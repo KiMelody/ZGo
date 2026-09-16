@@ -80,9 +80,49 @@ void main() {
       window: [row(10), row(11)],
       totalCount: 50,
     );
-    state.prependOlderRows([row(8), row(9), row(10)], 8);
+    state.prependOlderRows([row(8), row(9), row(10)]);
     expect(state.rows.map((r) => r['rowId']), [8, 9, 10, 11]);
     expect(state.firstRowId, 8);
+  });
+
+  test('prependOlderRows keeps the cursor on the smallest prepended row even '
+      'when the response firstRowId is a placeholder', () {
+    // Live-probed trap: snapshot/response firstRowId can be 1 while the real
+    // rows sit far higher — trusting it made the second「加载更早」page a
+    // no-op.
+    final state = stateWithWindow(
+      window: [row(100), row(101)],
+      totalCount: 60,
+      firstRowId: 1, // placeholder
+    );
+    expect(state.oldestRowId, 100, reason: 'cursor = oldest held row');
+
+    // Page 1 returns rows 40..99 with a placeholder envelope firstRowId.
+    state.prependOlderRows([for (var id = 40; id <= 99; id++) row(id)]);
+    expect(state.rows.first['rowId'], 40);
+    expect(state.firstRowId, 40, reason: 'not rewound to the placeholder 1');
+    expect(state.oldestRowId, 40);
+
+    // Page 2 must page back from the REAL cursor and land strictly older.
+    state.prependOlderRows([for (var id = 1; id <= 39; id++) row(id)]);
+    expect(state.rows.first['rowId'], 1);
+    expect(state.firstRowId, 1);
+    // Two pages of strictly-older rows reassemble the full ascending history.
+    expect(
+      state.rows.map((r) => r['rowId']),
+      [for (var id = 1; id <= 101; id++) id],
+    );
+    expect(state.oldestRowId, 1);
+  });
+
+  test('prependOlderRows with no fresh rows leaves the cursor alone', () {
+    final state = stateWithWindow(
+      window: [row(40), row(100)],
+      totalCount: 60,
+    );
+    state.prependOlderRows([row(40), row(100)]);
+    expect(state.firstRowId, 40,
+        reason: 'an all-duplicate page must not rewrite the cursor');
   });
 }
 

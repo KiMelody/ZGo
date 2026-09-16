@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import '../../protocol/conversation.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
+import 'chat_page.dart' show subagentActionText;
+import 'subagent_feed.dart';
 
 /// Web 目标面板 parity (chat.statusPanel.* / goalBanner.*): the active
 /// goal's summary + elapsed + iteration progress, the plan's process list
@@ -15,6 +17,11 @@ import '../ui_settings.dart';
 /// ({summaryTitle, objective, timeUsedSeconds, status, iterations:[{items:
 /// [{content, status}]}]}), `subagents` ({running:[{title, startedAt}]}),
 /// `plan` ({items:[{content, status}]}).
+///
+/// Running agent tiles share the chat page's [SubagentFeed]: the pooled
+/// child-session subscription streams a live action tail into the tile, and
+/// a replayed running entry within the terminal hysteresis window stays off
+/// the panel (see [_GoalPanelState]).
 class GoalPanel extends StatefulWidget {
   final ConversationState state;
   final Future<void> Function(String sessionId) onPauseGoal;
@@ -24,12 +31,16 @@ class GoalPanel extends StatefulWidget {
   /// page opens the read-only child-session detail page from it.
   final void Function(Map<String, dynamic> agent)? onOpenAgent;
 
+  /// Shared child-session pool + terminal hysteresis (chat page owned).
+  final SubagentFeed? feed;
+
   const GoalPanel({
     super.key,
     required this.state,
     required this.onPauseGoal,
     required this.onResumeGoal,
     this.onOpenAgent,
+    this.feed,
   });
 
   @override
@@ -40,17 +51,62 @@ class _GoalPanelState extends State<GoalPanel> {
   bool _showCompleted = false;
   bool _busy = false;
 
+  /// childSessionIds this panel currently holds in the pooled subscription.
+  final Set<String> _held = {};
+
+  @override
+  void dispose() {
+    final feed = widget.feed;
+    if (feed != null) {
+      for (final id in _held) {
+        feed.release(id);
+      }
+    }
+    _held.clear();
+    super.dispose();
+  }
+
+  /// Reconciles pooled subscriptions with the running agent tiles shown.
+  void _syncSubscriptions(List<Map<String, dynamic>> shown) {
+    final feed = widget.feed;
+    if (feed == null) return;
+    final wanted = {
+      for (final a in shown)
+        if ((a['childSessionId'] as String? ?? '').isNotEmpty)
+          a['childSessionId'] as String,
+    };
+    for (final id in wanted.difference(_held)) {
+      feed.acquire(id);
+      _held.add(id);
+    }
+    for (final id in _held.difference(wanted)) {
+      feed.release(id);
+      _held.remove(id);
+    }
+  }
+
   Map<String, dynamic>? get _goal =>
       (widget.state.snapshot?['goal'] as Map?)?.cast<String, dynamic>();
 
   Map<String, dynamic>? get _subagents =>
       (widget.state.snapshot?['subagents'] as Map?)?.cast<String, dynamic>();
 
+  /// Running agents as the hysteresis view sees them: a replayed running
+  /// entry within the window of an observed terminal is dropped.
   List<Map<String, dynamic>> get _runningAgents {
     final list = _subagents?['running'];
-    return list is List
+    final all = list is List
         ? list.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList()
-        : const [];
+        : const <Map<String, dynamic>>[];
+    final feed = widget.feed;
+    return all.where((a) {
+      final effective = feed?.effectiveStatus(
+            '${a['childSessionId'] ?? ''}',
+            '${a['status'] ?? 'running'}',
+          ) ??
+          'running';
+      return !subagentTerminalStatuses.contains(effective);
+    }).toList();
   }
 
   /// Latest iteration's process items (falls back to plan.items).
@@ -89,11 +145,25 @@ class _GoalPanelState extends State<GoalPanel> {
 
   @override
   Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([widget.state, widget.feed]),
+      builder: (context, _) => _buildPanel(context),
+    );
+  }
+
+  Widget _buildPanel(BuildContext context) {
     final goal = _goal;
     if (goal == null) return const SizedBox.shrink();
     final sessionId = widget.state.snapshot?['sessionId'] as String? ?? '';
     final title = '${goal['summaryTitle'] ?? goal['objective'] ?? ''}'.trim();
-    if (title.isEmpty) return const SizedBox.shrink();
+    if (title.isEmpty) {
+      // Empty-title exit can still hold subscriptions from the previous
+      // build — release them (check P2, 2026-09-17).
+      _syncSubscriptions(const []);
+      return const SizedBox.shrink();
+    }
+    final runningAgents = _runningAgents;
+    _syncSubscriptions(runningAgents);
 
     final status = '${goal['status'] ?? 'active'}';
     final paused = status == 'paused';
@@ -206,7 +276,7 @@ class _GoalPanelState extends State<GoalPanel> {
                 ),
           ],
           // ── running subagents
-          if (_runningAgents.isNotEmpty) ...[
+          if (runningAgents.isNotEmpty) ...[
             Divider(height: 16, color: ZInk.hairline(context)),
             Row(
               children: [
@@ -214,12 +284,12 @@ class _GoalPanelState extends State<GoalPanel> {
                     style: ZType.caption.copyWith(color: ZInk.muted(context))),
                 const SizedBox(width: 6),
                 Text(trP(context, 'goalPanel.agentsRunning',
-                    ['${_runningAgents.length}']),
+                    ['${runningAgents.length}']),
                     style: ZType.caption.copyWith(color: ZInk.muted(context))),
               ],
             ),
             const SizedBox(height: 4),
-            for (final a in _runningAgents)
+            for (final a in runningAgents)
               Padding(
                 padding:
                     const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
@@ -236,7 +306,7 @@ class _GoalPanelState extends State<GoalPanel> {
                       ),
                       const SizedBox(width: 8),
                       Expanded(
-                        child: Text('${a['title'] ?? a['subagentType'] ?? ''}',
+                        child: Text(_agentTileLabel(context, a),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: ZType.sub.copyWith(color: ZInk.soft(context))),
@@ -250,6 +320,17 @@ class _GoalPanelState extends State<GoalPanel> {
         ],
       ),
     );
+  }
+
+  /// Tile label: `title · live action` when the pooled child session has a
+  /// last toolCall to report (works-bar parity); bare title otherwise.
+  String _agentTileLabel(BuildContext context, Map<String, dynamic> agent) {
+    final title = '${agent['title'] ?? agent['subagentType'] ?? ''}';
+    final action = subagentActionText(
+      context,
+      widget.feed?.childState('${agent['childSessionId'] ?? ''}'),
+    );
+    return action == null ? title : '$title · $action';
   }
 
   Widget _stepIcon(String status) {

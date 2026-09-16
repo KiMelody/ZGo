@@ -58,12 +58,6 @@ const List<Exemption> exemptions = [
   ),
   Exemption(
     file: 'lib/ui/chat/chat_page.dart',
-    literal: r'^[，,·:：/、\s]+',
-    reason: 'strips leading punctuation from desktop-provided subagent '
-        'summaries — pattern only, never rendered',
-  ),
-  Exemption(
-    file: 'lib/ui/chat/chat_page.dart',
     literal: r'${_trimZero(n / 10000)}万',
     reason: '_fmtCompactTokens already branches by locale (zh 万 / en k-M)',
   ),

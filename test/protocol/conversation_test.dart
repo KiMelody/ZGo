@@ -278,7 +278,7 @@ void main() {
       state.prependOlderRows([
         {'rowId': 1, 'kind': 'user', 'text': 'a'},
         {'rowId': 2, 'kind': 'assistant', 'text': 'b'},
-      ], 1);
+      ]);
 
       expect(state.rows, hasLength(3));
       expect(state.rows[0]['rowId'], 1);
@@ -295,7 +295,7 @@ void main() {
       state.prependOlderRows([
         {'rowId': 1, 'kind': 'user', 'text': 'old'},
         {'rowId': 2, 'kind': 'user', 'text': 'dup'},
-      ], 1);
+      ]);
 
       expect(state.rows, hasLength(2));
       expect(state.rows[0]['text'], 'old');

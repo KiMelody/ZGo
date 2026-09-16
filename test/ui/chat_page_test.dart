@@ -623,6 +623,79 @@ void main() {
     expect(find.text('取消置顶任务'), findsOneWidget);
   });
 
+  // ------------------------------------- jump-to-bottom button
+
+  testWidgets('jump-to-bottom: hidden at the newest message, appears after '
+      'scrolling up, jumps back and hides', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    // 24 turns: enough history to scroll through.
+    gateway.feedSnapshot([
+      for (var i = 1; i <= 24; i++) ...[
+        {
+          'rowId': i * 2 - 1,
+          'kind': 'userInput',
+          'text': '提问 $i',
+          'state': 'done',
+        },
+        {
+          'rowId': i * 2,
+          'kind': 'assistantText',
+          'text': '回答 $i',
+          'state': 'done',
+        },
+      ],
+    ]);
+    await tester.pumpAndSettle();
+
+    final controller =
+        tester.widget<ListView>(find.byType(ListView)).controller!;
+    // The control stays mounted and cross-fades, so its target opacity is the
+    // visibility signal (IgnorePointer blocks taps while transparent).
+    double opacity() => tester
+        .widget<AnimatedOpacity>(
+          find
+              .ancestor(
+                of: find.byIcon(Icons.arrow_downward),
+                matching: find.byType(AnimatedOpacity),
+              )
+              .first,
+        )
+        .opacity;
+
+    // Precondition: the 24 turns really do overflow the viewport.
+    expect(controller.position.maxScrollExtent, greaterThan(100));
+
+    // Opening a session lands on the newest message → no button. The list is
+    // laid out lazily, so assert the app's own pinned window instead of an
+    // exact pixel.
+    expect(
+      controller.position.maxScrollExtent - controller.position.pixels,
+      lessThan(40),
+    );
+    expect(opacity(), 0);
+
+    // The reader scrolls up into the history: the button appears.
+    controller.jumpTo(controller.position.maxScrollExtent - 200);
+    await tester.pump();
+    expect(opacity(), 1);
+
+    await tester.tap(find.byTooltip('回到底部'));
+    await tester.pumpAndSettle();
+
+    // It lands on the newest message and hides itself again.
+    expect(
+      controller.position.pixels,
+      moreOrLessEquals(controller.position.maxScrollExtent, epsilon: 0.5),
+    );
+    expect(opacity(), 0);
+  });
+
   testWidgets('subagent background work renders a live row without a goal', (
     tester,
   ) async {

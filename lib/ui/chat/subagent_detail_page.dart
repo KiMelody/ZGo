@@ -112,11 +112,12 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
     try {
       final res = await widget.gateway.conversationCommands.rowsRange(
         widget.childSessionId,
-        beforeRowId: state.firstRowId,
+        // Cursor = the oldest held row (placeholder-proof; snapshot
+        // `firstRowId` can be 1 — see ConversationState.oldestRowId).
+        beforeRowId: state.oldestRowId,
         limit: 60,
       );
       List? rows;
-      int? firstRowId;
       bool? hasMore;
       String? atLogEpoch;
       if (res is Map) {
@@ -130,12 +131,10 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
         final rowsObj = res['rows'];
         if (rowsObj is Map) {
           rows = rowsObj['window'] as List? ?? rowsObj['rows'] as List?;
-          firstRowId = (rowsObj['firstRowId'] as num?)?.toInt();
         } else if (rowsObj is List) {
           rows = rowsObj;
         }
         rows ??= res['items'] as List? ?? res['window'] as List?;
-        firstRowId ??= (res['firstRowId'] as num?)?.toInt();
       } else if (res is List) {
         rows = res;
       }
@@ -150,7 +149,7 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
           );
         state
           ..hasMore = hasMore
-          ..prependOlderRows(older, firstRowId);
+          ..prependOlderRows(older);
       } else if (state.rows.isNotEmpty) {
         state.hasMore = hasMore ?? false;
         if (mounted) _toast(tr(context, 'chat.noOlder'));
@@ -276,18 +275,27 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
                     }
                     final row =
                         state.rows[index - (state.canLoadOlder ? 1 : 0)];
-                    return _timelineRow(context, row);
+                    return SubagentTimelineRow(row: row);
                   },
                 );
               },
             ),
     );
   }
+}
 
-  /// Simplified read-only timeline: assistant markdown, collapsible
-  /// reasoning, compact tool summaries (+ diff); anything else (turnHeader,
-  /// timelineMarker, nested subagent rows…) renders as a light separator.
-  Widget _timelineRow(BuildContext context, Map<String, dynamic> row) {
+/// Simplified read-only timeline row: assistant markdown, collapsible
+/// reasoning, compact tool summaries (+ diff), plain task block; anything
+/// else (turnHeader, timelineMarker, nested subagent rows…) renders as a
+/// light divider. Shared by this page's list and the chat page's inline
+/// Agent expansion (task internal-task).
+class SubagentTimelineRow extends StatelessWidget {
+  final Map<String, dynamic> row;
+
+  const SubagentTimelineRow({super.key, required this.row});
+
+  @override
+  Widget build(BuildContext context) {
     switch (row['kind']) {
       case 'assistantText':
         return Padding(

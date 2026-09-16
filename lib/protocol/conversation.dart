@@ -1866,6 +1866,18 @@ class ConversationState extends ChangeNotifier {
     return totalCount > rows.length;
   }
 
+  /// Oldest row actually held — the rowsRange paging cursor. Snapshot
+  /// `firstRowId` can be a placeholder (live-probed 1), so「加载更早」and
+  /// the subagent sheet page back from this value instead.
+  int? get oldestRowId {
+    int? oldest;
+    for (final r in rows) {
+      final id = (r['rowId'] as num?)?.toInt();
+      if (id != null && (oldest == null || id < oldest)) oldest = id;
+    }
+    return oldest;
+  }
+
   /// Applies a conversationRowsRangeV4 response envelope: the web store
   /// drops the result when its log epoch no longer matches the live
   /// subscription, and pages on `hasMore`.
@@ -1873,20 +1885,29 @@ class ConversationState extends ChangeNotifier {
       atLogEpoch == null || atLogEpoch == logEpoch;
 
   /// Prepends older rows loaded via rowsRange (deduped by rowId).
-  void prependOlderRows(List<Map<String, dynamic>> older, int? newFirstRowId) {
+  ///
+  /// The new cursor is the smallest ACTUALLY prepended rowId. Snapshot and
+  /// response `firstRowId` can be a placeholder (live-probed 1 while real
+  /// rows start far higher) — trusting it rewound the paging cursor and
+  /// broke the second「加载更早」page, so the response value is ignored
+  /// here; callers derive the request cursor from the held rows too.
+  /// No fresh rows → no cursor write: the response carries no new evidence.
+  void prependOlderRows(List<Map<String, dynamic>> older) {
     final existing = rows.map((r) => (r['rowId'] as num?)?.toInt()).toSet();
     final fresh = older
         .where((r) => !existing.contains((r['rowId'] as num?)?.toInt()))
         .toList();
-    if (fresh.isNotEmpty) {
-      rows = [...fresh, ...rows];
-      final firstFresh = (fresh.first['rowId'] as num?)?.toInt();
-      firstRowId = newFirstRowId ?? firstFresh ?? firstRowId;
-      notifyListeners();
-    } else if (newFirstRowId != null && newFirstRowId != firstRowId) {
-      firstRowId = newFirstRowId;
-      notifyListeners();
+    if (fresh.isEmpty) return;
+    int? firstFresh;
+    for (final r in fresh) {
+      final id = (r['rowId'] as num?)?.toInt();
+      if (id != null && (firstFresh == null || id < firstFresh)) {
+        firstFresh = id;
+      }
     }
+    rows = [...fresh, ...rows];
+    if (firstFresh != null) firstRowId = firstFresh;
+    notifyListeners();
   }
 
   List<Map<String, dynamic>> get backgroundWorks {

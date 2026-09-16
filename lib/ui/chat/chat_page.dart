@@ -50,6 +50,17 @@ class ChatPage extends StatefulWidget {
   /// switch only.
   final VoidCallback? onOpenUsage;
 
+  /// Terminal-footer confirm window (F): a turnHeader going terminal must
+  /// hold this long before the phase pill and feedback row render — bridge
+  /// replays flip a live turn terminal for a few seconds. Injectable so
+  /// tests can shrink it.
+  final Duration turnFooterConfirmWindow;
+
+  /// Subagent regression hysteresis (E): a running report within this
+  /// window of an observed terminal keeps the terminal display. Injectable
+  /// so tests can shrink it.
+  final Duration subagentHysteresis;
+
   const ChatPage({
     super.key,
     required this.gateway,
@@ -61,6 +72,8 @@ class ChatPage extends StatefulWidget {
     this.workspaceLabel,
     this.initialPinned = false,
     this.onOpenUsage,
+    this.turnFooterConfirmWindow = const Duration(seconds: 3),
+    this.subagentHysteresis = const Duration(seconds: 15),
   });
 
   @override
@@ -116,6 +129,13 @@ class _ChatPageState extends State<ChatPage> {
   /// on the gateway side, no background timer); absence just hides the
   /// pill — quota problems never surface as chat errors.
   EntitlementView? _entitlement;
+
+  /// Shared child-session subscription pool + subagent terminal hysteresis
+  /// (Agent tile expansion / running works-bar entries / goal-panel tiles).
+  late final SubagentFeed _feed = SubagentFeed(
+    gateway: widget.gateway,
+    regressionHysteresis: widget.subagentHysteresis,
+  );
 
   ConversationState? get _state => _handle?.state;
 
@@ -183,7 +203,12 @@ class _ChatPageState extends State<ChatPage> {
   void _onScroll() {
     if (!_scrollController.hasClients) return;
     final max = _scrollController.position.maxScrollExtent;
-    _stickToBottom = _scrollController.position.pixels >= max - 40;
+    final stick = _scrollController.position.pixels >= max - 40;
+    // Scroll notifications arrive per frame: only a flip of the pinned state
+    // rebuilds (it toggles the jump-to-bottom button), steady scrolling stays
+    // free.
+    if (stick == _stickToBottom) return;
+    if (mounted) setState(() => _stickToBottom = stick);
   }
 
   Future<void> _loadPrep() async {
@@ -209,6 +234,7 @@ class _ChatPageState extends State<ChatPage> {
       widget.gateway.sendViewState();
     } catch (_) {}
     _handle?.close();
+    _feed.dispose();
     _inputController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -232,6 +258,9 @@ class _ChatPageState extends State<ChatPage> {
       // mobile-view-state: the desktop shows 「手机正在操作此任务」 from it.
       widget.gateway.sendViewState(taskId: sessionId);
       handle.state.addListener(_scrollToBottom);
+      // Terminal-hysteresis memory rides the parent conversation (subagent
+      // rows + backgroundWorks).
+      _feed.observe(handle.state);
       // The server snapshot is a tail window (can be as few as 3 rows).
       // The official client shows the full history immediately, so
       // auto-load the missing older rows once on open.
@@ -255,12 +284,19 @@ class _ChatPageState extends State<ChatPage> {
       final grew = _lastContentBottom == null || max > _lastContentBottom! + 0.5;
       _lastContentBottom = max;
       if (!grew || !_stickToBottom) return;
-      _scrollController.animateTo(
-        max,
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOut,
-      );
+      _animateToBottom();
     });
+  }
+
+  /// Scrolls to the newest row (200ms easeOut) — the one motion shared by the
+  /// follow-on-new-content pass above and the jump-to-bottom button's tap.
+  void _animateToBottom() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+    );
   }
 
   void _toast(String message) {
@@ -554,11 +590,10 @@ class _ChatPageState extends State<ChatPage> {
       // (live_child_rows_probe documents the same trap).
       final res = await widget.gateway.conversationCommands.rowsRange(
         sessionId,
-        beforeRowId: state.firstRowId,
+        beforeRowId: state.oldestRowId,
         limit: 60,
       );
       List? rows;
-      int? firstRowId;
       bool? hasMore;
       String? atLogEpoch;
       if (res is Map) {
@@ -573,12 +608,10 @@ class _ChatPageState extends State<ChatPage> {
         final rowsObj = res['rows'];
         if (rowsObj is Map) {
           rows = rowsObj['window'] as List? ?? rowsObj['rows'] as List?;
-          firstRowId = (rowsObj['firstRowId'] as num?)?.toInt();
         } else if (rowsObj is List) {
           rows = rowsObj;
         }
         rows ??= res['items'] as List? ?? res['window'] as List?;
-        firstRowId ??= (res['firstRowId'] as num?)?.toInt();
       } else if (res is List) {
         rows = res;
       }
@@ -592,7 +625,7 @@ class _ChatPageState extends State<ChatPage> {
               );
         state
           ..hasMore = hasMore
-          ..prependOlderRows(older, firstRowId);
+          ..prependOlderRows(older);
         // Prepending shifts the content above; keep the newest message in
         // view when the user is pinned to the bottom.
         if (_stickToBottom) _scrollToBottom();
@@ -740,6 +773,27 @@ class _ChatPageState extends State<ChatPage> {
         entitlement: _entitlement,
         controller: controller,
         onUseReset: _showResetDialog,
+      ),
+    );
+  }
+
+  /// Subagent management sheet (internal-task): running
+  /// actions + ended rows + older-history paging. Anchored to the chat
+  /// route's navigator (`useRootNavigator: false`) so it stays inside the
+  /// dual-pane chat pane (chat-conventions §6).
+  void _showSubagentSheet() {
+    final state = _state;
+    if (state == null || !mounted) return;
+    showModalBottomSheet<void>(
+      context: context,
+      useRootNavigator: false,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => _SubagentSheet(
+        state: state,
+        gateway: widget.gateway,
+        feed: _feed,
+        confirmWindow: widget.turnFooterConfirmWindow,
       ),
     );
   }
@@ -958,6 +1012,83 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 
+  /// The message stream itself — the layer the jump-to-bottom control floats
+  /// over (see [build]).
+  Widget _messageList(BuildContext context, ConversationState? state) {
+    if (state == null) {
+      return Center(
+        child: _sessionId == null
+            ? Text(
+                tr(context, 'chat.draftHint'),
+                style: TextStyle(color: ZInk.faint(context)),
+              )
+            : const CircularProgressIndicator(),
+      );
+    }
+    if (!state.ready) return const Center(child: CircularProgressIndicator());
+    return AnimatedBuilder(
+      animation: state,
+      builder: (context, _) {
+        final groups = _groupRows(state.rows);
+        final itemCount = groups.length + (state.canLoadOlder ? 1 : 0);
+        if (groups.isEmpty && !state.canLoadOlder) {
+          return Center(
+            child: Text(
+              tr(context, 'chat.empty'),
+              style: TextStyle(color: ZInk.faint(context)),
+            ),
+          );
+        }
+        return _contentCol(
+          ListView.builder(
+            controller: _scrollController,
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+            itemCount: itemCount,
+            itemBuilder: (context, index) {
+              if (state.canLoadOlder && index == 0) {
+                return Center(
+                  child: TextButton.icon(
+                    onPressed: _loadingOlder ? null : _loadOlder,
+                    icon: _loadingOlder
+                        ? const SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(strokeWidth: 1.5),
+                          )
+                        : const Icon(Icons.history, size: 14),
+                    label: Text(
+                      tr(context, 'chat.loadOlder'),
+                      style: ZType.sub,
+                    ),
+                  ),
+                );
+              }
+              final groupIndex = index - (state.canLoadOlder ? 1 : 0);
+              final group = groups[groupIndex];
+              final previous = groupIndex > 0 ? groups[groupIndex - 1] : null;
+              final divider = _timeDividerLabel(previous, group);
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (divider != null) _TimeDivider(label: divider),
+                  _TurnGroupWidget(
+                    rows: group,
+                    gateway: widget.gateway,
+                    sessionId: _sessionId ?? '',
+                    onAction: _run,
+                    state: state,
+                    feed: _feed,
+                    confirmWindow: widget.turnFooterConfirmWindow,
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = _state;
@@ -1136,84 +1267,24 @@ class _ChatPageState extends State<ChatPage> {
               ),
             ),
           Expanded(
-            child: state == null
-                ? Center(
-                    child: _sessionId == null
-                        ? Text(
-                            tr(context, 'chat.draftHint'),
-                            style: TextStyle(color: ZInk.faint(context)),
-                          )
-                        : const CircularProgressIndicator(),
-                  )
-                : !state.ready
-                ? const Center(child: CircularProgressIndicator())
-                : AnimatedBuilder(
-                    animation: state,
-                    builder: (context, _) {
-                      final groups = _groupRows(state.rows);
-                      final itemCount =
-                          groups.length + (state.canLoadOlder ? 1 : 0);
-                      if (groups.isEmpty && !state.canLoadOlder) {
-                        return Center(
-                          child: Text(
-                            tr(context, 'chat.empty'),
-                            style: TextStyle(color: ZInk.faint(context)),
-                          ),
-                        );
-                      }
-                      return _contentCol(
-                        ListView.builder(
-                          controller: _scrollController,
-                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                          itemCount: itemCount,
-                          itemBuilder: (context, index) {
-                            if (state.canLoadOlder && index == 0) {
-                              return Center(
-                                child: TextButton.icon(
-                                  onPressed: _loadingOlder ? null : _loadOlder,
-                                  icon: _loadingOlder
-                                      ? const SizedBox(
-                                          width: 12,
-                                          height: 12,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 1.5,
-                                          ),
-                                        )
-                                      : const Icon(Icons.history, size: 14),
-                                  label: Text(
-                                    tr(context, 'chat.loadOlder'),
-                                    style: ZType.sub,
-                                  ),
-                                ),
-                              );
-                            }
-                            final groupIndex =
-                                index - (state.canLoadOlder ? 1 : 0);
-                            final group = groups[groupIndex];
-                            final previous = groupIndex > 0
-                                ? groups[groupIndex - 1]
-                                : null;
-                            return Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                if (_timeDividerLabel(previous, group) != null)
-                                  _TimeDivider(
-                                    label: _timeDividerLabel(previous, group)!,
-                                  ),
-                                _TurnGroupWidget(
-                                  rows: group,
-                                  gateway: widget.gateway,
-                                  sessionId: _sessionId ?? '',
-                                  onAction: _run,
-                                  state: state,
-                                ),
-                              ],
-                            );
-                          },
-                        ),
-                      );
-                    },
+            child: Stack(
+              children: [
+                Positioned.fill(child: _messageList(context, state)),
+                // Jump-to-newest control: floating in the message area it
+                // covers the list only — the takeover cover, sheets and menus
+                // are page-level layers painted above it.
+                Positioned.fill(
+                  bottom: 8,
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    child: _JumpToBottomButton(
+                      visible: !_stickToBottom,
+                      onPressed: _animateToBottom,
+                    ),
                   ),
+                ),
+              ],
+            ),
           ),
           AnimatedBuilder(
             animation: widget.gateway,
@@ -1226,11 +1297,12 @@ class _ChatPageState extends State<ChatPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   _GoalBanner(state: state),
-                  _GoalProcessPanel(state: state, gateway: widget.gateway),
-                  _BackgroundWorksBar(
+                  _GoalProcessPanel(
                     state: state,
                     gateway: widget.gateway,
+                    feed: _feed,
                   ),
+                  _BackgroundWorksBar(state: state, gateway: widget.gateway),
                   _QueueBar(state: state, gateway: widget.gateway),
                   _PendingInteractions(state: state, gateway: widget.gateway),
                 ],
@@ -1292,11 +1364,14 @@ class _ChatPageState extends State<ChatPage> {
                 draftConfig: _draftConfig,
                 gateway: widget.gateway,
                 sessionId: _sessionId,
+                feed: state == null ? null : _feed,
+                subagentConfirmWindow: widget.turnFooterConfirmWindow,
                 onSend: _send,
                 onAttach: _pickFiles,
                 onSkills: _openSkillsPicker,
                 onModelSheet: _showModelSheet,
                 onUsage: _showUsageSheet,
+                onSubagents: _showSubagentSheet,
               ),
               maxWidth: _kComposerColumnWidth,
             ),
@@ -1534,6 +1609,58 @@ Map<String, dynamic>? _subagentRowFor(
   return null;
 }
 
+/// Agent tool calls dispatch a subagent: the input JSON carries
+/// description / subagent_type / prompt while outputText stays empty — the
+/// result lives in the child session (live-probed 2026-09-16).
+bool _isAgentTool(Map<String, dynamic> row) {
+  if (row['kind'] != 'toolCall') return false;
+  return '${row['toolName'] ?? ''}'.toLowerCase() == 'agent';
+}
+
+/// turnHeader states whose footer (terminal pill + feedback row) is gated
+/// behind the confirm window (see _TurnGroupWidgetState).
+const turnTerminalPhases = {
+  'completedSuccess',
+  'completedInterrupted',
+  'failed',
+  'error',
+};
+
+/// Live action text of a running subagent: the child session's LAST
+/// toolCall — `inputStreaming` with empty input → 「准备执行…」, otherwise
+/// the shared per-tool summary (已写入 x / 终端 · cmd / …, live-probed row
+/// shapes 2026-09-16). null when the child snapshot hasn't landed or has no
+/// toolCall yet — callers fall back to the title / parent-side summaryText.
+String? subagentActionText(BuildContext context, ConversationState? child) {
+  if (child == null || !child.ready) return null;
+  for (final row in child.rows.reversed) {
+    if (row['kind'] != 'toolCall') continue;
+    if ('${row['status'] ?? ''}' == 'inputStreaming' &&
+        '${row['inputText'] ?? ''}'.isEmpty) {
+      return tr(context, 'chat.subagent.preparing');
+    }
+    return _ToolCallTile.toolSummaryOf(context, row).title;
+  }
+  return null;
+}
+
+/// The `kind=='subagent'` stream row spawned by an Agent tool call, linked
+/// via parentToolCallId ↔ toolCallId (live-probed 2026-09-16); carries the
+/// childSessionId/workId needed for the detail-page entry.
+Map<String, dynamic>? _subagentRowFor(
+  List<Map<String, dynamic>> rows,
+  Map<String, dynamic> toolRow,
+) {
+  final id = '${toolRow['toolCallId'] ?? ''}';
+  if (id.isEmpty) return null;
+  for (final r in rows) {
+    if (r['kind'] == 'subagent' && '${r['parentToolCallId'] ?? ''}' == id) {
+      return r;
+    }
+  }
+  return null;
+}
+
 AssistantTurnParts assistantTurnParts(List<Map<String, dynamic>> rows) {
   final parts = <AssistantPart>[];
   Map<String, dynamic>? header;
@@ -1654,6 +1781,10 @@ class _TurnGroupWidget extends StatefulWidget {
   final String sessionId;
   final Future<void> Function(String, Future<dynamic> Function()) onAction;
   final ConversationState state;
+  final SubagentFeed feed;
+
+  /// Terminal-footer confirm window (see [_TurnGroupWidgetState]).
+  final Duration confirmWindow;
 
   const _TurnGroupWidget({
     required this.rows,
@@ -1661,6 +1792,8 @@ class _TurnGroupWidget extends StatefulWidget {
     required this.sessionId,
     required this.onAction,
     required this.state,
+    required this.feed,
+    required this.confirmWindow,
   });
 
   @override
@@ -1672,6 +1805,74 @@ class _TurnGroupWidget extends StatefulWidget {
 /// file-changes card (official always-visible rounded bar with 撤销).
 class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
   bool _showChanges = true;
+
+  Timer? _terminalTimer;
+
+  /// Whether the turn's terminal footer (terminal phase pill + feedback
+  /// row) may render — see [_reconcileTerminal].
+  bool _terminalConfirmed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // A terminal phase observed on the FIRST build (history / snapshot) has
+    // no running predecessor to protect — render its footer immediately.
+    _terminalConfirmed =
+        turnTerminalPhases.contains(_headerPhase ?? '');
+  }
+
+  @override
+  void didUpdateWidget(_TurnGroupWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _reconcileTerminal();
+  }
+
+  @override
+  void dispose() {
+    _terminalTimer?.cancel();
+    super.dispose();
+  }
+
+  String? get _headerPhase {
+    for (final row in widget.rows) {
+      if (row['kind'] == 'turnHeader') return row['state'] as String? ?? '';
+    }
+    return null;
+  }
+
+  /// Whether the feedback row stays hidden: the turn has a header and is
+  /// either still running or inside the terminal confirm window. Headerless
+  /// groups keep the legacy not-streaming behavior (no header → no gate).
+  bool get _feedbackLocked {
+    final phase = _headerPhase;
+    if (phase == null) return false;
+    if (phase == 'running') return true;
+    if (turnTerminalPhases.contains(phase)) return !_terminalConfirmed;
+    return false;
+  }
+
+  /// Terminal-footer gate (F): a turnHeader going terminal mid-session must
+  /// persist for [widget.confirmWindow] before the phase pill and feedback
+  /// row render. Bridge degradations replay a finished turn as terminal for
+  /// a few seconds while the session lives on, which flashed 「已结束」+
+  /// feedback buttons on a running conversation (user report 2026-09-16).
+  /// The window anchors once — repeated terminal frames don't postpone it.
+  void _reconcileTerminal() {
+    final terminal = turnTerminalPhases.contains(_headerPhase ?? '');
+    if (!terminal) {
+      _terminalTimer?.cancel();
+      _terminalTimer = null;
+      if (_terminalConfirmed) setState(() => _terminalConfirmed = false);
+      return;
+    }
+    if (_terminalConfirmed || _terminalTimer != null) return;
+    _terminalTimer = Timer(widget.confirmWindow, () {
+      _terminalTimer = null;
+      if (mounted && turnTerminalPhases.contains(_headerPhase ?? '')) {
+        setState(() => _terminalConfirmed = true);
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1710,6 +1911,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
           sessionId: sessionId,
           onAction: onAction,
           state: widget.state,
+          feed: widget.feed,
         ),
       );
     }
@@ -1720,6 +1922,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
           hasChanges: header['fileChanges'] is Map,
           expanded: _showChanges,
           onToggle: () => setState(() => _showChanges = !_showChanges),
+          terminalConfirmed: _terminalConfirmed,
         ),
       );
     }
@@ -1747,6 +1950,8 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
             sessionId: sessionId,
             onAction: onAction,
             state: widget.state,
+            feed: widget.feed,
+            turnFeedbackLocked: _feedbackLocked,
           ),
         );
       } else if (p.kind == 'rowGroup') {
@@ -1757,6 +1962,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
             sessionId: sessionId,
             onAction: onAction,
             state: widget.state,
+            feed: widget.feed,
           ),
         );
       } else {
@@ -1768,6 +1974,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
             sessionId: sessionId,
             onAction: onAction,
             state: widget.state,
+            feed: widget.feed,
           ),
         );
       }
@@ -1802,6 +2009,13 @@ class _RowWidget extends StatelessWidget {
   final ConversationState state;
   final bool showFeedback;
 
+  /// Shared child-session subscription pool (Agent tile expansion).
+  final SubagentFeed? feed;
+
+  /// Whether the turn's feedback row stays hidden (running turn or terminal
+  /// confirm window — see [_TurnGroupWidgetState._feedbackLocked]).
+  final bool turnFeedbackLocked;
+
   const _RowWidget({
     required this.row,
     required this.gateway,
@@ -1809,6 +2023,8 @@ class _RowWidget extends StatelessWidget {
     required this.onAction,
     required this.state,
     this.showFeedback = true,
+    this.feed,
+    this.turnFeedbackLocked = false,
   });
 
   Map<String, dynamic> get _target => {
@@ -1978,6 +2194,7 @@ class _RowWidget extends StatelessWidget {
         sessionId: sessionId,
         state: state,
         showFeedback: showFeedback,
+        turnFeedbackLocked: turnFeedbackLocked,
       ),
       'reasoning' => _ReasoningTile(
         text: row['text'] as String? ?? '',
@@ -1997,6 +2214,7 @@ class _RowWidget extends StatelessWidget {
         row: row,
         gateway: gateway,
         sessionId: sessionId,
+        feed: feed,
       ),
       'timelineMarker' => _TimelineMarkerWidget(row: row),
       _ => const SizedBox.shrink(),
@@ -2315,12 +2533,19 @@ class _AssistantBubble extends StatelessWidget {
   final ConversationState state;
   final bool showFeedback;
 
+  /// Whether the turn's feedback row stays hidden; while the turn runs or
+  /// the confirm window holds, the copy/like/dislike/fork row is replaced
+  /// by the in-progress spinner (a blip back to running must not flash the
+  /// feedback UI, see _TurnGroupWidget).
+  final bool turnFeedbackLocked;
+
   const _AssistantBubble({
     required this.row,
     required this.gateway,
     required this.sessionId,
     required this.state,
     this.showFeedback = true,
+    this.turnFeedbackLocked = false,
   });
 
   void _setFeedback(String? value) {
@@ -2337,6 +2562,7 @@ class _AssistantBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final text = row['text'] as String? ?? '';
     final streaming = row['state'] == 'streaming';
+    final inProgress = streaming || turnFeedbackLocked;
     final feedback = row['feedback'] as String?;
     final timestamp = _ChatPageState._rowTimestamp(row);
     return Container(
@@ -2349,7 +2575,7 @@ class _AssistantBubble extends StatelessWidget {
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (streaming)
+                if (inProgress)
                   const Padding(
                     padding: EdgeInsets.only(top: 6),
                     child: SizedBox(
@@ -2394,7 +2620,7 @@ class _AssistantBubble extends StatelessWidget {
                   ),
                 ],
                 const Spacer(),
-                if (timestamp != null && !streaming)
+                if (timestamp != null && !inProgress)
                   Padding(
                     padding: const EdgeInsets.only(left: 8),
                     child: Text(
@@ -2498,7 +2724,7 @@ class _ReasoningTile extends StatelessWidget {
 /// "探索 · N 文件", expandable to input/output/diff. The diff body lives
 /// INSIDE the expansion (collapsed by default — long agent dumps must not
 /// flood the chat); the live progress row stays always visible.
-class _ToolCallTile extends StatelessWidget {
+class _ToolCallTile extends StatefulWidget {
   final Map<String, dynamic> row;
 
   /// Agent rows only: gateway/sessionId + [subagent] wire the tile's
@@ -2530,6 +2756,7 @@ class _ToolCallTileState extends State<_ToolCallTile> {
 
   @override
   Widget build(BuildContext context) {
+    final row = widget.row;
     final status = row['status'] as String? ?? '';
     final inputText = row['inputText'] as String? ?? '';
     final output = row['output'];
@@ -2559,6 +2786,11 @@ class _ToolCallTileState extends State<_ToolCallTile> {
     final summary = toolRowSemantics(row, locale: _localeOf(context));
 
     final agentPrompt = isAgentTool(row) ? promptOf(inputText) : null;
+    final childSessionId = widget.subagent?['childSessionId'] as String?;
+    final canOpen =
+        widget.gateway != null && (childSessionId ?? '').isNotEmpty;
+
+    final agentPrompt = _isAgentTool(row) ? _promptOf(inputText) : null;
     final childSessionId = widget.subagent?['childSessionId'] as String?;
     final canOpen =
         widget.gateway != null && (childSessionId ?? '').isNotEmpty;
@@ -2593,6 +2825,33 @@ class _ToolCallTileState extends State<_ToolCallTile> {
             child: Text(
               '-${summary.deletions}',
               style: ZType.caption.copyWith(color: ZColors.danger),
+            ),
+          ),
+        if (canOpen)
+          // Web chat.toolCall.agent.openInSidePane parity: on mobile the
+          // drill-in affordance opens the child-session detail page. A
+          // dedicated hit area keeps the header tap expanding the tile.
+          Padding(
+            padding: const EdgeInsets.only(left: 6),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _openSubagentDetail(
+                context,
+                widget.gateway!,
+                childSessionId: childSessionId,
+                title: widget.subagent?['summaryText'] as String?,
+                subagentType: widget.subagent?['subagentType'] as String?,
+                workId: widget.subagent?['workId'] as String?,
+                parentSessionId: widget.sessionId,
+                running: '${widget.subagent?['status'] ?? ''}' == 'running' ||
+                    status == 'running' ||
+                    status == 'pending',
+              ),
+              child: Icon(
+                Icons.chevron_right,
+                size: 18,
+                color: ZInk.faint(context),
+              ),
             ),
           ),
       ],
@@ -2630,7 +2889,10 @@ class _ToolCallTileState extends State<_ToolCallTile> {
               child: ExpansionTile(
                 dense: true,
                 minTileHeight: ZTile.headHeight,
-                onExpansionChanged: (_) => HapticFeedback.lightImpact(),
+                onExpansionChanged: (value) {
+                  HapticFeedback.lightImpact();
+                  setState(() => _expanded = value);
+                },
                 tilePadding: ZTile.head,
                 leading: Icon(summary.icon, size: ZTile.iconSize, color: color),
                 title: title,
@@ -2638,7 +2900,15 @@ class _ToolCallTileState extends State<_ToolCallTile> {
                 children: [
                   // File edits show only the diff: the raw input/output JSON
                   // of a write/edit call is noise the official web omits too.
-                  if (diff == null && inputText.isNotEmpty)
+                  // Agent rows expand to the dispatched prompt (web
+                  // chat.toolCall.agent.prompt) instead of the raw JSON.
+                  if (agentPrompt != null)
+                    _kv(
+                      context,
+                      tr(context, 'chat.tool.agent.prompt'),
+                      agentPrompt,
+                    )
+                  else if (diff == null && inputText.isNotEmpty)
                     _kv(context, tr(context, 'chat.tool.input'), inputText),
                   if (diff == null && outputText.isNotEmpty)
                     _kv(context, tr(context, 'chat.tool.output'), outputText),
@@ -2669,6 +2939,16 @@ class _ToolCallTileState extends State<_ToolCallTile> {
                           ),
                         ),
                       ),
+                  // Inline child transcript (web childToolCalls parity):
+                  // mounted only while expanded so the pooled child
+                  // subscription follows the expansion.
+                  if (_expanded &&
+                      widget.feed != null &&
+                      (childSessionId ?? '').isNotEmpty)
+                    _AgentChildTimeline(
+                      feed: widget.feed!,
+                      childSessionId: childSessionId!,
+                    ),
                 ],
               ),
             ),
@@ -2720,6 +3000,104 @@ class _ToolCallTileState extends State<_ToolCallTile> {
   }
 }
 
+/// Inline child-session transcript inside an expanded Agent tile: holds a
+/// pooled child subscription for the mount duration ([SubagentFeed.acquire]
+/// on init, [SubagentFeed.release] on dispose) and renders the simplified
+/// timeline (same row renderer as the detail page) plus the 「输出」preview
+/// = the child's last assistantText.
+class _AgentChildTimeline extends StatefulWidget {
+  final SubagentFeed feed;
+  final String childSessionId;
+
+  const _AgentChildTimeline({
+    required this.feed,
+    required this.childSessionId,
+  });
+
+  @override
+  State<_AgentChildTimeline> createState() => _AgentChildTimelineState();
+}
+
+class _AgentChildTimelineState extends State<_AgentChildTimeline> {
+  @override
+  void initState() {
+    super.initState();
+    widget.feed.acquire(widget.childSessionId);
+  }
+
+  @override
+  void didUpdateWidget(_AgentChildTimeline oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.childSessionId != widget.childSessionId) {
+      oldWidget.feed.release(oldWidget.childSessionId);
+      widget.feed.acquire(widget.childSessionId);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.feed.release(widget.childSessionId);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final feed = widget.feed;
+    return AnimatedBuilder(
+      animation: Listenable.merge([feed, feed.childState(widget.childSessionId)]),
+      builder: (context, _) {
+        final child = feed.childState(widget.childSessionId);
+        if (child == null || !child.ready) {
+          // Snapshot not in yet (subscribe ack → snapshot lands in well
+          // under a second live) — a hairline spinner beats a blank body.
+          return const Padding(
+            padding: ZTile.body,
+            child: SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 1.5),
+            ),
+          );
+        }
+        String? output;
+        for (final row in child.rows.reversed) {
+          if (row['kind'] == 'assistantText') {
+            output = row['text'] as String? ?? '';
+            break;
+          }
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (output != null && output.trim().isNotEmpty)
+              Padding(
+                padding: ZTile.body,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      tr(context, 'chat.tool.output'),
+                      style:
+                          ZType.caption.copyWith(color: ZInk.faint(context)),
+                    ),
+                    const SizedBox(height: 2),
+                    ZLinkerMarkdown(
+                      output.length > 600
+                          ? '${output.substring(0, 600)}…'
+                          : output,
+                      bodyStyle: ZType.sub,
+                    ),
+                  ],
+                ),
+              ),
+            for (final row in child.rows) SubagentTimelineRow(row: row),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _ProgressRow extends StatelessWidget {
   final Map progress;
 
@@ -2766,11 +3144,16 @@ class _TurnHeader extends StatelessWidget {
   final bool expanded;
   final VoidCallback onToggle;
 
+  /// Whether the terminal phase pill may render (see _TurnGroupWidget's
+  /// confirm window); a running pill is never gated.
+  final bool terminalConfirmed;
+
   const _TurnHeader({
     required this.row,
     required this.hasChanges,
     required this.expanded,
     required this.onToggle,
+    this.terminalConfirmed = true,
   });
 
   @override
@@ -2785,6 +3168,10 @@ class _TurnHeader extends StatelessWidget {
       'failed' || 'error' => 'phase.error',
       _ => null,
     };
+    // Terminal pill only after the confirm window held (a blip back to
+    // running inside the window must not flash 「已结束」).
+    final showPill = phaseKey != null &&
+        (terminalConfirmed || !turnTerminalPhases.contains(phase));
 
     return Padding(
       padding: const EdgeInsets.only(top: 10, bottom: 4),
@@ -2816,8 +3203,7 @@ class _TurnHeader extends StatelessWidget {
               ),
             ),
           const Spacer(),
-          if (phaseKey != null)
-            PhasePill(label: tr(context, phaseKey), phase: phase),
+          if (showPill) PhasePill(label: tr(context, phaseKey), phase: phase),
         ],
       ),
     );
@@ -3111,19 +3497,41 @@ class _TimelineMarkerWidget extends StatelessWidget {
   }
 }
 
+/// Localized status word for `kind=='subagent'` captions (raw server
+/// statuses are English; user-facing copy follows the chat phase words).
+String _subagentStatusWord(BuildContext context, String status) {
+  return switch (status) {
+    'running' || 'pending' => tr(context, 'chat.subagent.status.running'),
+    'error' || 'failed' => tr(context, 'chat.subagent.status.failed'),
+    'success' => tr(context, 'chat.subagent.status.success'),
+    _ => status,
+  };
+}
+
 class _SubagentTile extends StatelessWidget {
   final Map<String, dynamic> row;
   final ChatGateway gateway;
   final String sessionId;
 
+  /// Terminal-hysteresis view over the raw row status (a replayed running
+  /// report within the window keeps the terminal caption).
+  final SubagentFeed? feed;
+
   const _SubagentTile({
     required this.row,
     required this.gateway,
     required this.sessionId,
+    this.feed,
   });
 
   @override
   Widget build(BuildContext context) {
+    final rawStatus = '${row['status'] ?? ''}';
+    final status = feed?.effectiveStatus(
+          '${row['childSessionId'] ?? ''}',
+          rawStatus,
+        ) ??
+        rawStatus;
     return InkWell(
       // Whole tile opens the read-only child-session detail page.
       onTap: () => _openSubagentDetail(
@@ -3133,7 +3541,7 @@ class _SubagentTile extends StatelessWidget {
         subagentType: row['subagentType'] as String?,
         workId: row['workId'] as String?,
         parentSessionId: sessionId,
-        running: row['status'] == 'running',
+        running: status == 'running',
       ),
       child: Container(
         margin: const EdgeInsets.only(bottom: ZTile.seam),
@@ -3162,7 +3570,7 @@ class _SubagentTile extends StatelessWidget {
                       style: ZType.sub.copyWith(color: ZInk.soft(context)),
                     ),
                     Text(
-                      '${row['status'] ?? ''}  ${row['summaryText'] ?? ''}',
+                      '${_subagentStatusWord(context, status)}  ${row['summaryText'] ?? ''}',
                       style: ZType.caption.copyWith(color: ZInk.faint(context)),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
@@ -3251,8 +3659,13 @@ class _GoalBanner extends StatelessWidget {
 class _GoalProcessPanel extends StatelessWidget {
   final ConversationState state;
   final ChatGateway gateway;
+  final SubagentFeed? feed;
 
-  const _GoalProcessPanel({required this.state, required this.gateway});
+  const _GoalProcessPanel({
+    required this.state,
+    required this.gateway,
+    this.feed,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -3276,58 +3689,27 @@ class _GoalProcessPanel extends StatelessWidget {
   }
 }
 
+/// Background works bar, plain background tasks only (bash & co.): ONE
+/// compact count line + per-task ✕. Subagent entries moved to the composer
+/// pill + management sheet (task internal-task); the bar no
+/// longer holds pooled child subscriptions — the Agent tile expansion, the
+/// management sheet and the goal panel share those now.
 class _BackgroundWorksBar extends StatelessWidget {
   final ConversationState state;
   final ChatGateway gateway;
 
   const _BackgroundWorksBar({required this.state, required this.gateway});
 
-  /// Live action stream of a subagent work: the `kind=='subagent'` row in
-  /// [state.rows] matching [childSessionId] appends to `summaryText`
-  /// (it starts as the title, streaming actions after — live-probed
-  /// 2026-09-13). Returns the action text beyond [title], or '' when no
-  /// matching row exists yet (backgrounding can precede the row).
-  String _subagentTail(String? childSessionId, String title) {
-    final sid = childSessionId ?? '';
-    if (sid.isEmpty) return '';
-    for (final row in state.rows) {
-      if (row['kind'] != 'subagent' || row['childSessionId'] != sid) continue;
-      final summary = row['summaryText'] as String? ?? '';
-      if (summary.isEmpty || summary == title) return '';
-      if (title.isNotEmpty && summary.startsWith(title)) {
-        return summary
-            .substring(title.length)
-            .replaceFirst(RegExp(r'^[，,·:：/、\s]+'), '');
-      }
-      return summary;
-    }
-    return '';
-  }
-
-  Widget _cancelButton(BuildContext context, String sessionId, Map work) {
-    return IconButton(
-      icon: Icon(Icons.close, size: 14, color: ZInk.muted(context)),
-      tooltip: tr(context, 'chat.bgWorks.cancel'),
-      visualDensity: VisualDensity.compact,
-      onPressed: () {
-        final workId = "${work['workId'] ?? work['id'] ?? ''}";
-        if (workId.isEmpty) return;
-        gateway.cancelBackgroundWork(sessionId, workId);
-      },
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final works = state.backgroundWorks
-        .where((w) => w['status'] == 'running' && w['endedAt'] == null)
+    final plainWorks = state.backgroundWorks
+        .where((w) =>
+            w['kind'] != 'subagent' &&
+            w['status'] == 'running' &&
+            w['endedAt'] == null)
         .toList();
-    if (works.isEmpty) return const SizedBox.shrink();
+    if (plainWorks.isEmpty) return const SizedBox.shrink();
     final sessionId = state.snapshot?['sessionId'] as String? ?? '';
-    // Subagent works get one live row each (summary stream + detail-page
-    // entry); bash & co. keep the single compact count line.
-    final subagentWorks = works.where((w) => w['kind'] == 'subagent').toList();
-    final plainWorks = works.where((w) => w['kind'] != 'subagent').toList();
     return Container(
       margin: const EdgeInsets.fromLTRB(14, 4, 14, 0),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -3335,35 +3717,25 @@ class _BackgroundWorksBar extends StatelessWidget {
         color: ZInk.tile(context),
         borderRadius: BorderRadius.circular(ZRadius.tile),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      child: Row(
         children: [
-          if (plainWorks.isNotEmpty)
-            Row(
-              children: [
-                const SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CircularProgressIndicator(strokeWidth: 1.5),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    trP(context, 'chat.bgWorks', [
-                      '${plainWorks.length}',
-                      plainWorks
-                          .map((w) => w['title'] ?? w['kind'])
-                          .join(tr(context, 'chat.bgWorks.sep')),
-                    ]),
-                    style: ZType.caption.copyWith(color: ZInk.soft(context)),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                for (final w in plainWorks)
-                  _cancelButton(context, sessionId, w),
-              ],
+          const SizedBox(
+            width: 12,
+            height: 12,
+            child: CircularProgressIndicator(strokeWidth: 1.5),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              trP(context, 'chat.bgWorks', [
+                '${plainWorks.length}',
+                plainWorks
+                    .map((w) => w['title'] ?? w['kind'])
+                    .join(tr(context, 'chat.bgWorks.sep')),
+              ]),
+              style: ZType.caption.copyWith(color: ZInk.soft(context)),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
           for (final w in plainWorks)
@@ -4219,6 +4591,7 @@ class _ToolGroupCard extends StatefulWidget {
   final String sessionId;
   final Future<void> Function(String, Future<dynamic> Function()) onAction;
   final ConversationState state;
+  final SubagentFeed? feed;
 
   const _ToolGroupCard({
     required this.rows,
@@ -4226,6 +4599,7 @@ class _ToolGroupCard extends StatefulWidget {
     required this.sessionId,
     required this.onAction,
     required this.state,
+    this.feed,
   });
 
   @override
@@ -4315,6 +4689,7 @@ class _ToolGroupCardState extends State<_ToolGroupCard> {
                       sessionId: widget.sessionId,
                       onAction: widget.onAction,
                       state: widget.state,
+                      feed: widget.feed,
                     ),
                 ],
               ),
@@ -5960,11 +6335,22 @@ class _InputBar extends StatefulWidget {
   final ChatGateway gateway;
   final String? sessionId;
 
+  /// Shared child-session pool backing the subagent pill's terminal
+  /// hysteresis view (null in draft mode → no pill).
+  final SubagentFeed? feed;
+
+  /// Terminal destroy-confirm window for the subagent pill (same anti-replay
+  /// window as the turn footer).
+  final Duration subagentConfirmWindow;
+
   final VoidCallback onSend;
   final VoidCallback onAttach;
   final VoidCallback onSkills;
   final VoidCallback onModelSheet;
   final VoidCallback onUsage;
+
+  /// Opens the subagent management sheet (wired only with a live session).
+  final VoidCallback? onSubagents;
 
   const _InputBar({
     required this.controller,
@@ -5976,11 +6362,14 @@ class _InputBar extends StatefulWidget {
     required this.draftConfig,
     required this.gateway,
     required this.sessionId,
+    required this.feed,
+    required this.subagentConfirmWindow,
     required this.onSend,
     required this.onAttach,
     required this.onSkills,
     required this.onModelSheet,
     required this.onUsage,
+    this.onSubagents,
   });
 
   @override
@@ -6013,6 +6402,7 @@ class _InputBarState extends State<_InputBar> {
   bool get sending => widget.sending;
   bool get isDraft => widget.isDraft;
   ConversationState? get state => widget.state;
+  SubagentFeed? get feed => widget.feed;
   WorkspacePrep? get prep => widget.prep;
   Map<String, String>? get draftConfig => widget.draftConfig;
   ChatGateway get gateway => widget.gateway;
@@ -6021,6 +6411,7 @@ class _InputBarState extends State<_InputBar> {
   VoidCallback get onAttach => widget.onAttach;
   VoidCallback get onModelSheet => widget.onModelSheet;
   VoidCallback get onUsage => widget.onUsage;
+  VoidCallback? get onSubagents => widget.onSubagents;
 
   String get _modeValue => isDraft
       ? (draftConfig?['mode'] ?? 'build')
@@ -6135,6 +6526,17 @@ class _InputBarState extends State<_InputBar> {
                     onTap: () => _pickMode(context),
                     showLabel: wide,
                   ),
+                  // Subagent management entry (official composer count
+                  // button parity, subagents-only by design). Sits right of
+                  // the mode chip; its appearance never shifts the other
+                  // controls (Spacer keeps the right cluster in place).
+                  if (state != null && feed != null && onSubagents != null)
+                    _SubagentPill(
+                      state: state!,
+                      feed: feed!,
+                      confirmWindow: widget.subagentConfirmWindow,
+                      onTap: onSubagents!,
+                    ),
                   const Spacer(),
                   if (_usageRatio != null)
                     _UsageRing(ratio: _usageRatio!, onTap: onUsage),
@@ -6304,6 +6706,158 @@ class _ControlChip extends StatelessWidget {
   }
 }
 
+/// Composer entry pill for running subagents (official composer count
+/// button shape, subagents-only by design — bash tasks stay on the works
+/// bar). Shows the agent glyph + running count (tabular-nums) + a breathing
+/// dot on a faint brand wash, per the confirmed design mock
+/// (tool/design/subagent_entry_mock.html B).
+///
+/// Visibility: the `subagents.running[]` hysteresis view non-empty → shown;
+/// once everything went terminal the pill must hold that state for
+/// [confirmWindow] before it is destroyed (the same anti-replay window as
+/// the turn footer). The SubagentFeed's regression hysteresis absorbs
+/// replayed running reports against a terminal, so this window guards
+/// genuine empty↔non-empty flips only.
+class _SubagentPill extends StatefulWidget {
+  final ConversationState state;
+  final SubagentFeed feed;
+  final Duration confirmWindow;
+  final VoidCallback onTap;
+
+  const _SubagentPill({
+    required this.state,
+    required this.feed,
+    required this.confirmWindow,
+    required this.onTap,
+  });
+
+  @override
+  State<_SubagentPill> createState() => _SubagentPillState();
+}
+
+class _SubagentPillState extends State<_SubagentPill> {
+  /// Fires at the end of the destroy-confirm window to re-render (an
+  /// external notify usually won't arrive once everything is terminal).
+  Timer? _destroyTimer;
+
+  bool _visible = false;
+
+  @override
+  void dispose() {
+    _destroyTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Derived inside the AnimatedBuilder (its notifications are what drive
+  /// rebuilds); plain field writes only — the timer's own completion calls
+  /// setState.
+  void _reconcile(List<Map<String, dynamic>> running) {
+    if (running.isNotEmpty) {
+      _destroyTimer?.cancel();
+      _destroyTimer = null;
+      _visible = true;
+      return;
+    }
+    if (!_visible) return;
+    _destroyTimer ??= Timer(widget.confirmWindow, () {
+      _destroyTimer = null;
+      if (!mounted) return;
+      if (subagentsRunningView(widget.state, widget.feed).isEmpty) {
+        setState(() => _visible = false);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([widget.state, widget.feed]),
+      builder: (context, _) {
+        final running = subagentsRunningView(widget.state, widget.feed);
+        _reconcile(running);
+        if (!_visible) return const SizedBox.shrink();
+        return Tooltip(
+          message: tr(context, 'chat.subagentSheet.title'),
+          child: InkWell(
+            onTap: widget.onTap,
+            borderRadius: BorderRadius.circular(ZRadius.field),
+            child: Container(
+              height: 30,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
+                color: ZColors.sky400.withValues(alpha: 0.10),
+                borderRadius: BorderRadius.circular(ZRadius.field),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.smart_toy_outlined,
+                    size: 14,
+                    color: ZColors.sky400,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    '${running.length}',
+                    style: ZType.sub.copyWith(
+                      color: ZInk.soft(context),
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  const _BreathingDot(),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// The pill's pulsing brand dot (mock: 5px, 1.2s ease-in-out, 50% @ .25).
+class _BreathingDot extends StatefulWidget {
+  const _BreathingDot();
+
+  @override
+  State<_BreathingDot> createState() => _BreathingDotState();
+}
+
+class _BreathingDotState extends State<_BreathingDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 600),
+  )..repeat(reverse: true);
+
+  late final Animation<double> _opacity = Tween(
+    begin: 1.0,
+    end: 0.25,
+  ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _opacity,
+      child: Container(
+        width: 5,
+        height: 5,
+        decoration: const BoxDecoration(
+          color: ZColors.sky400,
+          shape: BoxShape.circle,
+        ),
+      ),
+    );
+  }
+}
+
 /// Circular context-usage indicator (official 环形用量).
 class _UsageRing extends StatelessWidget {
   final double ratio;
@@ -6463,6 +7017,49 @@ class _StopButton extends StatelessWidget {
               child: Center(
                 child: Icon(Icons.stop, color: ZColors.danger, size: 20),
               ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Floating「jump to the newest message」control, shown only while the reader
+/// is scrolled away from the bottom. Circular icon-only button on the card
+/// surface (no label, no unread count).
+class _JumpToBottomButton extends StatelessWidget {
+  final bool visible;
+  final VoidCallback onPressed;
+
+  const _JumpToBottomButton({required this.visible, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    // Card surface (darkCard / lightCard) + hairline border + a light shadow,
+    // so the button reads as floating over the stream.
+    final scheme = Theme.of(context).colorScheme;
+    return IgnorePointer(
+      // Stays mounted so the show/hide can cross-fade; taps must never reach
+      // it while transparent.
+      ignoring: !visible,
+      child: AnimatedOpacity(
+        opacity: visible ? 1 : 0,
+        duration: const Duration(milliseconds: 150),
+        child: IconButton(
+          tooltip: tr(context, 'chat.jumpToBottom'),
+          onPressed: onPressed,
+          icon: const Icon(Icons.arrow_downward, size: 20),
+          style: IconButton.styleFrom(
+            backgroundColor: scheme.surfaceContainerHighest,
+            foregroundColor: ZInk.muted(context),
+            minimumSize: const Size(40, 40),
+            maximumSize: const Size(40, 40),
+            padding: EdgeInsets.zero,
+            elevation: 3,
+            surfaceTintColor: Colors.transparent,
+            shape: CircleBorder(
+              side: BorderSide(color: ZInk.hairline(context)),
             ),
           ),
         ),
