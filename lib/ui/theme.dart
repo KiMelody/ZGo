@@ -48,6 +48,14 @@ class ZColors {
   // Official mobile status pills (measured on the official 390px list).
   static const pillSuccessBg = Color(0xFF46BF72); // 已完成 pill surface
   static const pillRunningBg = Color(0xFF001D3D); // 运行中 pill surface
+
+  // Usage panel (desktop/remote entitlement panel, pixel-measured
+  // 2026-09-15 — research/reference-panel-spec.md). Panel-only accents:
+  // the existing brand/status tokens take different values, so they stay
+  // untouched and these are additive.
+  static const usageBlue = Color(0xFF4099FF); // bar fill + legend dot base
+  static const usageOrange = Color(0xFFFF8A30); // high-ratio / >=90% limit
+  static const usageGreen = Color(0xFF87D9A4); // reset countdown + pill
 }
 
 /// Theme-aware text colors mirroring the official foreground tokens.

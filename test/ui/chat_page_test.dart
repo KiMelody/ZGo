@@ -5,6 +5,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zlinker/protocol/conversation.dart';
 import 'package:zlinker/state/device_session.dart';
+import 'package:zlinker/state/entitlement_poller.dart';
+import 'package:zlinker/state/quota_reset.dart';
 import 'package:zlinker/ui/chat/chat_page.dart';
 import 'package:zlinker/ui/chat/subagent_detail_page.dart';
 import 'package:zlinker/ui/theme.dart';
@@ -24,6 +26,48 @@ class FakeChatGateway extends ChangeNotifier implements ChatGateway {
   final List<(String, List<Object?>)> calls = [];
   final List<String> subscribedSessions = [];
   Object Function(String method)? failSubscribeWith;
+
+  /// Plan-quota snapshot programming (quota pill / warning banner).
+  /// Default hides both (notConfigured → no data in the chat).
+  EntitlementView entitlementResult =
+      const EntitlementView(phase: EntitlementPhase.notConfigured);
+  int entitlementCalls = 0;
+
+  /// Raw `getCodingPlanResetStatus` answer (null → no usable data); use
+  /// failures throw [useQuotaError].
+  Map<String, dynamic>? quotaStatusResult;
+  int quotaStatusCalls = 0;
+  Object? useQuotaError;
+  final List<(String, String?, String)> useQuotaCalls = [];
+
+  QuotaResetController? _quotaReset;
+
+  @override
+  QuotaResetController get quotaResetController =>
+      _quotaReset ??= QuotaResetController(gateway: this);
+
+  @override
+  Future<Object?> quotaResetStatus({bool force = false}) async {
+    quotaStatusCalls++;
+    return quotaStatusResult;
+  }
+
+  @override
+  Future<void> useQuotaReset(
+    String resetType,
+    String idempotencyKey, {
+    String? preferredProviderId,
+  }) async {
+    useQuotaCalls.add((resetType, preferredProviderId, idempotencyKey));
+    final err = useQuotaError;
+    if (err != null) throw err;
+  }
+
+  @override
+  Future<EntitlementView> entitlementSnapshot({bool force = false}) async {
+    entitlementCalls++;
+    return entitlementResult;
+  }
 
   /// Extra snapshot fields merged into every feed (queue, interactions...).
   Map<String, dynamic> snapshotExtra = const {};
@@ -906,5 +950,263 @@ void main() {
       ),
       findsNothing,
     );
+  });
+
+  // ---------------------------------------------- plan quota warning
+
+  /// Entitlement snapshot with the top-level `remaining` mirror plus an
+  /// optional token-class quota limit (the only limit kind that drives the
+  /// banner — TIME_LIMIT is the monthly MCP quota and must not).
+  EntitlementView okQuota(
+    Map<String, dynamic> remaining, {
+    double? tokenPercentage,
+  }) =>
+      EntitlementView(
+        phase: EntitlementPhase.ok,
+        data: {
+          'authenticated': true,
+          'provider': {'id': 'prov-1', 'name': 'BigModel'},
+          'remaining': remaining,
+          'quota': tokenPercentage == null
+              ? null
+              : {
+                  'limits': [
+                    {
+                      'type': 'TOKENS_LIMIT',
+                      'unit': 3,
+                      'number': 5,
+                      'percentage': tokenPercentage,
+                    },
+                  ],
+                },
+          'subscription': null,
+        },
+      );
+
+  Future<void> pumpWithQuota(
+    WidgetTester tester,
+    FakeChatGateway gateway, {
+    void Function()? onOpenUsage,
+  }) async {
+    await tester.pumpWidget(wrap(ChatPage(
+      gateway: gateway,
+      sessionId: 's1',
+      title: 't',
+      onOpenUsage: onOpenUsage,
+    )));
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('monthly MCP TIME_LIMIT exhaustion does not raise the banner '
+      '(bug 09-15)', (tester) async {
+    // Reported symptom: TIME_LIMIT (search-prime 100/101) topped out and
+    // `remaining` mirroring it at 0, token window at 51% → no banner.
+    final gateway = FakeChatGateway()
+      ..entitlementResult = EntitlementView(
+        phase: EntitlementPhase.ok,
+        data: {
+          'authenticated': true,
+          'provider': {'id': 'prov-1', 'name': 'BigModel'},
+          'remaining': {'count': 0, 'percentage': 100, 'isShow': true},
+          'quota': {
+            'limits': [
+              {'type': 'TIME_LIMIT', 'unit': 5, 'number': 1, 'percentage': 100},
+              {'type': 'TOKENS_LIMIT', 'unit': 3, 'number': 5, 'percentage': 51},
+            ],
+          },
+          'subscription': null,
+        },
+      );
+    await pumpWithQuota(tester, gateway);
+
+    expect(gateway.entitlementCalls, 1);
+    expect(find.text('套餐额度已用尽'), findsNothing);
+    expect(find.text('切换模型'), findsNothing);
+  });
+
+  testWidgets('top-level remaining at 100% alone does not raise the banner', (
+    tester,
+  ) async {
+    final gateway = FakeChatGateway()
+      ..entitlementResult = okQuota({
+        'count': 0,
+        'percentage': 100,
+        'isShow': true,
+      });
+    await pumpWithQuota(tester, gateway);
+
+    expect(gateway.entitlementCalls, 1);
+    expect(find.text('套餐额度已用尽'), findsNothing);
+  });
+
+  testWidgets('exhausted token limit shows the warning banner with actions', (
+    tester,
+  ) async {
+    var openedUsage = false;
+    final gateway = FakeChatGateway()
+      ..entitlementResult = okQuota(
+        {'count': 0, 'percentage': 100, 'isShow': true},
+        tokenPercentage: 100,
+      );
+    await pumpWithQuota(
+      tester,
+      gateway,
+      onOpenUsage: () => openedUsage = true,
+    );
+    expect(find.text('套餐额度已用尽'), findsOneWidget);
+    expect(find.textContaining('已用尽或受限'), findsOneWidget);
+
+    // 查看用量 jumps through the injected callback.
+    await tester.tap(find.text('查看用量'));
+    await tester.pump();
+    expect(openedUsage, isTrue);
+
+    // 切换模型 opens the existing model sheet.
+    await tester.tap(find.text('切换模型'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('GLM-5.2'), findsWidgets);
+  });
+
+  testWidgets('healthy quota snapshot clears the banner on the next open', (
+    tester,
+  ) async {
+    final gateway = FakeChatGateway()
+      ..entitlementResult = okQuota(
+        {'count': 0, 'percentage': 100, 'isShow': true},
+        tokenPercentage: 100,
+      );
+    await pumpWithQuota(tester, gateway);
+    expect(find.text('套餐额度已用尽'), findsOneWidget);
+
+    // Shared poller refreshed to healthy; the page reopens (fresh state).
+    gateway.entitlementResult = okQuota(
+      {'count': 12, 'percentage': 40, 'isShow': true},
+      tokenPercentage: 40,
+    );
+    await tester.pumpWidget(wrap(ChatPage(
+      key: UniqueKey(),
+      gateway: gateway,
+      sessionId: 's1',
+      title: 't',
+    )));
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    expect(find.text('套餐额度已用尽'), findsNothing);
+  });
+
+  // ------------------------------------------ banner reset action (R2)
+
+  testWidgets('exhausted banner hides the reset action without '
+      'opportunities', (tester) async {
+    final gateway = FakeChatGateway()
+      ..entitlementResult = okQuota(
+        {'count': 0, 'percentage': 100, 'isShow': true},
+        tokenPercentage: 100,
+      );
+    // Default quotaStatusResult: null → no usable pools data.
+    await pumpWithQuota(tester, gateway);
+
+    expect(find.text('套餐额度已用尽'), findsOneWidget);
+    expect(find.text('使用重置券'), findsNothing);
+  });
+
+  testWidgets('exhausted banner is warning-only: no「使用重置券」even with '
+      'opportunities (entry moved to the usage sheet)', (tester) async {
+    final gateway = FakeChatGateway()
+      ..entitlementResult = okQuota(
+        {'count': 0, 'percentage': 100, 'isShow': true},
+        tokenPercentage: 100,
+      )
+      ..quotaStatusResult = {
+        'availableFiveHourResets': [
+          {
+            'expireAt':
+                DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch,
+          },
+        ],
+        'availableWeekResets': <Map<String, dynamic>>[],
+      };
+    await pumpWithQuota(tester, gateway);
+
+    expect(find.text('套餐额度已用尽'), findsOneWidget);
+    expect(find.text('使用重置券'), findsNothing);
+    expect(gateway.useQuotaCalls, isEmpty);
+  });
+
+  testWidgets('usage sheet reset entry consumes one opportunity and flips '
+      'the banner off with the refreshed entitlement', (tester) async {
+    final gateway = FakeChatGateway()
+      ..entitlementResult = okQuota(
+        {'count': 0, 'percentage': 100, 'isShow': true},
+        tokenPercentage: 100,
+      )
+      ..quotaStatusResult = {
+        'availableFiveHourResets': [
+          {
+            'expireAt':
+                DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch,
+          },
+        ],
+        'availableWeekResets': <Map<String, dynamic>>[],
+      };
+    await pumpWithQuota(tester, gateway);
+
+    // More menu → 用量统计 opens the upgraded usage sheet.
+    await tester.tap(find.text('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('用量统计'));
+    await tester.pumpAndSettle();
+    // Remaining-quota block (R4): the aggregated reset-credit row is the
+    // single reset entry (the per-pool lines were dropped in the restyle).
+    expect(find.text('剩余额度'), findsOneWidget);
+    expect(find.text('重置券 · 可用 1 张'), findsOneWidget);
+    expect(find.text('使用重置券'), findsOneWidget);
+
+    await tester.tap(find.text('使用重置券'));
+    await tester.pumpAndSettle();
+    // Official-shape dialog: pool rows + counts + expiry + cancel/reset.
+    expect(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.textContaining('1 张'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.text('取消'),
+      ),
+      findsOneWidget,
+    );
+
+    // Fresh entitlement for the post-reset confirmation refresh.
+    gateway.entitlementResult = okQuota(
+      {'count': 12, 'percentage': 40, 'isShow': true},
+      tokenPercentage: 40,
+    );
+    final entitlementCallsBefore = gateway.entitlementCalls;
+    await tester.tap(find.text('重置'));
+    await tester.pumpAndSettle();
+
+    expect(gateway.useQuotaCalls, hasLength(1));
+    final (type, providerId, key) = gateway.useQuotaCalls.single;
+    expect(type, 'FIVE_HOUR');
+    expect(providerId, 'prov-1');
+    expect(key, isNotEmpty);
+    // The controller's success chain + the banner re-read both hit the
+    // entitlement gateway.
+    expect(
+      gateway.entitlementCalls,
+      greaterThanOrEqualTo(entitlementCallsBefore + 2),
+    );
+    // Banner flips off with the refreshed healthy snapshot.
+    expect(find.text('套餐额度已用尽'), findsNothing);
   });
 }

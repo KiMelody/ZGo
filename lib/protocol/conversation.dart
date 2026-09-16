@@ -1049,18 +1049,52 @@ class ConversationSubscription extends _SubscriptionBase<ConversationState> {
   @override
   void _onStarted() {
     _startWatchdog();
+    _listenTaskStream();
   }
 
   @override
   void _onResubscribeCleanup() {
     _watchdog?.cancel();
+    _cancelTaskStreamListener?.call();
+    _cancelTaskStreamListener = null;
   }
 
   @override
   Future<void> _onDispose() async {
     _watchdog?.cancel();
+    _cancelTaskStreamListener?.call();
     _transport._untrackSubscription(sessionId);
-    state.dispose();
+    state.deactivateState();
+  }
+
+  /// Context/usage numbers ride the desktop's task-stream broadcast
+  /// (`bots:task-stream` messages on the `broadcast` channel, official
+  /// `broadcastService.onMessage`), not the Conversation V4 delta stream —
+  /// the official V4 reducer only handles row/state ops. Filtered to this
+  /// session's taskId; everything else is dropped. Live-probed on 3.11.2:
+  /// the broadcast stays silent there and the numbers flow through
+  /// `state.updated` patches instead, so [ContextUsageView] reads both
+  /// shapes and this listener is purely additive.
+  void Function()? _cancelTaskStreamListener;
+
+  void _listenTaskStream() {
+    _cancelTaskStreamListener?.call();
+    _cancelTaskStreamListener = _transport._channels.addEventListener(
+      Channels.broadcast,
+      'onMessage',
+      _handleBroadcastMessage,
+    );
+  }
+
+  void _handleBroadcastMessage(dynamic data) {
+    if (_disposed || data is! Map) return;
+    if (data['channel'] != 'bots:task-stream') return;
+    final payload = data['payload'];
+    if (payload is! Map) return;
+    if ('${payload['taskId']}' != sessionId) return;
+    final event = payload['event'];
+    if (event is! Map || event['type'] != 'usage_update') return;
+    state.applyUsageUpdate(event.cast<String, dynamic>());
   }
 
   @override
@@ -1277,6 +1311,21 @@ class SessionsIndexState extends ChangeNotifier {
   final Map<String, SessionEntry> sessions = {};
   bool ready = false;
 
+  bool _deactivated = false;
+
+  /// Same lazy shutdown as [ConversationState.deactivateState]: UI listening
+  /// to the sessions index may outlive the subscription, so dispose-time
+  /// asserts must not fire while listeners detach.
+  void deactivateState() {
+    _deactivated = true;
+  }
+
+  @override
+  void notifyListeners() {
+    if (_deactivated) return;
+    super.notifyListeners();
+  }
+
   List<SessionEntry> get list {
     final values = sessions.values.toList()
       ..sort((a, b) => b.lastActivityAt.compareTo(a.lastActivityAt));
@@ -1367,7 +1416,7 @@ class SessionsIndexSubscription extends _SubscriptionBase<SessionsIndexState> {
 
   @override
   Future<void> _onDispose() async {
-    state.dispose();
+    state.deactivateState();
   }
 
   @override
@@ -1388,6 +1437,25 @@ class ConversationState extends ChangeNotifier {
   int? firstRowId;
   int totalCount = 0;
   bool ready = false;
+
+  /// Set by [deactivateState]; the notification path below checks it.
+  bool _deactivated = false;
+
+  /// Lazy deactivation instead of ChangeNotifier.dispose(): modal routes
+  /// (usage sheet) can outlive the subscription that owns this state, and a
+  /// hard dispose would trip ChangeNotifier's post-dispose asserts when those
+  /// routes detach their listeners (crash: 'used after being disposed' +
+  /// '_dependents.isEmpty'). Notifications stop; reads keep working; the
+  /// notifier is GC'd together with its last listeners.
+  void deactivateState() {
+    _deactivated = true;
+  }
+
+  @override
+  void notifyListeners() {
+    if (_deactivated) return;
+    super.notifyListeners();
+  }
 
   /// `hasMore` from the latest conversationRowsRangeV4 response — the web
   /// store pages on this flag. Null until the first load-older runs (older
@@ -1425,6 +1493,7 @@ class ConversationState extends ChangeNotifier {
 
   void _applySnapshot(Map<String, dynamic> snap, int toSeq) {
     snapshot = snap;
+    _usageEvent = null;
     if (_pendingPatch != null) {
       snapshot = {...snap, ..._pendingPatch!};
       _pendingPatch = null;
@@ -1622,9 +1691,171 @@ class ConversationState extends ChangeNotifier {
 
   bool get autoDrain => queue?['autoDrain'] != false;
 
-  /// Token usage: {contextWindow: {usedTokens, maxTokens, ...}?, cumulative}.
-  Map<String, dynamic>? get usage =>
-      (snapshot?['usage'] as Map?)?.cast<String, dynamic>();
+  /// Usage pushed by the `usage_update` task-stream event (whitelist
+  /// parsed, see [applyUsageUpdate]). Reset on every snapshot re-apply so
+  /// a fresh authoritative snapshot is never shadowed by stale merges.
+  Map<String, dynamic>? _usageEvent;
+
+  /// Token usage — the single UI exit for context/cumulative numbers.
+  /// Two schemas coexist by design: the snapshot's
+  /// `{contextWindow: {usedTokens, maxTokens, cache: {hitRate, …},
+  /// breakdown: […]}, cumulative: {…}}` (live-updated by state.updated
+  /// patches on 3.11.2 desktops) and the event's
+  /// `{size, used, cost, cache, breakdown}`. Event fields win, snapshot
+  /// fields fill the gaps (research「关系」节 strategy); read the
+  /// normalized view from [contextUsage].
+  Map<String, dynamic>? get usage {
+    final snap = snapshot?['usage'];
+    final base = snap is Map ? snap.cast<String, dynamic>() : null;
+    final event = _usageEvent;
+    if (event == null || event.isEmpty) return base;
+    if (base == null) return event;
+    return {...base, ...event};
+  }
+
+  /// Applies one `usage_update` task-stream event
+  /// (`{type: 'usage_update', size, used, cost, cache?, breakdown?}`),
+  /// whitelist-parsed and defensively read: any missing/invalid field is
+  /// simply absent and falls back to the snapshot in [usage]. Mirrors the
+  /// official reducer's guards: an update without a usable `used` never
+  /// clobbers current usage, and an update lacking a breakdown keeps the
+  /// previous one while used/size are unchanged.
+  void applyUsageUpdate(Map<String, dynamic> event) {
+    final parsed = _parseUsageUpdate(event);
+    if (parsed.isEmpty) return;
+    final current = usage;
+    final currentUsed = _finiteNum(current?['used']);
+    final currentSize = _finiteNum(current?['size']);
+    final incomingUsed = _finiteNum(parsed['used']);
+    if (currentUsed != null &&
+        currentUsed > 0 &&
+        currentSize != null &&
+        currentSize > 0 &&
+        (incomingUsed == null || incomingUsed <= 0)) {
+      return; // official s0t: keep the valid current usage intact
+    }
+    if (!parsed.containsKey('breakdown') && current != null) {
+      final prev = current['breakdown'];
+      if (prev != null &&
+          _finiteNum(current['used']) == parsed['used'] &&
+          _finiteNum(current['size']) == parsed['size']) {
+        parsed['breakdown'] = prev;
+      }
+    }
+    _usageEvent = parsed;
+    notifyListeners();
+  }
+
+  /// Whitelist parser for one `usage_update` event. `cost` is parsed but
+  /// never rendered (PRD R7); `size`/`used` must be finite and positive
+  /// (the official renderer hides usage at <= 0); `cache` reduces to
+  /// `{hitRate}`; breakdown entries need a string `source` and finite
+  /// `chars` (<= 0 entries are dropped later in [contextUsage]).
+  static Map<String, dynamic> _parseUsageUpdate(Map<String, dynamic> event) {
+    final out = <String, dynamic>{};
+    final size = _finiteNum(event['size']);
+    if (size != null && size > 0) out['size'] = size;
+    final used = _finiteNum(event['used']);
+    if (used != null && used > 0) out['used'] = used;
+    final cost = _finiteNum(event['cost']);
+    if (cost != null) out['cost'] = cost;
+    final cache = event['cache'];
+    if (cache is Map) {
+      final hitRate = _finiteNum(cache['hitRate']);
+      if (hitRate != null) out['cache'] = {'hitRate': hitRate};
+    }
+    final breakdown = event['breakdown'];
+    if (breakdown is List) {
+      final items = [
+        for (final e in breakdown)
+          if (e is Map &&
+              e['source'] is String &&
+              (_finiteNum(e['chars']) ?? 0) > 0)
+            {'chars': _finiteNum(e['chars']), 'source': e['source']},
+      ];
+      if (items.isNotEmpty) out['breakdown'] = items;
+    }
+    return out;
+  }
+
+  static num? _finiteNum(Object? value) =>
+      value is num && value.isFinite ? value : null;
+
+  /// Official breakdown weight order (bundle `AI`): primary sort is chars
+  /// descending, ties break by this table; unknown sources trail in
+  /// first-seen order.
+  static const _breakdownWeights = {
+    'messages': 0,
+    'system_prompt': 1,
+    'meta_user_context': 2,
+    'skills': 3,
+    'tool_prompt': 4,
+    'system_tool_schemas': 5,
+    'mcp_tool_schemas': 6,
+  };
+
+  /// Normalized context-usage projection for the UI (usage sheet + ring):
+  /// used/max from event or snapshot, cache hit rate, and the aggregated
+  /// breakdown (per-source chars summed, <= 0 dropped, chars descending
+  /// with the official weight tie-break, percent of the retained total).
+  ContextUsageView get contextUsage {
+    final usage = this.usage;
+    final window = usage?['contextWindow'];
+    final used = _finiteNum(usage?['used']) ??
+        (window is Map ? _finiteNum(window['usedTokens']) : null);
+    final max = _finiteNum(usage?['size']) ??
+        (window is Map ? _finiteNum(window['maxTokens']) : null);
+    // 3.11.2 desktops ship cache/breakdown inside the snapshot's
+    // contextWindow (live-merged via state.updated patches); the flat
+    // event shape only arrives where the task-stream broadcast exists.
+    final cache = usage?['cache'] ?? (window is Map ? window['cache'] : null);
+    final hitRate = cache is Map ? _finiteNum(cache['hitRate']) : null;
+
+    final items = <ContextUsageBreakdownItem>[];
+    final breakdown =
+        usage?['breakdown'] ?? (window is Map ? window['breakdown'] : null);
+    if (breakdown is List) {
+      // Aggregate per source (official AZe), then rank: known sources by
+      // the weight table, unknown ones after them in first-seen order.
+      final bySource = <String, num>{};
+      for (final e in breakdown) {
+        if (e is! Map) continue;
+        final source = e['source'];
+        final chars = _finiteNum(e['chars']);
+        if (source is! String || chars == null || chars <= 0) continue;
+        bySource[source] = (bySource[source] ?? 0) + chars;
+      }
+      final total = bySource.values.fold<num>(0, (a, b) => a + b);
+      final ranks = {
+        for (final source in bySource.keys)
+          source: _breakdownWeights[source] ??
+              _breakdownWeights.length + bySource.keys.toList().indexOf(source),
+      };
+      if (total > 0) {
+        final entries = bySource.entries.toList()
+          ..sort((a, b) {
+            final byChars = b.value.compareTo(a.value);
+            if (byChars != 0) return byChars;
+            return ranks[a.key]!.compareTo(ranks[b.key]!);
+          });
+        for (final e in entries) {
+          items.add(
+            ContextUsageBreakdownItem(
+              source: e.key,
+              chars: e.value,
+              percent: e.value / total,
+            ),
+          );
+        }
+      }
+    }
+    return ContextUsageView(
+      used: used?.toInt(),
+      max: max?.toInt(),
+      hitRate: hitRate?.toDouble().clamp(0.0, double.infinity).toDouble(),
+      breakdown: items,
+    );
+  }
 
   /// Older history exists beyond the current window. Prefers the server's
   /// `hasMore` (web parity) once known; falls back to the totalCount
@@ -1686,4 +1917,46 @@ class ConversationState extends ChangeNotifier {
     if (list is! List) return const [];
     return list.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
   }
+}
+
+/// Normalized view over [ConversationState.usage] (snapshot + merged
+/// `usage_update` events). `used`/`max` are null when absent/invalid; the
+/// sheet hides the section unless `hasData`, mirroring the official
+/// renderer (usage hidden at used/max <= 0).
+class ContextUsageView {
+  final int? used;
+  final int? max;
+
+  /// 0..1 when readable (clamped at 0 like the official formatter).
+  final double? hitRate;
+  final List<ContextUsageBreakdownItem> breakdown;
+
+  const ContextUsageView({
+    this.used,
+    this.max,
+    this.hitRate,
+    this.breakdown = const [],
+  });
+
+  bool get hasData => used != null && max != null && max! > 0;
+
+  double? get ratio {
+    if (used == null || max == null || max! <= 0) return null;
+    return (used! / max!).clamp(0.0, 1.0);
+  }
+}
+
+/// One aggregated breakdown row (official AZe output shape).
+class ContextUsageBreakdownItem {
+  final String source;
+  final num chars;
+
+  /// Share of the retained breakdown total, 0..1.
+  final double percent;
+
+  const ContextUsageBreakdownItem({
+    required this.source,
+    required this.chars,
+    required this.percent,
+  });
 }

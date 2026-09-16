@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
@@ -6,7 +7,10 @@ import 'package:flutter/services.dart';
 
 import '../../protocol/conversation.dart';
 import '../../state/device_session.dart';
+import '../../state/entitlement_poller.dart';
+import '../../state/quota_reset.dart';
 import '../phase_pill.dart';
+import '../quota_reset_dialog.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
 import 'diff_view.dart';
@@ -39,6 +43,11 @@ class ChatPage extends StatefulWidget {
   /// can show 置顶任务 / 取消置顶任务 like the web and toggle it.
   final bool initialPinned;
 
+  /// Opens the plan-usage page (quota warning banner / pill action). Left
+  /// null where no usage route exists; the banner then shows the model
+  /// switch only.
+  final VoidCallback? onOpenUsage;
+
   const ChatPage({
     super.key,
     required this.gateway,
@@ -49,6 +58,7 @@ class ChatPage extends StatefulWidget {
     this.initialComposerText,
     this.workspaceLabel,
     this.initialPinned = false,
+    this.onOpenUsage,
   });
 
   @override
@@ -95,6 +105,12 @@ class _ChatPageState extends State<ChatPage> {
   /// Mirrors [ChatPage.initialPinned]; flips when the 更多 pin toggle runs.
   bool _pinned = false;
 
+  /// Plan-quota snapshot for the composer pill / warning banner. Fetched
+  /// once per page open through the session-wide poller (staleness cached
+  /// on the gateway side, no background timer); absence just hides the
+  /// pill — quota problems never surface as chat errors.
+  EntitlementView? _entitlement;
+
   ConversationState? get _state => _handle?.state;
 
   @override
@@ -111,6 +127,7 @@ class _ChatPageState extends State<ChatPage> {
       _subscribe();
     }
     _loadPrep();
+    _loadEntitlement();
     _inputController.addListener(() {
       final text = _inputController.text;
       final show =
@@ -578,6 +595,54 @@ class _ChatPageState extends State<ChatPage> {
 
   // ------------------------------------------------------------ sheets
 
+  /// Quota warning (R3): the fetched plan snapshot reports exhausted or
+  /// limited. The fetch happens once per page open, so the banner persists
+  /// for the page's lifetime and the next open re-evaluates it against the
+  /// shared poller's freshest ok snapshot.
+  bool get _showQuotaWarning {
+    final view = _entitlement;
+    return view != null &&
+        view.phase == EntitlementPhase.ok &&
+        view.exhausted;
+  }
+
+  Future<void> _loadEntitlement() async {
+    try {
+      final view = await widget.gateway.entitlementSnapshot();
+      if (!mounted) return;
+      setState(() => _entitlement = view);
+      _syncResetScope(view);
+    } catch (_) {
+      // Gateways may reject; the banner then stays hidden and the chat is
+      // not disturbed.
+    }
+  }
+
+  /// Reset opportunities ride the same entitlement snapshot: inject the
+  /// provider scope into the session-wide controller and refresh it (a
+  /// no-op without a provider id — the banner action then never shows).
+  void _syncResetScope(EntitlementView view) {
+    final controller = widget.gateway.quotaResetController;
+    final provider = view.data?['provider'];
+    final id = provider is Map ? provider['id'] : null;
+    controller.updateScope(id is String && id.isNotEmpty ? id : null);
+    unawaited(controller.refresh());
+  }
+
+  /// Banner「使用重置券」入口 removed (PRD: the sheet is the single
+  /// reset entry) — the dialog + success chain live in [_showResetDialog].
+  Future<void> _showResetDialog() async {
+    final type = await showQuotaResetDialog(
+      context,
+      controller: widget.gateway.quotaResetController,
+    );
+    if (!mounted || type == null) return;
+    _toast(tr(context, 'usage.reset.success'));
+    // The controller's success chain force-refreshed the poller; re-read
+    // it so the exhausted banner flips immediately.
+    await _loadEntitlement();
+  }
+
   void _showModelSheet() {
     showModalBottomSheet(
       context: context,
@@ -645,12 +710,26 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 
-  void _showUsageSheet() {
+  /// Usage sheet (R7): one fresh entitlement fetch per open feeds the limit
+  /// columns and the reset countdown; the sheet then renders that snapshot
+  /// without polling.
+  Future<void> _showUsageSheet() async {
     final state = _state;
     if (state == null) return;
+    final controller = widget.gateway.quotaResetController;
+    unawaited(controller.refresh());
+    await _loadEntitlement();
+    if (!mounted) return;
     showModalBottomSheet(
       context: context,
-      builder: (context) => _UsageSheet(state: state),
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => _UsageSheet(
+        state: state,
+        entitlement: _entitlement,
+        controller: controller,
+        onUseReset: _showResetDialog,
+      ),
     );
   }
 
@@ -990,6 +1069,67 @@ class _ChatPageState extends State<ChatPage> {
                 trailing: TextButton(
                   onPressed: _subscribe,
                   child: Text(tr(context, 'tasks.retry')),
+                ),
+              ),
+            ),
+          if (_showQuotaWarning)
+            // Warning-only banner (PRD: the「使用重置券」action moved to
+            // the usage sheet; switch model / view usage remain).
+            Material(
+              color: ZColors.danger.withValues(alpha: 0.15),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 6),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      tr(context, 'chat.quota.exhaustedTitle'),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: ZColors.danger,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      tr(context, 'chat.quota.exhaustedBody'),
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: ZInk.muted(context),
+                      ),
+                    ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        TextButton(
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding:
+                                const EdgeInsets.symmetric(horizontal: 8),
+                          ),
+                          onPressed: _showModelSheet,
+                          child: Text(
+                            tr(context, 'chat.quota.switchModel'),
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                        if (widget.onOpenUsage != null)
+                          TextButton(
+                            style: TextButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 8),
+                            ),
+                            onPressed: widget.onOpenUsage,
+                            child: Text(
+                              tr(context, 'chat.quota.viewUsage'),
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -4615,83 +4755,543 @@ class _ModelModeSheet extends StatelessWidget {
   }
 }
 
+/// Context usage detail panel, restyled onto the desktop/remote entitlement
+/// panel (PRD internal-task, pixel spec in
+/// research/reference-panel-spec.md): capacity head, six-class legend,
+/// cache hit rate, remaining quota block, and the bottom limit columns.
 class _UsageSheet extends StatelessWidget {
   final ConversationState state;
 
-  const _UsageSheet({required this.state});
+  /// Entitlement snapshot taken when the sheet opened (R7) — the limit
+  /// columns and the reset countdown read it; no polling inside the sheet.
+  final EntitlementView? entitlement;
+  final QuotaResetController controller;
+  final VoidCallback onUseReset;
+
+  const _UsageSheet({
+    required this.state,
+    required this.entitlement,
+    required this.controller,
+    required this.onUseReset,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final usage = state.usage ?? const {};
-    final cumulative = usage['cumulative'];
-    final contextWindow = usage['contextWindow'];
+    // Live refresh (acceptance 4): usage_update events notify the state
+    // while the sheet is open, so read the numbers inside a listener.
     return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              tr(context, 'chat.more.usage'),
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+      child: ListenableBuilder(
+        listenable: state,
+        builder: (context, _) {
+          final contextUsage = state.contextUsage;
+          return ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(context).height * 0.85,
             ),
-            const SizedBox(height: 16),
-            if (contextWindow is Map)
-              _UsageRow(
-                tr(context, 'chat.usage.context'),
-                '${contextWindow['usedTokens'] ?? '-'} / ${contextWindow['maxTokens'] ?? '-'} tokens',
+            child: SingleChildScrollView(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (contextUsage.hasData)
+                      _contextSection(context, contextUsage),
+                    if (contextUsage.breakdown.isNotEmpty)
+                      _legend(context, contextUsage.breakdown),
+                    if (contextUsage.hitRate != null)
+                      _hitRateRow(context, contextUsage.hitRate!),
+                    _remainingSection(context),
+                    _limitsColumns(context),
+                  ],
+                ),
               ),
-            if (cumulative is Map) ...[
-              _UsageRow(
-                tr(context, 'chat.usage.input'),
-                '${cumulative['inputTokens'] ?? 0}',
-              ),
-              _UsageRow(
-                tr(context, 'chat.usage.output'),
-                '${cumulative['outputTokens'] ?? 0}',
-              ),
-              _UsageRow(
-                tr(context, 'chat.usage.cacheRead'),
-                '${cumulative['cacheReadTokens'] ?? 0}',
-              ),
-              _UsageRow(
-                tr(context, 'chat.usage.cacheWrite'),
-                '${cumulative['cacheWriteTokens'] ?? 0}',
-              ),
-            ],
-          ],
-        ),
+            ),
+          );
+        },
       ),
     );
   }
-}
 
-class _UsageRow extends StatelessWidget {
-  final String label;
-  final String value;
+  /// R1 — capacity head: label + used/max/pct on the right, gradient bar
+  /// below (track #353535; orange above the >0.8 high-ratio threshold).
+  Widget _contextSection(BuildContext context, ContextUsageView view) {
+    final ratio = view.ratio ?? 0.0;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Flexible(
+              child: Text(
+                tr(context, 'chat.usage.context'),
+                style: TextStyle(fontSize: 13, color: ZInk.muted(context)),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              trP(context, 'chat.usage.contextValue', [
+                _fmtCompactTokens(context, view.used!),
+                _fmtCompactTokens(context, view.max!),
+                _fmtPercent(ratio),
+              ]),
+              style: _usageNumber(context, 13),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        _UsageBar(
+          value: ratio,
+          height: 10,
+          radius: 5,
+          track: _usageTrackColor,
+          orange: ratio > 0.8,
+          gradient: true,
+        ),
+      ],
+    );
+  }
 
-  const _UsageRow(this.label, this.value);
-
-  @override
-  Widget build(BuildContext context) {
+  /// R2 — six-class legend: dot (one blue at a stepped opacity), label,
+  /// right-aligned share. No per-row bar and no chars (PRD R2).
+  Widget _legend(
+    BuildContext context,
+    List<ContextUsageBreakdownItem> items,
+  ) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      padding: const EdgeInsets.only(top: 22),
+      child: Column(
         children: [
-          Text(
-            label,
-            style: TextStyle(fontSize: 13, color: ZInk.muted(context)),
-          ),
-          Text(
-            value,
-            style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
-          ),
+          for (final (i, item) in items.indexed)
+            Padding(
+              padding: EdgeInsets.only(top: i == 0 ? 0 : 15),
+              child: Row(
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: ZColors.usageBlue
+                          .withValues(alpha: _legendOpacity(i)),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      tr(context, _breakdownLabelKey(item.source)),
+                      style: TextStyle(
+                          fontSize: 12.5, color: ZInk.muted(context)),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(_fmtPercent(item.percent),
+                      style: _usageNumber(context, 12)),
+                ],
+              ),
+            ),
         ],
       ),
     );
   }
+
+  /// R3 — average cache hit rate, one row without a dot.
+  Widget _hitRateRow(BuildContext context, double hitRate) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 26),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Flexible(
+            child: Text(
+              tr(context, 'chat.contextUsage.cacheHitRate'),
+              style: TextStyle(fontSize: 13, color: ZInk.muted(context)),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(_fmtPercent(hitRate), style: _usageNumber(context, 13)),
+        ],
+      ),
+    );
+  }
+
+  /// R4 — remaining quota: reset countdown and the 5-hour pill come from
+  /// the `TOKENS_LIMIT(3,5)` window, the reset-credit row is the ZLinker
+  /// entry point. Rows (and the whole block) hide when their data is
+  /// absent; nothing renders as a placeholder.
+  Widget _remainingSection(BuildContext context) {
+    final limit = _entitlementLimit(
+      entitlement,
+      'TOKENS_LIMIT',
+      unit: 3,
+      number: 5,
+    );
+    // Official semantics: the panel shows what's LEFT of the window, not
+    // what's used (bundle PF: clamp(100 - percentage)).
+    final percent = _remainingPercent(limit);
+    final countdown = _resetCountdown(context, limit?['nextResetTime']);
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) {
+        final pools = controller.pools;
+        final credits =
+            pools == null ? 0 : pools.fiveHour.count + pools.week.count;
+        if (percent == null && countdown == null && credits == 0) {
+          return const SizedBox.shrink();
+        }
+        return Padding(
+          padding: const EdgeInsets.only(top: 26),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                tr(context, 'chat.usage.remaining.title'),
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: ZInk.solid(context),
+                ),
+              ),
+              if (countdown != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Text(
+                    trP(context, 'chat.usage.remaining.resetsIn', [countdown]),
+                    style: const TextStyle(
+                        fontSize: 12.5, color: ZColors.usageGreen),
+                  ),
+                ),
+              if (percent != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 14),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: ZColors.usageGreen.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(7),
+                        ),
+                        child: Text(
+                          tr(context, 'chat.usage.limit.fiveHour'),
+                          style: const TextStyle(
+                            fontSize: 11.5,
+                            height: 1.2,
+                            color: ZColors.usageGreen,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Text(
+                        trP(
+                          context,
+                          'chat.usage.remaining.left',
+                          [_fmtPercentValue(percent)],
+                        ),
+                        style:
+                            TextStyle(fontSize: 12, color: ZInk.muted(context)),
+                      ),
+                    ],
+                  ),
+                ),
+              if (credits > 0)
+                Container(
+                  margin: const EdgeInsets.only(top: 14),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 9),
+                  decoration: BoxDecoration(
+                    color: ZInk.hairline(context),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: ZColors.usageGreen.withValues(alpha: 0.35),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          trP(context, 'chat.usage.resetCredits', ['$credits']),
+                          style: TextStyle(
+                              fontSize: 12, color: ZInk.muted(context)),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      TextButton(
+                        onPressed: onUseReset,
+                        style: TextButton.styleFrom(
+                          backgroundColor:
+                              ZColors.usageGreen.withValues(alpha: 0.15),
+                          foregroundColor: ZColors.usageGreen,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 5),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          textStyle: const TextStyle(fontSize: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                        child: Text(tr(context, 'chat.quota.useReset')),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// R5 — three equal-width limit columns, all in official remaining
+  /// semantics (bundle `PF`: `clamp(100 - percentage)`). 工具调用 is the
+  /// monthly built-in tool quota (entitlementMonthlyMcpUsage), ZCode MCP
+  /// the server-side aggregate (entitlementServerMcpUsage); a limit absent
+  /// from the snapshot drops its column.
+  Widget _limitsColumns(BuildContext context) {
+    final fiveHour = _remainingPercent(
+      _entitlementLimit(entitlement, 'TOKENS_LIMIT', unit: 3, number: 5),
+    );
+    final toolCalls = _remainingPercent(
+      _entitlementLimit(entitlement, 'TIME_LIMIT', unit: 5, number: 1),
+    );
+    final zcodeMcp = _remainingPercent(_serverMcpLimit(entitlement));
+    final columns = <Widget>[
+      if (fiveHour != null)
+        _limitColumn(
+            context, tr(context, 'chat.usage.limit.fiveHour'), fiveHour),
+      if (toolCalls != null)
+        _limitColumn(
+            context, tr(context, 'chat.usage.limit.toolCalls'), toolCalls),
+      if (zcodeMcp != null)
+        _limitColumn(
+            context, tr(context, 'chat.usage.limit.zcodeMcp'), zcodeMcp,
+            orange: true),
+    ];
+    if (columns.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 28),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final (i, column) in columns.indexed) ...[
+            if (i > 0) const SizedBox(width: 14),
+            Expanded(child: column),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// One limit column: title → remaining percentage → mini bar. The fill
+  /// color is a fixed per-column tone (the official chart scale), not a
+  /// usage threshold.
+  Widget _limitColumn(
+    BuildContext context,
+    String name,
+    double percent, {
+    bool orange = false,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          name,
+          style: TextStyle(fontSize: 12, color: ZInk.muted(context)),
+          overflow: TextOverflow.ellipsis,
+        ),
+        const SizedBox(height: 5),
+        Text(
+          _fmtPercentValue(percent),
+          style: _usageNumber(context, 13.5),
+        ),
+        const SizedBox(height: 7),
+        _UsageBar(
+          value: percent / 100,
+          height: 5,
+          radius: 3,
+          track: ZColors.neutral700,
+          orange: orange,
+        ),
+      ],
+    );
+  }
+}
+
+/// Reference-panel tones without a ZColors token: the capacity-bar track
+/// and the gradient's deep stop (#353535 / #4185D5, pixel spec).
+const _usageTrackColor = Color(0xFF353535);
+const _usageBlueDeep = Color(0xFF4185D5);
+
+/// Rounded track + fill bar of the usage panel. The capacity bar carries
+/// the reference's blue gradient, the mini limit bars a flat fill; an
+/// orange fill replaces both at their high-usage thresholds.
+class _UsageBar extends StatelessWidget {
+  final double value;
+  final double height;
+  final double radius;
+  final Color track;
+  final bool orange;
+  final bool gradient;
+
+  const _UsageBar({
+    required this.value,
+    required this.height,
+    required this.radius,
+    required this.track,
+    this.orange = false,
+    this.gradient = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fill = orange ? ZColors.usageOrange : ZColors.usageBlue;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return Container(
+          height: height,
+          decoration: BoxDecoration(
+            color: track,
+            borderRadius: BorderRadius.circular(radius),
+          ),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Container(
+              width: constraints.maxWidth * value.clamp(0.0, 1.0),
+              decoration: BoxDecoration(
+                color: gradient && !orange ? null : fill,
+                gradient: gradient && !orange
+                    ? const LinearGradient(
+                        colors: [ZColors.usageBlue, _usageBlueDeep],
+                      )
+                    : null,
+                borderRadius: BorderRadius.circular(radius),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Legend dot opacity ladder by row index (measured on the reference:
+/// 1.0/.82/.64/.5/.42/.38). Extra rows beyond the ladder reuse its last
+/// step — the projection can rank more than six sources.
+double _legendOpacity(int index) {
+  const ladder = [1.0, 0.82, 0.64, 0.5, 0.42, 0.38];
+  return ladder[index < ladder.length ? index : ladder.length - 1];
+}
+
+/// Tabular-figure value style of the panel (percentages and token counts
+/// line up column-wise, mirroring the reference's tabular-nums).
+TextStyle _usageNumber(BuildContext context, double size) {
+  return TextStyle(
+    fontSize: size,
+    color: ZInk.solid(context),
+    fontFeatures: const [FontFeature.tabularFigures()],
+  );
+}
+
+/// Official `kZe` mapping: breakdown source → i18n key. Unknown sources
+/// render their raw id.
+String _breakdownLabelKey(String source) => switch (source) {
+  'messages' => 'chat.contextUsage.breakdown.messages',
+  'system_prompt' => 'chat.contextUsage.breakdown.systemPrompt',
+  'meta_user_context' => 'chat.contextUsage.breakdown.metaUserContext',
+  'skills' => 'chat.contextUsage.breakdown.skills',
+  'tool_prompt' => 'chat.contextUsage.breakdown.toolPrompt',
+  'system_tool_schemas' => 'chat.contextUsage.breakdown.systemTools',
+  'mcp_tool_schemas' => 'chat.contextUsage.breakdown.mcpTools',
+  _ => source,
+};
+
+/// Percent with at most one decimal (official maximumFractionDigits: 1).
+String _fmtPercent(double ratio) => _fmtPercentValue(ratio * 100);
+
+/// Same formatting for an already-percent value (entitlement percentages
+/// arrive as 0..100).
+String _fmtPercentValue(double percent) => percent == percent.roundToDouble()
+    ? '${percent.round()}%'
+    : '${percent.toStringAsFixed(1)}%';
+
+/// Capacity-line token count: zh renders 万 with one decimal (19.4万),
+/// en the k/M scale (194k); trailing `.0` is dropped on both (R1).
+String _fmtCompactTokens(BuildContext context, int n) {
+  final english =
+      (UiSettingsProvider.of(context)?.locale ?? 'zh-CN').startsWith('en');
+  if (!english) return '${_trimZero(n / 10000)}万';
+  if (n >= 1000000) return '${_trimZero(n / 1000000)}M';
+  if (n >= 1000) return '${_trimZero(n / 1000)}k';
+  return '$n';
+}
+
+/// One decimal with a trailing `.0` removed (30万, not 30.0万).
+String _trimZero(double v) {
+  final s = v.toStringAsFixed(1);
+  return s.endsWith('.0') ? s.substring(0, s.length - 2) : s;
+}
+
+/// Exact `type`(+`unit`/`number`) lookup over the entitlement snapshot's
+/// `quota.limits` (the official `MF`), same parsing idea as the usage page.
+Map<String, dynamic>? _entitlementLimit(
+  EntitlementView? view,
+  String type, {
+  int? unit,
+  int? number,
+}) {
+  final quota = view?.data?['quota'];
+  final limits = quota is Map ? quota['limits'] : null;
+  if (limits is! List) return null;
+  for (final e in limits) {
+    if (e is! Map) continue;
+    if (e['type'] != type) continue;
+    if (unit != null && e['unit'] != unit) continue;
+    if (number != null && e['number'] != number) continue;
+    return e.cast<String, dynamic>();
+  }
+  return null;
+}
+
+double? _limitPercent(Map<String, dynamic>? limit) =>
+    (limit?['percentage'] as num?)?.toDouble();
+
+/// Official PF: remaining% = clamp(100 - percentage) — every quota metric
+/// on the panel shows what is LEFT of the limit, never what is used.
+double? _remainingPercent(Map<String, dynamic>? limit) {
+  final used = _limitPercent(limit);
+  if (used == null) return null;
+  return (100 - used).clamp(0.0, 100.0);
+}
+
+/// Server MCP usage (`mcpQuota.aggregate`) as a limit-shaped map so the
+/// columns can read it through the same remaining-percent path.
+Map<String, dynamic>? _serverMcpLimit(EntitlementView? view) {
+  final mcpQuota = view?.data?['mcpQuota'];
+  final aggregate = mcpQuota is Map ? mcpQuota['aggregate'] : null;
+  return aggregate is Map ? aggregate.cast<String, dynamic>() : null;
+}
+
+/// Reset countdown「20 小时 13 分钟」for a `nextResetTime` ms epoch; null
+/// when the timestamp is absent or already past (the row then hides).
+String? _resetCountdown(BuildContext context, Object? nextResetTime) {
+  if (nextResetTime is! num) return null;
+  final remaining = DateTime.fromMillisecondsSinceEpoch(nextResetTime.toInt())
+      .difference(DateTime.now());
+  if (remaining.isNegative) return null;
+  final minutes = remaining.inMinutes % 60;
+  return [
+    if (remaining.inHours > 0)
+      trP(context, 'chat.usage.duration.hours', ['${remaining.inHours}']),
+    trP(context, 'chat.usage.duration.minutes', ['$minutes']),
+  ].join(' ');
 }
 
 class _JsonSheet extends StatelessWidget {
@@ -4944,6 +5544,7 @@ class _InputBar extends StatefulWidget {
   final Map<String, String>? draftConfig;
   final ChatGateway gateway;
   final String? sessionId;
+
   final VoidCallback onSend;
   final VoidCallback onAttach;
   final VoidCallback onSkills;
@@ -5050,14 +5651,7 @@ class _InputBarState extends State<_InputBar> {
     return raw;
   }
 
-  double? get _usageRatio {
-    final window = state?.usage?['contextWindow'];
-    if (window is! Map) return null;
-    final used = (window['usedTokens'] as num?)?.toInt();
-    final max = (window['maxTokens'] as num?)?.toInt();
-    if (used == null || max == null || max <= 0) return null;
-    return (used / max).clamp(0.0, 1.0);
-  }
+  double? get _usageRatio => state?.contextUsage.ratio;
 
   List<String> get _thoughtChoices {
     final fromPrep =

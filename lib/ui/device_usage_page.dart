@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../state/device_session.dart';
+import '../state/entitlement_poller.dart';
+import '../state/quota_reset.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 
@@ -15,9 +17,9 @@ class DeviceUsagePage extends StatefulWidget {
 }
 
 class _DeviceUsagePageState extends State<DeviceUsagePage> {
-  Map<String, dynamic>? _data;
-  String? _error;
-  bool _loading = true;
+  /// Last entitlement view from the session-wide poller (null = first
+  /// fetch still in flight).
+  EntitlementView? _view;
 
   /// App-usage snapshot (`getAppUsageSnapshot {range, timeZone}`) — the
   /// local-session-based estimation tab of the web settings usage page.
@@ -56,35 +58,22 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
     }
   }
 
-  Future<void> _load() async {
+  /// Entitlement via the session-wide poller: opening reuses the cache
+  /// within the staleness window, refresh (button / pull) forces a fetch.
+  /// The call never throws — failures land in the view as phase=error.
+  /// The reset-opportunity scope rides the same snapshot (R2: provider
+  /// id from the ok state; anything else disables the feature).
+  Future<void> _load({bool force = false}) async {
+    final view = await widget.session.entitlementSnapshot(force: force);
     if (!mounted) return;
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final res = await widget.session.callChannel(
-        'usage-stats',
-        'getEntitlementSnapshot',
-        [
-          {'includeSubscription': true}
-        ],
-      );
-      if (mounted) {
-        setState(() {
-          _data = res is Map ? res.cast<String, dynamic>() : {};
-          _loading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = '$e';
-          _loading = false;
-        });
-      }
-    }
+    setState(() => _view = view);
+    final provider = view.data?['provider'];
+    final id = provider is Map ? provider['id'] : null;
+    _reset.updateScope(id is String && id.isNotEmpty ? id : null);
+    await _reset.refresh(force: force);
   }
+
+  QuotaResetController get _reset => widget.session.quotaResetController;
 
   String _fmtTime(Object? millis) {
     if (millis is! num) return '-';
@@ -101,24 +90,87 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
       appBar: AppBar(
         title: Text(tr(context, 'usageRpc.title')),
         actions: [
-          IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () => _load(force: true),
+          ),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(child: Text(trP(context, 'usageRpc.loadFailed', [_error!])))
-              : _buildBody(),
+      body: RefreshIndicator(
+        onRefresh: () async {
+          await _load(force: true);
+          await _loadAppUsage();
+        },
+        child: _buildEntitlementBody(),
+      ),
     );
   }
 
-  Widget _buildBody() {
-    final data = _data ?? const {};
+  Widget _buildEntitlementBody() {
+    final view = _view;
+    if (view == null || view.phase == EntitlementPhase.loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    switch (view.phase) {
+      case EntitlementPhase.notConfigured:
+      case EntitlementPhase.noPlan:
+      case EntitlementPhase.loginRequired:
+      case EntitlementPhase.error:
+        return _statusView(view);
+      case EntitlementPhase.ok:
+        return _buildBody(view.data ?? const {});
+      case EntitlementPhase.loading:
+        return const Center(child: CircularProgressIndicator());
+    }
+  }
+
+  /// Status copy + retry for the four non-data phases (design.md table) —
+  /// never a blank page or a misleading card.
+  Widget _statusView(EntitlementView view) {
+    final String message;
+    switch (view.phase) {
+      case EntitlementPhase.notConfigured:
+        message = tr(context, 'usageRpc.notConfigured');
+      case EntitlementPhase.noPlan:
+        message = tr(context, 'usageRpc.noPlan');
+      case EntitlementPhase.loginRequired:
+        message = tr(context, 'usageRpc.loginRequired');
+      default:
+        message = trP(context, 'usageRpc.loadFailed', [view.error ?? '-']);
+    }
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Text(
+              message,
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: ZInk.muted(context)),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextButton.icon(
+            icon: const Icon(Icons.refresh, size: 16),
+            onPressed: () => _load(force: true),
+            label: Text(tr(context, 'tasks.retry')),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody(Map<String, dynamic> data) {
     final context_ = data['context'];
     final provider = data['provider'];
     final remaining = data['remaining'];
     final subscription = data['subscription'];
     final quota = data['quota'];
+    final mcpQuota = data['mcpQuota'];
+    final mcpAggregate = mcpQuota is Map && mcpQuota['aggregate'] is Map
+        ? Map<String, dynamic>.from(mcpQuota['aggregate'] as Map)
+        : null;
 
     return RefreshIndicator(
       onRefresh: () async {
@@ -220,8 +272,9 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                 ),
               ),
             ),
-          if (quota is Map && quota['limits'] is List) ...[
-            const SizedBox(height: 10),
+          if ((quota is Map && quota['limits'] is List) ||
+              mcpAggregate != null) ...[
+            const SizedBox(height: ZSpacing.cardGap),
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16),
@@ -232,11 +285,18 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                         style: const TextStyle(
                             fontSize: 14, fontWeight: FontWeight.w600)),
                     const SizedBox(height: 8),
-                    for (final limit in quota['limits'] as List)
-                      if (limit is Map)
-                        _LimitRow(
-                            limit: limit.cast<String, dynamic>(),
-                            fmtTime: _fmtTime),
+                    if (quota is Map && quota['limits'] is List)
+                      for (final limit in quota['limits'] as List)
+                        if (limit is Map)
+                          _LimitRow(
+                              limit: limit.cast<String, dynamic>(),
+                              fmtTime: _fmtTime),
+                    if (mcpAggregate != null)
+                      _LimitRow(
+                        limit: mcpAggregate,
+                        fmtTime: _fmtTime,
+                        label: tr(context, 'usageRpc.serverMcp'),
+                      ),
                   ],
                 ),
               ),
@@ -272,6 +332,96 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
               ),
             ),
           ],
+          const SizedBox(height: 10),
+          _resetCard(),
+        ],
+      ),
+    );
+  }
+
+  /// Reset opportunities, read-only (PRD: the sheet is the single reset
+  /// entry): one row per pool with the count, the earliest expiry and a
+  /// 「上次使用重置」 line when the pool has a usage history; the degraded
+  /// copy replaces the rows while no usable desktop data exists.
+  Widget _resetCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: ListenableBuilder(
+          listenable: _reset,
+          builder: (context, _) {
+            final pools = _reset.pools;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(tr(context, 'usage.reset.title'),
+                    style: const TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                if (pools == null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Text(tr(context, 'usage.reset.unavailable'),
+                        style: TextStyle(
+                            fontSize: 12, color: ZInk.faint(context))),
+                  )
+                else ...[
+                  _poolRow(
+                    name: tr(context, 'usage.reset.fiveHour'),
+                    pool: pools.fiveHour,
+                  ),
+                  _poolRow(
+                    name: tr(context, 'usage.reset.week'),
+                    pool: pools.week,
+                  ),
+                ],
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _poolRow({
+    required String name,
+    required QuotaResetPool pool,
+  }) {
+    final detail = pool.count > 0
+        ? [
+            trP(context, 'usage.reset.count', ['${pool.count}']),
+            if (pool.earliestExpireAt != null)
+              trP(context, 'usage.reset.expiresIn',
+                  [relativeTime(context, pool.earliestExpireAt!)]),
+          ].join(' · ')
+        : tr(context, 'usage.reset.none');
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              SizedBox(
+                width: 88,
+                child: Text(name, style: const TextStyle(fontSize: 12)),
+              ),
+              Expanded(
+                child: Text(detail,
+                    style:
+                        TextStyle(fontSize: 11, color: ZInk.muted(context))),
+              ),
+            ],
+          ),
+          if (pool.lastUsedAt != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 88, top: 2),
+              child: Text(
+                trP(context, 'usage.reset.lastUsed',
+                    [_fmtTime(pool.lastUsedAt)]),
+                style: TextStyle(fontSize: 10.5, color: ZInk.faint(context)),
+              ),
+            ),
         ],
       ),
     );
@@ -469,11 +619,37 @@ class _LimitRow extends StatelessWidget {
   final Map<String, dynamic> limit;
   final String Function(Object?) fmtTime;
 
-  const _LimitRow({required this.limit, required this.fmtTime});
+  /// Row title override (the server MCP aggregate carries no type of its
+  /// own). Absent, the label is derived from the limit type.
+  final String? label;
+
+  const _LimitRow({required this.limit, required this.fmtTime, this.label});
+
+  /// Human label for a limit type (research/entitlement-limits-probe.md):
+  /// `TIME_LIMIT` is the monthly built-in MCP tool quota, the token-class
+  /// types are the chat windows. Unknown types keep the raw enum string.
+  static String? _semanticLabel(BuildContext context, Map<String, dynamic> l) {
+    switch (l['type']) {
+      case 'TIME_LIMIT':
+        return tr(context, 'usageRpc.limitMonthlyTools');
+      case 'TOKENS_LIMIT':
+        if (l['unit'] == 6) return tr(context, 'usageRpc.limitTokenWeek');
+        if (l['unit'] == 3 && l['number'] == 5) {
+          return tr(context, 'usageRpc.limitToken5h');
+        }
+        return tr(context, 'usageRpc.limitToken');
+      case 'CREDIT_LIMIT':
+        return tr(context, 'usageRpc.limitToken');
+    }
+    return null;
+  }
 
   @override
   Widget build(BuildContext context) {
     final type = '${limit['type'] ?? ''}';
+    final title = label ??
+        _semanticLabel(context, limit) ??
+        '$type · unit ${limit['unit'] ?? '-'}';
     final percentage = (limit['percentage'] as num?)?.toDouble();
     final usageDetails = limit['usageDetails'];
     return Padding(
@@ -484,8 +660,7 @@ class _LimitRow extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('$type · unit ${limit['unit'] ?? '-'}',
-                  style: const TextStyle(fontSize: 12)),
+              Text(title, style: const TextStyle(fontSize: 12)),
               Text(
                 [
                   if (limit['usage'] != null)

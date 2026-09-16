@@ -732,6 +732,13 @@ class _TaskListPageState extends State<TaskListPage> {
       workspaceLabel: session.activeWorkspace != null
           ? workspaceTitle(session.activeWorkspace!)
           : null,
+      onOpenUsage: () => _openUsage(session),
+    );
+  }
+
+  void _openUsage(DeviceSession session) {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => DeviceUsagePage(session: session)),
     );
   }
 
@@ -1985,6 +1992,7 @@ class _TaskListPageState extends State<TaskListPage> {
           workspaceLabel: session.activeWorkspace != null
               ? workspaceTitle(session.activeWorkspace!)
               : null,
+          onOpenUsage: () => _openUsage(session),
         ),
       ),
     );

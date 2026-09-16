@@ -12,6 +12,8 @@ import '../protocol/relay_client.dart';
 import '../protocol/remote_client.dart';
 import '../protocol/task_commands.dart';
 import 'device_store.dart';
+import 'entitlement_poller.dart';
+import 'quota_reset.dart';
 
 /// Mirrors `HC()` in the web client:
 /// key = workspaceIdentity?.trim() || workspacePath.
@@ -147,7 +149,8 @@ class ChatHandle {
 /// [AutomationHost]/[OffPeakHost] seam pattern applied to conversations.
 /// [DeviceSession] implements it against the live transport; tests fake it
 /// (recording calls, answering from a real [ConversationState] fed by hand).
-abstract interface class ChatGateway implements Listenable {
+abstract interface class ChatGateway
+    implements Listenable, QuotaResetGateway {
   DeviceStatus get status;
   bool get kicked;
   String? get error;
@@ -305,6 +308,19 @@ abstract interface class ChatGateway implements Listenable {
   /// Skills synchronously from the last known list (mention picker reads
   /// this without awaiting a fresh RPC).
   List<Map<String, dynamic>> mentionSkillsSync();
+
+  /// Entitlement/quota snapshot (usage-stats.getEntitlementSnapshot) via
+  /// the session-wide [EntitlementPoller]: cached within the staleness
+  /// window, [force] bypasses it. Never throws — failures arrive as an
+  /// [EntitlementView] with phase [EntitlementPhase.error].
+  @override
+  Future<EntitlementView> entitlementSnapshot({bool force = false});
+
+  /// Session-wide reset-opportunity controller (usage page card + chat
+  /// banner action). Lazily created with the gateway, disposed with the
+  /// session; UI only reads [QuotaResetController.pools] and calls
+  /// updateScope/refresh/use.
+  QuotaResetController get quotaResetController;
 }
 
 /// One native protocol connection to one device. Owns the full stack
@@ -1406,6 +1422,55 @@ class DeviceSession extends ChangeNotifier
     ];
   }
 
+  /// Session-wide entitlement poller — the usage page and the chat quota
+  /// pill / warning banner share one cache per connection. Created lazily
+  /// on first use and disposed with the session.
+  EntitlementPoller? _entitlementPoller;
+
+  /// usage-stats channel fetch for [_entitlementPoller].
+  Future<dynamic> _fetchEntitlement() => callChannel(
+        'usage-stats',
+        'getEntitlementSnapshot',
+        [
+          {'includeSubscription': true}
+        ],
+      );
+
+  @override
+  Future<EntitlementView> entitlementSnapshot({bool force = false}) =>
+      (_entitlementPoller ??= EntitlementPoller(fetch: _fetchEntitlement))
+          .refresh(force: force);
+
+  /// Session-wide reset-opportunity controller — lazily created like
+  /// [_entitlementPoller], disposed with the session. The scope
+  /// (`preferredProviderId`) is injected by consumers from the
+  /// entitlement ok snapshot via [QuotaResetController.updateScope]; the
+  /// forwarded RPCs below read it back as the single source.
+  QuotaResetController? _quotaReset;
+
+  @override
+  QuotaResetController get quotaResetController =>
+      _quotaReset ??= QuotaResetController(gateway: this);
+
+  @override
+  Future<Object?> quotaResetStatus({bool force = false}) =>
+      callChannel('usage-stats', 'getCodingPlanResetStatus', [
+        {'preferredProviderId': quotaResetController.scopeProviderId},
+      ]);
+
+  @override
+  Future<void> useQuotaReset(
+    String resetType,
+    String idempotencyKey, {
+    String? preferredProviderId,
+  }) => callChannel('usage-stats', 'useCodingPlanReset', [
+        {
+          'preferredProviderId': preferredProviderId,
+          'idempotencyKey': idempotencyKey,
+          'resetType': resetType,
+        },
+      ]);
+
   /// Cleanly closes the connection so the in-app WebView (or another
   /// terminal) can take the slot without a KICK race. Callers reconnect
   /// via [connect] later (the hub adds the ~1s grace delay).
@@ -1453,6 +1518,8 @@ class DeviceSession extends ChangeNotifier
     if (_disposed) return;
     _disposed = true;
     await suspend();
+    _entitlementPoller?.dispose();
+    _quotaReset?.dispose();
     super.dispose();
   }
 

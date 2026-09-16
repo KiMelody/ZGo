@@ -370,6 +370,258 @@ void main() {
     });
   });
 
+  group('usage_update events & contextUsage', () {
+    late ConversationState state;
+
+    setUp(() {
+      state = ConversationState();
+    });
+
+    Map<String, dynamic> usageEvent({
+      Object? size = 200000,
+      Object? used = 50000,
+      Object? cost,
+      Object? hitRate,
+      Object? breakdown,
+    }) =>
+        {
+          'type': 'usage_update',
+          'taskId': 'sess-1',
+          if (size != null) 'size': size,
+          if (used != null) 'used': used,
+          if (cost != null) 'cost': cost,
+          if (hitRate != null) 'cache': {'hitRate': hitRate},
+          if (breakdown != null) 'breakdown': breakdown,
+        };
+
+    test('parses a full event and normalizes the projection', () {
+      state.applyUsageUpdate(usageEvent(
+        cost: 0.42,
+        hitRate: 0.91,
+        breakdown: [
+          {'chars': 12000, 'source': 'messages'},
+          {'chars': 8000, 'source': 'system_prompt'},
+        ],
+      ));
+
+      final view = state.contextUsage;
+      expect(view.used, 50000);
+      expect(view.max, 200000);
+      expect(view.hasData, isTrue);
+      expect(view.ratio, closeTo(0.25, 1e-9));
+      expect(view.hitRate, 0.91);
+      expect(view.breakdown, hasLength(2));
+      expect(view.breakdown[0].source, 'messages');
+      expect(view.breakdown[0].chars, 12000);
+      expect(view.breakdown[0].percent, closeTo(0.6, 1e-9));
+      expect(view.breakdown[1].source, 'system_prompt');
+      // cost is parsed into the merged usage (PRD: never rendered).
+      expect(state.usage?['cost'], 0.42);
+    });
+
+    test('event fields win over the snapshot, snapshot fills the gaps', () {
+      _injectSnapshot(state, snapshot: {
+        'usage': {
+          'contextWindow': {'usedTokens': 100, 'maxTokens': 200000},
+          'cumulative': {'inputTokens': 7},
+        },
+      });
+
+      state.applyUsageUpdate(usageEvent(used: 50000));
+
+      // event `used` overrides the snapshot usedTokens; `max` falls back.
+      final view = state.contextUsage;
+      expect(view.used, 50000);
+      expect(view.max, 200000);
+      // the untouched snapshot schema (cumulative) stays visible.
+      expect(state.usage?['cumulative'], isNotNull);
+    });
+
+    test('deactivateState is a lazy shutdown: listeners detach and reads work',
+        () {
+      // Modal routes (usage sheet) can outlive the subscription; detaching
+      // their listeners and reading fields after shutdown must not throw,
+      // and notifications must fall silent instead of firing post-dispose
+      // asserts (crash seen: 'A ConversationState was used after being
+      // disposed' + '_dependents.isEmpty').
+      var notified = 0;
+      void listener() => notified++;
+      state.addListener(listener);
+      state.notifyListeners();
+      expect(notified, 1);
+
+      state.deactivateState();
+
+      // detaching a listener after shutdown must not assert.
+      state.removeListener(listener);
+      // reads keep working for routes still showing the last data.
+      expect(state.contextUsage.hasData, isFalse);
+      // notifications fall silent.
+      state.notifyListeners();
+      state.applyUsageUpdate(usageEvent());
+      expect(notified, 1);
+    });
+
+    test('missing / mistyped fields degrade without throwing', () {
+      _injectSnapshot(state, snapshot: {
+        'usage': {
+          'contextWindow': {'usedTokens': 100, 'maxTokens': 200000},
+        },
+      });
+
+      // empty event: nothing whitelisted — state untouched.
+      state.applyUsageUpdate({'type': 'usage_update'});
+      expect(state.contextUsage.used, 100);
+      expect(state.contextUsage.max, 200000);
+
+      state.applyUsageUpdate(usageEvent(
+        size: 'oops',
+        used: null,
+        hitRate: 'nope',
+        breakdown: [
+          'garbage',
+          {'chars': 'x', 'source': 'messages'},
+          {'chars': 50}, // no source
+        ],
+      ));
+      final view = state.contextUsage;
+      expect(view.used, 100); // snapshot fallback
+      expect(view.max, 200000);
+      expect(view.hitRate, isNull);
+      expect(view.breakdown, isEmpty);
+    });
+
+    test('an event without a usable used keeps the current usage intact',
+        () {
+      state.applyUsageUpdate(usageEvent(used: 50000, hitRate: 0.5));
+      state.applyUsageUpdate(usageEvent(used: 0, hitRate: 0.99));
+
+      // official s0t: invalid incoming used never clobbers valid usage.
+      final view = state.contextUsage;
+      expect(view.used, 50000);
+      expect(view.hitRate, 0.5);
+    });
+
+    test('a breakdown-less event keeps the previous breakdown', () {
+      final withBreakdown = usageEvent(
+        breakdown: [
+          {'chars': 900, 'source': 'skills'},
+        ],
+      );
+      state.applyUsageUpdate(withBreakdown);
+      state.applyUsageUpdate(usageEvent()); // same used/size, no breakdown
+
+      expect(state.contextUsage.breakdown.single.source, 'skills');
+
+      // changed used/size → the stale breakdown is dropped.
+      state.applyUsageUpdate(usageEvent(used: 60000));
+      expect(state.contextUsage.breakdown, isEmpty);
+    });
+
+    test('breakdown aggregation: sum, drop <=0, sort desc with weight',
+        () {
+      state.applyUsageUpdate(usageEvent(breakdown: [
+        {'chars': 100, 'source': 'mcp_tool_schemas'},
+        {'chars': 50, 'source': 'mcp_tool_schemas'}, // summed → 150
+        {'chars': 300, 'source': 'messages'},
+        {'chars': 300, 'source': 'system_prompt'}, // tie → weight wins
+        {'chars': 0, 'source': 'skills'}, // <=0 dropped
+        {'chars': -5, 'source': 'tool_prompt'}, // <=0 dropped
+        {'chars': 25, 'source': 'custom_thing'}, // unknown source trails
+      ]));
+
+      final view = state.contextUsage;
+      expect(view.breakdown.map((e) => e.source).toList(), [
+        'messages',
+        'system_prompt',
+        'mcp_tool_schemas',
+        'custom_thing',
+      ]);
+      expect(view.breakdown[0].percent, closeTo(300 / 775, 1e-9));
+      expect(view.breakdown[2].chars, 150);
+      expect(view.breakdown[3].chars, 25);
+    });
+
+    test('negative hitRate clamps to 0 (official Math.max)', () {
+      state.applyUsageUpdate(usageEvent(hitRate: -0.2));
+      expect(state.contextUsage.hitRate, 0);
+    });
+
+    test('snapshot contextWindow carries cache+breakdown (3.11.2 shape)',
+        () {
+      // Live-probed: 3.11.2 desktops never emit the task-stream broadcast;
+      // usage rides state.updated patches into the snapshot's
+      // contextWindow, cache/breakdown included.
+      _injectSnapshot(state, snapshot: {
+        'usage': {
+          'contextWindow': {
+            'usedTokens': 53684,
+            'maxTokens': 300000,
+            'cache': {'hitRate': 0.95, 'latestHitRate': 0.99},
+            'breakdown': [
+              {'chars': 85522, 'source': 'system_tool_schemas'},
+              {'chars': 12000, 'source': 'messages'},
+              {'chars': 10597, 'source': 'system_prompt'},
+            ],
+          },
+          'cumulative': {'inputTokens': 1088590, 'outputTokens': 14603},
+        },
+      });
+
+      final view = state.contextUsage;
+      expect(view.used, 53684);
+      expect(view.max, 300000);
+      expect(view.hitRate, 0.95);
+      expect(view.breakdown, hasLength(3));
+      // chars-descending: the big system_tool_schemas block ranks first.
+      expect(view.breakdown.first.source, 'system_tool_schemas');
+      expect(state.usage?['cumulative'], isNotNull);
+    });
+
+    test('event cache shadows the snapshot; gaps fall back to it', () {
+      _injectSnapshot(state, snapshot: {
+        'usage': {
+          'contextWindow': {
+            'usedTokens': 100,
+            'maxTokens': 200000,
+            'cache': {'hitRate': 0.95},
+            'breakdown': [
+              {'chars': 100, 'source': 'messages'},
+            ],
+          },
+        },
+      });
+
+      state.applyUsageUpdate(usageEvent(hitRate: 0.99));
+
+      final view = state.contextUsage;
+      expect(view.hitRate, 0.99); // event wins
+      expect(view.used, 50000); // event used
+      // the event carried no breakdown → snapshot breakdown fills in.
+      expect(view.breakdown, hasLength(1));
+      expect(view.breakdown.single.source, 'messages');
+    });
+
+    test('a fresh snapshot re-apply clears the merged event', () {
+      state.applyUsageUpdate(usageEvent(used: 50000));
+      expect(state.contextUsage.used, 50000);
+
+      _injectSnapshot(state, snapshot: {
+        'usage': {
+          'contextWindow': {'usedTokens': 100, 'maxTokens': 200000},
+        },
+      });
+      expect(state.contextUsage.used, 100);
+    });
+
+    test('usage stays null with neither snapshot nor event data', () {
+      _injectSnapshot(state);
+      expect(state.usage, isNull);
+      expect(state.contextUsage.hasData, isFalse);
+      expect(state.contextUsage.ratio, isNull);
+    });
+  });
+
   group('SessionsIndexState delta application', () {
     late SessionsIndexState state;
     late int gapCount;
