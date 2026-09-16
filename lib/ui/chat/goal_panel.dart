@@ -20,11 +20,16 @@ class GoalPanel extends StatefulWidget {
   final Future<void> Function(String sessionId) onPauseGoal;
   final Future<void> Function(String sessionId) onResumeGoal;
 
+  /// Optional: invoked when a running subagent tile is tapped — the chat
+  /// page opens the read-only child-session detail page from it.
+  final void Function(Map<String, dynamic> agent)? onOpenAgent;
+
   const GoalPanel({
     super.key,
     required this.state,
     required this.onPauseGoal,
     required this.onResumeGoal,
+    this.onOpenAgent,
   });
 
   @override
@@ -224,23 +229,28 @@ class _GoalPanelState extends State<GoalPanel> {
               Padding(
                 padding:
                     const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
-                child: Row(
-                  children: [
-                    const SizedBox(
-                      width: 10,
-                      height: 10,
-                      child: CircularProgressIndicator(strokeWidth: 1.5),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text('${a['title'] ?? a['subagentType'] ?? ''}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                              fontSize: 12, color: ZInk.soft(context))),
-                    ),
-                    _AgentElapsed(startedAt: a['startedAt'] as num?),
-                  ],
+                child: InkWell(
+                  onTap: widget.onOpenAgent == null
+                      ? null
+                      : () => widget.onOpenAgent!(a),
+                  child: Row(
+                    children: [
+                      const SizedBox(
+                        width: 10,
+                        height: 10,
+                        child: CircularProgressIndicator(strokeWidth: 1.5),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text('${a['title'] ?? a['subagentType'] ?? ''}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontSize: 12, color: ZInk.soft(context))),
+                      ),
+                      _AgentElapsed(startedAt: a['startedAt'] as num?),
+                    ],
+                  ),
                 ),
               ),
           ],

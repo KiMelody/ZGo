@@ -1083,6 +1083,16 @@ class ConversationSubscription extends _SubscriptionBase<ConversationState> {
           '[v4] watchdog: no frames for ${quietSeconds}s while active, resync',
         );
         _resync();
+      } else if (!state.ready) {
+        // Never-ready blind spot: the subscribe acked but no snapshot ever
+        // arrived. Observed live (2026-09-15): the desktop bridge can die
+        // mid-push of a large subagent snapshot, and without a forced
+        // resync the subscription idles forever — the detail page would
+        // spin indefinitely.
+        _transport._log(
+          '[v4] watchdog: no snapshot ${quietSeconds}s after subscribe, resync',
+        );
+        _resync();
       }
     });
   }
@@ -1653,6 +1663,13 @@ class ConversationState extends ChangeNotifier {
     if (list is! List) return const [];
     return list.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
   }
+
+  /// `subagents` typed: {revision, childSessionIds, running, endedTotal}.
+  /// `running` entries carry childSessionId/agentId/toolCallId/subagentType/
+  /// title/status/startedAt (live-probed 2026-09-13, see
+  /// tasks/internal-task research).
+  Map<String, dynamic>? get subagentsInfo =>
+      (snapshot?['subagents'] as Map?)?.cast<String, dynamic>();
 
   Map<String, dynamic>? get goal =>
       (snapshot?['goal'] as Map?)?.cast<String, dynamic>();

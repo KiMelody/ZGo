@@ -318,6 +318,46 @@ void main() {
       expect(state.usage, isNotNull);
     });
 
+    test('subagentsInfo exposes running entries from the snapshot', () {
+      _injectSnapshot(state, snapshot: {
+        'subagents': {
+          'revision': 2,
+          'childSessionIds': [
+            'sess_subagent_agent_a',
+            'sess_subagent_agent_b',
+          ],
+          'running': [
+            {
+              'childSessionId': 'sess_subagent_agent_a',
+              'agentId': 'agent_1',
+              'toolCallId': 'call_1',
+              'subagentType': 'general-purpose',
+              'title': '实现通道失败隔离加固',
+              'status': 'running',
+              'startedAt': 1789279676224,
+            },
+          ],
+          'endedTotal': 2,
+        },
+      });
+
+      final sub = state.subagentsInfo;
+      expect(sub, isNotNull);
+      expect(sub!['revision'], 2);
+      expect(sub['endedTotal'], 2);
+      expect((sub['childSessionIds'] as List), hasLength(2));
+      final running = sub['running'] as List;
+      expect(running, hasLength(1));
+      expect(running[0]['childSessionId'], 'sess_subagent_agent_a');
+      expect(running[0]['subagentType'], 'general-purpose');
+    });
+
+    test('subagentsInfo is null without the subagents field', () {
+      _injectSnapshot(state, snapshot: {'revision': 1});
+
+      expect(state.subagentsInfo, isNull);
+    });
+
     test('draft phase is not running', () {
       _injectSnapshot(state, snapshot: {
         'revision': 1,

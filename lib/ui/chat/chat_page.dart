@@ -13,6 +13,7 @@ import 'diff_view.dart';
 import 'markdown_view.dart';
 import 'goal_panel.dart';
 import 'mention_sheet.dart';
+import 'subagent_detail_page.dart';
 
 /// Native chat view for one task (session), backed by Conversation V4 over
 /// [ChatGateway]. Draft mode (no [sessionId]): the first message issues
@@ -1798,7 +1799,11 @@ class _RowWidget extends StatelessWidget {
       'toolCall' => _ToolCallTile(row: row),
       // turnHeader rows are lifted out of the stream by _TurnGroupWidget
       'turnHeader' => const SizedBox.shrink(),
-      'subagent' => _SubagentTile(row: row),
+      'subagent' => _SubagentTile(
+        row: row,
+        gateway: gateway,
+        sessionId: sessionId,
+      ),
       'timelineMarker' => _TimelineMarkerWidget(row: row),
       _ => const SizedBox.shrink(),
     };
@@ -3067,42 +3072,62 @@ class _TimelineMarkerWidget extends StatelessWidget {
 
 class _SubagentTile extends StatelessWidget {
   final Map<String, dynamic> row;
+  final ChatGateway gateway;
+  final String sessionId;
 
-  const _SubagentTile({required this.row});
+  const _SubagentTile({
+    required this.row,
+    required this.gateway,
+    required this.sessionId,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: ZInk.tile(context),
-        borderRadius: BorderRadius.circular(12),
+    return InkWell(
+      // Whole tile opens the read-only child-session detail page.
+      onTap: () => _openSubagentDetail(
+        context,
+        gateway,
+        childSessionId: row['childSessionId'] as String?,
+        subagentType: row['subagentType'] as String?,
+        workId: row['workId'] as String?,
+        parentSessionId: sessionId,
+        running: row['status'] == 'running',
       ),
-      child: Row(
-        children: [
-          Icon(Icons.smart_toy_outlined, size: 15, color: ZInk.muted(context)),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  trP(context, 'chat.subagent', [
-                    '${row['subagentType'] ?? ''}',
-                  ]),
-                  style: TextStyle(fontSize: 12, color: ZInk.soft(context)),
-                ),
-                Text(
-                  '${row['status'] ?? ''}  ${row['summaryText'] ?? ''}',
-                  style: TextStyle(fontSize: 11, color: ZInk.faint(context)),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: ZInk.tile(context),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.smart_toy_outlined,
+                size: 15, color: ZInk.muted(context)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    trP(context, 'chat.subagent', [
+                      '${row['subagentType'] ?? ''}',
+                    ]),
+                    style: TextStyle(fontSize: 12, color: ZInk.soft(context)),
+                  ),
+                  Text(
+                    '${row['status'] ?? ''}  ${row['summaryText'] ?? ''}',
+                    style: TextStyle(fontSize: 11, color: ZInk.faint(context)),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
+            Icon(Icons.chevron_right, size: 16, color: ZInk.ghost(context)),
+          ],
+        ),
       ),
     );
   }
@@ -3189,6 +3214,16 @@ class _GoalProcessPanel extends StatelessWidget {
       state: state,
       onPauseGoal: (sid) => gateway.pauseGoal(sid),
       onResumeGoal: (sid) => gateway.resumeGoal(sid),
+      onOpenAgent: (agent) => _openSubagentDetail(
+        context,
+        gateway,
+        childSessionId: agent['childSessionId'] as String?,
+        title: agent['title'] as String?,
+        subagentType: agent['subagentType'] as String?,
+        workId: agent['agentId'] as String?,
+        parentSessionId: state.snapshot?['sessionId'] as String?,
+        running: true,
+      ),
     );
   }
 }
@@ -3199,6 +3234,41 @@ class _BackgroundWorksBar extends StatelessWidget {
 
   const _BackgroundWorksBar({required this.state, required this.gateway});
 
+  /// Live action stream of a subagent work: the `kind=='subagent'` row in
+  /// [state.rows] matching [childSessionId] appends to `summaryText`
+  /// (it starts as the title, streaming actions after — live-probed
+  /// 2026-09-13). Returns the action text beyond [title], or '' when no
+  /// matching row exists yet (backgrounding can precede the row).
+  String _subagentTail(String? childSessionId, String title) {
+    final sid = childSessionId ?? '';
+    if (sid.isEmpty) return '';
+    for (final row in state.rows) {
+      if (row['kind'] != 'subagent' || row['childSessionId'] != sid) continue;
+      final summary = row['summaryText'] as String? ?? '';
+      if (summary.isEmpty || summary == title) return '';
+      if (title.isNotEmpty && summary.startsWith(title)) {
+        return summary
+            .substring(title.length)
+            .replaceFirst(RegExp(r'^[，,·:：/、\s]+'), '');
+      }
+      return summary;
+    }
+    return '';
+  }
+
+  Widget _cancelButton(BuildContext context, String sessionId, Map work) {
+    return IconButton(
+      icon: Icon(Icons.close, size: 14, color: ZInk.muted(context)),
+      tooltip: tr(context, 'chat.bgWorks.cancel'),
+      visualDensity: VisualDensity.compact,
+      onPressed: () {
+        final workId = "${work['workId'] ?? work['id'] ?? ''}";
+        if (workId.isEmpty) return;
+        gateway.cancelBackgroundWork(sessionId, workId);
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final works = state.backgroundWorks
@@ -3206,6 +3276,10 @@ class _BackgroundWorksBar extends StatelessWidget {
         .toList();
     if (works.isEmpty) return const SizedBox.shrink();
     final sessionId = state.snapshot?['sessionId'] as String? ?? '';
+    // Subagent works get one live row each (summary stream + detail-page
+    // entry); bash & co. keep the single compact count line.
+    final subagentWorks = works.where((w) => w['kind'] == 'subagent').toList();
+    final plainWorks = works.where((w) => w['kind'] != 'subagent').toList();
     return Container(
       margin: const EdgeInsets.fromLTRB(14, 4, 14, 0),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -3213,41 +3287,111 @@ class _BackgroundWorksBar extends StatelessWidget {
         color: ZInk.tile(context),
         borderRadius: BorderRadius.circular(12),
       ),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const SizedBox(
-            width: 12,
-            height: 12,
-            child: CircularProgressIndicator(strokeWidth: 1.5),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              trP(context, 'chat.bgWorks', [
-                '${works.length}',
-                works.map((w) => w['title'] ?? w['kind']).join('、'),
-              ]),
-              style: TextStyle(fontSize: 11.5, color: ZInk.soft(context)),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+          if (plainWorks.isNotEmpty)
+            Row(
+              children: [
+                const SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(strokeWidth: 1.5),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    trP(context, 'chat.bgWorks', [
+                      '${plainWorks.length}',
+                      plainWorks.map((w) => w['title'] ?? w['kind']).join('、'),
+                    ]),
+                    style: TextStyle(fontSize: 11.5, color: ZInk.soft(context)),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                for (final w in plainWorks)
+                  _cancelButton(context, sessionId, w),
+              ],
             ),
-          ),
-          for (final w in works)
-            IconButton(
-              icon: Icon(Icons.close, size: 14, color: ZInk.muted(context)),
-              tooltip: tr(context, 'chat.bgWorks.cancel'),
-              visualDensity: VisualDensity.compact,
-              onPressed: () {
-                final workId =
-                    "${w['workId'] ?? w['id'] ?? ''}";
-                if (workId.isEmpty) return;
-                gateway.cancelBackgroundWork(sessionId, workId);
+          for (final w in subagentWorks)
+            Builder(
+              builder: (rowContext) {
+                final title = '${w['title'] ?? w['subagentType'] ?? ''}';
+                final tail = _subagentTail(
+                  w['childSessionId'] as String?,
+                  title,
+                );
+                return InkWell(
+                  onTap: () => _openSubagentDetail(
+                    rowContext,
+                    gateway,
+                    childSessionId: w['childSessionId'] as String?,
+                    title: w['title'] as String?,
+                    subagentType: w['subagentType'] as String?,
+                    workId: w['workId'] as String?,
+                    parentSessionId: sessionId,
+                    running: w['status'] == 'running',
+                  ),
+                  child: Row(
+                    children: [
+                      const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(strokeWidth: 1.5),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          tail.isEmpty ? title : '$title · $tail',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: ZInk.soft(context),
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      _cancelButton(context, sessionId, w),
+                    ],
+                  ),
+                );
               },
             ),
         ],
       ),
     );
   }
+}
+
+/// Opens the read-only subagent child-session detail page (works bar row,
+/// subagent stream tile, goal panel running tile).
+void _openSubagentDetail(
+  BuildContext context,
+  ChatGateway gateway, {
+  required String? childSessionId,
+  String? title,
+  String? subagentType,
+  String? workId,
+  String? parentSessionId,
+  bool running = false,
+}) {
+  final sid = childSessionId ?? '';
+  if (sid.isEmpty) return;
+  Navigator.of(context).push(
+    MaterialPageRoute(
+      builder: (_) => SubagentDetailPage(
+        gateway: gateway,
+        childSessionId: sid,
+        title: title,
+        subagentType: subagentType,
+        workId: workId,
+        parentSessionId: parentSessionId,
+        running: running,
+      ),
+    ),
+  );
 }
 
 class _QueueBar extends StatelessWidget {

@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:zlinker/protocol/conversation.dart';
 import 'package:zlinker/state/device_session.dart';
 import 'package:zlinker/ui/chat/chat_page.dart';
+import 'package:zlinker/ui/chat/subagent_detail_page.dart';
 import 'package:zlinker/ui/theme.dart';
 import 'package:zlinker/ui/ui_settings.dart';
 
@@ -21,6 +22,7 @@ class FakeChatGateway extends ChangeNotifier implements ChatGateway {
 
   final ConversationState state = ConversationState();
   final List<(String, List<Object?>)> calls = [];
+  final List<String> subscribedSessions = [];
   Object Function(String method)? failSubscribeWith;
 
   /// Extra snapshot fields merged into every feed (queue, interactions...).
@@ -52,6 +54,7 @@ class FakeChatGateway extends ChangeNotifier implements ChatGateway {
 
   @override
   Future<ChatHandle> subscribe(String sessionId) async {
+    subscribedSessions.add(sessionId);
     final fail = failSubscribeWith;
     if (fail != null) throw fail('subscribe');
     return ChatHandle(state: state, close: () async {});
@@ -320,6 +323,50 @@ Widget wrap(Widget child) => MaterialApp(
       UiSettingsProvider(settings: UiSettings(), child: child!),
   home: child,
 );
+
+/// Gateway seeded with one running subagent background work
+/// (`kind=='subagent'` works entry, live-probed 2026-09-13) whose matching
+/// `kind=='subagent'` stream row carries the summary text.
+FakeChatGateway _gatewayWithSubagentWork() => FakeChatGateway()
+  ..snapshotExtra = {
+    'backgroundWorks': [
+      {
+        'workId': 'agent_1',
+        'kind': 'subagent',
+        'title': '实现加固',
+        'status': 'running',
+        'startedAt': 1789279676224,
+        'cancellable': true,
+        'anchorRowId': null,
+        'childSessionId': 'sess_child_1',
+      },
+    ],
+  };
+
+Future<void> _pumpWithRunningSubagent(
+  WidgetTester tester,
+  FakeChatGateway gateway,
+) async {
+  await tester.pumpWidget(
+    wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+  );
+  gateway.feedSnapshot([
+    {
+      'rowId': 9,
+      'kind': 'subagent',
+      'childSessionId': 'sess_child_1',
+      'subagentType': 'general-purpose',
+      'status': 'running',
+      'summaryText': '实现加固，正在读取 a.dart',
+      'workId': 'agent_1',
+    },
+    {'rowId': 10, 'kind': 'assistantText', 'text': 'done'},
+  ]);
+  // finite pumps: the works-bar spinner animates forever, pumpAndSettle
+  // would time out on it.
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 100));
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -804,5 +851,60 @@ void main() {
     await tester.tap(find.byTooltip('更多'));
     await tester.pumpAndSettle();
     expect(find.text('取消置顶任务'), findsOneWidget);
+  });
+
+  testWidgets('subagent background work renders a live row without a goal', (
+    tester,
+  ) async {
+    final gateway = _gatewayWithSubagentWork();
+    await _pumpWithRunningSubagent(tester, gateway);
+
+    // goal=null: the goal panel stays hidden, the subagent entry doesn't.
+    expect(find.text('目标'), findsNothing);
+    expect(find.text('实现加固 · 正在读取 a.dart'), findsOneWidget);
+    expect(find.byTooltip('取消此后台任务'), findsOneWidget);
+  });
+
+  testWidgets('summaryText stream appends update the works bar row', (
+    tester,
+  ) async {
+    final gateway = _gatewayWithSubagentWork();
+    await _pumpWithRunningSubagent(tester, gateway);
+
+    gateway.state.applyFrame({
+      'toSeq': gateway.state.seq + 1,
+      'payload': {
+        'kind': 'deltas',
+        'deltas': [
+          {'op': 'row.delta', 'rowId': 9, 'path': 'summaryText', 'append': '，写入测试'},
+        ],
+      },
+    }, onGap: () => fail('unexpected gap'));
+    await tester.pump();
+
+    expect(find.text('实现加固 · 正在读取 a.dart，写入测试'), findsOneWidget);
+  });
+
+  testWidgets('tapping the subagent work row opens the read-only detail page', (
+    tester,
+  ) async {
+    final gateway = _gatewayWithSubagentWork();
+    await _pumpWithRunningSubagent(tester, gateway);
+
+    await tester.tap(find.text('实现加固 · 正在读取 a.dart'));
+    await tester.pump(); // route push + subscribe microtask
+    await tester.pump(const Duration(milliseconds: 350)); // transition
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(SubagentDetailPage), findsOneWidget);
+    expect(gateway.subscribedSessions, contains('sess_child_1'));
+    // the detail page is read-only: no composer inside it
+    expect(
+      find.descendant(
+        of: find.byType(SubagentDetailPage),
+        matching: find.byType(TextField),
+      ),
+      findsNothing,
+    );
   });
 }
