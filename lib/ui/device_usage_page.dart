@@ -147,7 +147,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
             child: Text(
               message,
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: ZInk.muted(context)),
+              style: ZType.body.copyWith(color: ZInk.muted(context)),
             ),
           ),
           const SizedBox(height: 12),
@@ -178,10 +178,10 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
         await _loadAppUsage();
       },
       child: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(ZSpacing.screen),
         children: [
           _appUsageCard(context),
-          const SizedBox(height: 10),
+          const SizedBox(height: ZSpacing.cardGap),
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -192,7 +192,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                     height: 44,
                     decoration: BoxDecoration(
                       color: ZColors.sky500.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(12),
+                      borderRadius: BorderRadius.circular(ZRadius.tile),
                     ),
                     child: const Icon(Icons.bolt, color: ZColors.sky500),
                   ),
@@ -205,8 +205,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                           context_ is Map
                               ? '${context_['displayName'] ?? '-'}'
                               : '-',
-                          style: const TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.w600),
+                          style: ZType.heading,
                         ),
                         Text(
                           [
@@ -214,8 +213,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                             if (quota is Map && quota['level'] != null)
                               '${quota['level']}',
                           ].join(' · '),
-                          style: TextStyle(
-                              fontSize: 12, color: ZInk.faint(context)),
+                          style: ZType.sub.copyWith(color: ZInk.faint(context)),
                         ),
                       ],
                     ),
@@ -224,7 +222,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
               ),
             ),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: ZSpacing.cardGap),
           if (remaining is Map && remaining['isShow'] == true)
             Card(
               child: Padding(
@@ -236,19 +234,18 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(tr(context, 'usageRpc.remaining'),
-                            style: const TextStyle(fontSize: 14)),
+                            style: ZType.body),
                         Text(
                           '${remaining['count'] ?? '-'}',
-                          style: const TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.w700,
-                              color: ZColors.sky500),
+                          style: ZType.display.copyWith(
+                              color: ZColors.sky500,
+                          ),
                         ),
                       ],
                     ),
                     const SizedBox(height: 8),
                     ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
+                      borderRadius: BorderRadius.circular(ZRadius.mini),
                       child: LinearProgressIndicator(
                         value:
                             ((remaining['percentage'] as num?) ?? 0) / 100,
@@ -265,8 +262,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                         '${remaining['percentage'] ?? '-'}',
                         _fmtTime(remaining['nextResetTime']),
                       ]),
-                      style: TextStyle(
-                          fontSize: 11, color: ZInk.faint(context)),
+                      style: ZType.caption.copyWith(color: ZInk.faint(context)),
                     ),
                   ],
                 ),
@@ -282,8 +278,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(tr(context, 'usageRpc.limits'),
-                        style: const TextStyle(
-                            fontSize: 14, fontWeight: FontWeight.w600)),
+                        style: ZType.bodyStrong),
                     const SizedBox(height: 8),
                     if (quota is Map && quota['limits'] is List)
                       for (final limit in quota['limits'] as List)
@@ -305,7 +300,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
           if (subscription is Map &&
               subscription['details'] is List &&
               (subscription['details'] as List).isNotEmpty) ...[
-            const SizedBox(height: 10),
+            const SizedBox(height: ZSpacing.cardGap),
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16),
@@ -313,8 +308,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(tr(context, 'usageRpc.subscription'),
-                        style: const TextStyle(
-                            fontSize: 14, fontWeight: FontWeight.w600)),
+                        style: ZType.bodyStrong),
                     const SizedBox(height: 8),
                     for (final d in subscription['details'] as List)
                       if (d is Map) ...[
@@ -332,7 +326,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
               ),
             ),
           ],
-          const SizedBox(height: 10),
+          const SizedBox(height: ZSpacing.cardGap),
           _resetCard(),
         ],
       ),
@@ -355,15 +349,13 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(tr(context, 'usage.reset.title'),
-                    style: const TextStyle(
-                        fontSize: 14, fontWeight: FontWeight.w600)),
+                    style: ZType.bodyStrong),
                 const SizedBox(height: 8),
                 if (pools == null)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 4),
                     child: Text(tr(context, 'usage.reset.unavailable'),
-                        style: TextStyle(
-                            fontSize: 12, color: ZInk.faint(context))),
+                        style: ZType.sub.copyWith(color: ZInk.faint(context))),
                   )
                 else ...[
                   _poolRow(
@@ -404,12 +396,12 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
             children: [
               SizedBox(
                 width: 88,
-                child: Text(name, style: const TextStyle(fontSize: 12)),
+                child: Text(name, style: ZType.sub),
               ),
               Expanded(
                 child: Text(detail,
                     style:
-                        TextStyle(fontSize: 11, color: ZInk.muted(context))),
+                        ZType.caption.copyWith(color: ZInk.muted(context))),
               ),
             ],
           ),
@@ -419,7 +411,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
               child: Text(
                 trP(context, 'usage.reset.lastUsed',
                     [_fmtTime(pool.lastUsedAt)]),
-                style: TextStyle(fontSize: 10.5, color: ZInk.faint(context)),
+                style: ZType.caption.copyWith(color: ZInk.faint(context)),
               ),
             ),
         ],
@@ -460,12 +452,11 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
               children: [
                 Expanded(
                   child: Text(tr(context, 'usageRpc.appUsage'),
-                      style: const TextStyle(
-                          fontSize: 14, fontWeight: FontWeight.w600)),
+                      style: ZType.bodyStrong),
                 ),
                 for (final r in _appRanges)
                   InkWell(
-                    borderRadius: BorderRadius.circular(6),
+                    borderRadius: BorderRadius.circular(ZRadius.mini),
                     onTap: () {
                       if (_appRange == r || _appLoading) return;
                       setState(() => _appRange = r);
@@ -476,8 +467,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                           horizontal: 6, vertical: 2),
                       child: Text(
                         r == 'all' ? tr(context, 'usageRpc.rangeAll') : r,
-                        style: TextStyle(
-                          fontSize: 11,
+                        style: ZType.caption.copyWith(
                           color: _appRange == r
                               ? ZColors.sky500
                               : ZInk.muted(context),
@@ -492,7 +482,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
             ),
             const SizedBox(height: 4),
             Text(tr(context, 'usageRpc.appUsageHint'),
-                style: TextStyle(fontSize: 10.5, color: ZInk.faint(context))),
+                style: ZType.caption.copyWith(color: ZInk.faint(context))),
             const SizedBox(height: 10),
             if (_appLoading)
               const Padding(
@@ -503,7 +493,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 12),
                 child: Text(tr(context, 'usageRpc.appUsageEmpty'),
-                    style: TextStyle(fontSize: 12.5, color: ZInk.faint(context))),
+                    style: ZType.sub.copyWith(color: ZInk.faint(context))),
               )
             else ...[
               for (final (date, total, models) in rows)
@@ -516,15 +506,16 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Text(date,
-                              style: TextStyle(
-                                  fontSize: 11, color: ZInk.muted(context))),
+                              style: ZType.caption.copyWith(
+                                  color: ZInk.muted(context),
+                              )),
                           Text(_fmtTokens(total),
-                              style: const TextStyle(fontSize: 11)),
+                              style: ZType.caption),
                         ],
                       ),
                       const SizedBox(height: 2),
                       ClipRRect(
-                        borderRadius: BorderRadius.circular(3),
+                        borderRadius: BorderRadius.circular(ZRadius.mini),
                         child: SizedBox(
                           height: 5,
                           child: Row(
@@ -565,8 +556,9 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                         ),
                         const SizedBox(width: 4),
                         Text(id,
-                            style: TextStyle(
-                                fontSize: 10, color: ZInk.muted(context))),
+                            style: ZType.caption.copyWith(
+                                color: ZInk.muted(context),
+                            )),
                       ],
                     ),
                 ],
@@ -603,10 +595,10 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text(label,
-              style: TextStyle(fontSize: 12, color: ZInk.muted(context))),
+              style: ZType.sub.copyWith(color: ZInk.muted(context))),
           Flexible(
             child: Text(value,
-                style: const TextStyle(fontSize: 12),
+                style: ZType.sub,
                 textAlign: TextAlign.end),
           ),
         ],
@@ -660,7 +652,7 @@ class _LimitRow extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(title, style: const TextStyle(fontSize: 12)),
+              Text(title, style: ZType.sub),
               Text(
                 [
                   if (limit['usage'] != null)
@@ -669,7 +661,7 @@ class _LimitRow extends StatelessWidget {
                     trP(context, 'usageRpc.left', ['${limit['remaining']}']),
                   if (percentage != null) '$percentage%',
                 ].join(' · '),
-                style: TextStyle(fontSize: 11, color: ZInk.muted(context)),
+                style: ZType.caption.copyWith(color: ZInk.muted(context)),
               ),
             ],
           ),
@@ -677,7 +669,7 @@ class _LimitRow extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: ClipRRect(
-                borderRadius: BorderRadius.circular(3),
+                borderRadius: BorderRadius.circular(ZRadius.mini),
                 child: LinearProgressIndicator(
                   value: (percentage / 100).clamp(0.0, 1.0),
                   minHeight: 4,
@@ -698,12 +690,12 @@ class _LimitRow extends StatelessWidget {
                     .map((u) => '${u['modelCode']}: ${u['usage']}')
                     .join('  '),
                 style:
-                    TextStyle(fontSize: 10, color: ZInk.faint(context)),
+                    ZType.caption.copyWith(color: ZInk.faint(context)),
               ),
             ),
           Text(
             trP(context, 'usageRpc.resetAt', [fmtTime(limit['nextResetTime'])]),
-            style: TextStyle(fontSize: 10, color: ZInk.ghost(context)),
+            style: ZType.caption.copyWith(color: ZInk.ghost(context)),
           ),
         ],
       ),

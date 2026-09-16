@@ -237,7 +237,7 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
                 dense: true,
                 title: Text(
                   trP(context, 'chat.subscribe.failed', ['$_error']),
-                  style: const TextStyle(fontSize: 12),
+                  style: ZType.sub,
                 ),
                 trailing: TextButton(
                   onPressed: _subscribe,
@@ -307,11 +307,11 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
           padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
             color: ZInk.tile(context),
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(ZRadius.tile),
           ),
           child: Text(
             row['text'] as String? ?? '',
-            style: TextStyle(fontSize: 13, color: ZInk.soft(context)),
+            style: ZType.body.copyWith(color: ZInk.soft(context)),
           ),
         );
       default:
@@ -335,7 +335,7 @@ class _ReasoningStrip extends StatelessWidget {
       color: ZInk.tile(context),
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
         side: BorderSide(color: ZInk.hairline(context)),
       ),
       child: ExpansionTile(
@@ -353,14 +353,14 @@ class _ReasoningStrip extends StatelessWidget {
               streaming
                   ? tr(context, 'chat.reasoning.thinking')
                   : tr(context, 'chat.reasoning'),
-              style: TextStyle(fontSize: 12, color: ZInk.muted(context)),
+              style: ZType.sub.copyWith(color: ZInk.muted(context)),
             ),
           ],
         ),
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            child: ZLinkerMarkdown(text, fontSize: 12),
+            child: ZLinkerMarkdown(text, bodyStyle: ZType.sub),
           ),
         ],
       ),
@@ -404,8 +404,7 @@ class _ToolSummary extends StatelessWidget {
                   preview.isEmpty ? name : '$name · $preview',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
+                  style: ZType.sub.copyWith(
                     color: ZInk.muted(context),
                     fontFamily: 'monospace',
                   ),

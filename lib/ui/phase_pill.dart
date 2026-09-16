@@ -46,7 +46,7 @@ class PhasePill extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
         decoration: BoxDecoration(
           color: bg,
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(ZRadius.pill),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -64,8 +64,10 @@ class PhasePill extends StatelessWidget {
               Icon(icon, size: 10, color: fg),
             const SizedBox(width: 4),
             Text(label,
-                style: TextStyle(
-                    fontSize: 10, fontWeight: FontWeight.w500, color: fg)),
+                style: ZType.caption.copyWith(
+                    fontWeight: FontWeight.w500,
+                    color: fg,
+                )),
           ],
         ),
       );
@@ -74,7 +76,7 @@ class PhasePill extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(ZRadius.pill),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -92,10 +94,10 @@ class PhasePill extends StatelessWidget {
             Icon(icon, size: 10, color: color),
           const SizedBox(width: 4),
           Text(label,
-              style: TextStyle(
-                  fontSize: 10.5,
+              style: ZType.caption.copyWith(
                   fontWeight: FontWeight.w500,
-                  color: color)),
+                  color: color,
+              )),
         ],
       ),
     );

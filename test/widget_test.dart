@@ -63,9 +63,15 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('songsong'), findsOneWidget);
-    expect(find.text('zcode.z.ai'), findsWidgets);
-    // No native connection is attempted with the switch off.
-    expect(find.text('离线'), findsOneWidget);
+    // R5: the row carries 状态 · 时间 only — the host lives in the device's
+    // 「更多」detail sheet now. The meta line is one rich text span.
+    expect(find.text('zcode.z.ai'), findsNothing);
+    expect(find.textContaining('离线', findRichText: true), findsOneWidget);
+    expect(find.textContaining('从未使用', findRichText: true), findsOneWidget);
+
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    expect(find.text('zcode.z.ai'), findsOneWidget);
   });
 
   testWidgets('App boots', (WidgetTester tester) async {

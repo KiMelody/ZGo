@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../protocol/conversation.dart';
 import '../protocol/off_peak.dart';
@@ -180,8 +181,8 @@ class _OffPeakPageState extends State<OffPeakPage>
     final deviceSession = widget.hub.sessionOf(widget.device.id);
     if (!mounted) return;
     if (deviceSession != null) {
-      await Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => ChatPage(
+      await Navigator.of(context).push(zRoute(
+        (_) => ChatPage(
           gateway: deviceSession,
           sessionId: sessionId,
           title: task.title.isEmpty
@@ -193,8 +194,8 @@ class _OffPeakPageState extends State<OffPeakPage>
     }
     await widget.hub.suspend(widget.device.id);
     if (!mounted) return;
-    await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => RemotePage(
+    await Navigator.of(context).push(zRoute(
+      (_) => RemotePage(
         device: widget.device,
         targetSessionId: sessionId,
         targetTitle: task.title.isEmpty ? null : task.title,
@@ -213,10 +214,9 @@ class _OffPeakPageState extends State<OffPeakPage>
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(widget.device.label,
-                style: const TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.w600)),
+                style: ZType.heading),
             Text(tr(context, 'op.subtitle'),
-                style: TextStyle(fontSize: 11, color: ZInk.faint(context))),
+                style: ZType.caption.copyWith(color: ZInk.faint(context))),
           ],
         ),
         actions: [
@@ -229,6 +229,7 @@ class _OffPeakPageState extends State<OffPeakPage>
         // Official two-pane layout: 设置 / 历史.
         bottom: TabBar(
           controller: _tabs,
+          onTap: (_) => HapticFeedback.selectionClick(),
           tabs: [
             Tab(text: tr(context, 'op.tab.settings')),
             Tab(text: tr(context, 'op.tab.history')),
@@ -260,8 +261,7 @@ class _OffPeakPageState extends State<OffPeakPage>
                   const CircularProgressIndicator(),
                   const SizedBox(height: 16),
                   Text(tr(context, 'op.loading'),
-                      style: TextStyle(
-                          fontSize: 13, color: ZInk.faint(context))),
+                      style: ZType.body.copyWith(color: ZInk.faint(context))),
                 ],
               ),
             );
@@ -287,7 +287,7 @@ class _OffPeakPageState extends State<OffPeakPage>
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Text(trP(context, 'op.loadFailed', [_error!]),
-                style: TextStyle(fontSize: 12, color: ZColors.danger)),
+                style: ZType.sub.copyWith(color: ZColors.danger)),
           ),
         if (active.isNotEmpty)
           for (final t in active) ...[
@@ -339,7 +339,7 @@ class _OffPeakPageState extends State<OffPeakPage>
       color: Theme.of(context).colorScheme.secondaryContainer,
       margin: const EdgeInsets.only(bottom: 8),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 6, 4, 10),
+        padding: const EdgeInsets.fromLTRB(ZSpacing.card, 6, 4, 10),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -347,10 +347,10 @@ class _OffPeakPageState extends State<OffPeakPage>
               child: Padding(
                 padding: const EdgeInsets.only(top: 8),
                 child: Text(tr(context, 'op.banner'),
-                    style: TextStyle(
-                        fontSize: 11.5,
+                    style: ZType.caption.copyWith(
                         height: 1.5,
-                        color: ZInk.soft(context))),
+                        color: ZInk.soft(context),
+                    )),
               ),
             ),
             IconButton(
@@ -382,7 +382,7 @@ class _OffPeakPageState extends State<OffPeakPage>
               : null;
       return Card(
         child: Padding(
-          padding: const EdgeInsets.all(14),
+          padding: const EdgeInsets.all(ZSpacing.card),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -393,8 +393,7 @@ class _OffPeakPageState extends State<OffPeakPage>
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(text,
-                        style: TextStyle(
-                            fontSize: 13, color: ZInk.soft(context))),
+                        style: ZType.body.copyWith(color: ZInk.soft(context))),
                   ),
                 ],
               ),
@@ -403,7 +402,7 @@ class _OffPeakPageState extends State<OffPeakPage>
                 Text(
                   trP(context, 'op.limitReachedAt',
                       [formatRemaining(context, remainingMs)]),
-                  style: TextStyle(fontSize: 12, color: ZInk.muted(context)),
+                  style: ZType.sub.copyWith(color: ZInk.muted(context)),
                 ),
               ],
             ],
@@ -422,7 +421,7 @@ class _OffPeakPageState extends State<OffPeakPage>
     if (parts.isEmpty) return const SizedBox.shrink();
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(ZSpacing.card),
         child: Row(
           children: [
             const Icon(Icons.bolt_outlined, size: 18, color: ZColors.sky500),
@@ -430,7 +429,7 @@ class _OffPeakPageState extends State<OffPeakPage>
             Expanded(
               child: Text(parts.join(' · '),
                   style:
-                      TextStyle(fontSize: 13, color: ZInk.soft(context))),
+                      ZType.body.copyWith(color: ZInk.soft(context))),
             ),
           ],
         ),
@@ -467,8 +466,7 @@ class _OffPeakPageState extends State<OffPeakPage>
                       Expanded(
                         child: Text(
                           task.title.isEmpty ? task.prompt : task.title,
-                          style: const TextStyle(
-                              fontSize: 14.5, fontWeight: FontWeight.w600),
+                          style: ZType.bodyStrong,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -482,15 +480,15 @@ class _OffPeakPageState extends State<OffPeakPage>
                               horizontal: 8, vertical: 2),
                           decoration: BoxDecoration(
                             color: ZColors.neutral500.withValues(alpha: 0.14),
-                            borderRadius: BorderRadius.circular(8),
+                            borderRadius: BorderRadius.circular(ZRadius.field),
                           ),
                           child: Text(
                             trP(context, 'op.badge.paused',
                                 ['${task.queuePosition}']),
-                            style: const TextStyle(
-                                fontSize: 11,
+                            style: ZType.caption.copyWith(
                                 fontWeight: FontWeight.w600,
-                                color: ZColors.neutral500),
+                                color: ZColors.neutral500,
+                            ),
                           ),
                         ),
                       // 排队位置徽标 (official: 排队第 N 位).
@@ -501,21 +499,21 @@ class _OffPeakPageState extends State<OffPeakPage>
                               horizontal: 8, vertical: 2),
                           decoration: BoxDecoration(
                             color: ZColors.sky500.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(8),
+                            borderRadius: BorderRadius.circular(ZRadius.field),
                           ),
                           child: Text(
                             trP(context, 'op.queue', ['${task.queuePosition}']),
-                            style: const TextStyle(
-                                fontSize: 11,
+                            style: ZType.caption.copyWith(
                                 fontWeight: FontWeight.w600,
-                                color: ZColors.sky500),
+                                color: ZColors.sky500,
+                            ),
                           ),
                         ),
                       Text(statusLabel,
-                          style: TextStyle(
-                              fontSize: 11,
+                          style: ZType.caption.copyWith(
                               fontWeight: FontWeight.w500,
-                              color: statusColor)),
+                              color: statusColor,
+                          )),
                     ],
                   ),
                   if (task.prompt.isNotEmpty)
@@ -525,8 +523,7 @@ class _OffPeakPageState extends State<OffPeakPage>
                         task.prompt,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                            fontSize: 12, color: ZInk.muted(context)),
+                        style: ZType.sub.copyWith(color: ZInk.muted(context)),
                       ),
                     ),
                   const SizedBox(height: 6),
@@ -540,7 +537,7 @@ class _OffPeakPageState extends State<OffPeakPage>
                         ]),
                     ].join(' · '),
                     style:
-                        TextStyle(fontSize: 11, color: ZInk.ghost(context)),
+                        ZType.caption.copyWith(color: ZInk.ghost(context)),
                   ),
                   if (task.failed && task.error != null)
                     Padding(
@@ -550,7 +547,7 @@ class _OffPeakPageState extends State<OffPeakPage>
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style:
-                            TextStyle(fontSize: 11, color: ZColors.danger),
+                            ZType.caption.copyWith(color: ZColors.danger),
                       ),
                     ),
                   if (canViewResult)
@@ -749,21 +746,18 @@ class _OffPeakPageState extends State<OffPeakPage>
   Widget _centerNote(BuildContext context, String title, String body) {
     return Center(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.all(32),
+        padding: const EdgeInsets.all(ZSpacing.emptyState),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(Icons.cloud_off, size: 44, color: ZInk.ghost(context)),
             const SizedBox(height: 16),
             Text(title,
-                style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    color: ZInk.solid(context))),
+                style: ZType.heading.copyWith(color: ZInk.solid(context))),
             const SizedBox(height: 8),
             Text(body,
                 textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 13, color: ZInk.faint(context))),
+                style: ZType.body.copyWith(color: ZInk.faint(context))),
             const SizedBox(height: 20),
             FilledButton(
               onPressed: () => widget.hub.ensure(widget.device),
@@ -1032,22 +1026,21 @@ class _OffPeakSheetState extends State<OffPeakSheet> {
         if (ok && mounted) Navigator.pop(this.context);
       },
       child: Padding(
-        padding: EdgeInsets.fromLTRB(
-            20, 20, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
+        padding: EdgeInsets.fromLTRB(ZSpacing.screen, 20, ZSpacing.screen,
+            20 + MediaQuery.of(context).viewInsets.bottom),
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(editing ? tr(context, 'op.edit') : tr(context, 'op.add'),
-                  style: const TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.w600)),
+                  style: ZType.heading),
               const SizedBox(height: 4),
               Text(
                   editing
                       ? tr(context, 'op.edit.hint')
                       : tr(context, 'op.hint'),
-                  style: TextStyle(fontSize: 11, color: ZInk.muted(context))),
+                  style: ZType.caption.copyWith(color: ZInk.muted(context))),
               const SizedBox(height: 12),
               if (!editing)
                 Wrap(
@@ -1056,7 +1049,7 @@ class _OffPeakSheetState extends State<OffPeakSheet> {
                     for (final key in _templateKeys)
                       ActionChip(
                         label: Text(tr(context, 'op.$key.title'),
-                            style: const TextStyle(fontSize: 12)),
+                            style: ZType.sub),
                         onPressed: () => setState(() {
                           _title.text = tr(context, 'op.$key.title');
                           _prompt.text = tr(context, 'op.$key.prompt');
@@ -1120,7 +1113,7 @@ class _OffPeakSheetState extends State<OffPeakSheet> {
               const SizedBox(height: 10),
               InkWell(
                 onTap: _pickEarliest,
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(ZRadius.field),
                 child: InputDecorator(
                   decoration: InputDecoration(
                     labelText: tr(context, 'op.earliestAt'),
@@ -1130,11 +1123,11 @@ class _OffPeakSheetState extends State<OffPeakSheet> {
                     _earliest == null
                         ? tr(context, 'op.earliest.any')
                         : _fmt(_earliest!),
-                    style: TextStyle(
-                        fontSize: 13,
+                    style: ZType.body.copyWith(
                         color: _earliest == null
                             ? ZInk.ghost(context)
-                            : ZInk.soft(context)),
+                            : ZInk.soft(context),
+                    ),
                   ),
                 ),
               ),
@@ -1142,10 +1135,10 @@ class _OffPeakSheetState extends State<OffPeakSheet> {
                 contentPadding: EdgeInsets.zero,
                 dense: true,
                 title: Text(tr(context, 'op.keepAwake'),
-                    style: const TextStyle(fontSize: 13)),
+                    style: ZType.body),
                 subtitle: Text(tr(context, 'op.keepAwakeHint'),
                     style:
-                        TextStyle(fontSize: 11, color: ZInk.faint(context))),
+                        ZType.caption.copyWith(color: ZInk.faint(context))),
                 value: _keepAwake,
                 onChanged: (v) => setState(() => _keepAwake = v),
               ),
@@ -1165,8 +1158,10 @@ class _OffPeakSheetState extends State<OffPeakSheet> {
               const SizedBox(height: 6),
               Text(
                 tr(context, 'op.permissionWarning'),
-                style: TextStyle(
-                    fontSize: 11, height: 1.5, color: ZInk.faint(context)),
+                style: ZType.caption.copyWith(
+                    height: 1.5,
+                    color: ZInk.faint(context),
+                ),
               ),
               if (editing) ...[
                 const SizedBox(height: 6),
@@ -1179,10 +1174,10 @@ class _OffPeakSheetState extends State<OffPeakSheet> {
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(tr(context, 'op.peakWarning'),
-                          style: TextStyle(
-                              fontSize: 11,
+                          style: ZType.caption.copyWith(
                               height: 1.5,
-                              color: ZInk.faint(context))),
+                              color: ZInk.faint(context),
+                          )),
                     ),
                   ],
                 ),

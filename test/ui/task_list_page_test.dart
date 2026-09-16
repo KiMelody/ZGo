@@ -85,7 +85,8 @@ void main() {
     expect(find.text('当前设备上的工作区和任务'), findsOneWidget);
     expect(find.text('app'), findsWidgets); // workspace title from path
     expect(find.text('本地'), findsOneWidget);
-    expect(find.text('/repo/app'), findsOneWidget);
+    // R6: the header's second line merges 路径 · 时间 into one caption.
+    expect(find.textContaining('/repo/app'), findsOneWidget);
     expect(find.text('修复登录'), findsOneWidget);
     expect(find.text('运行中'), findsOneWidget);
     expect(find.text('已完成'), findsOneWidget);

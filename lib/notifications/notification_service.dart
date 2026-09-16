@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import '../ui/ui_settings.dart';
+
 /// Notification channels (each can be silenced separately, in-app and by
 /// the OS): 任务事件 / 闲时事件 / 自动化结果.
 enum NotifyChannel { tasks, offPeak, automations }
@@ -16,18 +18,34 @@ class NotificationService {
   bool _initialized = false;
   bool _permissionAsked = false;
 
+  /// Locale used for the channel name/description. Android fixes those at
+  /// channel-creation time, so a later language switch does NOT retitle an
+  /// existing channel (accepted limitation — no channel-id versioning).
+  String _locale = 'zh-CN';
+
   /// Set by main: routes a tapped notification to its conversation.
   Future<void> Function(Map<String, dynamic> payload)? onTap;
 
-  static const _channelSpecs = {
-    NotifyChannel.tasks: ('zlinker_tasks', '任务事件', '任务完成与失败提醒'),
-    NotifyChannel.offPeak: ('zlinker_offpeak', '闲时事件', '闲时任务完成与失败提醒'),
-    NotifyChannel.automations: (
-      'zlinker_automations',
-      '自动化结果',
-      '自动化定时触发的执行结果'
-    ),
+  /// Android channel ids — stable across releases (a changed id would create
+  /// a duplicate channel and orphan the user's per-channel silencing).
+  static const _channelIds = {
+    NotifyChannel.tasks: 'zlinker_tasks',
+    NotifyChannel.offPeak: 'zlinker_offpeak',
+    NotifyChannel.automations: 'zlinker_automations',
   };
+
+  /// Table key prefix per channel (`<prefix>.name` / `<prefix>.desc`).
+  static const _channelKeys = {
+    NotifyChannel.tasks: 'notify.channel.tasks',
+    NotifyChannel.offPeak: 'notify.channel.offPeak',
+    NotifyChannel.automations: 'notify.channel.automations',
+  };
+
+  String _channelName(NotifyChannel channel) =>
+      trLocale(_locale, '${_channelKeys[channel]}.name');
+
+  String _channelDescription(NotifyChannel channel) =>
+      trLocale(_locale, '${_channelKeys[channel]}.desc');
 
   bool get isReady => _initialized;
 
@@ -52,19 +70,20 @@ class NotificationService {
     }
   }
 
-  Future<void> init() async {
+  Future<void> init({String locale = 'zh-CN'}) async {
     if (_initialized) return;
+    _locale = locale;
     try {
       // Register the three Android channels up front so per-channel
       // silencing works from the first notification.
       final android = _plugin.resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>();
       if (android != null) {
-        for (final spec in _channelSpecs.values) {
+        for (final channel in NotifyChannel.values) {
           await android.createNotificationChannel(AndroidNotificationChannel(
-            spec.$1,
-            spec.$2,
-            description: spec.$3,
+            _channelIds[channel]!,
+            _channelName(channel),
+            description: _channelDescription(channel),
             importance: Importance.defaultImportance,
           ));
         }
@@ -109,7 +128,6 @@ class NotificationService {
   ) async {
     if (!_initialized) return;
     await requestPermission();
-    final spec = _channelSpecs[channel]!;
     try {
       await _plugin.show(
         id: id,
@@ -117,9 +135,9 @@ class NotificationService {
         body: body,
         notificationDetails: NotificationDetails(
           android: AndroidNotificationDetails(
-            spec.$1,
-            spec.$2,
-            channelDescription: spec.$3,
+            _channelIds[channel]!,
+            _channelName(channel),
+            channelDescription: _channelDescription(channel),
             importance: Importance.defaultImportance,
             priority: Priority.defaultPriority,
           ),

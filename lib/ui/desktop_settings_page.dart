@@ -101,10 +101,10 @@ class _DesktopSettingsPageState extends State<DesktopSettingsPage> {
               ? Center(
                   child: Text(trP(context, 'deskSet.loadFailed', [_error!])))
               : ListView(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(ZSpacing.screen),
                   children: [
                     _interactionCard(context),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: ZSpacing.cardGap),
                     _autoArchiveCard(context),
                   ],
                 ),
@@ -123,10 +123,10 @@ class _DesktopSettingsPageState extends State<DesktopSettingsPage> {
           children: [
             Text(tr(context, 'deskSet.interaction'),
                 style:
-                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                    ZType.bodyStrong),
             const SizedBox(height: 4),
             Text(tr(context, 'deskSet.interactionHint'),
-                style: TextStyle(fontSize: 11, color: ZInk.faint(context))),
+                style: ZType.caption.copyWith(color: ZInk.faint(context))),
             const SizedBox(height: 8),
             Column(
               children: [
@@ -150,10 +150,10 @@ class _DesktopSettingsPageState extends State<DesktopSettingsPage> {
                         _update({'zcodeInteractionBehavior': sel});
                       }
                     },
-                    title: Text(label, style: const TextStyle(fontSize: 13.5)),
+                    title: Text(label, style: ZType.body),
                     subtitle: Text(hint,
                         style:
-                            TextStyle(fontSize: 11, color: ZInk.faint(context))),
+                            ZType.caption.copyWith(color: ZInk.faint(context))),
                     contentPadding: EdgeInsets.zero,
                   ),
               ],
@@ -178,10 +178,9 @@ class _DesktopSettingsPageState extends State<DesktopSettingsPage> {
               value: enabled,
               onChanged: (v) => _update({'taskAutoArchiveEnabled': v}),
               title: Text(tr(context, 'deskSet.autoArchive'),
-                  style: const TextStyle(
-                      fontSize: 14, fontWeight: FontWeight.w600)),
+                  style: ZType.bodyStrong),
               subtitle: Text(tr(context, 'deskSet.autoArchiveHint'),
-                  style: TextStyle(fontSize: 11, color: ZInk.faint(context))),
+                  style: ZType.caption.copyWith(color: ZInk.faint(context))),
             ),
             if (enabled)
               Wrap(
@@ -191,7 +190,7 @@ class _DesktopSettingsPageState extends State<DesktopSettingsPage> {
                     ChoiceChip(
                       label: Text(
                         trP(context, 'deskSet.autoArchiveDays', ['$d']),
-                        style: const TextStyle(fontSize: 11.5),
+                        style: ZType.caption,
                       ),
                       selected: days == d,
                       onSelected: (_) =>

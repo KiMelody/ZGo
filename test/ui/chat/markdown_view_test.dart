@@ -37,6 +37,27 @@ void main() {
     expect(find.text('已复制'), findsOneWidget);
   });
 
+  testWidgets('fenced code block is collapsed by default and toggles',
+      (tester) async {
+    await tester.pumpWidget(wrap(const ZLinkerMarkdown(
+        '```dart\nvoid main() {}\nvoid x() {}\n```')));
+    await tester.pumpAndSettle();
+    // Collapsed: header shows language + line count, body is absent.
+    expect(find.text('dart'), findsOneWidget);
+    expect(find.text('2 行'), findsOneWidget);
+    expect(find.byIcon(Icons.expand_more), findsOneWidget);
+    expect(find.textContaining('void main()'), findsNothing);
+
+    await tester.tap(find.byIcon(Icons.expand_more));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('void main()'), findsOneWidget);
+    expect(find.byIcon(Icons.expand_less), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.expand_less));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('void main()'), findsNothing);
+  });
+
   testWidgets('unordered list renders', (tester) async {
     await tester.pumpWidget(wrap(const ZLinkerMarkdown('- one\n- two')));
     expect(find.text('one'), findsOneWidget);

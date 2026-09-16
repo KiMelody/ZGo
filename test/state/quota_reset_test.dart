@@ -152,7 +152,9 @@ void main() {
 
   Map<String, dynamic> statusFixture() => {
         'availableFiveHourResets': [
-          {'expireAt': DateTime(2026, 9, 14, 13).millisecondsSinceEpoch},
+          // Relative to the active clock (mocked or real): the fixture must
+          // stay unexpired forever, unlike a hardcoded 2026-09-14 timestamp.
+          {'expireAt': clock.now().millisecondsSinceEpoch + 3600000},
         ],
         'availableWeekResets': [],
       };

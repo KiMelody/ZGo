@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zlinker/protocol/conversation.dart';
 import 'package:zlinker/ui/chat/goal_panel.dart';
+import 'package:zlinker/ui/ui_settings.dart';
 
 ConversationState _stateWith(Map<String, dynamic> snapshot) {
   final state = ConversationState();
@@ -22,12 +23,15 @@ ConversationState _stateWith(Map<String, dynamic> snapshot) {
   return state;
 }
 
-Widget _wrap(ConversationState state) => MaterialApp(
-      home: Scaffold(
-        body: GoalPanel(
-          state: state,
-          onPauseGoal: (_) async {},
-          onResumeGoal: (_) async {},
+Widget _wrap(ConversationState state, {String locale = 'zh-CN'}) => MaterialApp(
+      home: UiSettingsProvider(
+        settings: UiSettings()..locale = locale,
+        child: Scaffold(
+          body: GoalPanel(
+            state: state,
+            onPauseGoal: (_) async {},
+            onResumeGoal: (_) async {},
+          ),
         ),
       ),
     );
@@ -67,7 +71,8 @@ void main() {
     await tester.pump();
 
     expect(find.text('目标'), findsOneWidget);
-    expect(find.text('19分46秒'), findsOneWidget);
+    // Duration copy comes from the tables (chat.time.secOnly / minSec).
+    expect(find.text('19 分 46 秒'), findsOneWidget);
     expect(find.text('Commit 后按方案逐步执行并验证'), findsOneWidget);
     expect(find.text('1/3'), findsOneWidget); // 1 completed of 3
     // completed items are collapsed: only inProgress + pending visible
@@ -76,7 +81,28 @@ void main() {
     expect(find.text('commit 当前基线'), findsNothing);
     // running subagent with elapsed time
     expect(find.text('类型化三个 main chunk 文件'), findsOneWidget);
-    expect(find.textContaining('已运行 1分'), findsOneWidget);
+    expect(find.textContaining('已运行 1 分'), findsOneWidget);
+  });
+
+  testWidgets('en locale renders English durations', (tester) async {
+    final state = _stateWith({
+      'goal': goal,
+      'subagents': {
+        'running': [
+          {
+            'title': 'Type the three main chunk files',
+            'status': 'running',
+            'startedAt': DateTime.now().millisecondsSinceEpoch - 60000,
+          },
+        ],
+      },
+    });
+    await tester.pumpWidget(_wrap(state, locale: 'en-US'));
+    await tester.pump();
+
+    expect(find.text('Goal'), findsOneWidget);
+    expect(find.text('19m 46s'), findsOneWidget);
+    expect(find.textContaining('Ran for 1m'), findsOneWidget);
   });
 
   testWidgets('expanding shows completed items', (tester) async {

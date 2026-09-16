@@ -6,6 +6,7 @@ import '../state/scheduled_store.dart';
 import 'automations_page.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
+import 'widgets/device_name.dart';
 import 'widgets/dropdown_field.dart';
 
 /// Combined scheduling hub: server-side device automations on top, local
@@ -98,7 +99,7 @@ class _ScheduledPageState extends State<ScheduledPage> {
                 trailing: Text(
                   tr(context, 'sched.hint'),
                   style:
-                      TextStyle(fontSize: 11, color: ZInk.ghost(context)),
+                      ZType.caption.copyWith(color: ZInk.ghost(context)),
                 ),
               ),
               const SizedBox(height: 8),
@@ -127,10 +128,10 @@ class _ScheduledPageState extends State<ScheduledPage> {
         Expanded(
           child: Text(
             text,
-            style: TextStyle(
-                fontSize: 12,
+            style: ZType.sub.copyWith(
                 fontWeight: FontWeight.w600,
-                color: ZInk.muted(context)),
+                color: ZInk.muted(context),
+            ),
           ),
         ),
         if (trailing != null) trailing,
@@ -146,7 +147,7 @@ class _ScheduledPageState extends State<ScheduledPage> {
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Text(tr(context, 'sched.noDevices'),
-              style: TextStyle(fontSize: 13, color: ZInk.muted(context))),
+              style: ZType.body.copyWith(color: ZInk.muted(context))),
         ),
       );
     }
@@ -164,7 +165,10 @@ class _ScheduledPageState extends State<ScheduledPage> {
           ),
           items: [
             for (final d in devices)
-              DropdownMenuItem(value: d.id, child: Text(d.label)),
+              DropdownMenuItem(
+                value: d.id,
+                child: Text(deviceDisplayName(context, d.label)),
+              ),
           ],
           onChanged: (v) => setState(() => _autoDeviceId = v ?? _autoDeviceId),
         ),
@@ -200,18 +204,18 @@ class _ScheduledPageState extends State<ScheduledPage> {
                       Icon(Icons.schedule, size: 14, color: color),
                       const SizedBox(width: 6),
                       Expanded(
-                        child: Text(m.deviceLabel,
-                            style: const TextStyle(
-                                fontSize: 14, fontWeight: FontWeight.w600),
+                        child: Text(
+                            deviceDisplayName(context, m.deviceLabel),
+                            style: ZType.bodyStrong,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis),
                       ),
                       const SizedBox(width: 8),
                       Text(label,
-                          style: TextStyle(
-                              fontSize: 11,
+                          style: ZType.caption.copyWith(
                               fontWeight: FontWeight.w500,
-                              color: color)),
+                              color: color,
+                          )),
                     ],
                   ),
                   const SizedBox(height: 4),
@@ -219,14 +223,14 @@ class _ScheduledPageState extends State<ScheduledPage> {
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style:
-                          TextStyle(fontSize: 12, color: ZInk.muted(context))),
+                          ZType.sub.copyWith(color: ZInk.muted(context))),
                   const SizedBox(height: 4),
                   Text(
                     m.sent
                         ? _fmtDateTime(m.fireAt)
                         : '${_fmtDateTime(m.fireAt)} · ${relativeTime(context, m.fireAt)}',
                     style:
-                        TextStyle(fontSize: 11, color: ZInk.ghost(context)),
+                        ZType.caption.copyWith(color: ZInk.ghost(context)),
                   ),
                   if (m.lastError != null && !m.sent)
                     Padding(
@@ -236,7 +240,7 @@ class _ScheduledPageState extends State<ScheduledPage> {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style:
-                            TextStyle(fontSize: 11, color: ZColors.danger),
+                            ZType.caption.copyWith(color: ZColors.danger),
                       ),
                     ),
                 ],
@@ -323,18 +327,18 @@ class _AddSheetState extends State<_AddSheet> {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: EdgeInsets.fromLTRB(
-          20, 20, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
+      padding: EdgeInsets.fromLTRB(ZSpacing.screen, 20, ZSpacing.screen,
+          20 + MediaQuery.of(context).viewInsets.bottom),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(tr(context, 'sched.add'),
               style:
-                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  ZType.heading),
           const SizedBox(height: 4),
           Text(tr(context, 'sched.hint'),
-              style: TextStyle(fontSize: 11, color: ZInk.muted(context))),
+              style: ZType.caption.copyWith(color: ZInk.muted(context))),
           const SizedBox(height: 16),
           DropdownField<String>(
             value: _deviceId,
@@ -342,7 +346,10 @@ class _AddSheetState extends State<_AddSheet> {
                 InputDecoration(labelText: tr(context, 'sched.device')),
             items: [
               for (final d in widget.devices)
-                DropdownMenuItem(value: d.id, child: Text(d.label)),
+                DropdownMenuItem(
+                  value: d.id,
+                  child: Text(deviceDisplayName(context, d.label)),
+                ),
             ],
             onChanged: (v) => setState(() => _deviceId = v ?? _deviceId),
           ),
@@ -356,7 +363,7 @@ class _AddSheetState extends State<_AddSheet> {
           const SizedBox(height: 10),
           InkWell(
             onTap: _pickTime,
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(ZRadius.field),
             child: InputDecorator(
               decoration: InputDecoration(
                   labelText: tr(context, 'sched.time'),

@@ -505,7 +505,11 @@ class BridgeSession {
           timeout,
           onTimeout: () {
             degraded.removeListener(check);
-            throw TimeoutException('bridge 恢复超时: ${degraded.value}');
+            // Diagnostic text: generic error paths may surface it verbatim
+            // (e.g. "operation failed: $e"), so it stays language-neutral
+            // English instead of table copy.
+            throw TimeoutException(
+                'bridge recovery timed out: ${degraded.value}');
           },
         )
         .whenComplete(() => degraded.removeListener(check));

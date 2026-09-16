@@ -93,7 +93,7 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
   Widget _channelUnavailableView(BuildContext context) {
     return Center(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.all(32),
+        padding: const EdgeInsets.all(ZSpacing.emptyState),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -101,16 +101,13 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
             const SizedBox(height: 16),
             Text(
               tr(context, 'providers.channelUnavailable.title'),
-              style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  color: ZInk.solid(context)),
+              style: ZType.heading.copyWith(color: ZInk.solid(context)),
             ),
             const SizedBox(height: 8),
             Text(
               tr(context, 'providers.channelUnavailable.body'),
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: ZInk.faint(context)),
+              style: ZType.body.copyWith(color: ZInk.faint(context)),
             ),
             const SizedBox(height: 20),
             FilledButton(
@@ -264,9 +261,7 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
                                   children: [
                                     Text(
                                       '${p['name'] ?? p['id']}',
-                                      style: const TextStyle(
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.w600),
+                                      style: ZType.bodyStrong,
                                     ),
                                     const SizedBox(height: 3),
                                     Text(
@@ -283,9 +278,9 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
                                       ]
                                           .where((s) => s.isNotEmpty)
                                           .join(' · '),
-                                      style: TextStyle(
-                                          fontSize: 11,
-                                          color: ZInk.faint(context)),
+                                      style: ZType.caption.copyWith(
+                                          color: ZInk.faint(context),
+                                      ),
                                       maxLines: 2,
                                       overflow: TextOverflow.ellipsis,
                                     ),
@@ -439,15 +434,15 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: EdgeInsets.fromLTRB(
-          20, 20, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
+      padding: EdgeInsets.fromLTRB(ZSpacing.screen, 20, ZSpacing.screen,
+          20 + MediaQuery.of(context).viewInsets.bottom),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(tr(context, 'providers.addTitle'),
               style:
-                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  ZType.heading),
           const SizedBox(height: 16),
           TextField(
             controller: _nameController,
@@ -490,7 +485,7 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
                       padding: const EdgeInsets.only(right: 6),
                       child: ActionChip(
                         label: Text(s0,
-                            style: const TextStyle(fontSize: 11)),
+                            style: ZType.caption),
                         onPressed: () {
                           _baseUrlController.text = s0;
                           _fetchModels(s0);

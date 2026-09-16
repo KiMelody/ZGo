@@ -59,7 +59,7 @@ class _AboutPageState extends State<AboutPage> {
           const SizedBox(height: 24),
           Center(
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
+              borderRadius: BorderRadius.circular(ZRadius.large),
               child: Image.asset(
                 'assets/icon/icon.png',
                 width: 72,
@@ -71,11 +71,7 @@ class _AboutPageState extends State<AboutPage> {
           Center(
             child: Text(
               'ZLinker',
-              style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.w700,
-                color: ZInk.solid(context),
-              ),
+              style: ZType.display.copyWith(color: ZInk.solid(context)),
             ),
           ),
           const SizedBox(height: 4),
@@ -84,7 +80,7 @@ class _AboutPageState extends State<AboutPage> {
               _version.isEmpty
                   ? ''
                   : '${tr(context, 'about.version')} $_version ($_build)',
-              style: TextStyle(fontSize: 12, color: ZInk.muted(context)),
+              style: ZType.sub.copyWith(color: ZInk.muted(context)),
             ),
           ),
           const SizedBox(height: 24),
@@ -122,7 +118,7 @@ class _AboutPageState extends State<AboutPage> {
             child: Text(
               tr(context, 'about.disclaimer'),
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12, color: ZInk.ghost(context)),
+              style: ZType.sub.copyWith(color: ZInk.ghost(context)),
             ),
           ),
         ],

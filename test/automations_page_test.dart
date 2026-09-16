@@ -44,11 +44,13 @@ class FakeAutomationHost implements AutomationHost {
   }
 }
 
-Widget wrap(Widget child) => MaterialApp(
+Widget wrap(Widget child, {String locale = 'zh-CN'}) => MaterialApp(
       theme: buildLightTheme(),
       darkTheme: buildDarkTheme(),
-      builder: (context, child) =>
-          UiSettingsProvider(settings: UiSettings(), child: child!),
+      builder: (context, child) => UiSettingsProvider(
+        settings: UiSettings()..locale = locale,
+        child: child!,
+      ),
       home: Scaffold(body: child),
     );
 
@@ -326,6 +328,22 @@ void main() {
       'prompt': contains('周五回顾'),
       'cronExpr': '0 16 * * 5',
     });
+  });
+
+  testWidgets('en locale renders the template schedule from the table',
+      (tester) async {
+    final host = FakeAutomationHost(DeviceStatus.connected);
+    await tester.pumpWidget(
+        wrap(AutomationsPane(session: host), locale: 'en-US'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Task templates'));
+    await tester.pumpAndSettle();
+
+    // auto.tpl.weeklyReview.schedule / meetingPrep.schedule (same preset).
+    expect(find.text('Every Friday at 16:00'), findsNWidgets(2));
+    expect(find.text('Every Monday at 9:00'), findsOneWidget);
+    expect(find.text('每周五 16:00'), findsNothing);
   });
 
   testWidgets('editing an interval automation re-emits its interval wire',

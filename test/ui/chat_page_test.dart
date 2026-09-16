@@ -470,12 +470,20 @@ void main() {
 
     expect(find.byType(ExpansionTile), findsOneWidget);
     expect(find.textContaining('已写入'), findsOneWidget);
-    expect(find.textContaining('lib/a.dart'), findsWidgets);
+    // Collapsed header shows basename title + directory subtitle.
+    expect(find.textContaining('a.dart'), findsOneWidget);
+    expect(find.text('lib'), findsOneWidget);
+    // Collapsed by default: the diff body is absent until the header opens.
+    expect(find.textContaining('-a'), findsNothing);
+    expect(find.textContaining('+b'), findsNothing);
 
     await tester.tap(find.byType(ExpansionTile));
     await tester.pumpAndSettle();
     expect(find.textContaining('-a'), findsWidgets);
     expect(find.textContaining('+b'), findsWidgets);
+    // File edits carry the diff only — no raw parameter/output JSON dump.
+    expect(find.textContaining('old_string'), findsNothing);
+    expect(find.textContaining('filePath'), findsNothing);
   });
 
   testWidgets('permission interaction resolves through the gateway', (
@@ -550,7 +558,34 @@ void main() {
     expect(call.$2, ['s1', 'q1']);
   });
 
-  testWidgets('queue bar reorder issues reorderQueueItem with web shape',
+  testWidgets('composer hint switches to the queue wording when queued',
+      (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+    expect(find.text('提出后续修改要求'), findsOneWidget);
+
+    gateway.snapshotExtra = {
+      'queue': {
+        'autoDrain': true,
+        'items': [
+          {'queueItemId': 'q1', 'text': '排队消息 A'},
+        ],
+      },
+    };
+    gateway.feedSnapshot([
+      {'rowId': 2, 'kind': 'userInput', 'text': 'hi again'},
+    ]);
+    await tester.pumpAndSettle();
+    expect(find.text('继续输入以排队后续修改'), findsOneWidget);
+  });
+
+  testWidgets('queue bar drag-to-reorder issues reorderQueueItem with web shape',
       (tester) async {
     final gateway = FakeChatGateway();
     gateway.snapshotExtra = {
@@ -570,22 +605,28 @@ void main() {
     ]);
     await tester.pumpAndSettle();
 
-    // move q2 up: it should be inserted before q1
-    await tester.tap(find.byTooltip('上移').last);
+    // Official parity: rows reorder via the drag handle, no arrow buttons.
+    expect(find.byIcon(Icons.drag_indicator), findsNWidgets(2));
+    expect(find.byTooltip('上移'), findsNothing);
+    expect(find.byTooltip('下移'), findsNothing);
+
+    // Drag q2 (bottom) above q1: it should be inserted before q1.
+    final q2handle = find.byIcon(Icons.drag_indicator).last;
+    final gesture = await tester.startGesture(tester.getCenter(q2handle));
     await tester.pump();
+    for (var i = 0; i < 6; i++) {
+      await gesture.moveBy(const Offset(0, -12));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    await gesture.up();
+    await tester.pumpAndSettle();
+
     final up = gateway.calls
         .where((c) => c.$1 == 'reorderQueueItem')
         .toList()
         .single;
     expect(up.$2, ['s1', 'q2', 'q1']);
-
-    // move q1 down with nothing after q2 → beforeQueueItemId null (end)
-    await tester.tap(find.byTooltip('下移').first);
-    await tester.pump();
-    final downs = gateway.calls
-        .where((c) => c.$1 == 'reorderQueueItem')
-        .toList();
-    expect(downs.last.$2, ['s1', 'q1', null]);
   });
 
   testWidgets('@ trigger opens mention picker; picking inserts reference',
@@ -678,6 +719,32 @@ void main() {
 
     final call = gateway.calls.where((c) => c.$1 == 'sendText').toList().single;
     expect(call.$2, ['s1', '继续', null]);
+  });
+
+  testWidgets('running keeps send beside stop so follow-ups can queue',
+      (tester) async {
+    final gateway = FakeChatGateway();
+    gateway.snapshotExtra = {
+      'control': {'phase': 'running'},
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    // Official web: stop at the far right, send stays available.
+    expect(find.byIcon(Icons.stop), findsOneWidget);
+    expect(find.byIcon(Icons.arrow_upward), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), '排队消息 A');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pumpAndSettle();
+    final call = gateway.calls.where((c) => c.$1 == 'sendText').toList().single;
+    expect(call.$2[1], '排队消息 A');
   });
 
   testWidgets('kicked gateway shows the takeover overlay', (tester) async {
@@ -827,19 +894,20 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    IconButton buttonOf() => tester.widget<IconButton>(
+    // The send button is a squircle visual (32) inside a 48px InkWell target.
+    InkWell buttonOf() => tester.widget<InkWell>(
       find
           .ancestor(
             of: find.byIcon(Icons.arrow_upward),
-            matching: find.byType(IconButton),
+            matching: find.byType(InkWell),
           )
           .first,
     );
-    expect(buttonOf().onPressed, isNull); // empty input → disabled
+    expect(buttonOf().onTap, isNull); // empty input → disabled
 
     await tester.enterText(find.byType(TextField), '继续');
     await tester.pump();
-    expect(buttonOf().onPressed, isNotNull);
+    expect(buttonOf().onTap, isNotNull);
   });
 
   testWidgets('更多 menu: official order and pin toggle flips label', (

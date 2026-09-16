@@ -45,8 +45,7 @@ class _QuotaResetDialog extends StatelessWidget {
               if (pools == null)
                 Text(
                   tr(context, 'usage.reset.unavailable'),
-                  style: TextStyle(
-                      fontSize: 12, color: ZInk.muted(context)),
+                  style: ZType.sub.copyWith(color: ZInk.muted(context)),
                 )
               else ...[
                 _poolRow(context, 'usage.reset.fiveHour', pools.fiveHour),
@@ -58,8 +57,7 @@ class _QuotaResetDialog extends StatelessWidget {
                   child: Text(
                     trP(context, 'usage.reset.failed',
                         [controller.error ?? '-']),
-                    style: const TextStyle(
-                        fontSize: 11, color: ZColors.danger),
+                    style: ZType.caption.copyWith(color: ZColors.danger),
                   ),
                 ),
             ],
@@ -108,11 +106,11 @@ class _QuotaResetDialog extends StatelessWidget {
         children: [
           Expanded(
             child: Text(tr(context, nameKey),
-                style: const TextStyle(fontSize: 12)),
+                style: ZType.sub),
           ),
           Text(
             detail,
-            style: TextStyle(fontSize: 11, color: ZInk.muted(context)),
+            style: ZType.caption.copyWith(color: ZInk.muted(context)),
           ),
           if (pool.processing) ...[
             const SizedBox(width: 8),

@@ -47,3 +47,10 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 .cdp/
+
+# Local-only agent notes (local-only)
+/AGENTS.md
+
+# Local-only architecture/domain docs
+/CONTEXT.md
+/docs/adr/

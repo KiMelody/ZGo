@@ -102,6 +102,10 @@ class _ChatPageState extends State<ChatPage> {
   /// opening the chat lands at the bottom; the user scrolling up unpins it.
   bool _stickToBottom = true;
 
+  /// Content bottom seen by the last scroll-follow pass; null until the
+  /// initial snapshot is positioned.
+  double? _lastContentBottom;
+
   /// Mirrors [ChatPage.initialPinned]; flips when the 更多 pin toggle runs.
   bool _pinned = false;
 
@@ -244,15 +248,16 @@ class _ChatPageState extends State<ChatPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollController.hasClients) return;
       final max = _scrollController.position.maxScrollExtent;
-      // Snap to the newest message on open; afterwards only follow while the
-      // user is already near the bottom (so reading history isn't yanked).
-      if (_stickToBottom || _scrollController.position.pixels > max - 400) {
-        _scrollController.animateTo(
-          max,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
-      }
+      // Follow only when content actually grew (new rows appended);
+      // in-place refreshes (background-task progress) never move the view.
+      final grew = _lastContentBottom == null || max > _lastContentBottom! + 0.5;
+      _lastContentBottom = max;
+      if (!grew || !_stickToBottom) return;
+      _scrollController.animateTo(
+        max,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
     });
   }
 
@@ -265,6 +270,9 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _run(String errorPrefix, Future<dynamic> Function() run) async {
+    // Read the locale before the async gap: [businessErrorCopy] needs it, and
+    // it must not receive a BuildContext.
+    final locale = UiSettingsProvider.of(context)?.locale ?? 'zh-CN';
     try {
       final res = await run();
       if (res is Map &&
@@ -274,8 +282,7 @@ class _ChatPageState extends State<ChatPage> {
         _toast('$errorPrefix: ${res['reasonCode'] ?? res['status']}');
       }
     } catch (e) {
-      final business = businessErrorCopy('$e', () => tr(context, 'common.retryLater'));
-      _toast(business ?? '$errorPrefix: $e');
+      _toast(businessErrorCopy('$e', locale) ?? '$errorPrefix: $e');
     }
   }
 
@@ -338,6 +345,7 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _send() async {
     final text = _inputController.text.trim();
     if ((text.isEmpty && _pendingFiles.isEmpty) || _sending) return;
+    HapticFeedback.lightImpact();
 
     // Slash commands (mirrors the web composer).
     if (text == '/compact' || text.startsWith('/compact ')) {
@@ -647,6 +655,7 @@ class _ChatPageState extends State<ChatPage> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      showDragHandle: true,
       builder: (context) => _ModelModeSheet(
         gateway: widget.gateway,
         state: _state,
@@ -741,6 +750,7 @@ class _ChatPageState extends State<ChatPage> {
       if (!mounted) return;
       showModalBottomSheet(
         context: context,
+        showDragHandle: true,
         builder: (context) =>
             _JsonSheet(title: tr(context, 'chat.plans'), data: plans),
       );
@@ -979,11 +989,7 @@ class _ChatPageState extends State<ChatPage> {
                       widget.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: ZInk.solid(context),
-                      ),
+                      style: ZType.heading.copyWith(color: ZInk.solid(context)),
                     ),
                   ),
                   if (widget.workspaceLabel != null &&
@@ -996,7 +1002,7 @@ class _ChatPageState extends State<ChatPage> {
                       ),
                       decoration: BoxDecoration(
                         color: ZInk.tile(context),
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: BorderRadius.circular(ZRadius.field),
                         border: Border.all(color: ZInk.hairline(context)),
                       ),
                       child: Row(
@@ -1014,8 +1020,7 @@ class _ChatPageState extends State<ChatPage> {
                               widget.workspaceLabel!,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 12,
+                              style: ZType.sub.copyWith(
                                 color: ZInk.muted(context),
                               ),
                             ),
@@ -1039,8 +1044,7 @@ class _ChatPageState extends State<ChatPage> {
                         children: [
                           Text(
                             tr(context, 'chat.more'),
-                            style: const TextStyle(
-                              fontSize: 13,
+                            style: ZType.body.copyWith(
                               color: ZColors.sky500,
                             ),
                           ),
@@ -1064,7 +1068,7 @@ class _ChatPageState extends State<ChatPage> {
                 dense: true,
                 title: Text(
                   trP(context, 'chat.subscribe.failed', ['$_error']),
-                  style: const TextStyle(fontSize: 12),
+                  style: ZType.sub,
                 ),
                 trailing: TextButton(
                   onPressed: _subscribe,
@@ -1085,8 +1089,7 @@ class _ChatPageState extends State<ChatPage> {
                   children: [
                     Text(
                       tr(context, 'chat.quota.exhaustedTitle'),
-                      style: const TextStyle(
-                        fontSize: 12,
+                      style: ZType.sub.copyWith(
                         fontWeight: FontWeight.w600,
                         color: ZColors.danger,
                       ),
@@ -1094,10 +1097,7 @@ class _ChatPageState extends State<ChatPage> {
                     const SizedBox(height: 2),
                     Text(
                       tr(context, 'chat.quota.exhaustedBody'),
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: ZInk.muted(context),
-                      ),
+                      style: ZType.caption.copyWith(color: ZInk.muted(context)),
                     ),
                     Row(
                       mainAxisSize: MainAxisSize.min,
@@ -1111,7 +1111,7 @@ class _ChatPageState extends State<ChatPage> {
                           onPressed: _showModelSheet,
                           child: Text(
                             tr(context, 'chat.quota.switchModel'),
-                            style: const TextStyle(fontSize: 12),
+                            style: ZType.sub,
                           ),
                         ),
                         if (widget.onOpenUsage != null)
@@ -1124,7 +1124,7 @@ class _ChatPageState extends State<ChatPage> {
                             onPressed: widget.onOpenUsage,
                             child: Text(
                               tr(context, 'chat.quota.viewUsage'),
-                              style: const TextStyle(fontSize: 12),
+                              style: ZType.sub,
                             ),
                           ),
                       ],
@@ -1180,7 +1180,7 @@ class _ChatPageState extends State<ChatPage> {
                                       : const Icon(Icons.history, size: 14),
                                   label: Text(
                                     tr(context, 'chat.loadOlder'),
-                                    style: const TextStyle(fontSize: 12),
+                                    style: ZType.sub,
                                   ),
                                 ),
                               );
@@ -1264,7 +1264,7 @@ class _ChatPageState extends State<ChatPage> {
                   const SizedBox(width: 8),
                   Text(
                     _progress!,
-                    style: TextStyle(fontSize: 11, color: ZInk.muted(context)),
+                    style: ZType.caption.copyWith(color: ZInk.muted(context)),
                   ),
                 ],
               ),
@@ -1316,7 +1316,7 @@ class _ChatPageState extends State<ChatPage> {
         color: ZColors.darkBackground.withValues(alpha: 0.92),
         child: Center(
           child: Padding(
-            padding: const EdgeInsets.all(32),
+            padding: const EdgeInsets.all(ZSpacing.emptyState),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1328,16 +1328,13 @@ class _ChatPageState extends State<ChatPage> {
                 const SizedBox(height: 16),
                 Text(
                   tr(context, 'chat.kicked.title'),
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  style: ZType.heading,
                 ),
                 const SizedBox(height: 8),
                 Text(
                   tr(context, 'chat.kicked.body'),
                   textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 13, color: ZInk.faint(context)),
+                  style: ZType.body.copyWith(color: ZInk.faint(context)),
                 ),
                 const SizedBox(height: 20),
                 FilledButton.icon(
@@ -1424,7 +1421,7 @@ class _GatewayBanner extends StatelessWidget {
           Expanded(
             child: Text(
               tr(context, 'chat.reconnecting'),
-              style: TextStyle(fontSize: 12, color: ZInk.soft(context)),
+              style: ZType.sub.copyWith(color: ZInk.soft(context)),
             ),
           ),
         ],
@@ -1448,25 +1445,29 @@ typedef AssistantPart = ({
 /// 3002/429 限流, 3006 模型不在范围, 3007 验证码, 3008-3010 系统繁忙, 2007 上游
 /// 不可用). When the failure text mentions one, show the official line
 /// instead of the raw transport error.
-String? businessErrorCopy(String errorText, String Function() retryLater) {
+///
+/// Takes a locale (not a BuildContext) so it stays a pure function; the
+/// `chat.bizErr.*` table entries supply the copy.
+String? businessErrorCopy(String errorText, String locale) {
   final m = RegExp(r'\b(1006|1005|3006|3001|3007|3008|3009|3010|3002|2007|429)\b')
       .firstMatch(errorText);
   if (m == null) return null;
-  final copy = {
-    '1006': '登录状态已失效，请重新登录后再试。',
-    '1005': '免费额度已用完，请升级套餐或稍后再试。',
-    '3006': '当前模型不在你的套餐范围内，请更换模型。',
-    '3001': '请求参数无效，请重试或更换模型。',
-    '3007': '触发验证码校验，请在桌面端完成验证后重试。',
-    '3008': '系统繁忙，请稍后重试或升级套餐。',
-    '3009': '系统繁忙，请稍后重试或升级套餐。',
-    '3010': '系统繁忙，请稍后重试或升级套餐。',
-    '3002': '请求被限流，请稍后重试。',
-    '2007': '上游服务暂不可用，请稍后重试。',
-    '429': '请求被限流，请稍后重试。',
+  final key = {
+    '1006': 'chat.bizErr.loginExpired',
+    '1005': 'chat.bizErr.quotaExhausted',
+    '3006': 'chat.bizErr.modelNotInPlan',
+    '3001': 'chat.bizErr.invalidParams',
+    '3007': 'chat.bizErr.verificationRequired',
+    '3008': 'chat.bizErr.serviceBusy',
+    '3009': 'chat.bizErr.serviceBusy',
+    '3010': 'chat.bizErr.serviceBusy',
+    '3002': 'chat.bizErr.rateLimited',
+    '2007': 'chat.bizErr.upstreamUnavailable',
+    '429': 'chat.bizErr.rateLimited',
   }[m.group(1)];
-  if (copy == null) return null;
-  return '$copy (${retryLater.call()})';
+  if (key == null) return null;
+  final retryLater = trLocale(locale, 'common.retryLater');
+  return '${trLocale(locale, key)} ($retryLater)';
 }
 
 /// Splits an assistant-turn group into ORDERED parts — consecutive
@@ -1775,8 +1776,10 @@ class _RowWidget extends StatelessWidget {
   void _showActions(BuildContext context) {
     final kind = row['kind'];
     if (kind != 'userInput' && kind != 'assistantText') return;
+    HapticFeedback.mediumImpact();
     showModalBottomSheet(
       context: context,
+      showDragHandle: true,
       builder: (context) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1899,6 +1902,7 @@ class _RowWidget extends StatelessWidget {
       if (!context.mounted) return;
       showModalBottomSheet(
         context: context,
+        showDragHandle: true,
         builder: (context) => _JsonSheet(
           title: tr(context, 'chat.action.fileChanges'),
           data: changes,
@@ -1987,15 +1991,15 @@ class _UserBubbleState extends State<_UserBubble> {
         Align(
           alignment: Alignment.centerRight,
           child: Container(
-            margin: const EdgeInsets.only(left: 56, top: 4, bottom: 4),
+            margin: const EdgeInsets.only(left: 56, top: 8, bottom: 8),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
               color: ZColors.darkCard,
               borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(16),
-                topRight: Radius.circular(16),
-                bottomLeft: Radius.circular(16),
-                bottomRight: Radius.circular(4),
+                topLeft: Radius.circular(ZRadius.tile),
+                topRight: Radius.circular(ZRadius.tile),
+                bottomLeft: Radius.circular(ZRadius.tile),
+                bottomRight: Radius.circular(ZRadius.mini),
               ),
             ),
             child: Column(
@@ -2022,13 +2026,13 @@ class _UserBubbleState extends State<_UserBubble> {
                             physics: const NeverScrollableScrollPhysics(),
                             child: SelectableText(
                               text,
-                              style: const TextStyle(fontSize: 14, height: 1.5),
+                              style: ZType.body,
                             ),
                           ),
                         )
                       : SelectableText(
                           text,
-                          style: const TextStyle(fontSize: 14, height: 1.5),
+                          style: ZType.body,
                         ),
                 if (longText)
                   TextButton(
@@ -2036,12 +2040,15 @@ class _UserBubbleState extends State<_UserBubble> {
                       visualDensity: VisualDensity.compact,
                       minimumSize: Size.zero,
                     ),
-                    onPressed: () => setState(() => _expanded = !_expanded),
+                    onPressed: () {
+                      HapticFeedback.lightImpact();
+                      setState(() => _expanded = !_expanded);
+                    },
                     child: Text(
                       _expanded
                           ? tr(context, 'chat.collapse')
                           : tr(context, 'chat.expand'),
-                      style: const TextStyle(fontSize: 11),
+                      style: ZType.caption,
                     ),
                   ),
               ],
@@ -2189,11 +2196,11 @@ class _AttachmentViewState extends State<_AttachmentView> {
     final fileName = '${widget.attachment['fileName'] ?? ''}';
     if (!_isImage) {
       return Container(
-        margin: const EdgeInsets.only(bottom: 6),
+        margin: const EdgeInsets.only(bottom: 12),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
           color: ZInk.tile(context),
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(ZRadius.field),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -2207,7 +2214,7 @@ class _AttachmentViewState extends State<_AttachmentView> {
             Flexible(
               child: Text(
                 fileName,
-                style: TextStyle(fontSize: 12, color: ZInk.soft(context)),
+                style: ZType.sub.copyWith(color: ZInk.soft(context)),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
@@ -2218,7 +2225,7 @@ class _AttachmentViewState extends State<_AttachmentView> {
     if (_failed) {
       return Text(
         trP(context, 'chat.attach.loadFailed', [fileName]),
-        style: TextStyle(fontSize: 11, color: ZInk.faint(context)),
+        style: ZType.caption.copyWith(color: ZInk.faint(context)),
       );
     }
     if (_imageBytes == null) {
@@ -2232,9 +2239,11 @@ class _AttachmentViewState extends State<_AttachmentView> {
       );
     }
     return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
+      // Gallery rhythm: consecutive image attachments in one bubble need a
+      // clear seam (user feedback: 6px read as "glued together").
+      padding: const EdgeInsets.only(bottom: 12),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(ZRadius.field),
         child: Image.memory(_imageBytes!, width: 220, fit: BoxFit.cover),
       ),
     );
@@ -2275,7 +2284,7 @@ class _AssistantBubble extends StatelessWidget {
     final feedback = row['feedback'] as String?;
     final timestamp = _ChatPageState._rowTimestamp(row);
     return Container(
-      margin: const EdgeInsets.only(right: 24, top: 4, bottom: 4),
+      margin: const EdgeInsets.only(right: 24, top: 8, bottom: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -2334,10 +2343,7 @@ class _AssistantBubble extends StatelessWidget {
                     padding: const EdgeInsets.only(left: 8),
                     child: Text(
                       _formatClock(timestamp),
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: ZInk.ghost(context),
-                      ),
+                      style: ZType.caption.copyWith(color: ZInk.ghost(context)),
                     ),
                   ),
               ],
@@ -2388,45 +2394,54 @@ class _ReasoningTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: ZInk.tile(context),
-      clipBehavior: Clip.antiAlias,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: ZInk.hairline(context)),
-      ),
-      child: ExpansionTile(
-        dense: true,
-        tilePadding: const EdgeInsets.symmetric(horizontal: 12),
-        title: Row(
+    return Padding(
+      // Turn-part rhythm: reasoning/tool/subagent blocks need a seam
+      // between neighbours (0px margins read as glued together).
+      padding: const EdgeInsets.only(bottom: ZTile.seam),
+      child: Material(
+        color: ZInk.tile(context),
+        clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(ZRadius.tile),
+          side: BorderSide(color: ZInk.hairline(context)),
+        ),
+        child: ExpansionTile(
+          dense: true,
+          minTileHeight: ZTile.headHeight,
+          onExpansionChanged: (_) => HapticFeedback.lightImpact(),
+          tilePadding: ZTile.head,
+          title: Row(
+            children: [
+              Icon(
+                Icons.psychology_outlined,
+                size: ZTile.iconSize,
+                color: streaming ? ZColors.sky400 : ZInk.faint(context),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                streaming
+                    ? tr(context, 'chat.reasoning.thinking')
+                    : tr(context, 'chat.reasoning'),
+                style: ZType.sub.copyWith(color: ZInk.muted(context)),
+              ),
+            ],
+          ),
           children: [
-            Icon(
-              Icons.psychology_outlined,
-              size: 14,
-              color: streaming ? ZColors.sky400 : ZInk.faint(context),
-            ),
-            const SizedBox(width: 6),
-            Text(
-              streaming
-                  ? tr(context, 'chat.reasoning.thinking')
-                  : tr(context, 'chat.reasoning'),
-              style: TextStyle(fontSize: 12, color: ZInk.muted(context)),
+            Padding(
+              padding: ZTile.body,
+              child: ZLinkerMarkdown(text, bodyStyle: ZType.sub),
             ),
           ],
         ),
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            child: ZLinkerMarkdown(text, fontSize: 12),
-          ),
-        ],
       ),
     );
   }
 }
 
 /// Official-style tool summary: icon + "已写入 file +N" / "终端 · cmd" /
-/// "探索 · N 文件", expandable to input/output/diff.
+/// "探索 · N 文件", expandable to input/output/diff. The diff body lives
+/// INSIDE the expansion (collapsed by default — long agent dumps must not
+/// flood the chat); the live progress row stays always visible.
 class _ToolCallTile extends StatelessWidget {
   final Map<String, dynamic> row;
 
@@ -2472,8 +2487,7 @@ class _ToolCallTile extends StatelessWidget {
             summary.title,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 13,
+            style: ZType.body.copyWith(
               fontWeight: FontWeight.w500,
               color: ZInk.solid(context),
             ),
@@ -2484,7 +2498,7 @@ class _ToolCallTile extends StatelessWidget {
             padding: const EdgeInsets.only(left: 8),
             child: Text(
               '+${summary.additions}',
-              style: const TextStyle(fontSize: 11.5, color: ZColors.success),
+              style: ZType.caption.copyWith(color: ZColors.success),
             ),
           ),
         if (summary.deletions > 0)
@@ -2492,7 +2506,7 @@ class _ToolCallTile extends StatelessWidget {
             padding: const EdgeInsets.only(left: 4),
             child: Text(
               '-${summary.deletions}',
-              style: const TextStyle(fontSize: 11.5, color: ZColors.danger),
+              style: ZType.caption.copyWith(color: ZColors.danger),
             ),
           ),
       ],
@@ -2503,59 +2517,79 @@ class _ToolCallTile extends StatelessWidget {
             summary.subtitle!,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 11,
+            style: ZType.caption.copyWith(
               color: ZInk.faint(context),
               fontFamily: 'monospace',
             ),
           );
 
-    return Material(
-      color: ZInk.tile(context),
-      clipBehavior: Clip.antiAlias,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ExpansionTile(
-            dense: true,
-            tilePadding: const EdgeInsets.symmetric(horizontal: 12),
-            leading: Icon(icon, size: 15, color: color),
-            title: title,
-            subtitle: subtitle,
-            children: [
-              if (inputText.isNotEmpty)
-                _kv(context, tr(context, 'chat.tool.input'), inputText),
-              if (outputText.isNotEmpty)
-                _kv(context, tr(context, 'chat.tool.output'), outputText),
-              if (error is Map)
-                _kv(
-                  context,
-                  tr(context, 'chat.tool.error'),
-                  '${error['code'] ?? ''} ${error['message'] ?? ''}',
-                ),
-            ],
-          ),
-          if (progress is Map) _ProgressRow(progress: progress),
-          if (diff != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-              child: DiffView(diff: diff),
-            ),
-          for (final image in images)
-            if (image is Map && image['base64'] is String)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.memory(
-                    base64Decode(image['base64'] as String),
-                    fit: BoxFit.contain,
-                    errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
-                  ),
-                ),
+    return Padding(
+      // Turn-part rhythm: seam between neighbouring blocks (see _ReasoningTile).
+      padding: const EdgeInsets.only(bottom: ZTile.seam),
+      child: Material(
+        color: ZInk.tile(context),
+        clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(ZRadius.tile),
+          side: BorderSide(color: ZInk.hairline(context)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ListTile's defaults (40px leading box + 16px gap) would push the
+            // title 36px further right than the other two tiles' headers.
+            ListTileTheme.merge(
+              horizontalTitleGap: 8,
+              minLeadingWidth: ZTile.iconSize,
+              child: ExpansionTile(
+                dense: true,
+                minTileHeight: ZTile.headHeight,
+                onExpansionChanged: (_) => HapticFeedback.lightImpact(),
+                tilePadding: ZTile.head,
+                leading: Icon(icon, size: ZTile.iconSize, color: color),
+                title: title,
+                subtitle: subtitle,
+                children: [
+                  // File edits show only the diff: the raw input/output JSON
+                  // of a write/edit call is noise the official web omits too.
+                  if (diff == null && inputText.isNotEmpty)
+                    _kv(context, tr(context, 'chat.tool.input'), inputText),
+                  if (diff == null && outputText.isNotEmpty)
+                    _kv(context, tr(context, 'chat.tool.output'), outputText),
+                  if (error is Map)
+                    _kv(
+                      context,
+                      tr(context, 'chat.tool.error'),
+                      '${error['code'] ?? ''} ${error['message'] ?? ''}',
+                    ),
+                  // Diff/images live INSIDE the expansion so a collapsed
+                  // tool call shows only the "已写入 file +N" summary line.
+                  if (diff != null)
+                    Padding(
+                      padding: ZTile.body,
+                      child: DiffView(diff: diff),
+                    ),
+                  for (final image in images)
+                    if (image is Map && image['base64'] is String)
+                      Padding(
+                        padding: ZTile.body,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(ZRadius.field),
+                          child: Image.memory(
+                            base64Decode(image['base64'] as String),
+                            fit: BoxFit.contain,
+                            errorBuilder: (context, error, stackTrace) =>
+                                const SizedBox.shrink(),
+                          ),
+                        ),
+                      ),
+                ],
               ),
-        ],
+            ),
+            // Live progress stays visible while collapsed.
+            if (progress is Map) _ProgressRow(progress: progress),
+          ],
+        ),
       ),
     );
   }
@@ -2794,13 +2828,13 @@ class _ToolCallTile extends StatelessWidget {
       display = const JsonEncoder.withIndent('  ').convert(decoded);
     } catch (_) {}
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      padding: ZTile.body,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
             label,
-            style: TextStyle(fontSize: 10.5, color: ZInk.faint(context)),
+            style: ZType.caption.copyWith(color: ZInk.faint(context)),
           ),
           const SizedBox(height: 2),
           Container(
@@ -2808,15 +2842,14 @@ class _ToolCallTile extends StatelessWidget {
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
               color: ZInk.codeBlockBg(context),
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(ZRadius.field),
             ),
             child: SelectableText(
               display.length > 4000
                   ? '${display.substring(0, 4000)}…'
                   : display,
-              style: TextStyle(
+              style: ZType.caption.copyWith(
                 fontFamily: 'monospace',
-                fontSize: 11,
                 color: ZInk.solid(context),
               ),
             ),
@@ -2837,7 +2870,7 @@ class _ProgressRow extends StatelessWidget {
     final bytes = (progress['bytes'] as num?)?.toInt() ?? 0;
     final preview = progress['previewLine'] as String? ?? '';
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      padding: ZTile.body,
       child: Row(
         children: [
           const SizedBox(
@@ -2852,7 +2885,7 @@ class _ProgressRow extends StatelessWidget {
                 if (preview.isNotEmpty) preview,
                 '${(bytes / 1024).toStringAsFixed(1)} KB',
               ].join(' · '),
-              style: TextStyle(fontSize: 11, color: ZInk.faint(context)),
+              style: ZType.caption.copyWith(color: ZInk.faint(context)),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -2900,15 +2933,26 @@ class _TurnHeader extends StatelessWidget {
           if (duration.isNotEmpty)
             Text(
               trP(context, 'chat.turn.worked', [duration]),
-              style: TextStyle(fontSize: 11.5, color: ZInk.faint(context)),
+              style: ZType.caption.copyWith(color: ZInk.faint(context)),
             ),
           if (hasChanges)
             InkWell(
-              onTap: onToggle,
-              child: Icon(
-                expanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
-                size: 16,
-                color: ZInk.ghost(context),
+              onTap: () {
+                HapticFeedback.lightImpact();
+                onToggle();
+              },
+              child: SizedBox(
+                width: zTouchWidth,
+                height: zTouchHeight,
+                child: Center(
+                  child: Icon(
+                    expanded
+                        ? Icons.keyboard_arrow_up
+                        : Icons.keyboard_arrow_down,
+                    size: 16,
+                    color: ZInk.ghost(context),
+                  ),
+                ),
               ),
             ),
           const Spacer(),
@@ -2949,11 +2993,11 @@ class _FileChangesBar extends StatelessWidget {
     final dels = (changes['deletions'] as num?)?.toInt() ?? 0;
     final files = (changes['files'] as num?)?.toInt() ?? 0;
     return Container(
-      margin: const EdgeInsets.only(bottom: 6),
+      margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: ZInk.tile(context),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(ZRadius.field),
         border: Border.all(color: ZInk.hairline(context)),
       ),
       child: Row(
@@ -2962,7 +3006,7 @@ class _FileChangesBar extends StatelessWidget {
             child: Text.rich(
               TextSpan(
                 text: trP(context, 'chat.files.changed', ['$files']),
-                style: TextStyle(fontSize: 12, color: ZInk.soft(context)),
+                style: ZType.sub.copyWith(color: ZInk.soft(context)),
                 children: [
                   if (adds > 0)
                     TextSpan(
@@ -2982,7 +3026,7 @@ class _FileChangesBar extends StatelessWidget {
             onPressed: () => _rewindWithPreview(context),
             child: Text(
               tr(context, 'chat.files.undo'),
-              style: const TextStyle(fontSize: 12),
+              style: ZType.sub,
             ),
           ),
         ],
@@ -3034,8 +3078,7 @@ class _FileChangesBar extends StatelessWidget {
           width: double.maxFinite,
           child: files.isEmpty && !blocked
               ? Text(tr(dialogCtx, 'chat.rewind.checking'),
-                  style: TextStyle(
-                      fontSize: 13, color: ZInk.soft(dialogCtx)))
+                  style: ZType.body.copyWith(color: ZInk.soft(dialogCtx)))
               : Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -3045,8 +3088,7 @@ class _FileChangesBar extends StatelessWidget {
                         padding: const EdgeInsets.only(bottom: 8),
                         child: Text(
                           tr(dialogCtx, 'chat.rewind.cannotApply'),
-                          style: TextStyle(
-                              fontSize: 13, color: ZColors.danger),
+                          style: ZType.body.copyWith(color: ZColors.danger),
                         ),
                       ),
                     for (final f in files.take(12))
@@ -3056,9 +3098,7 @@ class _FileChangesBar extends StatelessWidget {
                           f,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                              fontSize: 12.5,
-                              color: ZInk.soft(dialogCtx)),
+                          style: ZType.sub.copyWith(color: ZInk.soft(dialogCtx)),
                         ),
                       ),
                     if (files.length > 12)
@@ -3066,8 +3106,9 @@ class _FileChangesBar extends StatelessWidget {
                         padding: const EdgeInsets.only(top: 4),
                         child: Text(
                           '+${files.length - 12}',
-                          style: TextStyle(
-                              fontSize: 12, color: ZInk.muted(dialogCtx)),
+                          style: ZType.sub.copyWith(
+                              color: ZInk.muted(dialogCtx),
+                          ),
                         ),
                       ),
                   ],
@@ -3188,7 +3229,7 @@ class _TimelineMarkerWidget extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
           color: color.withValues(alpha: 0.1),
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(ZRadius.pill),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -3198,7 +3239,7 @@ class _TimelineMarkerWidget extends StatelessWidget {
             Flexible(
               child: Text(
                 text,
-                style: TextStyle(fontSize: 11, color: color),
+                style: ZType.caption.copyWith(color: color),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -3235,38 +3276,44 @@ class _SubagentTile extends StatelessWidget {
         running: row['status'] == 'running',
       ),
       child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.all(10),
+        margin: const EdgeInsets.only(bottom: ZTile.seam),
+        padding: const EdgeInsets.all(ZTile.headPadding),
         decoration: BoxDecoration(
           color: ZInk.tile(context),
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(ZRadius.tile),
+          border: Border.all(color: ZInk.hairline(context)),
         ),
-        child: Row(
-          children: [
-            Icon(Icons.smart_toy_outlined,
-                size: 15, color: ZInk.muted(context)),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    trP(context, 'chat.subagent', [
-                      '${row['subagentType'] ?? ''}',
-                    ]),
-                    style: TextStyle(fontSize: 12, color: ZInk.soft(context)),
-                  ),
-                  Text(
-                    '${row['status'] ?? ''}  ${row['summaryText'] ?? ''}',
-                    style: TextStyle(fontSize: 11, color: ZInk.faint(context)),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: ZTile.headHeight),
+          child: Row(
+            children: [
+              Icon(Icons.smart_toy_outlined,
+                  size: ZTile.iconSize, color: ZInk.muted(context)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      trP(context, 'chat.subagent', [
+                        '${row['subagentType'] ?? ''}',
+                      ]),
+                      style: ZType.sub.copyWith(color: ZInk.soft(context)),
+                    ),
+                    Text(
+                      '${row['status'] ?? ''}  ${row['summaryText'] ?? ''}',
+                      style: ZType.caption.copyWith(color: ZInk.faint(context)),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
               ),
-            ),
-            Icon(Icons.chevron_right, size: 16, color: ZInk.ghost(context)),
-          ],
+              Icon(Icons.chevron_right,
+                  size: ZTile.iconSize, color: ZInk.ghost(context)),
+            ],
+          ),
         ),
       ),
     );
@@ -3286,7 +3333,7 @@ class _TimeDivider extends StatelessWidget {
       child: Center(
         child: Text(
           label,
-          style: TextStyle(fontSize: 10.5, color: ZInk.ghost(context)),
+          style: ZType.caption.copyWith(color: ZInk.ghost(context)),
         ),
       ),
     );
@@ -3312,7 +3359,7 @@ class _GoalBanner extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: ZColors.success.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
         border: Border.all(color: ZColors.success.withValues(alpha: 0.25)),
       ),
       child: Row(
@@ -3322,7 +3369,7 @@ class _GoalBanner extends StatelessWidget {
           Expanded(
             child: Text(
               objective,
-              style: TextStyle(fontSize: 12, color: ZInk.soft(context)),
+              style: ZType.sub.copyWith(color: ZInk.soft(context)),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -3330,7 +3377,7 @@ class _GoalBanner extends StatelessWidget {
           if (status.isNotEmpty)
             Text(
               status,
-              style: const TextStyle(fontSize: 11, color: ZColors.success),
+              style: ZType.caption.copyWith(color: ZColors.success),
             ),
         ],
       ),
@@ -3425,7 +3472,7 @@ class _BackgroundWorksBar extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       decoration: BoxDecoration(
         color: ZInk.tile(context),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -3444,9 +3491,11 @@ class _BackgroundWorksBar extends StatelessWidget {
                   child: Text(
                     trP(context, 'chat.bgWorks', [
                       '${plainWorks.length}',
-                      plainWorks.map((w) => w['title'] ?? w['kind']).join('、'),
+                      plainWorks
+                          .map((w) => w['title'] ?? w['kind'])
+                          .join(tr(context, 'chat.bgWorks.sep')),
                     ]),
-                    style: TextStyle(fontSize: 11.5, color: ZInk.soft(context)),
+                    style: ZType.caption.copyWith(color: ZInk.soft(context)),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -3485,8 +3534,7 @@ class _BackgroundWorksBar extends StatelessWidget {
                       Expanded(
                         child: Text(
                           tail.isEmpty ? title : '$title · $tail',
-                          style: TextStyle(
-                            fontSize: 11.5,
+                          style: ZType.caption.copyWith(
                             color: ZInk.soft(context),
                           ),
                           maxLines: 1,
@@ -3520,8 +3568,8 @@ void _openSubagentDetail(
   final sid = childSessionId ?? '';
   if (sid.isEmpty) return;
   Navigator.of(context).push(
-    MaterialPageRoute(
-      builder: (_) => SubagentDetailPage(
+    zRoute(
+      (_) => SubagentDetailPage(
         gateway: gateway,
         childSessionId: sid,
         title: title,
@@ -3548,21 +3596,24 @@ class _QueueBar extends StatelessWidget {
     return Container(
       margin: const EdgeInsets.fromLTRB(14, 4, 14, 0),
       padding: const EdgeInsets.all(10),
+      // Official web: the queue is a neutral sub-surface inside the composer
+      // area — no accent tint. ZInk.tile's contract names the queue directly.
       decoration: BoxDecoration(
-        color: ZColors.sky500.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: ZColors.sky500.withValues(alpha: 0.25)),
+        color: ZInk.tile(context),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
+        border: Border.all(color: ZInk.hairline(context)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.queue_outlined, size: 14, color: ZColors.sky500),
+              Icon(Icons.queue_outlined,
+                  size: 14, color: ZInk.muted(context)),
               const SizedBox(width: 6),
               Text(
                 trP(context, 'chat.queue.count', ['${items.length}']),
-                style: const TextStyle(fontSize: 12, color: ZColors.sky500),
+                style: ZType.sub.copyWith(color: ZInk.muted(context)),
               ),
               const Spacer(),
               InkWell(
@@ -3577,100 +3628,124 @@ class _QueueBar extends StatelessWidget {
                   state.autoDrain
                       ? tr(context, 'chat.queue.autoOn')
                       : tr(context, 'chat.queue.autoOff'),
-                  style: TextStyle(fontSize: 11, color: ZInk.muted(context)),
+                  style: ZType.caption.copyWith(color: ZInk.muted(context)),
                 ),
               ),
             ],
           ),
           const SizedBox(height: 6),
-          for (var i = 0; i < items.length; i++)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 3),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      '${items[i]['text'] ?? ''}',
-                      style: TextStyle(fontSize: 12, color: ZInk.soft(context)),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
+          // Official web parity: each queued message is its own pill row with
+          // a drag handle (⋮⋮) for reordering — no up/down arrows.
+          ReorderableListView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            padding: EdgeInsets.zero,
+            buildDefaultDragHandles: false,
+            itemCount: items.length,
+            onReorderItem: (oldIndex, newIndex) {
+              if (newIndex == oldIndex) return;
+              // onReorderItem's newIndex is the post-removal insert position;
+              // map it onto the web's beforeQueueItemId semantics.
+              final before = newIndex > oldIndex ? newIndex + 1 : newIndex;
+              _reorder(context, sessionId, items, oldIndex,
+                  before >= items.length ? null : before);
+            },
+            itemBuilder: (context, i) {
+              return Padding(
+                key: ValueKey('${items[i]['queueItemId']}'),
+                padding: EdgeInsets.only(bottom: i == items.length - 1 ? 0 : 4),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).brightness == Brightness.dark
+                        ? ZColors.darkCard
+                        : ZColors.lightCard,
+                    borderRadius: BorderRadius.circular(ZRadius.field),
+                    border: Border.all(color: ZInk.hairline(context)),
                   ),
-                  _QueueAction(
-                    icon: Icons.arrow_upward,
-                    tooltip: tr(context, 'chat.queue.moveUp'),
-                    enabled: i > 0,
-                    onTap: () => _reorder(context, sessionId, items, i, i - 1),
-                  ),
-                  _QueueAction(
-                    icon: Icons.arrow_downward,
-                    tooltip: tr(context, 'chat.queue.moveDown'),
-                    enabled: i < items.length - 1,
-                    onTap: () => _reorder(context, sessionId, items, i,
-                        i + 2 >= items.length ? null : i + 2),
-                  ),
-                  _QueueAction(
-                    icon: Icons.play_arrow,
-                    tooltip: tr(context, 'chat.queue.sendNow'),
-                    onTap: () {
-                      final id = '${items[i]['queueItemId']}';
-                      state.optimisticRemoveQueueItem(id);
-                      gateway.sendQueuedNow(sessionId, id);
-                    },
-                  ),
-                  _QueueAction(
-                    icon: Icons.edit_outlined,
-                    tooltip: tr(context, 'chat.queue.edit'),
-                    onTap: () => _edit(context, sessionId, items[i]),
-                  ),
-                  _QueueAction(
-                    icon: Icons.close,
-                    tooltip: tr(context, 'devices.menu.delete'),
-                    onTap: () async {
-                      final id = '${items[i]['queueItemId']}';
-                      final confirmed = await showDialog<bool>(
-                        context: context,
-                        useRootNavigator: false,
-                        builder: (context) => AlertDialog(
-                          title: Text(tr(context, 'chat.queue.delete.title')),
-                          content: Text(
-                            '${items[i]['text'] ?? ''}',
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.pop(context, false),
-                              child: Text(tr(context, 'devices.add.cancel')),
-                            ),
-                            FilledButton(
-                              style: FilledButton.styleFrom(
-                                backgroundColor: ZColors.danger,
-                              ),
-                              onPressed: () => Navigator.pop(context, true),
-                              child: Text(
-                                tr(context, 'devices.delete.confirm'),
-                              ),
-                            ),
-                          ],
+                  child: Row(
+                    children: [
+                      ReorderableDragStartListener(
+                        index: i,
+                        child: SizedBox(
+                          width: 36,
+                          height: 44,
+                          child: Icon(Icons.drag_indicator,
+                              size: 18, color: ZInk.ghost(context)),
                         ),
-                      );
-                      if (confirmed != true) return;
-                      state.optimisticRemoveQueueItem(id);
-                      gateway.deleteQueueItem(sessionId, id);
-                    },
+                      ),
+                      Expanded(
+                        child: Text(
+                          '${items[i]['text'] ?? ''}',
+                          style: ZType.sub.copyWith(color: ZInk.soft(context)),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      _QueueAction(
+                        icon: Icons.play_arrow,
+                        tooltip: tr(context, 'chat.queue.sendNow'),
+                        onTap: () {
+                          final id = '${items[i]['queueItemId']}';
+                          state.optimisticRemoveQueueItem(id);
+                          gateway.sendQueuedNow(sessionId, id);
+                        },
+                      ),
+                      _QueueAction(
+                        icon: Icons.edit_outlined,
+                        tooltip: tr(context, 'chat.queue.edit'),
+                        onTap: () => _edit(context, sessionId, items[i]),
+                      ),
+                      _QueueAction(
+                        icon: Icons.close,
+                        tooltip: tr(context, 'devices.menu.delete'),
+                        onTap: () async {
+                          final id = '${items[i]['queueItemId']}';
+                          final confirmed = await showDialog<bool>(
+                            context: context,
+                            useRootNavigator: false,
+                            builder: (context) => AlertDialog(
+                              title: Text(tr(context, 'chat.queue.delete.title')),
+                              content: Text(
+                                '${items[i]['text'] ?? ''}',
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.pop(context, false),
+                                  child: Text(tr(context, 'devices.add.cancel')),
+                                ),
+                                FilledButton(
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: ZColors.danger,
+                                  ),
+                                  onPressed: () => Navigator.pop(context, true),
+                                  child: Text(
+                                    tr(context, 'devices.delete.confirm'),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                          if (confirmed != true) return;
+                          state.optimisticRemoveQueueItem(id);
+                          gateway.deleteQueueItem(sessionId, id);
+                        },
+                      ),
+                    ],
                   ),
-                ],
-              ),
-            ),
+                ),
+              );
+            },
+          ),
         ],
       ),
     );
   }
 
   /// Web drag-to-reorder parity: the same `reorderQueueItem
-  /// {queueItemId, beforeQueueItemId|null}` command, driven by move
-  /// buttons (rows are too narrow for a drag handle on phones).
+  /// {queueItemId, beforeQueueItemId|null}` command, driven by the
+  /// drag handle on each queued row.
   /// [targetIndex] is the index the item should occupy after the move;
   /// `null` moves it to the end.
   void _reorder(
@@ -3787,44 +3862,49 @@ class _ToolGroupCardState extends State<_ToolGroupCard> {
       if (stopped > 0) trP(context, 'chat.tool.group.stopped', ['$stopped']),
     ].join(' · ');
     return Container(
-      margin: const EdgeInsets.only(bottom: 6),
+      margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
         color: ZInk.tile(context),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(ZRadius.field),
         border: Border.all(color: ZInk.hairline(context)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           InkWell(
-            borderRadius: BorderRadius.circular(10),
-            onTap: () => setState(() => _expanded = !_expanded),
-            child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              child: Row(
-                children: [
-                  Icon(Icons.terminal,
-                      size: 14, color: ZInk.muted(context)),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      '${tr(context, 'chat.tool.group.terminal')} · $bits'
-                      '${lastCmd.isEmpty ? '' : '  ·  $lastCmd'}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                          fontSize: 12, color: ZInk.soft(context)),
+            borderRadius: BorderRadius.circular(ZRadius.field),
+            onTap: () {
+              HapticFeedback.lightImpact();
+              setState(() => _expanded = !_expanded);
+            },
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: zTouchHeight),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Row(
+                  children: [
+                    Icon(Icons.terminal,
+                        size: 14, color: ZInk.muted(context)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '${tr(context, 'chat.tool.group.terminal')} · $bits'
+                        '${lastCmd.isEmpty ? '' : '  ·  $lastCmd'}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ZType.sub.copyWith(color: ZInk.soft(context)),
+                      ),
                     ),
-                  ),
-                  Icon(
-                    _expanded
-                        ? Icons.keyboard_arrow_up
-                        : Icons.keyboard_arrow_down,
-                    size: 16,
-                    color: ZInk.ghost(context),
-                  ),
-                ],
+                    Icon(
+                      _expanded
+                          ? Icons.keyboard_arrow_up
+                          : Icons.keyboard_arrow_down,
+                      size: 16,
+                      color: ZInk.ghost(context),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -3855,13 +3935,11 @@ class _QueueAction extends StatelessWidget {
   final IconData icon;
   final String tooltip;
   final VoidCallback onTap;
-  final bool enabled;
 
   const _QueueAction({
     required this.icon,
     required this.tooltip,
     required this.onTap,
-    this.enabled = true,
   });
 
   @override
@@ -3870,10 +3948,10 @@ class _QueueAction extends StatelessWidget {
       icon: Icon(
         icon,
         size: 16,
-        color: enabled ? ZInk.muted(context) : ZInk.ghost(context),
+        color: ZInk.muted(context),
       ),
       tooltip: tooltip,
-      onPressed: enabled ? onTap : null,
+      onPressed: onTap,
       visualDensity: VisualDensity.compact,
     );
   }
@@ -3897,7 +3975,7 @@ class _PendingFilesBar extends StatelessWidget {
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: ZInk.tile(context),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -3916,7 +3994,7 @@ class _PendingFilesBar extends StatelessWidget {
                   avatar: const Icon(Icons.attach_file, size: 14),
                   label: Text(
                     files[i].fileName,
-                    style: const TextStyle(fontSize: 11),
+                    style: ZType.caption,
                   ),
                   onDeleted: () => onRemove(i),
                   deleteIcon: const Icon(Icons.close, size: 14),
@@ -4042,7 +4120,7 @@ class _InteractionCardState extends State<_InteractionCard> {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: ZColors.warning.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
         border: Border.all(color: ZColors.warning.withValues(alpha: 0.35)),
       ),
       child: Column(
@@ -4059,7 +4137,7 @@ class _InteractionCardState extends State<_InteractionCard> {
               Expanded(
                 child: Text(
                   title,
-                  style: TextStyle(fontSize: 13, color: ZInk.solid(context)),
+                  style: ZType.body.copyWith(color: ZInk.solid(context)),
                 ),
               ),
             ],
@@ -4070,7 +4148,7 @@ class _InteractionCardState extends State<_InteractionCard> {
               padding: const EdgeInsets.only(top: 6),
               child: Text(
                 '${payload['prompt']}',
-                style: TextStyle(fontSize: 12, color: ZInk.soft(context)),
+                style: ZType.sub.copyWith(color: ZInk.soft(context)),
               ),
             ),
           if (kind == 'permission' && payload['summary'] != null)
@@ -4078,7 +4156,7 @@ class _InteractionCardState extends State<_InteractionCard> {
               padding: const EdgeInsets.only(top: 6),
               child: Text(
                 '${payload['summary']}',
-                style: TextStyle(fontSize: 12, color: ZInk.soft(context)),
+                style: ZType.sub.copyWith(color: ZInk.soft(context)),
               ),
             ),
           const SizedBox(height: 8),
@@ -4102,7 +4180,7 @@ class _InteractionCardState extends State<_InteractionCard> {
                           : () => _resolve(optionId: '${option['optionId']}'),
                       child: Text(
                         _optionLabel(option),
-                        style: const TextStyle(fontSize: 12),
+                        style: ZType.sub,
                       ),
                     ),
               ],
@@ -4120,7 +4198,7 @@ class _InteractionCardState extends State<_InteractionCard> {
                 Expanded(
                   child: TextField(
                     controller: _freeTextController,
-                    style: const TextStyle(fontSize: 13),
+                    style: ZType.body,
                     decoration: InputDecoration(
                       isDense: true,
                       hintText: tr(context, 'chat.interact.hint'),
@@ -4143,7 +4221,7 @@ class _InteractionCardState extends State<_InteractionCard> {
               child: Padding(
                 padding: const EdgeInsets.only(top: 2),
                 child: InkWell(
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: BorderRadius.circular(ZRadius.mini),
                   onTap: _busy ? null : () => widget.onSnooze!(),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
@@ -4161,8 +4239,7 @@ class _InteractionCardState extends State<_InteractionCard> {
                         const SizedBox(width: 4),
                         Text(
                           tr(context, 'chat.interact.snooze'),
-                          style: TextStyle(
-                            fontSize: 11.5,
+                          style: ZType.caption.copyWith(
                             color: ZInk.muted(context),
                           ),
                         ),
@@ -4255,18 +4332,14 @@ class _QuestionItemState extends State<_QuestionItem> {
         children: [
           Text(
             '${widget.index + 1}. $label',
-            style: TextStyle(
-              fontSize: 12,
-              height: 1.4,
-              color: ZInk.solid(context),
-            ),
+            style: ZType.sub.copyWith(height: 1.4, color: ZInk.solid(context)),
           ),
           if (q['description'] != null)
             Padding(
               padding: const EdgeInsets.only(top: 2),
               child: Text(
                 '${q['description']}',
-                style: TextStyle(fontSize: 11, color: ZInk.faint(context)),
+                style: ZType.caption.copyWith(color: ZInk.faint(context)),
               ),
             ),
           if (options is List && options.isNotEmpty)
@@ -4281,7 +4354,7 @@ class _QuestionItemState extends State<_QuestionItem> {
                       FilterChip(
                         label: Text(
                           '${o['label'] ?? o['value'] ?? ''}',
-                          style: const TextStyle(fontSize: 12),
+                          style: ZType.sub,
                         ),
                         selected: _selected.contains('${o['value']}'),
                         onSelected: widget.busy
@@ -4317,7 +4390,7 @@ class _QuestionItemState extends State<_QuestionItem> {
                     : () => widget.onSelect(List.of(_selected)),
                 child: Text(
                   tr(context, 'chat.interact.submit'),
-                  style: const TextStyle(fontSize: 12),
+                  style: ZType.sub,
                 ),
               ),
             ),
@@ -4392,7 +4465,8 @@ class _ModelModeSheet extends StatelessWidget {
 
     return SafeArea(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.symmetric(
+            horizontal: ZSpacing.screen, vertical: 20),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -4401,13 +4475,13 @@ class _ModelModeSheet extends StatelessWidget {
               _isDraft
                   ? tr(context, 'chat.sheet.draftTitle')
                   : tr(context, 'chat.sheet.title'),
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              style: ZType.heading,
             ),
             const SizedBox(height: 16),
             if (modelOption != null && modelOption.options.isNotEmpty) ...[
               Text(
                 modelOption.name,
-                style: TextStyle(fontSize: 13, color: ZInk.solid(context)),
+                style: ZType.body.copyWith(color: ZInk.solid(context)),
               ),
               const SizedBox(height: 8),
               // Official web menu groups models by provider (BigModel /
@@ -4420,8 +4494,7 @@ class _ModelModeSheet extends StatelessWidget {
                     padding: EdgeInsets.only(top: i == 0 ? 0 : 10, bottom: 2),
                     child: Text(
                       v.modelProviderName ?? v.name,
-                      style: TextStyle(
-                        fontSize: 11,
+                      style: ZType.caption.copyWith(
                         fontWeight: FontWeight.w600,
                         color: ZInk.ghost(context),
                       ),
@@ -4441,13 +4514,12 @@ class _ModelModeSheet extends StatelessWidget {
                   ),
                   title: Text(
                     v.name,
-                    style: TextStyle(fontSize: 13, color: ZInk.solid(context)),
+                    style: ZType.body.copyWith(color: ZInk.solid(context)),
                   ),
                   subtitle: v.modelProviderName != null
                       ? Text(
                           v.modelProviderName!,
-                          style: TextStyle(
-                            fontSize: 11,
+                          style: ZType.caption.copyWith(
                             color: ZInk.faint(context),
                           ),
                         )
@@ -4497,12 +4569,12 @@ class _ModelModeSheet extends StatelessWidget {
                 trP(context, 'chat.sheet.currentModel', [
                   state?.currentModel ?? '',
                 ]),
-                style: TextStyle(fontSize: 12, color: ZInk.muted(context)),
+                style: ZType.sub.copyWith(color: ZInk.muted(context)),
               ),
             if (thoughtOption != null && thoughtOption.options.isNotEmpty) ...[
               Text(
                 thoughtOption.name,
-                style: TextStyle(fontSize: 13, color: ZInk.solid(context)),
+                style: ZType.body.copyWith(color: ZInk.solid(context)),
               ),
               const SizedBox(height: 8),
               Wrap(
@@ -4545,7 +4617,7 @@ class _ModelModeSheet extends StatelessWidget {
             ] else if ((state?.thoughtLevels ?? const []).isNotEmpty) ...[
               Text(
                 tr(context, 'chat.sheet.thought'),
-                style: TextStyle(fontSize: 13, color: ZInk.solid(context)),
+                style: ZType.body.copyWith(color: ZInk.solid(context)),
               ),
               const SizedBox(height: 8),
               Wrap(
@@ -4571,7 +4643,7 @@ class _ModelModeSheet extends StatelessWidget {
             const SizedBox(height: 16),
             Text(
               tr(context, 'chat.sheet.mode'),
-              style: TextStyle(fontSize: 13, color: ZInk.solid(context)),
+              style: ZType.body.copyWith(color: ZInk.solid(context)),
             ),
             const SizedBox(height: 8),
             if (modeOption != null && modeOption.options.isNotEmpty)
@@ -4590,13 +4662,12 @@ class _ModelModeSheet extends StatelessWidget {
                   ),
                   title: Text(
                     v.name,
-                    style: TextStyle(fontSize: 13, color: ZInk.solid(context)),
+                    style: ZType.body.copyWith(color: ZInk.solid(context)),
                   ),
                   subtitle: v.description != null
                       ? Text(
                           v.description!,
-                          style: TextStyle(
-                            fontSize: 11,
+                          style: ZType.caption.copyWith(
                             color: ZInk.faint(context),
                           ),
                         )
@@ -4631,11 +4702,11 @@ class _ModelModeSheet extends StatelessWidget {
                   ),
                   title: Text(
                     tr(context, 'chat.mode.$m'),
-                    style: TextStyle(fontSize: 13, color: ZInk.solid(context)),
+                    style: ZType.body.copyWith(color: ZInk.solid(context)),
                   ),
                   subtitle: Text(
                     tr(context, 'chat.mode.$m.desc'),
-                    style: TextStyle(fontSize: 11, color: ZInk.faint(context)),
+                    style: ZType.caption.copyWith(color: ZInk.faint(context)),
                   ),
                   onTap: () {
                     if (_isDraft) {
@@ -4655,7 +4726,7 @@ class _ModelModeSheet extends StatelessWidget {
               const SizedBox(height: 16),
               Text(
                 tr(context, 'chat.sheet.followup'),
-                style: TextStyle(fontSize: 13, color: ZInk.solid(context)),
+                style: ZType.body.copyWith(color: ZInk.solid(context)),
               ),
               const SizedBox(height: 8),
               Wrap(
@@ -4684,7 +4755,7 @@ class _ModelModeSheet extends StatelessWidget {
               const SizedBox(height: 16),
               Text(
                 tr(context, 'chat.sheet.other'),
-                style: TextStyle(fontSize: 13, color: ZInk.solid(context)),
+                style: ZType.body.copyWith(color: ZInk.solid(context)),
               ),
               const SizedBox(height: 8),
               for (final o in _otherOptions)
@@ -4696,19 +4767,13 @@ class _ModelModeSheet extends StatelessWidget {
                       Expanded(
                         child: Text(
                           o.name,
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: ZInk.solid(context),
-                          ),
+                          style: ZType.body.copyWith(color: ZInk.solid(context)),
                         ),
                       ),
                       const SizedBox(width: 8),
                       Text(
                         '${o.currentValue}',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: ZInk.muted(context),
-                        ),
+                        style: ZType.sub.copyWith(color: ZInk.muted(context)),
                       ),
                     ],
                   ),
@@ -4790,7 +4855,8 @@ class _UsageSheet extends StatelessWidget {
             ),
             child: SingleChildScrollView(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+                padding: const EdgeInsets.fromLTRB(
+                    ZSpacing.screen, 4, ZSpacing.screen, 24),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -4826,7 +4892,7 @@ class _UsageSheet extends StatelessWidget {
             Flexible(
               child: Text(
                 tr(context, 'chat.usage.context'),
-                style: TextStyle(fontSize: 13, color: ZInk.muted(context)),
+                style: ZType.body.copyWith(color: ZInk.muted(context)),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
@@ -4837,7 +4903,7 @@ class _UsageSheet extends StatelessWidget {
                 _fmtCompactTokens(context, view.max!),
                 _fmtPercent(ratio),
               ]),
-              style: _usageNumber(context, 13),
+              style: _usageNumber(context, ZType.body),
             ),
           ],
         ),
@@ -4882,14 +4948,13 @@ class _UsageSheet extends StatelessWidget {
                   Expanded(
                     child: Text(
                       tr(context, _breakdownLabelKey(item.source)),
-                      style: TextStyle(
-                          fontSize: 12.5, color: ZInk.muted(context)),
+                      style: ZType.sub.copyWith(color: ZInk.muted(context)),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   const SizedBox(width: 8),
                   Text(_fmtPercent(item.percent),
-                      style: _usageNumber(context, 12)),
+                      style: _usageNumber(context, ZType.sub)),
                 ],
               ),
             ),
@@ -4908,12 +4973,12 @@ class _UsageSheet extends StatelessWidget {
           Flexible(
             child: Text(
               tr(context, 'chat.contextUsage.cacheHitRate'),
-              style: TextStyle(fontSize: 13, color: ZInk.muted(context)),
+              style: ZType.body.copyWith(color: ZInk.muted(context)),
               overflow: TextOverflow.ellipsis,
             ),
           ),
           const SizedBox(width: 8),
-          Text(_fmtPercent(hitRate), style: _usageNumber(context, 13)),
+          Text(_fmtPercent(hitRate), style: _usageNumber(context, ZType.body)),
         ],
       ),
     );
@@ -4950,8 +5015,7 @@ class _UsageSheet extends StatelessWidget {
             children: [
               Text(
                 tr(context, 'chat.usage.remaining.title'),
-                style: TextStyle(
-                  fontSize: 13,
+                style: ZType.body.copyWith(
                   fontWeight: FontWeight.w600,
                   color: ZInk.solid(context),
                 ),
@@ -4961,8 +5025,7 @@ class _UsageSheet extends StatelessWidget {
                   padding: const EdgeInsets.only(top: 12),
                   child: Text(
                     trP(context, 'chat.usage.remaining.resetsIn', [countdown]),
-                    style: const TextStyle(
-                        fontSize: 12.5, color: ZColors.usageGreen),
+                    style: ZType.sub.copyWith(color: ZColors.usageGreen),
                   ),
                 ),
               if (percent != null)
@@ -4975,12 +5038,11 @@ class _UsageSheet extends StatelessWidget {
                             horizontal: 10, vertical: 3),
                         decoration: BoxDecoration(
                           color: ZColors.usageGreen.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(7),
+                          borderRadius: BorderRadius.circular(ZRadius.field),
                         ),
                         child: Text(
                           tr(context, 'chat.usage.limit.fiveHour'),
-                          style: const TextStyle(
-                            fontSize: 11.5,
+                          style: ZType.caption.copyWith(
                             height: 1.2,
                             color: ZColors.usageGreen,
                           ),
@@ -4994,7 +5056,7 @@ class _UsageSheet extends StatelessWidget {
                           [_fmtPercentValue(percent)],
                         ),
                         style:
-                            TextStyle(fontSize: 12, color: ZInk.muted(context)),
+                            ZType.sub.copyWith(color: ZInk.muted(context)),
                       ),
                     ],
                   ),
@@ -5006,7 +5068,7 @@ class _UsageSheet extends StatelessWidget {
                       horizontal: 12, vertical: 9),
                   decoration: BoxDecoration(
                     color: ZInk.hairline(context),
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(ZRadius.field),
                     border: Border.all(
                       color: ZColors.usageGreen.withValues(alpha: 0.35),
                     ),
@@ -5017,8 +5079,7 @@ class _UsageSheet extends StatelessWidget {
                       Expanded(
                         child: Text(
                           trP(context, 'chat.usage.resetCredits', ['$credits']),
-                          style: TextStyle(
-                              fontSize: 12, color: ZInk.muted(context)),
+                          style: ZType.sub.copyWith(color: ZInk.muted(context)),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
@@ -5033,9 +5094,9 @@ class _UsageSheet extends StatelessWidget {
                               horizontal: 14, vertical: 5),
                           minimumSize: Size.zero,
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          textStyle: const TextStyle(fontSize: 12),
+                          textStyle: ZType.sub,
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
+                            borderRadius: BorderRadius.circular(ZRadius.field),
                           ),
                         ),
                         child: Text(tr(context, 'chat.quota.useReset')),
@@ -5104,13 +5165,13 @@ class _UsageSheet extends StatelessWidget {
       children: [
         Text(
           name,
-          style: TextStyle(fontSize: 12, color: ZInk.muted(context)),
+          style: ZType.sub.copyWith(color: ZInk.muted(context)),
           overflow: TextOverflow.ellipsis,
         ),
         const SizedBox(height: 5),
         Text(
           _fmtPercentValue(percent),
-          style: _usageNumber(context, 13.5),
+          style: _usageNumber(context, ZType.bodyStrong),
         ),
         const SizedBox(height: 7),
         _UsageBar(
@@ -5191,10 +5252,10 @@ double _legendOpacity(int index) {
 }
 
 /// Tabular-figure value style of the panel (percentages and token counts
-/// line up column-wise, mirroring the reference's tabular-nums).
-TextStyle _usageNumber(BuildContext context, double size) {
-  return TextStyle(
-    fontSize: size,
+/// line up column-wise, mirroring the reference's tabular-nums). [base] picks
+/// the tier — the panel uses [ZType.body], [ZType.sub] and [ZType.bodyStrong].
+TextStyle _usageNumber(BuildContext context, TextStyle base) {
+  return base.copyWith(
     color: ZInk.solid(context),
     fontFeatures: const [FontFeature.tabularFigures()],
   );
@@ -5305,14 +5366,15 @@ class _JsonSheet extends StatelessWidget {
     const encoder = JsonEncoder.withIndent('  ');
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.symmetric(
+            horizontal: ZSpacing.screen, vertical: 20),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               title,
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              style: ZType.heading,
             ),
             const SizedBox(height: 12),
             Flexible(
@@ -5321,7 +5383,7 @@ class _JsonSheet extends StatelessWidget {
                   data == null
                       ? tr(context, 'chat.json.empty')
                       : encoder.convert(data),
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                  style: ZType.caption.copyWith(fontFamily: 'monospace'),
                 ),
               ),
             ),
@@ -5376,11 +5438,11 @@ class _SlashCommandBar extends StatelessWidget {
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
           color: ZColors.darkCard,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(ZRadius.tile),
         ),
         child: Text(
           tr(context, 'chat.slash.empty'),
-          style: TextStyle(fontSize: 12, color: ZInk.faint(context)),
+          style: ZType.sub.copyWith(color: ZInk.faint(context)),
         ),
       );
     }
@@ -5389,7 +5451,7 @@ class _SlashCommandBar extends StatelessWidget {
       constraints: const BoxConstraints(maxHeight: 260),
       decoration: BoxDecoration(
         color: ZColors.darkCard,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
         border: Border.all(color: ZInk.hairline(context)),
       ),
       child: ListView(
@@ -5407,11 +5469,11 @@ class _SlashCommandBar extends StatelessWidget {
               ),
               title: Text(
                 command.isSkill ? '\$${command.name}' : '/${command.name}',
-                style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
+                style: ZType.body.copyWith(fontFamily: 'monospace'),
               ),
               subtitle: Text(
                 command.description,
-                style: TextStyle(fontSize: 11, color: ZInk.faint(context)),
+                style: ZType.caption.copyWith(color: ZInk.faint(context)),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -5441,7 +5503,8 @@ class _SkillsPickerSheet extends StatelessWidget {
     final list = skills.where((s) => s.enabled).toList();
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+        padding: const EdgeInsets.fromLTRB(
+            ZSpacing.screen, 4, ZSpacing.screen, 20),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -5450,10 +5513,7 @@ class _SkillsPickerSheet extends StatelessWidget {
               children: [
                 Text(
                   tr(context, 'chat.skills.title'),
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  style: ZType.heading,
                 ),
                 const Spacer(),
                 IconButton(
@@ -5478,7 +5538,7 @@ class _SkillsPickerSheet extends StatelessWidget {
                 padding: const EdgeInsets.all(16),
                 child: Text(
                   tr(context, 'chat.skills.empty'),
-                  style: TextStyle(fontSize: 13, color: ZInk.muted(context)),
+                  style: ZType.body.copyWith(color: ZInk.muted(context)),
                 ),
               )
             else
@@ -5496,16 +5556,14 @@ class _SkillsPickerSheet extends StatelessWidget {
                         ),
                         title: Text(
                           '\$${s.name}',
-                          style: const TextStyle(
-                            fontSize: 14,
+                          style: ZType.body.copyWith(
                             fontFamily: 'monospace',
                           ),
                         ),
                         subtitle: s.description != null
                             ? Text(
                                 s.description!,
-                                style: TextStyle(
-                                  fontSize: 12,
+                                style: ZType.sub.copyWith(
                                   color: ZInk.faint(context),
                                 ),
                                 maxLines: 2,
@@ -5663,6 +5721,9 @@ class _InputBarState extends State<_InputBar> {
   @override
   Widget build(BuildContext context) {
     final running = state?.isRunning ?? false;
+    // Official web swaps the hint once messages are queued, so typing more
+    // keeps appending to the queue instead of looking like a fresh message.
+    final queued = state?.queueItems.isNotEmpty ?? false;
     // Official composer: icon-only buttons below sm (640), icon+label above.
     final wide = MediaQuery.sizeOf(context).width >= 640;
     return SafeArea(
@@ -5672,7 +5733,7 @@ class _InputBarState extends State<_InputBar> {
           padding: const EdgeInsets.fromLTRB(6, 6, 6, 6),
           decoration: BoxDecoration(
             color: ZColors.darkCard,
-            borderRadius: BorderRadius.circular(22),
+            borderRadius: BorderRadius.circular(ZRadius.tile),
             border: Border.all(color: ZInk.hairline(context)),
           ),
           child: Column(
@@ -5682,9 +5743,12 @@ class _InputBarState extends State<_InputBar> {
                 controller: controller,
                 minLines: 1,
                 maxLines: 6,
-                style: TextStyle(fontSize: 14, color: ZInk.solid(context)),
+                style: ZType.body.copyWith(color: ZInk.solid(context)),
                 decoration: InputDecoration(
-                  hintText: tr(context, 'chat.input.hint'),
+                  hintText: tr(
+                    context,
+                    queued ? 'chat.input.hint.queued' : 'chat.input.hint',
+                  ),
                   hintStyle: TextStyle(color: ZInk.ghost(context)),
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,
@@ -5732,13 +5796,15 @@ class _InputBarState extends State<_InputBar> {
                       showLabel: wide,
                     ),
                   const SizedBox(width: 4),
-                  running
-                      ? _StopButton(onStop: () => _stop(context))
-                      : _SendButton(
-                          enabled: _hasInput && !sending,
-                          sending: sending,
-                          onSend: onSend,
-                        ),
+                  // Official web keeps the composer sendable while a turn
+                  // runs — follow-ups queue mid-turn — with stop appearing
+                  // at the far right.
+                  _SendButton(
+                    enabled: _hasInput && !sending,
+                    sending: sending,
+                    onSend: onSend,
+                  ),
+                  if (running) _StopButton(onStop: () => _stop(context)),
                 ],
               ),
             ],
@@ -5845,7 +5911,7 @@ class _ControlChip extends StatelessWidget {
   Widget build(BuildContext context) {
     if (!showLabel) {
       return InkWell(
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
         onTap: onTap,
         child: SizedBox(
           width: 28,
@@ -5855,13 +5921,13 @@ class _ControlChip extends StatelessWidget {
       );
     }
     return InkWell(
-      borderRadius: BorderRadius.circular(14),
+      borderRadius: BorderRadius.circular(ZRadius.tile),
       onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
           color: ZInk.tile(context),
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(ZRadius.tile),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -5872,7 +5938,7 @@ class _ControlChip extends StatelessWidget {
               label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 11, color: ZInk.soft(context)),
+              style: ZType.caption.copyWith(color: ZInk.soft(context)),
             ),
           ],
         ),
@@ -5905,9 +5971,13 @@ class _UsageRing extends StatelessWidget {
           child: Center(
             child: Text(
               '${(ratio * 100).round()}',
+              // Deliberate off-scale size: the label has to fit the digits
+              // inside an 18px ring; ZType.caption would overflow it.
               style: TextStyle(
                 fontSize: 6.5,
                 fontWeight: FontWeight.w600,
+                fontFamily: zFontFamily,
+                fontFamilyFallback: zFontFallback,
                 color: color,
               ),
             ),
@@ -5967,29 +6037,43 @@ class _SendButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: enabled ? ZColors.sky500 : ZColors.sky500.withValues(alpha: 0.4),
-        shape: BoxShape.circle,
-      ),
-      child: IconButton(
-        onPressed: enabled ? onSend : null,
-        icon: sending
-            ? const SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.white,
-                ),
-              )
-            : Icon(
-                Icons.arrow_upward,
-                size: 18,
-                color: enabled
-                    ? Colors.white
-                    : Colors.white.withValues(alpha: 0.7),
-              ),
+    // Official web: ~30px squircle (ZRadius.mini) with the arrow glyph.
+    // The InkWell spans 48px so the touch target stays ≥48.
+    return SizedBox(
+      width: 48,
+      height: 48,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(ZRadius.mini),
+        onTap: enabled ? onSend : null,
+        child: Center(
+          child: Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color:
+                  enabled ? ZColors.sky500 : ZColors.sky500.withValues(alpha: 0.4),
+              borderRadius: BorderRadius.circular(ZRadius.mini),
+            ),
+            child: Center(
+              child: sending
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : Icon(
+                      Icons.arrow_upward,
+                      size: 18,
+                      color: enabled
+                          ? Colors.white
+                          : Colors.white.withValues(alpha: 0.7),
+                    ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -6002,15 +6086,29 @@ class _StopButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: ZColors.danger.withValues(alpha: 0.2),
-        shape: BoxShape.circle,
-      ),
-      child: IconButton(
-        tooltip: tr(context, 'tasks.stop'),
-        onPressed: onStop,
-        icon: const Icon(Icons.stop, color: ZColors.danger, size: 20),
+    // Same squircle as the send button (they swap in place).
+    return SizedBox(
+      width: 48,
+      height: 48,
+      child: Tooltip(
+        message: tr(context, 'tasks.stop'),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(ZRadius.mini),
+          onTap: onStop,
+          child: Center(
+            child: Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: ZColors.danger.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(ZRadius.mini),
+              ),
+              child: Center(
+                child: Icon(Icons.stop, color: ZColors.danger, size: 20),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

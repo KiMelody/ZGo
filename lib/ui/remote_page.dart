@@ -199,9 +199,9 @@ class _RemotePageState extends State<RemotePage> {
           children: [
             Text(widget.device.label,
                 style:
-                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                    ZType.heading),
             Text(linking ? tr(context, 'tasks.deepLinking') : 'zcode.z.ai',
-                style: TextStyle(fontSize: 11, color: ZInk.faint(context))),
+                style: ZType.caption.copyWith(color: ZInk.faint(context))),
           ],
         ),
         actions: [
@@ -281,10 +281,7 @@ class _RemotePageState extends State<RemotePage> {
                       size: 48, color: ZInk.ghost(context)),
                   const SizedBox(height: 16),
                   Text(tr(context, 'remote.error.title'),
-                      style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          color: ZInk.solid(context))),
+                      style: ZType.heading.copyWith(color: ZInk.solid(context))),
                   const SizedBox(height: 8),
                   Text(
                     _errorDescription?.isNotEmpty == true
@@ -292,7 +289,7 @@ class _RemotePageState extends State<RemotePage> {
                         : tr(context, 'remote.error.hint'),
                     textAlign: TextAlign.center,
                     style:
-                        TextStyle(fontSize: 13, color: ZInk.faint(context)),
+                        ZType.body.copyWith(color: ZInk.faint(context)),
                   ),
                   const SizedBox(height: 20),
                   FilledButton(

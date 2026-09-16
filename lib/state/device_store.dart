@@ -39,11 +39,11 @@ class Device {
     final params = RemoteConnectionParams.parse(url);
     return Device(
       id: generateUuid(),
+      // Empty when the URL carries no device name: the display layer falls
+      // back to the localized 'devices.unnamed' (never persist copy).
       label: (label != null && label.trim().isNotEmpty)
           ? label.trim()
-          : (params?.deviceName ??
-              params?.source.host ??
-              '未命名设备'),
+          : (params?.deviceName ?? params?.source.host ?? ''),
       url: url.trim(),
       addedAt: DateTime.now().millisecondsSinceEpoch,
       sortOrder: sortOrder,
@@ -77,7 +77,7 @@ class Device {
 
   factory Device.fromJson(Map<String, dynamic> j) => Device(
         id: j['id'] as String? ?? generateUuid(),
-        label: j['label'] as String? ?? '未命名设备',
+        label: j['label'] as String? ?? '',
         url: j['url'] as String? ?? '',
         addedAt: j['addedAt'] as int? ?? DateTime.now().millisecondsSinceEpoch,
         lastUsedAt: j['lastUsedAt'] as int?,

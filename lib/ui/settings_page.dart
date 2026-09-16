@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -68,7 +69,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   width: 420,
                   child: SingleChildScrollView(
                     child: SelectableText(update.body!,
-                        style: const TextStyle(fontSize: 12, height: 1.5)),
+                        style: ZType.sub),
                   ),
                 ),
           actions: [
@@ -129,7 +130,10 @@ class _SettingsPageState extends State<SettingsPage> {
                       ),
                     ],
                     selected: {theme.mode},
-                    onSelectionChanged: (s) => theme.setMode(s.first),
+                    onSelectionChanged: (s) {
+                      HapticFeedback.selectionClick();
+                      theme.setMode(s.first);
+                    },
                     showSelectedIcon: false,
                   ),
                 ],
@@ -154,7 +158,10 @@ class _SettingsPageState extends State<SettingsPage> {
                       ),
                     ],
                     selected: {ui.locale},
-                    onSelectionChanged: (s) => ui.setLocale(s.first),
+                    onSelectionChanged: (s) {
+                      HapticFeedback.selectionClick();
+                      ui.setLocale(s.first);
+                    },
                     showSelectedIcon: false,
                   ),
                 ],
@@ -204,9 +211,8 @@ class _SettingsPageState extends State<SettingsPage> {
               title: Text(tr(context, 'settings.usageStats')),
               subtitle: Text(tr(context, 'settings.usageStatsHint')),
               trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.of(context).push(MaterialPageRoute(
-                builder: (_) =>
-                    UsageStatsPage(store: widget.store, ui: widget.ui),
+              onTap: () => Navigator.of(context).push(zRoute(
+                (_) => UsageStatsPage(store: widget.store, ui: widget.ui),
               )),
             ),
             ListTile(
@@ -225,8 +231,8 @@ class _SettingsPageState extends State<SettingsPage> {
               leading: const Icon(Icons.info_outline),
               title: Text(tr(context, 'settings.about')),
               trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.of(context).push(MaterialPageRoute(
-                builder: (_) => AboutPage(),
+              onTap: () => Navigator.of(context).push(zRoute(
+                (_) => AboutPage(),
               )),
             ),
           ],
@@ -239,8 +245,7 @@ class _SettingsPageState extends State<SettingsPage> {
         padding: const EdgeInsets.fromLTRB(16, 20, 16, 6),
         child: Text(
           text,
-          style: TextStyle(
-            fontSize: 12,
+          style: ZType.sub.copyWith(
             fontWeight: FontWeight.w600,
             color: ZInk.muted(context),
           ),

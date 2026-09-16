@@ -9,13 +9,13 @@ import 'theme.dart';
 import 'ui_settings.dart';
 import 'widgets/dropdown_field.dart';
 
-/// One 定时任务模板 idea (official moreIdeas trio): dictionary key plus
-/// its cron preset and display schedule.
+/// One 定时任务模板 idea (official moreIdeas trio): dictionary key plus its
+/// cron preset. Every display string comes from the table under
+/// `auto.tpl.<key>.*`, so only the key is stored here.
 class _Idea {
   final String key;
-  final String schedule;
   final String cron;
-  const _Idea(this.key, this.schedule, this.cron);
+  const _Idea(this.key, this.cron);
 }
 
 /// Server-side automations of one device (desktop zcode-cron-scheduler).
@@ -64,11 +64,10 @@ class _AutomationsPageState extends State<AutomationsPage> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(tr(context, 'auto.title'),
-                    style: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.w600)),
+                    style: ZType.heading),
                 Text(tr(context, 'auto.subtitle'),
                     style:
-                        TextStyle(fontSize: 11, color: ZInk.faint(context))),
+                        ZType.caption.copyWith(color: ZInk.faint(context))),
               ],
             ),
           ),
@@ -140,9 +139,9 @@ class AutomationsPane extends StatefulWidget {
 
 class _AutomationsPaneState extends State<AutomationsPane> {
   static const _templateIdeas = [
-    _Idea('weeklyReview', '每周五 16:00', '0 16 * * 5'),
-    _Idea('meetingPrep', '每周五 16:00', '0 16 * * 5'),
-    _Idea('contentIdeas', '每周一 9:00', '0 9 * * 1'),
+    _Idea('weeklyReview', '0 16 * * 5'),
+    _Idea('meetingPrep', '0 16 * * 5'),
+    _Idea('contentIdeas', '0 9 * * 1'),
   ];
 
   List<AutomationItem> _items = const [];
@@ -307,7 +306,7 @@ class _AutomationsPaneState extends State<AutomationsPane> {
             const SizedBox(height: 16),
             Text(tr(context, 'auto.loading'),
                 style:
-                    TextStyle(fontSize: 13, color: ZInk.faint(context))),
+                    ZType.body.copyWith(color: ZInk.faint(context))),
           ],
         ),
       );
@@ -323,14 +322,11 @@ class _AutomationsPaneState extends State<AutomationsPane> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(tr(context, 'auto.empty'),
-                style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: ZInk.solid(context))),
+                style: ZType.bodyStrong.copyWith(color: ZInk.solid(context))),
             const SizedBox(height: 4),
             Text(tr(context, 'auto.empty.desc'),
                 style:
-                    TextStyle(fontSize: 12.5, color: ZInk.faint(context))),
+                    ZType.sub.copyWith(color: ZInk.faint(context))),
             const SizedBox(height: 12),
             FilledButton.tonalIcon(
               onPressed: () => _showSheet(),
@@ -389,24 +385,21 @@ Future<void> _pickTemplate() async {
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
             child: Text(tr(sheetCtx, 'auto.templates'),
-                style: const TextStyle(
-                    fontSize: 15, fontWeight: FontWeight.w600)),
+                style: ZType.heading),
           ),
           for (final idea in _templateIdeas)
             ListTile(
               dense: true,
               title: Text(tr(sheetCtx, 'auto.tpl.${idea.key}.title'),
-                  style: const TextStyle(
-                      fontSize: 13.5, fontWeight: FontWeight.w600)),
+                  style: ZType.bodyStrong),
               subtitle: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(idea.schedule,
+                  Text(tr(sheetCtx, 'auto.tpl.${idea.key}.schedule'),
                       style:
-                          TextStyle(fontSize: 11, color: ZColors.sky500)),
+                          ZType.caption.copyWith(color: ZColors.sky500)),
                   Text(tr(sheetCtx, 'auto.tpl.${idea.key}.desc'),
-                      style: TextStyle(
-                          fontSize: 11.5, color: ZInk.muted(sheetCtx))),
+                      style: ZType.caption.copyWith(color: ZInk.muted(sheetCtx))),
                 ],
               ),
               trailing: Icon(Icons.arrow_forward_ios,
@@ -444,7 +437,7 @@ Future<void> _pickTemplate() async {
   Widget _unavailable(BuildContext context) {
     return Center(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.all(32),
+        padding: const EdgeInsets.all(ZSpacing.emptyState),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -452,16 +445,13 @@ Future<void> _pickTemplate() async {
             const SizedBox(height: 16),
             Text(
               tr(context, 'auto.unavailable.title'),
-              style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  color: ZInk.solid(context)),
+              style: ZType.heading.copyWith(color: ZInk.solid(context)),
             ),
             const SizedBox(height: 8),
             Text(
               tr(context, 'auto.unavailable.body'),
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: ZInk.faint(context)),
+              style: ZType.body.copyWith(color: ZInk.faint(context)),
             ),
             const SizedBox(height: 20),
             FilledButton(
@@ -477,14 +467,14 @@ Future<void> _pickTemplate() async {
   Widget _errorView(BuildContext context) {
     return Center(
       child: SingleChildScrollView(
-        padding: const EdgeInsets.all(32),
+        padding: const EdgeInsets.all(ZSpacing.emptyState),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
               trP(context, 'auto.loadFailed', [_error!]),
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: ZInk.faint(context)),
+              style: ZType.body.copyWith(color: ZInk.faint(context)),
             ),
             const SizedBox(height: 16),
             FilledButton(
@@ -536,8 +526,7 @@ Future<void> _pickTemplate() async {
                       Expanded(
                         child: Text(
                           item.title.isEmpty ? item.id : item.title,
-                          style: const TextStyle(
-                              fontSize: 14.5, fontWeight: FontWeight.w600),
+                          style: ZType.bodyStrong,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -547,12 +536,12 @@ Future<void> _pickTemplate() async {
                         item.enabled
                             ? tr(context, 'auto.enabled')
                             : tr(context, 'auto.disabled'),
-                        style: TextStyle(
-                            fontSize: 11,
+                        style: ZType.caption.copyWith(
                             fontWeight: FontWeight.w500,
                             color: item.enabled
                                 ? ZColors.success
-                                : ZInk.muted(context)),
+                                : ZInk.muted(context),
+                        ),
                       ),
                     ],
                   ),
@@ -560,7 +549,7 @@ Future<void> _pickTemplate() async {
                   Text(
                     describeTrigger(context, item),
                     style:
-                        TextStyle(fontSize: 12, color: ZInk.muted(context)),
+                        ZType.sub.copyWith(color: ZInk.muted(context)),
                   ),
                   if (item.prompt.isNotEmpty)
                     Padding(
@@ -569,8 +558,7 @@ Future<void> _pickTemplate() async {
                         item.prompt,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                            fontSize: 12, color: ZInk.muted(context)),
+                        style: ZType.sub.copyWith(color: ZInk.muted(context)),
                       ),
                     ),
                   if (item.lastRunAt != null || item.nextRunAtMs != null ||
@@ -588,8 +576,7 @@ Future<void> _pickTemplate() async {
                         if (item.runCount != null)
                           _runCountLabel(context, item),
                       ].join(' · '),
-                      style: TextStyle(
-                          fontSize: 11, color: ZInk.ghost(context)),
+                      style: ZType.caption.copyWith(color: ZInk.ghost(context)),
                     ),
                   ],
                 ],
@@ -936,8 +923,8 @@ class AutomationSheetState extends State<AutomationSheet> {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: EdgeInsets.fromLTRB(
-          20, 20, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
+      padding: EdgeInsets.fromLTRB(ZSpacing.screen, 20, ZSpacing.screen,
+          20 + MediaQuery.of(context).viewInsets.bottom),
       child: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -947,12 +934,12 @@ class AutomationSheetState extends State<AutomationSheet> {
               tr(context,
                   widget.initial == null ? 'auto.create' : 'auto.edit'),
               style:
-                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ZType.heading,
             ),
             const SizedBox(height: 4),
             Text(
               tr(context, 'auto.hint'),
-              style: TextStyle(fontSize: 11, color: ZInk.muted(context)),
+              style: ZType.caption.copyWith(color: ZInk.muted(context)),
             ),
             const SizedBox(height: 16),
             TextField(
@@ -982,10 +969,10 @@ class AutomationSheetState extends State<AutomationSheet> {
             // Official frequency presets; interval shapes come from the
             // custom-repeat dialog under 自定义….
             Text(tr(context, 'auto.preset'),
-                style: TextStyle(
-                    fontSize: 12,
+                style: ZType.sub.copyWith(
                     fontWeight: FontWeight.w600,
-                    color: ZInk.muted(context))),
+                    color: ZInk.muted(context),
+                )),
             const SizedBox(height: 8),
             DropdownField<FrequencyPreset>(
               value: _preset,
@@ -1026,7 +1013,7 @@ class AutomationSheetState extends State<AutomationSheet> {
                 _preset != FrequencyPreset.customInterval)
               InkWell(
                 onTap: _pickTime,
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(ZRadius.field),
                 child: InputDecorator(
                   decoration:
                       InputDecoration(labelText: tr(context, 'auto.time')),
@@ -1078,17 +1065,17 @@ class AutomationSheetState extends State<AutomationSheet> {
                     _interval.text.trim(),
                     tr(context, 'auto.intervalUnit.$_intervalUnit'),
                   ]),
-                  style: const TextStyle(fontSize: 13),
+                  style: ZType.body,
                 ),
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 dense: true,
                 title: Text(tr(context, 'auto.recurring'),
-                    style: const TextStyle(fontSize: 13)),
+                    style: ZType.body),
                 subtitle: Text(tr(context, 'auto.recurring.hint'),
                     style:
-                        TextStyle(fontSize: 11, color: ZInk.faint(context))),
+                        ZType.caption.copyWith(color: ZInk.faint(context))),
                 value: _recurring,
                 onChanged: (v) => setState(() => _recurring = v),
               ),
@@ -1119,7 +1106,7 @@ class AutomationSheetState extends State<AutomationSheet> {
                 child: Text(
                   trP(context, 'auto.schedule.preview',
                       [describeTrigger(context, previewItem)]),
-                  style: TextStyle(fontSize: 11, color: ZInk.ghost(context)),
+                  style: ZType.caption.copyWith(color: ZInk.ghost(context)),
                 ),
               );
             }),
@@ -1144,10 +1131,10 @@ class AutomationSheetState extends State<AutomationSheet> {
       tilePadding: EdgeInsets.zero,
       dense: true,
       title: Text(tr(context, 'auto.advanced'),
-          style: TextStyle(
-              fontSize: 12,
+          style: ZType.sub.copyWith(
               fontWeight: FontWeight.w600,
-              color: ZInk.muted(context))),
+              color: ZInk.muted(context),
+          )),
       initiallyExpanded: _advanced,
       children: [
         DropdownField<String?>(
@@ -1175,7 +1162,7 @@ class AutomationSheetState extends State<AutomationSheet> {
         const SizedBox(height: 10),
         TextField(
           controller: _targetTask,
-          style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
+          style: ZType.body.copyWith(fontFamily: 'monospace'),
           decoration: InputDecoration(
               labelText: tr(context, 'auto.targetTask')),
         ),
@@ -1243,7 +1230,7 @@ class _CustomRepeatDialogState extends State<CustomRepeatDialog> {
           size: 18,
           color: selected == value ? ZColors.sky500 : ZInk.ghost(context),
         ),
-        title: Text(label, style: const TextStyle(fontSize: 13)),
+        title: Text(label, style: ZType.body),
         onTap: onPick,
       );
 
@@ -1300,7 +1287,7 @@ class _CustomRepeatDialogState extends State<CustomRepeatDialog> {
             ),
             const SizedBox(height: 12),
             Text(tr(context, 'auto.custom.ends'),
-                style: TextStyle(fontSize: 12, color: ZInk.muted(context))),
+                style: ZType.sub.copyWith(color: ZInk.muted(context))),
             _endsChoice(
               context,
               selected: _neverEnds,
@@ -1327,7 +1314,7 @@ class _CustomRepeatDialogState extends State<CustomRepeatDialog> {
                   );
                   if (d != null) setState(() => _endDate = d);
                 },
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(ZRadius.field),
                 child: InputDecorator(
                   decoration:
                       InputDecoration(labelText: tr(context, 'auto.custom.dateLabel')),
@@ -1339,7 +1326,7 @@ class _CustomRepeatDialogState extends State<CustomRepeatDialog> {
             if (_estimatedRuns != null) ...[
               const SizedBox(height: 6),
               Text(trP(context, 'auto.custom.estRuns', ['$_estimatedRuns']),
-                  style: TextStyle(fontSize: 11, color: ZInk.faint(context))),
+                  style: ZType.caption.copyWith(color: ZInk.faint(context))),
             ],
           ],
         ),

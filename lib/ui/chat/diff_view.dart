@@ -194,7 +194,7 @@ class DiffView extends StatelessWidget {
       margin: const EdgeInsets.symmetric(vertical: 4),
       decoration: BoxDecoration(
         color: ZInk.codeBlockBg(context),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(ZRadius.field),
         border: Border.all(color: ZInk.hairline(context)),
       ),
       child: Column(
@@ -207,14 +207,14 @@ class DiffView extends StatelessWidget {
               decoration: BoxDecoration(
                 color: ZInk.tile(context),
                 borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(10)),
+                    top: Radius.circular(ZRadius.field)),
               ),
               child: Text(
                 diff.filePath!,
-                style: TextStyle(
-                    fontSize: 10.5,
+                style: ZType.caption.copyWith(
                     fontFamily: 'monospace',
-                    color: ZInk.muted(context)),
+                    color: ZInk.muted(context),
+                ),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
@@ -237,9 +237,8 @@ class DiffView extends StatelessWidget {
                         horizontal: 10, vertical: 1),
                     child: Text(
                       line.text.isEmpty ? ' ' : line.text,
-                      style: TextStyle(
+                      style: ZType.caption.copyWith(
                         fontFamily: 'monospace',
-                        fontSize: 11,
                         height: 1.45,
                         color: switch (line.type) {
                           DiffLineType.added => ZColors.success,
@@ -253,8 +252,9 @@ class DiffView extends StatelessWidget {
                   Padding(
                     padding: const EdgeInsets.all(8),
                     child: Text(tr(context, 'chat.diff.truncated'),
-                        style: TextStyle(
-                            fontSize: 10, color: ZInk.faint(context))),
+                        style: ZType.caption.copyWith(
+                            color: ZInk.faint(context),
+                        )),
                   ),
               ],
             ),

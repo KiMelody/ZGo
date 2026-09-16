@@ -128,7 +128,7 @@ class _QrScanPageState extends State<QrScanPage> {
             padding: const EdgeInsets.all(16),
             child: Text(
               tr(context, 'devices.scan.hint'),
-              style: TextStyle(color: ZInk.muted(context), fontSize: 12),
+              style: ZType.sub.copyWith(color: ZInk.muted(context)),
               textAlign: TextAlign.center,
             ),
           ),

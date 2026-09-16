@@ -134,8 +134,7 @@ class _ModelOptionFieldState extends State<ModelOptionField> {
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
                 child: Text(widget.labelText,
-                    style: const TextStyle(
-                        fontSize: 15, fontWeight: FontWeight.w600)),
+                    style: ZType.heading),
               ),
               if (_loading)
                 const Padding(
@@ -156,8 +155,7 @@ class _ModelOptionFieldState extends State<ModelOptionField> {
                         textAlign: TextAlign.center,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                            fontSize: 12, color: ZInk.faint(sheetCtx)),
+                        style: ZType.sub.copyWith(color: ZInk.faint(sheetCtx)),
                       ),
                     ),
                   )
@@ -184,11 +182,11 @@ class _ModelOptionFieldState extends State<ModelOptionField> {
         color: selected ? ZColors.sky500 : ZInk.ghost(sheetCtx),
       ),
       title: Text(name,
-          style: TextStyle(fontSize: 13, color: ZInk.solid(sheetCtx))),
+          style: ZType.body.copyWith(color: ZInk.solid(sheetCtx))),
       subtitle: subtitle != null && subtitle.isNotEmpty
           ? Text(subtitle,
               style:
-                  TextStyle(fontSize: 11, color: ZInk.faint(sheetCtx)))
+                  ZType.caption.copyWith(color: ZInk.faint(sheetCtx)))
           : null,
       onTap: () {
         Navigator.of(sheetCtx).pop();
@@ -201,7 +199,7 @@ class _ModelOptionFieldState extends State<ModelOptionField> {
   Widget build(BuildContext context) {
     final name = _displayName;
     return InkWell(
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(ZRadius.field),
       onTap: _openSheet,
       child: InputDecorator(
         decoration: InputDecoration(
@@ -215,9 +213,9 @@ class _ModelOptionFieldState extends State<ModelOptionField> {
         ),
         child: Text(
           name ?? widget.noneLabel ?? '—',
-          style: TextStyle(
-              fontSize: 13,
-              color: name == null ? ZInk.ghost(context) : ZInk.soft(context)),
+          style: ZType.body.copyWith(
+              color: name == null ? ZInk.ghost(context) : ZInk.soft(context),
+          ),
         ),
       ),
     );

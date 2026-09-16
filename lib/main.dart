@@ -15,6 +15,7 @@ import 'ui/remote_page.dart';
 import 'ui/task_list_page.dart';
 import 'ui/theme.dart';
 import 'ui/ui_settings.dart';
+import 'ui/widgets/device_name.dart';
 import 'widgets/home_widget_bridge.dart';
 
 void main() {
@@ -58,7 +59,7 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
   void initState() {
     super.initState();
     _theme.load();
-    _ui.load();
+    final uiLoaded = _ui.load();
     _scheduled.load();
     unawaited(_store.load().then((_) {
       HomeWidgetBridge.syncDevices(_store.devices);
@@ -68,7 +69,9 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
     // Local notifications: task events ride the sessions stream; off-peak
     // and automation results poll. Tapping deep-links to the conversation.
     _notifications.onTap = _handleNotificationTap;
-    unawaited(_notifications.init());
+    // Channel names are fixed the first time the channel is created, so wait
+    // for the stored locale before registering them.
+    unawaited(uiLoaded.then((_) => _notifications.init(locale: _ui.locale)));
     _hub.addListener(_syncNotifyHub);
     _syncNotifyHub();
     _notifyHub.start();
@@ -106,8 +109,8 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
     final context = _navigatorKey.currentContext;
     if (context == null || !context.mounted) return;
     if (_ui.nativeListEnabled && session != null) {
-      await Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => TaskListPage(
+      await Navigator.of(context).push(zRoute(
+        (_) => TaskListPage(
           store: _store,
           hub: _hub,
           device: device,
@@ -118,8 +121,8 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
     }
     await _hub.suspend(device.id);
     if (!context.mounted) return;
-    await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => RemotePage(device: device),
+    await Navigator.of(context).push(zRoute(
+      (_) => RemotePage(device: device),
     ));
     _hub.scheduleResume(device);
   }
@@ -144,11 +147,11 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
     final context = _navigatorKey.currentContext;
     if (context == null || !context.mounted) return;
     if (session != null) {
-      await Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => ChatPage(
+      await Navigator.of(context).push(zRoute(
+        (_) => ChatPage(
           gateway: session,
           sessionId: sessionId,
-          title: title ?? device.label,
+          title: title ?? deviceDisplayName(context, device.label),
           theme: _theme,
         ),
       ));
@@ -156,8 +159,8 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
     }
     await _hub.suspend(device.id);
     if (!context.mounted) return;
-    await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => RemotePage(
+    await Navigator.of(context).push(zRoute(
+      (_) => RemotePage(
         device: device,
         targetSessionId: sessionId,
         targetTitle: title,

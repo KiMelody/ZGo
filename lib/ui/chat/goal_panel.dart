@@ -70,11 +70,11 @@ class _GoalPanelState extends State<GoalPanel> {
         : const [];
   }
 
-  static String _fmtDuration(int seconds) {
+  static String _fmtDuration(BuildContext context, int seconds) {
     final m = seconds ~/ 60;
     final s = seconds % 60;
-    if (m <= 0) return '$s秒';
-    return '$m分${s.toString().padLeft(2, '0')}秒';
+    if (m <= 0) return trP(context, 'chat.time.secOnly', ['$s']);
+    return trP(context, 'chat.time.minSec', ['$m', '$s']);
   }
 
   Future<void> _togglePause(String sessionId, bool paused) async {
@@ -107,7 +107,7 @@ class _GoalPanelState extends State<GoalPanel> {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: ZInk.tile(context),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
         border: Border.all(color: ZInk.hairline(context)),
       ),
       child: Column(
@@ -117,13 +117,11 @@ class _GoalPanelState extends State<GoalPanel> {
           Row(
             children: [
               Text(tr(context, 'goalPanel.title'),
-                  style: const TextStyle(
-                      fontSize: 13.5, fontWeight: FontWeight.w600)),
+                  style: ZType.bodyStrong),
               const SizedBox(width: 8),
               if (used > 0)
-                Text(_fmtDuration(used),
-                    style: TextStyle(
-                        fontSize: 11.5, color: ZInk.muted(context))),
+                Text(_fmtDuration(context, used),
+                    style: ZType.caption.copyWith(color: ZInk.muted(context))),
               const Spacer(),
               InkWell(
                 onTap: _busy ? null : () => _togglePause(sessionId, paused),
@@ -145,12 +143,10 @@ class _GoalPanelState extends State<GoalPanel> {
               const SizedBox(width: 6),
               Expanded(
                 child: Text(title,
-                    style: TextStyle(
-                        fontSize: 12.5, color: ZInk.soft(context))),
+                    style: ZType.sub.copyWith(color: ZInk.soft(context))),
               ),
               Text('$done/$total',
-                  style: TextStyle(
-                      fontSize: 11.5, color: ZInk.muted(context))),
+                  style: ZType.caption.copyWith(color: ZInk.muted(context))),
             ],
           ),
           // ── process list
@@ -173,8 +169,9 @@ class _GoalPanelState extends State<GoalPanel> {
                     const SizedBox(width: 4),
                     Text(
                         trP(context, 'goalPanel.completedN', ['$done']),
-                        style: TextStyle(
-                            fontSize: 11.5, color: ZInk.muted(context))),
+                        style: ZType.caption.copyWith(
+                            color: ZInk.muted(context),
+                        )),
                   ],
                 ),
               ),
@@ -194,8 +191,7 @@ class _GoalPanelState extends State<GoalPanel> {
                           '${item['content'] ?? item['id'] ?? ''}',
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12,
+                          style: ZType.sub.copyWith(
                             color: item['status'] == 'completed'
                                 ? ZInk.faint(context)
                                 : ZInk.soft(context),
@@ -215,13 +211,11 @@ class _GoalPanelState extends State<GoalPanel> {
             Row(
               children: [
                 Text(tr(context, 'goalPanel.agents'),
-                    style: TextStyle(
-                        fontSize: 11.5, color: ZInk.muted(context))),
+                    style: ZType.caption.copyWith(color: ZInk.muted(context))),
                 const SizedBox(width: 6),
                 Text(trP(context, 'goalPanel.agentsRunning',
                     ['${_runningAgents.length}']),
-                    style: TextStyle(
-                        fontSize: 11.5, color: ZInk.muted(context))),
+                    style: ZType.caption.copyWith(color: ZInk.muted(context))),
               ],
             ),
             const SizedBox(height: 4),
@@ -245,8 +239,7 @@ class _GoalPanelState extends State<GoalPanel> {
                         child: Text('${a['title'] ?? a['subagentType'] ?? ''}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                                fontSize: 12, color: ZInk.soft(context))),
+                            style: ZType.sub.copyWith(color: ZInk.soft(context))),
                       ),
                       _AgentElapsed(startedAt: a['startedAt'] as num?),
                     ],
@@ -309,9 +302,10 @@ class _AgentElapsedState extends State<_AgentElapsed> {
     if (started == null) return const SizedBox.shrink();
     final secs =
         max(0, (_now?.millisecondsSinceEpoch ?? 0) - started) ~/ 1000;
-    final m = secs ~/ 60;
-    final s = secs % 60;
-    return Text('已运行 $m分${s.toString().padLeft(2, '0')}秒',
-        style: TextStyle(fontSize: 10.5, color: ZInk.faint(context)));
+    return Text(
+        trP(context, 'goalPanel.ranFor', [
+          _GoalPanelState._fmtDuration(context, secs),
+        ]),
+        style: ZType.caption.copyWith(color: ZInk.faint(context)));
   }
 }

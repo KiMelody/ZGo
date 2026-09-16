@@ -60,10 +60,10 @@ class _UsageStatsPageState extends State<UsageStatsPage> {
               Padding(
                 padding: const EdgeInsets.only(left: 4, bottom: 6),
                 child: Text(tr(context, 'usage.perDevice'),
-                    style: TextStyle(
-                        fontSize: 12,
+                    style: ZType.sub.copyWith(
                         fontWeight: FontWeight.w600,
-                        color: ZInk.muted(context))),
+                        color: ZInk.muted(context),
+                    )),
               ),
               for (final d in devices) ...[
                 Card(
@@ -77,9 +77,7 @@ class _UsageStatsPageState extends State<UsageStatsPage> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(d.label,
-                                  style: const TextStyle(
-                                      fontSize: 14.5,
-                                      fontWeight: FontWeight.w600),
+                                  style: ZType.bodyStrong,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis),
                               const SizedBox(height: 4),
@@ -89,27 +87,26 @@ class _UsageStatsPageState extends State<UsageStatsPage> {
                                         relativeTime(context, d.lastUsedAt!)
                                       ])
                                     : tr(context, 'usage.neverUsed'),
-                                style: TextStyle(
-                                    fontSize: 12,
-                                    color: ZInk.muted(context)),
+                                style: ZType.sub.copyWith(
+                                    color: ZInk.muted(context),
+                                ),
                               ),
                               Text(
                                 trP(context, 'usage.addedAt', [
                                   relativeTime(context, d.addedAt)
                                 ]),
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    color: ZInk.ghost(context)),
+                                style: ZType.caption.copyWith(
+                                    color: ZInk.ghost(context),
+                                ),
                               ),
                             ],
                           ),
                         ),
                         Text(
                           trP(context, 'usage.opens', ['${d.useCount}']),
-                          style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: ZColors.sky500),
+                          style: ZType.bodyStrong.copyWith(
+                              color: ZColors.sky500,
+                          ),
                         ),
                       ],
                     ),
@@ -128,7 +125,7 @@ class _UsageStatsPageState extends State<UsageStatsPage> {
       BuildContext context, String label, String value, IconData icon) {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(ZSpacing.card),
         child: Row(
           children: [
             Icon(icon, size: 20, color: ZColors.sky500),
@@ -137,13 +134,11 @@ class _UsageStatsPageState extends State<UsageStatsPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(value,
-                    style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                        color: ZInk.solid(context))),
+                    style:
+                        ZType.display.copyWith(color: ZInk.solid(context))),
                 Text(label,
                     style:
-                        TextStyle(fontSize: 11, color: ZInk.muted(context))),
+                        ZType.caption.copyWith(color: ZInk.muted(context))),
               ],
             ),
           ],

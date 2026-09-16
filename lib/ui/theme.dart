@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -57,6 +58,238 @@ class ZColors {
   static const usageOrange = Color(0xFFFF8A30); // high-ratio / >=90% limit
   static const usageGreen = Color(0xFF87D9A4); // reset countdown + pill
 }
+
+/// Card-list spacing scale (usage / settings screens).
+abstract final class ZSpacing {
+  /// Gap between adjacent cards in a list. Cards carry no default margin
+  /// ([zCardTheme] sets `margin: EdgeInsets.zero`), so the on-screen
+  /// separation between two cards equals [cardGap].
+  static const double cardGap = 16;
+
+  /// Page edge padding for card-list screens, and the horizontal content
+  /// padding inside a bottom sheet.
+  static const double screen = 16;
+
+  /// Inner padding of a page card (`ZCard`).
+  static const double card = 16;
+
+  /// Whitespace around a centered empty / error / unavailable state.
+  static const double emptyState = 32;
+}
+
+/// Corner-radius ladder — the only radius values allowed in `lib/ui/`.
+/// Eleven ad-hoc literals (3/4/6/7/8/10/12/14/18/20/22) collapse onto these
+/// five tiers; every call site spells the tier it means.
+abstract final class ZRadius {
+  /// Badges, micro chips, small action buttons (composer send/stop).
+  static const double mini = 6;
+
+  /// Inputs, embedded blocks (code / diff / kv), icon containers.
+  static const double field = 8;
+
+  /// Cards, chat tiles, dialogs, message bubbles.
+  static const double tile = 12;
+
+  /// Bottom-sheet top corners, large avatars, hero empty-state icon.
+  static const double large = 20;
+
+  /// Capsules (status pills, timeline markers).
+  static const double pill = 999;
+}
+
+/// Geometry contract for a row inside a card (`ZListRow`): device rows, task
+/// rows and other card lists share one inset, one height floor and one gap so
+/// the pages stop carrying three different row shapes.
+abstract final class ZListRow {
+  /// Row inset — the card itself adds no padding around rows.
+  static const EdgeInsets padding =
+      EdgeInsets.symmetric(horizontal: 12, vertical: 10);
+
+  /// Height floor for a row with a secondary line (title + meta).
+  static const double twoLineHeight = 60;
+
+  /// Height floor for a single-line row.
+  static const double singleLineHeight = 44;
+
+  /// Gap between two adjacent rows / around the row's highlight block.
+  static const double gap = 4;
+
+  /// Leading icon container (square) and the icon inside it.
+  static const double leadingSize = 36;
+  static const double leadingIcon = 20;
+
+  /// Unread / status dot diameter.
+  static const double dot = 8;
+}
+
+/// Geometry contract for chat turn blocks (`_ReasoningTile`,
+/// `_ToolCallTile`, `_SubagentTile`): one header height, icon size and
+/// horizontal inset, one seam between neighbours, one expanded-body inset.
+/// Type sizes stay semantic (12 label / 13 summary) — only the box is shared.
+abstract final class ZTile {
+  /// Gap below each block, so neighbouring blocks never read as glued.
+  static const double seam = 12;
+
+  /// Header row height floor (header is taller when its content is).
+  static const double headHeight = 38;
+
+  /// Header row horizontal inset.
+  static const double headPadding = 12;
+
+  /// Header leading icon.
+  static const double iconSize = 16;
+
+  /// Header row inset — see [headPadding].
+  static const EdgeInsets head =
+      EdgeInsets.symmetric(horizontal: headPadding);
+
+  /// Expanded body inset (same horizontal inset as the header, no top gap —
+  /// the header row already carries it).
+  static const EdgeInsets body =
+      EdgeInsets.fromLTRB(headPadding, 0, headPadding, seam);
+}
+
+/// Font family bundled with the app. The three static weights come from the
+/// Noto Sans SC variable font, subset to the app character set by
+/// `tool/font_subset.py`.
+const String zFontFamily = 'NotoSansSC';
+
+/// Fallback chain: the bundled family first (for styles used outside a themed
+/// `Text`), then emoji faces, then the platform CJK faces. Without an explicit
+/// CJK family the engine picks whatever the host offers — Windows lands on
+/// traditional-Chinese / Yu Gothic faces, and ROM CJK fonts fake every
+/// intermediate weight.
+const List<String> zFontFallback = [
+  'NotoSansSC',
+  'Segoe UI Emoji',
+  'Apple Color Emoji',
+  'PingFang SC',
+  'Microsoft YaHei',
+  'Noto Sans CJK SC',
+  'sans-serif',
+];
+
+/// Typography scale. Seven tiers replace the twelve ad-hoc sizes that were
+/// hardcoded at 300+ call sites; each tier carries the bundled family and the
+/// shared [zFontFallback] chain so stray inline styles stay covered.
+///
+/// Sizes 6 / 9 / 10 map to [caption], 18 to [display], and 16 to [heading] or
+/// [title] by context — the per-site decisions live in `implement.jsonl`.
+abstract final class ZType {
+  /// Screen-level hero numbers and markdown h1.
+  static const TextStyle display = TextStyle(
+      fontSize: 20,
+      fontWeight: FontWeight.w600,
+      height: 1.3,
+      fontFamily: zFontFamily,
+      fontFamilyFallback: zFontFallback);
+
+  /// Page titles, app bar titles, markdown h2, list-row primary text.
+  static const TextStyle title = TextStyle(
+      fontSize: 17,
+      fontWeight: FontWeight.w600,
+      height: 1.3,
+      fontFamily: zFontFamily,
+      fontFamilyFallback: zFontFallback);
+
+  /// Card headers and section headings.
+  static const TextStyle heading = TextStyle(
+      fontSize: 15,
+      fontWeight: FontWeight.w600,
+      height: 1.4,
+      fontFamily: zFontFamily,
+      fontFamilyFallback: zFontFallback);
+
+  /// Emphasised body text (buttons, key/value pairs, inline labels).
+  static const TextStyle bodyStrong = TextStyle(
+      fontSize: 14,
+      fontWeight: FontWeight.w600,
+      height: 1.4,
+      fontFamily: zFontFamily,
+      fontFamilyFallback: zFontFallback);
+
+  /// Default body text.
+  static const TextStyle body = TextStyle(
+      fontSize: 13,
+      fontWeight: FontWeight.w400,
+      height: 1.5,
+      fontFamily: zFontFamily,
+      fontFamilyFallback: zFontFallback);
+
+  /// Secondary text (list subtitles, metadata).
+  static const TextStyle sub = TextStyle(
+      fontSize: 12,
+      fontWeight: FontWeight.w400,
+      height: 1.5,
+      fontFamily: zFontFamily,
+      fontFamilyFallback: zFontFallback);
+
+  /// Timestamps, badges and other supporting text.
+  static const TextStyle caption = TextStyle(
+      fontSize: 11,
+      fontWeight: FontWeight.w400,
+      height: 1.4,
+      fontFamily: zFontFamily,
+      fontFamilyFallback: zFontFallback);
+}
+
+/// Motion: one shared-axis-style transition for every pushed page — the
+/// incoming page slides in horizontally while the outgoing one drifts left,
+/// so pushes never mix the platform's default zoom/fade with a native slide.
+const Duration zPageTransition = Duration(milliseconds: 260);
+const Duration zPageReverseTransition = Duration(milliseconds: 200);
+
+/// Page route with the horizontal slide-in above. Drop-in replacement for
+/// `MaterialPageRoute(builder: ...)`.
+///
+/// iOS/macOS keep the Material route: the platform transition there is
+/// already a horizontal slide, and it carries the interactive edge-swipe back
+/// gesture (the gesture detector lives inside CupertinoPageTransitionsBuilder,
+/// which a bare [PageRouteBuilder] does not provide).
+Route<T> zRoute<T>(WidgetBuilder builder) {
+  if (defaultTargetPlatform == TargetPlatform.iOS ||
+      defaultTargetPlatform == TargetPlatform.macOS) {
+    return MaterialPageRoute<T>(builder: builder);
+  }
+  return PageRouteBuilder<T>(
+    transitionDuration: zPageTransition,
+    reverseTransitionDuration: zPageReverseTransition,
+    pageBuilder: (context, animation, secondaryAnimation) => builder(context),
+    transitionsBuilder: (context, animation, secondaryAnimation, child) {
+      final incoming = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic);
+      final outgoing = CurvedAnimation(
+          parent: secondaryAnimation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic);
+      return SlideTransition(
+        position: Tween<Offset>(
+          begin: Offset.zero,
+          end: const Offset(-0.06, 0),
+        ).animate(outgoing),
+        child: FadeTransition(
+          opacity: incoming,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0.08, 0),
+              end: Offset.zero,
+            ).animate(incoming),
+            child: child,
+          ),
+        ),
+      );
+    },
+  );
+}
+
+/// Mobile touch-target floor (≥44×48dp) for icon-only targets that are not a
+/// Material button (Material buttons carry it via
+/// [MaterialTapTargetSize.padded]). Growing only these boxes leaves the
+/// painted icon at its size.
+const double zTouchWidth = 44;
+const double zTouchHeight = 48;
 
 /// Theme-aware text colors mirroring the official foreground tokens.
 class ZInk {
@@ -180,14 +413,19 @@ ThemeData _base(ColorScheme scheme, Color background, Color card,
     useMaterial3: true,
     colorScheme: scheme,
     scaffoldBackgroundColor: background,
+    fontFamily: zFontFamily,
+    fontFamilyFallback: zFontFallback,
+    // iOS/macOS default to shrinkWrap, which would leave Material buttons
+    // below the ≥44×48dp touch-target floor; padded keeps every button at
+    // kMinInteractiveDimension on all platforms.
+    materialTapTargetSize: MaterialTapTargetSize.padded,
     splashFactory: InkSparkle.splashFactory,
     appBarTheme: AppBarTheme(
       backgroundColor: background,
       surfaceTintColor: Colors.transparent,
       elevation: 0,
       centerTitle: false,
-      titleTextStyle: TextStyle(
-          color: foreground, fontSize: 17, fontWeight: FontWeight.w600),
+      titleTextStyle: ZType.title.copyWith(color: foreground),
       iconTheme: IconThemeData(color: foreground),
     ),
     // card/dialog visuals ride the CardTheme/DialogTheme widgets in
@@ -197,19 +435,21 @@ ThemeData _base(ColorScheme scheme, Color background, Color card,
     bottomSheetTheme: BottomSheetThemeData(
       backgroundColor: card,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        borderRadius:
+            BorderRadius.vertical(top: Radius.circular(ZRadius.large)),
       ),
     ),
     snackBarTheme: SnackBarThemeData(
       behavior: SnackBarBehavior.floating,
       backgroundColor: scheme.primary,
       contentTextStyle: TextStyle(color: scheme.onPrimary),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(ZRadius.field)),
     ),
     popupMenuTheme: PopupMenuThemeData(
       color: card,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(ZRadius.field),
         side: BorderSide(color: border),
       ),
     ),
@@ -220,35 +460,36 @@ ThemeData _base(ColorScheme scheme, Color background, Color card,
       contentPadding:
           const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
       border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(ZRadius.field),
           borderSide: BorderSide(color: border)),
       enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(ZRadius.field),
           borderSide: BorderSide(color: border)),
       focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(ZRadius.field),
           borderSide: const BorderSide(color: ZColors.sky500)),
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
         backgroundColor: scheme.primary,
         foregroundColor: scheme.onPrimary,
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(ZRadius.field)),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+        textStyle: ZType.bodyStrong.copyWith(fontWeight: FontWeight.w500),
       ),
     ),
     textButtonTheme: TextButtonThemeData(
       style: TextButton.styleFrom(
         foregroundColor: foreground,
-        textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+        textStyle: ZType.bodyStrong.copyWith(fontWeight: FontWeight.w500),
       ),
     ),
     listTileTheme: ListTileThemeData(
       textColor: foreground,
       iconColor: foreground,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(ZRadius.field)),
     ),
   );
 }
@@ -263,7 +504,7 @@ CardThemeData zCardTheme(Brightness brightness) {
     elevation: 0,
     margin: EdgeInsets.zero,
     shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(12), // official --radius-xl
+      borderRadius: BorderRadius.circular(ZRadius.tile), // official --radius-xl
       side: BorderSide(
           color: dark ? const Color(0x14FFFFFF) : const Color(0x140D0D0D)),
     ),
@@ -275,6 +516,7 @@ DialogThemeData zDialogTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;
   return DialogThemeData(
     backgroundColor: dark ? ZColors.darkCard : ZColors.lightCard,
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(ZRadius.tile)),
   );
 }

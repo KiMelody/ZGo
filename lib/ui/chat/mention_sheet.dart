@@ -157,7 +157,8 @@ class _MentionSheetState extends State<_MentionSheet> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+              padding: const EdgeInsets.fromLTRB(
+                  ZSpacing.screen, 0, ZSpacing.screen, 8),
               child: Row(
                 children: [
                   if (_category != null)
@@ -174,8 +175,7 @@ class _MentionSheetState extends State<_MentionSheet> {
                       tr(context, _category == null
                           ? 'chat.mention.title'
                           : 'chat.mention.category.$_category'),
-                      style: const TextStyle(
-                          fontSize: 15, fontWeight: FontWeight.w600),
+                      style: ZType.heading,
                     ),
                   ),
                 ],
@@ -189,12 +189,12 @@ class _MentionSheetState extends State<_MentionSheet> {
                       ListTile(
                         leading: Icon(_categoryIcon(c)),
                         title: Text(tr(context, 'chat.mention.category.$c'),
-                            style: const TextStyle(fontSize: 14)),
+                            style: ZType.body),
                         subtitle: Text(
                             tr(context, 'chat.mention.category.$c.description'),
-                            style: TextStyle(
-                                fontSize: 11.5,
-                                color: ZInk.faint(context))),
+                            style: ZType.caption.copyWith(
+                                color: ZInk.faint(context),
+                            )),
                         onTap: () => _enterCategory(c),
                       ),
                   ],
@@ -221,9 +221,9 @@ class _MentionSheetState extends State<_MentionSheet> {
                         ? Center(
                             child: Text(
                                 tr(context, 'chat.mention.emptyResults'),
-                                style: TextStyle(
-                                    fontSize: 12.5,
-                                    color: ZInk.faint(context))))
+                                style: ZType.sub.copyWith(
+                                    color: ZInk.faint(context),
+                                )))
                         : SingleChildScrollView(
                             child: Column(
                               children: [
@@ -234,14 +234,14 @@ class _MentionSheetState extends State<_MentionSheet> {
                                   title: Text(e.title,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(fontSize: 13.5)),
+                                      style: ZType.body),
                                   subtitle: (e.subtitle ?? '').isNotEmpty
                                       ? Text(e.subtitle!,
                                           maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                              fontSize: 11,
-                                              color: ZInk.faint(context)))
+                                          style: ZType.caption.copyWith(
+                                              color: ZInk.faint(context),
+                                          ))
                                       : null,
                                   dense: true,
                                   onTap: () =>
@@ -253,9 +253,10 @@ class _MentionSheetState extends State<_MentionSheet> {
               ),
             ],
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 4, 20, 10),
+              padding: const EdgeInsets.fromLTRB(
+                  ZSpacing.screen, 4, ZSpacing.screen, 10),
               child: Text(tr(context, 'chat.mention.selectItem'),
-                  style: TextStyle(fontSize: 10.5, color: ZInk.ghost(context))),
+                  style: ZType.caption.copyWith(color: ZInk.ghost(context))),
             ),
           ],
         ),
