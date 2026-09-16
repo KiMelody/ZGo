@@ -129,6 +129,22 @@ class ChannelRpcError implements Exception {
   String toString() => 'ChannelRpcError: $message';
 }
 
+/// True for the desktop's "channel does not resolve" RPC error: the remote
+/// bridge answers channels that are not registered with
+/// `Channel name '…' timed out after 1000ms` (the 2026-09 model-provider /
+/// settings outage shape — identical to probing a bogus channel name).
+bool isChannelMissingError(Object error) =>
+    error is ChannelRpcError &&
+    error.message.contains('Channel name') &&
+    error.message.contains('timed out');
+
+/// Channel-level failure: the RPC timed out or the channel is missing on
+/// the desktop. Unlike a bridge-health failure this does not by itself mean
+/// the whole link is wedged, so callers count per-channel failures instead
+/// of tearing the link down on first sight.
+bool isChannelLevelError(Object error) =>
+    error is TimeoutException || isChannelMissingError(error);
+
 /// Well-known channel names (`Wb` enum in the web client).
 class Channels {
   static const file = 'file';

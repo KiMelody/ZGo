@@ -4,6 +4,7 @@ import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 
 import '../protocol/automation.dart';
+import '../protocol/channel_client.dart' show isChannelMissingError;
 import '../protocol/connection_params.dart';
 import '../protocol/conversation.dart';
 import '../protocol/off_peak.dart';
@@ -365,6 +366,15 @@ class DeviceSession extends ChangeNotifier
 
   /// List-watchdog escalation step: 0 idle; 1 = reopen once failed.
   int _listEscalations = 0;
+
+  // --- Channel-level failure isolation (dead-channel defence) ---
+  /// Consecutive channel-level failures per channel name. A single dead
+  /// desktop channel (2026-09-13 model-provider/settings outage) must not
+  /// rebuild the whole link — only a streak of
+  /// [_channelFailEscalationThreshold] consecutive failures does; any
+  /// success on the channel clears its streak.
+  static const int _channelFailEscalationThreshold = 3;
+  final Map<String, int> _channelFailStreaks = {};
 
   /// Wall clock of the last forced rebuild, for debouncing.
   DateTime _lastStallRebuildAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -905,9 +915,14 @@ class DeviceSession extends ChangeNotifier
   /// model-provider, automations, off-peak...). Throws when no bridge is
   /// open.
   ///
-  /// Both waits are bounded, and each timeout marks the link as stalled:
-  /// the session forces one full suspend+connect rebuild so subsequent
-  /// calls ride a fresh bridge instead of queueing on the wedged one.
+  /// Failure tiers:
+  /// - Bridge-level (the [WorkspaceGate.waitHealthy] expiry): the link
+  ///   itself is degraded — one full suspend+connect rebuild immediately.
+  /// - Channel-level (the desktop's `Channel name … timed out` answer, or
+  ///   the RPC timing out): counted per channel; only
+  ///   [_channelFailEscalationThreshold] consecutive failures escalate to a
+  ///   rebuild, and any success on the channel clears its streak. A dead
+  ///   channel then degrades only the pages that use it, not the link.
   Future<dynamic> callChannel(
     String channel,
     String method, [
@@ -924,11 +939,39 @@ class DeviceSession extends ChangeNotifier
       rethrow;
     }
     try {
-      return await gate.call(channel, method, args).timeout(timings.rpcTimeout);
+      final result =
+          await gate.call(channel, method, args).timeout(timings.rpcTimeout);
+      // Any success proves the channel rides a live bridge again.
+      _channelFailStreaks.remove(channel);
+      return result;
     } on TimeoutException {
-      _forceRebuildAfterStall('$channel.$method timed out');
+      _noteChannelLevelFailure(channel, '$channel.$method timed out');
+      rethrow;
+    } catch (e) {
+      // Only the desktop's channel-missing shape is channel-level; other
+      // RPC errors (method not found, bad args) are deterministic answers
+      // and never imply a stalled link.
+      if (isChannelMissingError(e)) {
+        _noteChannelLevelFailure(channel, 'channel $channel unavailable: $e');
+      }
       rethrow;
     }
+  }
+
+  /// Counts one channel-level failure of [channel]. At the threshold the
+  /// streak escalates into the (debounced) link rebuild and resets, so a
+  /// permanently dead channel rebuilds at most once per debounce window
+  /// instead of on every call.
+  void _noteChannelLevelFailure(String channel, String reason) {
+    final streak = (_channelFailStreaks[channel] ?? 0) + 1;
+    if (streak < _channelFailEscalationThreshold) {
+      _channelFailStreaks[channel] = streak;
+      return;
+    }
+    _channelFailStreaks.remove(channel);
+    _log('[session] channel $channel failed $streak times in a row; '
+        'treating the link as stalled');
+    _forceRebuildAfterStall(reason);
   }
 
   WorkspaceGate? _liveGate() {
@@ -1372,6 +1415,7 @@ class DeviceSession extends ChangeNotifier
     _listWatchdog?.cancel();
     _listEscalations = 0;
     _softReloadFails = 0;
+    _channelFailStreaks.clear();
     _connecting = false;
     _openingWorkspace = false;
     final client = _client;

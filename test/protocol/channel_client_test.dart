@@ -1,4 +1,5 @@
-﻿import 'dart:typed_data';
+﻿import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 
@@ -119,5 +120,37 @@ void main() {
     expect(events, hasLength(1));
     expect(events[0], {'frame': 'hello'});
     client.dispose();
+  });
+
+  test('channel-level error classification', () {
+    // The 2026-09 outage shape: the desktop answers unregistered channels
+    // with the channel-name timeout error (same answer as a bogus name).
+    expect(
+      isChannelMissingError(ChannelRpcError(
+          "Channel name 'model-provider' timed out after 1000ms", null)),
+      isTrue,
+    );
+    expect(
+      isChannelMissingError(ChannelRpcError(
+          "Channel name 'zzz-bogus' timed out after 1000ms", null)),
+      isTrue,
+    );
+    // RPC timeouts are channel-level too.
+    expect(
+      isChannelLevelError(
+          TimeoutException('model-provider.getAll timed out')),
+      isTrue,
+    );
+    // Deterministic RPC answers are NOT channel-level: they prove the
+    // bridge resolved the channel and answered.
+    expect(
+      isChannelMissingError(ChannelRpcError('Method not found', null)),
+      isFalse,
+    );
+    expect(
+      isChannelLevelError(ChannelRpcError('Method not found', null)),
+      isFalse,
+    );
+    expect(isChannelLevelError(StateError('not connected')), isFalse);
   });
 }

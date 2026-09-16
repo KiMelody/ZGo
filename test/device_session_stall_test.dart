@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:zlinker/protocol/channel_client.dart';
 import 'package:zlinker/protocol/connection_params.dart';
 import 'package:zlinker/protocol/remote_client.dart';
 import 'package:zlinker/state/device_session.dart';
@@ -77,6 +78,11 @@ class FakeGate implements WorkspaceGate {
   /// When false, waitHealthy throws TimeoutException (simulating an expiry)
   /// immediately; when true RPCs are accepted but never answered.
   final bool healthy;
+
+  /// Optional per-call outcome: thrown errors fail the RPC, any other
+  /// value completes it; while null the bridge stays deaf (healthy but
+  /// never answering, so the caller's rpcTimeout fires).
+  Object? Function(String channel, String method)? respond;
   int calls = 0;
 
   @override
@@ -90,7 +96,9 @@ class FakeGate implements WorkspaceGate {
   @override
   Future<dynamic> call(String channel, String method, List<Object?> args) {
     calls += 1;
-    return Completer<dynamic>().future; // healthy-but-deaf bridge
+    final respond = this.respond;
+    if (respond == null) return Completer<dynamic>().future;
+    return Future.sync(() => respond(channel, method));
   }
 }
 
@@ -204,7 +212,7 @@ void main() {
     await session.dispose();
   });
 
-  test('healthy-but-deaf bridge RPC timeouts trigger the same rebuild',
+  test('healthy-but-deaf bridge RPC timeouts rebuild only on the third strike',
       () async {
     var created = 0;
     final session = DeviceSession(
@@ -222,13 +230,156 @@ void main() {
     await until(() => session.status == DeviceStatus.connected);
     expect(gate.calls, 0);
 
-    unawaited(
-        session.callChannel('usage-stats', 'overview').catchError((_) {}));
-    await Future<void>.delayed(const Duration(milliseconds: 10));
-    expect(gate.calls, 1);
-    // rpcTimeout fires against the never-answering bridge.
-    await until(() => created == 2, because: 'RPC timeout must rebuild');
+    final before = created;
+    // First two deaf RPCs time out as channel-level failures: counted, but
+    // the link must NOT be rebuilt (dead-channel isolation).
+    for (var i = 0; i < 2; i++) {
+      await expectLater(
+        session.callChannel('usage-stats', 'overview'),
+        throwsA(isA<TimeoutException>()),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    expect(created, before,
+        reason: 'RPC timeouts below the threshold must not rebuild');
+
+    // The third consecutive timeout escalates into the full rebuild.
+    await expectLater(
+      session.callChannel('usage-stats', 'overview'),
+      throwsA(isA<TimeoutException>()),
+    );
+    await until(() => created == before + 1,
+        because: 'third consecutive timeout must rebuild');
     await until(() => session.status == DeviceStatus.connected);
+    await session.dispose();
+  });
+
+  test('a single dead-channel error does not rebuild the link', () async {
+    var created = 0;
+    final session = DeviceSession(
+      deviceId: 'd1',
+      params: paramsOf(),
+      timings: fastTimings,
+      clientFactory: () {
+        created += 1;
+        return StubRemoteClient(paramsOf());
+      },
+    );
+    final gate = FakeGate(healthy: true)
+      ..respond = (channel, method) =>
+          throw ChannelRpcError(
+              "Channel name '$channel' timed out after 1000ms", null);
+    session.debugAttachGateForTest(gate);
+    unawaited(session.connect());
+    await until(() => session.status == DeviceStatus.connected);
+
+    // The 2026-09-13 outage shape: model-provider answers with the
+    // channel-missing error. It must surface, but the link stays up.
+    final before = created;
+    await expectLater(
+      session.callChannel('model-provider', 'getAll'),
+      throwsA(isA<ChannelRpcError>()),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    expect(gate.calls, 1);
+    expect(created, before,
+        reason: 'one dead channel must not take the whole link down');
+    expect(session.status, DeviceStatus.connected);
+    await session.dispose();
+  });
+
+  test('the third consecutive dead-channel failure rebuilds the link once',
+      () async {
+    var created = 0;
+    final session = DeviceSession(
+      deviceId: 'd1',
+      params: paramsOf(),
+      timings: fastTimings,
+      clientFactory: () {
+        created += 1;
+        return StubRemoteClient(paramsOf());
+      },
+    );
+    final gate = FakeGate(healthy: true)
+      ..respond = (channel, method) =>
+          throw ChannelRpcError(
+              "Channel name '$channel' timed out after 1000ms", null);
+    session.debugAttachGateForTest(gate);
+    unawaited(session.connect());
+    await until(() => session.status == DeviceStatus.connected);
+
+    final before = created;
+    for (var i = 0; i < 3; i++) {
+      await expectLater(
+        session.callChannel('model-provider', 'getAll'),
+        throwsA(isA<ChannelRpcError>()),
+      );
+    }
+    await until(() => created == before + 1,
+        because: 'third consecutive failure must rebuild once');
+    await until(() => session.status == DeviceStatus.connected);
+
+    // Post-rebuild the streak restarts: further failures of the same dead
+    // channel must not immediately rebuild again.
+    await expectLater(
+      session.callChannel('model-provider', 'getAll'),
+      throwsA(isA<ChannelRpcError>()),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    expect(created, before + 1);
+    await session.dispose();
+  });
+
+  test('a successful call resets the per-channel failure streak', () async {
+    var created = 0;
+    final session = DeviceSession(
+      deviceId: 'd1',
+      params: paramsOf(),
+      timings: fastTimings,
+      clientFactory: () {
+        created += 1;
+        return StubRemoteClient(paramsOf());
+      },
+    );
+    var fail = true;
+    final gate = FakeGate(healthy: true)
+      ..respond = (channel, method) {
+        if (fail) {
+          throw ChannelRpcError(
+              "Channel name '$channel' timed out after 1000ms", null);
+        }
+        return const [];
+      };
+    session.debugAttachGateForTest(gate);
+    unawaited(session.connect());
+    await until(() => session.status == DeviceStatus.connected);
+
+    final before = created;
+    // Two failures: below the threshold, no rebuild.
+    for (var i = 0; i < 2; i++) {
+      await expectLater(
+        session.callChannel('model-provider', 'getAll'),
+        throwsA(isA<ChannelRpcError>()),
+      );
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(created, before);
+
+    // One success clears the streak...
+    fail = false;
+    expect(await session.callChannel('model-provider', 'getAll'), const []);
+
+    // ...so two more failures stay below the threshold too.
+    fail = true;
+    for (var i = 0; i < 2; i++) {
+      await expectLater(
+        session.callChannel('model-provider', 'getAll'),
+        throwsA(isA<ChannelRpcError>()),
+      );
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(created, before,
+        reason: 'a reset streak must need a fresh run to the threshold');
     await session.dispose();
   });
 }

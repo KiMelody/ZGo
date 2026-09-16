@@ -22,6 +22,12 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
   bool _loading = true;
   String? _error;
 
+  /// Load failed with a channel-level error (channel missing on the
+  /// desktop / RPC timeout) — gets the dedicated "channel unavailable"
+  /// view instead of a raw error string, so it cannot read as "no
+  /// providers configured".
+  bool _channelUnavailable = false;
+
   /// Web parity: `model-provider.onDidChangeProviderRegistry` pushes
   /// registry revisions — reload the list whenever the desktop changes it.
   void Function()? _cancelRegistryListener;
@@ -54,6 +60,7 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
     setState(() {
       _loading = true;
       _error = null;
+      _channelUnavailable = false;
     });
     try {
       final res =
@@ -73,10 +80,47 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
       if (mounted) {
         setState(() {
           _error = '$e';
+          _channelUnavailable = isChannelLevelError(e);
           _loading = false;
         });
       }
     }
+  }
+
+  /// Mirrors the automations unavailable view: icon + reason + retry, so a
+  /// dead desktop channel reads as "channel unavailable" instead of an
+  /// empty provider list.
+  Widget _channelUnavailableView(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cloud_off, size: 44, color: ZInk.ghost(context)),
+            const SizedBox(height: 16),
+            Text(
+              tr(context, 'providers.channelUnavailable.title'),
+              style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  color: ZInk.solid(context)),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              tr(context, 'providers.channelUnavailable.body'),
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: ZInk.faint(context)),
+            ),
+            const SizedBox(height: 20),
+            FilledButton(
+              onPressed: _load,
+              child: Text(tr(context, 'tasks.retry')),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _save(Map<String, dynamic> provider) async {
@@ -185,8 +229,11 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
-              ? Center(
-                  child: Text(trP(context, 'providers.loadFailed', [_error!])))
+              ? _channelUnavailable
+                  ? _channelUnavailableView(context)
+                  : Center(
+                      child: Text(
+                          trP(context, 'providers.loadFailed', [_error!])))
               : RefreshIndicator(
                   onRefresh: _load,
                   child: ListView.separated(

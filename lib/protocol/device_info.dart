@@ -10,21 +10,17 @@ const remoteAppName = 'zlinker';
 /// `web` when unknown so the handshake stays valid on exotic targets.
 String remotePlatformName() {
   if (kIsWeb) return 'web';
-  switch (defaultTargetPlatform) {
-    case TargetPlatform.android:
-      return 'android';
-    case TargetPlatform.iOS:
-      return 'ios';
-    case TargetPlatform.windows:
-      return 'windows';
-    case TargetPlatform.macOS:
-      return 'macos';
-    case TargetPlatform.linux:
-      return 'linux';
-    case TargetPlatform.fuchsia:
-      return 'fuchsia';
-    default:
-      // ohos fork adds TargetPlatform.ohos to the enum
-      return 'ohos';
-  }
+  // Lookup instead of a switch: the ohos fork adds TargetPlatform.ohos to
+  // the enum, so a `default` arm is only reachable there — on official SDKs
+  // it trips `unreachable_switch_default`. The `?? 'ohos'` fallback covers
+  // the fork's extra value identically.
+  const names = {
+    TargetPlatform.android: 'android',
+    TargetPlatform.iOS: 'ios',
+    TargetPlatform.windows: 'windows',
+    TargetPlatform.macOS: 'macos',
+    TargetPlatform.linux: 'linux',
+    TargetPlatform.fuchsia: 'fuchsia',
+  };
+  return names[defaultTargetPlatform] ?? 'ohos';
 }

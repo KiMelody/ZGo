@@ -596,6 +596,9 @@ const _zh = {
   'providers.modelsCount': '\$0 个模型',
   'providers.disabled': '停用: \$0',
   'providers.loadFailed': '加载失败: \$0',
+  'providers.channelUnavailable.title': '桌面端通道不可用',
+  'providers.channelUnavailable.body':
+      '桌面 ZCode 未提供「模型设置」通道，可能需要更新桌面端 ZCode，请稍后重试。',
   'providers.toggleFailed': '切换失败: \$0',
   'providers.deleteFailed': '删除失败: \$0',
   'providers.addFailed': '添加失败: \$0',
@@ -1310,6 +1313,9 @@ const _en = {
   'providers.modelsCount': '\$0 models',
   'providers.disabled': 'Disabled: \$0',
   'providers.loadFailed': 'Load failed: \$0',
+  'providers.channelUnavailable.title': 'Desktop channel unavailable',
+  'providers.channelUnavailable.body':
+      'This ZCode desktop does not expose the model-provider channel. It may need a desktop update — retry later.',
   'providers.toggleFailed': 'Toggle failed: \$0',
   'providers.deleteFailed': 'Delete failed: \$0',
   'providers.addFailed': 'Add failed: \$0',
