@@ -329,6 +329,7 @@ class RemoteClient {
         _activeBridges.remove(s);
         _frameRouters.remove(s.bridge['bridgeSessionId']);
       },
+      workspaceHookReviewUi: params.atLeast(3, 12, 3),
     );
     _attachStack(session, bridgeSessionId, bridge);
     _activeBridges.add(session);
@@ -479,6 +480,11 @@ class BridgeSession {
   final void Function(BridgeSession) _onDispose;
   bool _disposed = false;
 
+  /// Desktop version gate (`params.atLeast(3, 12, 3)`, fixed at bridge
+  /// creation): whether the V4 clientHello declares the workspace hook
+  /// review UI capability.
+  final bool workspaceHookReviewUi;
+
   /// Non-null while the bridge is degraded (rpc-transport-fault etc.).
   final ValueNotifier<String?> degraded = ValueNotifier(null);
 
@@ -518,6 +524,7 @@ class BridgeSession {
   BridgeSession._({
     required Map<String, dynamic> bridge,
     required void Function(BridgeSession) onDispose,
+    required this.workspaceHookReviewUi,
   }) : _bridge = bridge,
        _transport = _placeholderTransport(bridge),
        _channels = ChannelClient(sendBody: (_) {}),
@@ -558,7 +565,12 @@ class BridgeSession {
     final key = '${scope['workspaceIdentity'] ?? scope['workspacePath']}';
     return _conversations.putIfAbsent(
       key,
-      () => ConversationTransport(session: this, scope: scope, onLog: onLog),
+      () => ConversationTransport(
+        session: this,
+        scope: scope,
+        onLog: onLog,
+        workspaceHookReviewUi: workspaceHookReviewUi,
+      ),
     );
   }
 

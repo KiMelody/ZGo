@@ -131,8 +131,11 @@ class ChannelRpcError implements Exception {
 
 /// True for the desktop's "channel does not resolve" RPC error: the remote
 /// bridge answers channels that are not registered with
-/// `Channel name '…' timed out after 1000ms` (the 2026-09 model-provider /
-/// settings outage shape — identical to probing a bogus channel name).
+/// `Channel name '…' timed out after 1000ms` (identical to probing a bogus
+/// channel name). The 2026-09 model-provider outage became permanent in
+/// desktop 3.12.3, which removed the channel outright — the providers page
+/// entry is now capability-gated on a probe
+/// (DeviceSession.probeModelProvider).
 bool isChannelMissingError(Object error) =>
     error is ChannelRpcError &&
     error.message.contains('Channel name') &&

@@ -192,17 +192,28 @@ class _AutomationsPaneState extends State<AutomationsPane> {
     }
   }
 
+  /// 20 条上限归类 (A4)：官方二进制的 AutomationCreateLimitError 消息为
+  /// `[code] At most 20 automations may be retained. …`——`code` 是压缩变量名
+  /// 不稳定，取消息文本与类名两个稳定子串（verified-grep 取证 2026-09-17）。
+  bool _isCreateLimitError(String message) {
+    final m = message.toLowerCase();
+    return m.contains('automationcreatelimiterror') ||
+        m.contains('may be retained');
+  }
+
   Future<void> _runOp(Future<void> Function() op,
-      {String? errorKey}) async {
+      {String? errorKey, String? limitErrorKey}) async {
     if (_busy) return;
     _busy = true;
     try {
       await op();
     } catch (e) {
       if (mounted) {
-        _toast(errorKey != null
-            ? tr(context, errorKey)
-            : trP(context, 'auto.opFailed', ['$e']));
+        _toast(limitErrorKey != null && _isCreateLimitError('$e')
+            ? tr(context, limitErrorKey)
+            : errorKey != null
+                ? tr(context, errorKey)
+                : trP(context, 'auto.opFailed', ['$e']));
       }
     } finally {
       _busy = false;
@@ -224,21 +235,26 @@ class _AutomationsPaneState extends State<AutomationsPane> {
     if (session == null) return;
     await _runOp(() async {
       if (edit == null) {
-        await session.automation.create(input);
+        // create/update 与 setEnabled 同源：始终带 workspace scope
+        // （官方 web 一直发，实测定证缺它 SQLite 绑定错）。
+        await session.automation.create(input, session.automationScope);
         if (mounted) _toast(tr(context, 'auto.created'));
       } else {
-        await session.automation.update(edit.id, input);
+        await session.automation
+            .update(edit.id, input, session.automationScope);
         if (mounted) _toast(tr(context, 'auto.saved'));
       }
       await _load();
-    }, errorKey: edit == null ? 'auto.error.create' : 'auto.error.update');
+    }, errorKey: edit == null ? 'auto.error.create' : 'auto.error.update',
+        limitErrorKey: edit == null ? 'auto.error.limit' : null);
   }
 
   Future<void> _toggle(AutomationItem item, bool enabled) async {
     final session = widget.session;
     if (session == null) return;
     await _runOp(() async {
-      await session.automation.setEnabled(item.id, enabled);
+      await session.automation
+          .setEnabled(item.id, enabled, session.automationScope);
       await _load();
     }, errorKey: 'auto.error.toggle');
   }
@@ -426,10 +442,10 @@ Future<void> _pickTemplate() async {
   );
   if (completed == null || session == null || !mounted) return;
   await _runOp(() async {
-    await session.automation.create(completed);
+    await session.automation.create(completed, session.automationScope);
     if (mounted) _toast(tr(context, 'auto.created'));
     await _load();
-  }, errorKey: 'auto.error.create');
+  }, errorKey: 'auto.error.create', limitErrorKey: 'auto.error.limit');
 }
 
 /// Mirrors the task-list fallback view: reason + retry + guidance to the
@@ -498,8 +514,19 @@ Future<void> _pickTemplate() async {
         limited ? ['$count', '$max'] : ['$count']);
   }
 
+  /// lifecycleStatus 徽标 (A3)：active=正常不显，completed/failed/paused
+  /// 显色点+文案。返回 (色, tr key)。
+  (Color, String)? _lifecycleBadge(AutomationItem item) =>
+      switch (item.lifecycleStatus) {
+        'completed' => (ZColors.success, 'auto.lifecycle.completed'),
+        'failed' => (ZColors.danger, 'auto.lifecycle.failed'),
+        'paused' => (ZColors.warning, 'auto.lifecycle.paused'),
+        _ => null,
+      };
+
   Widget _itemCard(AutomationItem item) {
     final dotColor = item.enabled ? ZColors.success : ZColors.neutral400;
+    final lifecycle = _lifecycleBadge(item);
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Padding(
@@ -531,6 +558,20 @@ Future<void> _pickTemplate() async {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      if (lifecycle != null) ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                              color: lifecycle.$1, shape: BoxShape.circle),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          tr(context, lifecycle.$2),
+                          style: ZType.caption.copyWith(color: lifecycle.$1),
+                        ),
+                      ],
                       const SizedBox(width: 8),
                       Text(
                         item.enabled
@@ -679,6 +720,10 @@ class AutomationSheetState extends State<AutomationSheet> {
   String? _mode;
   bool _advanced = false;
 
+  /// Interval-trigger anchor time (3.12.3 scheduleRule hour/minute)；null =
+  /// 提交时刻取当前时间取整（时:分），用户可改。
+  TimeOfDay? _anchor;
+
   FrequencyPreset _preset = FrequencyPreset.daily;
   TimeOfDay _timeOfDay = const TimeOfDay(hour: 9, minute: 0);
   final Set<int> _weekdays = {1};
@@ -703,6 +748,10 @@ class AutomationSheetState extends State<AutomationSheet> {
         text: '${init?.relativeDelayMinutes ?? 60}');
     _intervalUnit = init?.intervalUnit ?? 'day';
     _recurring = init?.recurring ?? true;
+    final anchorH = init?.anchorHour;
+    _anchor = anchorH == null
+        ? null
+        : TimeOfDay(hour: anchorH, minute: init!.anchorMinute ?? 0);
     _derivePreset(init);
     _mode = init?.mode;
     _modelValue = (init?.provider ?? '').isNotEmpty && (init?.model ?? '').isNotEmpty
@@ -790,15 +839,27 @@ class AutomationSheetState extends State<AutomationSheet> {
   }
 
   /// Cron minute/hour from the picked time.
-  String get _timePart =>
-      '${_timeOfDay.hour.toString().padLeft(2, '0')}:'
-      '${_timeOfDay.minute.toString().padLeft(2, '0')}';
+  String get _timePart => _formatTime(_timeOfDay);
+
+  String _formatTime(TimeOfDay t) =>
+      '${t.hour.toString().padLeft(2, '0')}:'
+      '${t.minute.toString().padLeft(2, '0')}';
+
+  /// Anchor display: 提交时刻的当前时间取整兜底。
+  TimeOfDay get _effectiveAnchor =>
+      _anchor ?? TimeOfDay.fromDateTime(DateTime.now());
 
   List<int> _sortedWeekdays() => _weekdays.toList()..sort();
 
   Future<void> _pickTime() async {
     final t = await showTimePicker(context: context, initialTime: _timeOfDay);
     if (t != null) setState(() => _timeOfDay = t);
+  }
+
+  Future<void> _pickAnchor() async {
+    final t = await showTimePicker(
+        context: context, initialTime: _effectiveAnchor);
+    if (t != null) setState(() => _anchor = t);
   }
 
   /// Synthetic item feeding the humanized schedule preview.
@@ -865,17 +926,23 @@ class AutomationSheetState extends State<AutomationSheet> {
     // Presets regenerate the expression; interval/one-shot keep their own
     // wire shapes.
     final presetCron = _effectiveCron();
+    final trigger = _preset == FrequencyPreset.once
+        ? AutomationInput.triggerOneShot
+        : (_preset == FrequencyPreset.customInterval
+            ? AutomationInput.triggerInterval
+            : AutomationInput.triggerCron);
+    final anchor = _effectiveAnchor;
     final input = AutomationInput(
       title: _title.text,
       prompt: _prompt.text,
-      trigger: _preset == FrequencyPreset.once
-          ? AutomationInput.triggerOneShot
-          : (_preset == FrequencyPreset.customInterval
-              ? AutomationInput.triggerInterval
-              : AutomationInput.triggerCron),
+      trigger: trigger,
       cronExpr: presetCron ?? _cron.text,
       interval: int.tryParse(_interval.text.trim()),
       intervalUnit: _intervalUnit,
+      anchorHour:
+          trigger == AutomationInput.triggerInterval ? anchor.hour : null,
+      anchorMinute:
+          trigger == AutomationInput.triggerInterval ? anchor.minute : null,
       recurring: _recurring,
       maxRuns: int.tryParse(_maxRuns.text.trim()),
       relativeDelayMinutes: int.tryParse(_delay.text.trim()),
@@ -1066,6 +1133,17 @@ class AutomationSheetState extends State<AutomationSheet> {
                     tr(context, 'auto.intervalUnit.$_intervalUnit'),
                   ]),
                   style: ZType.body,
+                ),
+              ),
+              // 锚点时间 (A1)：决定 interval 实际翻转的时刻，默认当前取整。
+              const SizedBox(height: 10),
+              InkWell(
+                onTap: _pickAnchor,
+                borderRadius: BorderRadius.circular(ZRadius.field),
+                child: InputDecorator(
+                  decoration:
+                      InputDecoration(labelText: tr(context, 'auto.anchor')),
+                  child: Text(_formatTime(_effectiveAnchor)),
                 ),
               ),
               SwitchListTile(

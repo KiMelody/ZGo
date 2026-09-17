@@ -33,7 +33,7 @@ class FakeOffPeakHost implements OffPeakHost {
   };
 
   @override
-  late final OffPeakPort offPeak = OffPeakPort(_call);
+  late final OffPeakPort offPeak = OffPeakPort(_call, newWire: false);
 
   Future<dynamic> _call(String method, List<Object?> args) async {
     final fail = failWith;

@@ -32,12 +32,27 @@ import 'method_probe.dart';
 ///
 /// Channel: `off-peak-task` (present in the desktop channel registry;
 /// confirmed via the zemote channel explorer). Method names below are
-/// NOT yet live-confirmed — each op probes candidates via [MethodProbe]
+/// live-confirmed only where noted (2026-09-17 rounds against 3.12.3:
+/// lifecycle positional names, positional `updateTask`, structured
+/// createTask errors); everything else probes candidates via [MethodProbe]
 /// and remembers the winner; validation/permission errors surface as-is.
+///
+/// Desktops ≥3.12.3 ([newWire]) take the lifecycle family as a bare
+/// positional `[taskId]` (the legacy object form throws a loud SQLite
+/// binding error there) and probe the positional `updateTask(taskId, patch)`
+/// first; they also answer some ops with a structured failure envelope
+/// `{ok:false, failureStage, errorCategory, errorCode}` which maps onto
+/// [OffPeakError] kinds. Older desktops keep the legacy wire exactly as
+/// before — gated, never double-sent.
 class OffPeakPort {
+  /// Binds one RPC: the channel is fixed by the port owner, method/args vary.
   final Future<dynamic> Function(String method, List<Object?> args) call;
 
-  OffPeakPort(this.call) : _probe = MethodProbe(call);
+  /// 3.12.3 wire gate (RemoteConnectionParams.atLeast(3, 12, 3) of the
+  /// session's app_version; a desktop never changes version mid-session).
+  final bool newWire;
+
+  OffPeakPort(this.call, {required this.newWire}) : _probe = MethodProbe(call);
 
   final MethodProbe _probe;
 
@@ -58,6 +73,9 @@ class OffPeakPort {
     'submitOffPeakTask',
     'createOffPeakTask',
   ];
+  // Lifecycle names live-confirmed on 3.12.3 (2026-09-17): pauseTask/
+  // continueTask/cancelTask/deleteTask/deleteHistory with a bare
+  // positional `[taskId]`. The legacy flat names stay as fallbacks.
   static const _pauseMethods = ['pause', 'pauseTask', 'pauseOffPeakTask'];
   static const _resumeMethods = [
     'resume',
@@ -71,6 +89,17 @@ class OffPeakPort {
     'delete',
     'deleteTask',
   ];
+
+  /// Candidates that take the positional `[taskId]` on [newWire] desktops
+  /// (see the class doc). Any other candidate keeps the legacy object form
+  /// `[{offPeakTaskId: taskId}]`.
+  static const _positionalLifecycle = {
+    'pauseTask',
+    'continueTask',
+    'cancelTask',
+    'deleteTask',
+    'deleteHistory',
+  };
   static const _updateMethods = [
     'updateTask',
     'editOffPeakTask',
@@ -113,6 +142,11 @@ class OffPeakPort {
     } on ChannelRpcError catch (e) {
       throw OffPeakError.fromMessage(e.message, e);
     }
+    // 3.12.3 answers some rejections with a structured envelope as a
+    // normal ack ({ok:false, errorCategory, ...}) — classify and throw
+    // instead of surfacing an opaque ok:false result.
+    final structured = OffPeakError.structuredFrom(res);
+    if (structured != null) throw structured;
     final ack =
         res is Map ? res.cast<String, dynamic>() : const <String, dynamic>{};
     return OffPeakRunResult.from(ack, echo: input.toWire());
@@ -120,23 +154,22 @@ class OffPeakPort {
 
   // ------------------------------------------------------------ lifecycle
 
-  Future<void> pause(String taskId) => _lifecycle('pause', _pauseMethods,
-      {'offPeakTaskId': taskId});
+  Future<void> pause(String taskId) =>
+      _lifecycle('pause', _pauseMethods, taskId);
 
-  Future<void> resume(String taskId) => _lifecycle('resume', _resumeMethods,
-      {'offPeakTaskId': taskId});
+  Future<void> resume(String taskId) =>
+      _lifecycle('resume', _resumeMethods, taskId);
 
-  Future<void> cancel(String taskId) => _lifecycle('cancel', _cancelMethods,
-      {'offPeakTaskId': taskId});
+  Future<void> cancel(String taskId) =>
+      _lifecycle('cancel', _cancelMethods, taskId);
 
   /// History removal (desktop separates 删除历史记录 from task delete).
   /// Falls back to the plain delete candidates on older desktops.
-  Future<void> remove(String taskId) => _lifecycle('delete', _deleteMethods,
-      {'offPeakTaskId': taskId});
+  Future<void> remove(String taskId) =>
+      _lifecycle('delete', _deleteMethods, taskId);
 
   Future<void> deleteHistory(String taskId) =>
-      _lifecycle('history-delete', _historyDeleteMethods,
-          {'offPeakTaskId': taskId});
+      _lifecycle('history-delete', _historyDeleteMethods, taskId);
 
   // ---------------------------------------------------------------- update
 
@@ -145,17 +178,25 @@ class OffPeakPort {
   /// task id; `model`/`thoughtLevel` arrive as explicit nulls when unset.
   /// Arg shapes: 0 = `[{offPeakTaskId, ...patch}]`,
   /// 1 = `[taskId, {patch}]` — resolved once and remembered.
+  ///
+  /// Shape order: 3.12.3 takes the positional form (live 2026-09-17:
+  /// bogus-id void ack; the object form is rejected with `Unknown named
+  /// parameter 'offPeakTaskId'`), so it probes first there. Legacy desktops
+  /// keep the object form first — a positional call can silent-void there,
+  /// while the object form fails loudly and lets the probe advance.
   Future<void> update(String taskId, OffPeakUpdateInput patch) async {
-    const shapes = 2;
+    final order = newWire ? const [1, 0] : const [0, 1];
     Object? firstError;
-    for (var shape = 0; shape < shapes; shape++) {
+    for (final shape in order) {
+      final wire = patch.toWire(newWire: newWire);
       final args = switch (shape) {
-        0 => <Object?>[{'offPeakTaskId': taskId, ...patch.toWire()}],
-        _ => <Object?>[taskId, patch.toWire()],
+        0 => <Object?>[
+            {'offPeakTaskId': taskId, ...wire}
+          ],
+        _ => <Object?>[taskId, wire],
       };
       try {
-        await _probe.run('update:$shape', _updateMethods,
-            argsOf: (_) => args);
+        await _probe.run('update:$shape', _updateMethods, argsOf: (_) => args);
         return;
       } on ChannelRpcError catch (e) {
         if (!MethodProbe.missingMethod(e.message)) rethrow;
@@ -165,9 +206,28 @@ class OffPeakPort {
     throw firstError ?? StateError('update: no candidate methods left');
   }
 
-  Future<void> _lifecycle(String op, List<String> methods, Map arg) async {
+  Future<void> _lifecycle(
+      String op, List<String> methods, String taskId) async {
+    // Candidate ladder direction (PRD R1): on newWire the positional-
+    // confirmed names lead (live hits) and a legacy object-form name stays
+    // as the loud-error fallback; on legacy desktops the sequence is kept
+    // verbatim and every call takes the object form — a positional
+    // `[taskId]` there can silent-void (false positive), so it never leads.
+    final candidates = newWire
+        ? [
+            ...methods.where(_positionalLifecycle.contains),
+            ...methods.where((m) => !_positionalLifecycle.contains(m)),
+          ]
+        : methods;
     try {
-      await _probe.run(op, methods, argsOf: (_) => [arg]);
+      final res = await _probe.run(op, candidates,
+          argsOf: (m) => newWire && _positionalLifecycle.contains(m)
+              ? <Object?>[taskId]
+              : <Object?>[
+                  {'offPeakTaskId': taskId}
+                ]);
+      final failure = OffPeakError.structuredFrom(res);
+      if (failure != null) throw failure;
     } on ChannelRpcError catch (e) {
       throw OffPeakError.fromMessage(e.message, e);
     }
@@ -241,7 +301,8 @@ class OffPeakSubmitInput {
           'thoughtLevel': thoughtLevel,
         if (earliestAtMs != null) 'earliestAvailableAt': earliestAtMs,
         if (title != null && title!.isNotEmpty) 'title': title,
-      };}
+      };
+}
 
 /// Edit-form patch for an existing run (desktop `updateTask` shape).
 /// [model]/[thoughtLevel] are emitted explicitly (null included) — the
@@ -254,6 +315,11 @@ class OffPeakUpdateInput {
   /// Plain model name (allowedModels entries); null = 默认模型.
   final String? model;
 
+  /// Provider id for the 3.12.3 [modelSelection] object. The off-peak
+  /// edit form has no provider picker yet — null means the pair is
+  /// incomplete and the flat wire keeps the desktop's stored value.
+  final String? provider;
+
   /// Thought level (allowedModelConfigs reasoning levels); null = 默认.
   final String? thoughtLevel;
 
@@ -262,17 +328,43 @@ class OffPeakUpdateInput {
     required this.prompt,
     this.permissionMode = 'build',
     this.model,
+    this.provider,
     this.thoughtLevel,
   });
 
-  Map<String, dynamic> toWire() => {
+  Map<String, dynamic> toWire({bool newWire = false}) {
+    final clearModel = model == null || model!.isEmpty;
+    final clearThought = thoughtLevel == null || thoughtLevel!.isEmpty;
+    if (!newWire) {
+      return {
         'title': title.trim(),
         'prompt': prompt.trim(),
         'permissionMode': permissionMode,
-        'model': (model == null || model!.isEmpty) ? null : model,
-        'thoughtLevel':
-            (thoughtLevel == null || thoughtLevel!.isEmpty) ? null : thoughtLevel,
+        'model': clearModel ? null : model,
+        'thoughtLevel': clearThought ? null : thoughtLevel,
       };
+    }
+    // 3.12.3: model/thoughtLevel ride in a modelSelection object. The
+    // automation-port ruling carries over — once emitted, providerId/
+    // modelId are required (zod strict), so the object only goes out with
+    // the provider+model pair; a lone thoughtLevel has no carrier and is
+    // dropped. An explicit null patch (user picked 默认模型) keeps its
+    // clear-the-field semantics as `modelSelection: null`.
+    final hasPair = !clearModel && provider != null && provider!.isNotEmpty;
+    return {
+      'title': title.trim(),
+      'prompt': prompt.trim(),
+      'permissionMode': permissionMode,
+      if (hasPair)
+        'modelSelection': {
+          'providerId': provider,
+          'modelId': model,
+          if (!clearThought) 'options': {'reasoningLevel': thoughtLevel},
+        }
+      else if (clearModel)
+        'modelSelection': null,
+    };
+  }
 }
 
 /// Parsed `off-peak-run-result`.
@@ -299,8 +391,7 @@ class OffPeakRunResult {
       ok: raw['ok'] != false && error == null,
       conversationId: raw['conversationId'] as String? ??
           echo?['conversationId'] as String?,
-      sessionId:
-          raw['sessionId'] as String? ?? echo?['sessionId'] as String?,
+      sessionId: raw['sessionId'] as String? ?? echo?['sessionId'] as String?,
       error: error,
       raw: raw,
     );
@@ -392,9 +483,8 @@ class OffPeakStatus {
   /// Tolerant: absolute-epoch fields at ms/s scale or an explicit remaining
   /// duration in ms/seconds.
   int? quotaResetRemainingMs(int nowMs) {
-    final reset =
-        (raw['quotaResetAt'] as num?)?.toInt() ??
-            (raw['limitReachedResetAt'] as num?)?.toInt();
+    final reset = (raw['quotaResetAt'] as num?)?.toInt() ??
+        (raw['limitReachedResetAt'] as num?)?.toInt();
     if (reset != null) {
       final ms = reset < 100000000000 ? reset * 1000 : reset;
       return ms - nowMs;
@@ -430,7 +520,10 @@ class OffPeakError implements Exception {
     if (m.contains('codingplan') ||
         m.contains('coding plan') ||
         m.contains('subscription') ||
-        m.contains('订阅')) {
+        m.contains('订阅') ||
+        // 3.12.3 structured errorCategory values also surface inside RPC
+        // error text — eligibility_3101 is the coding-plan gate.
+        m.contains('eligibility')) {
       return codingPlanOnly;
     }
     if (m.contains('quota') ||
@@ -444,10 +537,37 @@ class OffPeakError implements Exception {
         m.contains('no such method') ||
         m.contains('unknown method') ||
         m.contains('method not found') ||
-        m.contains('unsupported')) {
+        m.contains('unsupported') ||
+        m.contains('network') ||
+        m.contains('invalid_response')) {
       return unavailable;
     }
     return other;
+  }
+
+  /// Classifies a structured failure envelope (bridge-side zod shape,
+  /// live-confirmed 2026-09-17):
+  /// `{ok:false, failureStage, errorCategory, errorCode}` — answered as a
+  /// NORMAL ack (no RPC error) by createTask and the lifecycle family.
+  /// Returns null for anything else (void acks, legacy `{ok, error}`
+  /// run-results) so callers keep their existing paths. Category mapping:
+  /// eligibility_3101→codingPlanOnly, quota_3103→quota,
+  /// network|invalid_response→unavailable, rest→other.
+  static OffPeakError? structuredFrom(Object? res) {
+    if (res is! Map || res['ok'] != false) return null;
+    final category = res['errorCategory'];
+    if (category is! String || category.isEmpty) return null;
+    final code = res['errorCode'];
+    return OffPeakError(
+      switch (category) {
+        'eligibility_3101' => codingPlanOnly,
+        'quota_3103' => quota,
+        'network' || 'invalid_response' => unavailable,
+        _ => other,
+      },
+      code is String && code.isNotEmpty ? '$category ($code)' : category,
+      res,
+    );
   }
 
   factory OffPeakError.fromMessage(String message, [Object? cause]) =>

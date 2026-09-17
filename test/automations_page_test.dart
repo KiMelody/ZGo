@@ -29,7 +29,7 @@ class FakeAutomationHost implements AutomationHost {
   FakeAutomationHost(this.status, [this.items = const []]);
 
   @override
-  late final AutomationPort automation = AutomationPort(_call);
+  late final AutomationPort automation = AutomationPort(_call, newWire: false);
 
   Future<dynamic> _call(String method, List<Object?> args) async {
     final fail = failWith;
@@ -147,6 +147,7 @@ void main() {
     expect(create, hasLength(1));
     expect(create.single.$2, [
       {
+        'workspacePath': '/repo',
         'title': '站会总结',
         'prompt': '总结昨天的 git 提交',
         'cronExpr': '0 9 * * *',
@@ -187,6 +188,7 @@ void main() {
         .toList();
     expect(create.single.$2, [
       {
+        'workspacePath': '/repo',
         'title': 't',
         'prompt': 'p',
         'relativeDelayMinutes': 30,
@@ -324,6 +326,7 @@ void main() {
         host.calls.where((c) => c.$1 == 'createAutomation').toList();
     expect(create, hasLength(1));
     expect(create.single.$2.single, {
+      'workspacePath': '/repo',
       'title': '我的周报',
       'prompt': contains('周五回顾'),
       'cronExpr': '0 16 * * 5',

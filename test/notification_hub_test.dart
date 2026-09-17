@@ -59,10 +59,10 @@ class FakeNotifiableSession extends ChangeNotifier
 
   @override
   late final AutomationPort automation =
-      AutomationPort((m, a) async => automationItems);
+      AutomationPort((m, a) async => automationItems, newWire: false);
   @override
   late final OffPeakPort offPeak =
-      OffPeakPort((m, a) async => offPeakTasks);
+      OffPeakPort((m, a) async => offPeakTasks, newWire: false);
 
   final SessionsIndexState _state = SessionsIndexState();
 

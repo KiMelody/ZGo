@@ -26,10 +26,13 @@ class TaskDirectory {
   });
 
   /// Merged rows: relay base, live override per task id. Each row carries
-  /// its workspace key and archived flag of the WINNING source
-  /// ([SessionEntry.fromRelayTask] does not copy `archived` into `raw`, so
-  /// it is read off the relay map itself). Rows without a task id are
-  /// dropped — nothing can address them.
+  /// its workspace key and the archived flag read off the RELAY map only —
+  /// the relay `archived` field is the sole authority (live-probed
+  /// bootstrap frame; live sessions-index frames carry no reliable
+  /// `archived` field, so the old `entry.raw['archived']` fallback is gone
+  /// — R1, 2026-09-17). Unarchive propagates back via
+  /// workspace-list-updated. Rows without a task id are dropped — nothing
+  /// can address them.
   List<(SessionEntry, String?, bool)> _rows() {
     final byId = <String, (SessionEntry, String?, bool)>{};
     for (final task in relayTasks) {
@@ -39,14 +42,10 @@ class TaskDirectory {
     }
     if (sessions?.ready == true) {
       for (final entry in sessions!.list) {
-        // The live index rides archived sessions WITHOUT the archived field
-        // (probed 3.12.1), so the override may confirm but never clear the
-        // relay bit — unarchive propagates back via workspace-list-updated.
-        final relayArchived = byId[entry.sessionId]?.$3 ?? false;
         byId[entry.sessionId] = (
           entry,
           activeWorkspaceKey,
-          relayArchived || entry.raw['archived'] == true,
+          byId[entry.sessionId]?.$3 ?? false,
         );
       }
     }

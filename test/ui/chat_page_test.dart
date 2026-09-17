@@ -185,6 +185,118 @@ void main() {
     expect(call.$2[2], 'o1');
   });
 
+  Map<String, dynamic> hookReviewInteraction() => {
+    'interactionId': 'i1',
+    'payload': {
+      'kind': 'workspaceHookReview',
+      'sessionId': 's1',
+      'taskId': 't1',
+      'runId': 'r1',
+      'workspaceIdentity': 'wid',
+      'workspaceLabel': 'my-repo',
+      'bundleDigest':
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'reviewFlowId': 'rf1',
+      'generation': 2,
+      'interactionId': 'i1',
+      'summary': {'eventCount': 3, 'hookCount': 2, 'pendingCount': 2},
+      'items': [
+        {
+          'reviewItemId': 'r1',
+          'event': 'SessionStart',
+          'displayName': '启动检查',
+          'displayCommand': 'bash startup.sh',
+          'trustState': 'pending_trust',
+        },
+        {
+          'reviewItemId': 'r2',
+          'event': 'PreToolUse',
+          'displayName': '守卫脚本',
+          'displayCommand': 'python guard.py',
+          'trustState': 'revoked',
+        },
+      ],
+    },
+  };
+
+  Future<FakeChatGateway> pumpHookReview(WidgetTester tester) async {
+    final gateway = FakeChatGateway();
+    gateway.snapshotExtra = {
+      'pendingInteractions': [hookReviewInteraction()],
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+    return gateway;
+  }
+
+  testWidgets('hook review card renders label, summary, items and badges', (
+    tester,
+  ) async {
+    await pumpHookReview(tester);
+
+    expect(find.text('my-repo'), findsOneWidget);
+    expect(find.textContaining('3 个事件'), findsOneWidget);
+    // items: name, event, mono command, trustState badges.
+    expect(find.text('启动检查'), findsOneWidget);
+    expect(find.text('SessionStart'), findsOneWidget);
+    expect(find.textContaining('bash startup.sh'), findsOneWidget);
+    expect(find.text('守卫脚本'), findsOneWidget);
+    expect(find.text('待信任'), findsOneWidget);
+    expect(find.text('已撤销'), findsOneWidget);
+    expect(find.text('信任勾选项'), findsOneWidget);
+  });
+
+  testWidgets('trust button sends the checked reviewItemIds subset', (
+    tester,
+  ) async {
+    final gateway = await pumpHookReview(tester);
+
+    // All checked by default; uncheck the second hook, then trust.
+    await tester.tap(find.byType(Checkbox).last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('信任勾选项'));
+    await tester.pumpAndSettle();
+
+    final call = gateway.calls
+        .where((c) => c.$1 == 'respondWorkspaceHookReview')
+        .toList()
+        .single;
+    expect(call.$2[0], 's1');
+    expect(call.$2[2], ['r1']);
+  });
+
+  testWidgets('unknown interaction kind keeps the generic fallback', (
+    tester,
+  ) async {
+    final gateway = FakeChatGateway();
+    gateway.snapshotExtra = {
+      'pendingInteractions': [
+        {
+          'interactionId': 'i9',
+          'payload': {'kind': 'mysteryCard'},
+        },
+      ],
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('等待你的输入'), findsOneWidget);
+    expect(
+      gateway.calls.where((c) => c.$1 == 'respondWorkspaceHookReview'),
+      isEmpty,
+    );
+  });
+
   testWidgets('queue bar deletes a queued item', (tester) async {
     final gateway = FakeChatGateway();
     gateway.snapshotExtra = {

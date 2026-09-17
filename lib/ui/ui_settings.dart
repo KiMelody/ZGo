@@ -188,6 +188,24 @@ String relativeTimeShort(BuildContext context, int ms) {
   ).toLocal().toString().substring(0, 10);
 }
 
+/// Compact token count (chat capacity line, task token row): zh renders
+/// 万 with one decimal (19.4万), en the k/M scale (194k); trailing `.0` is
+/// dropped on both.
+String compactTokens(BuildContext context, int n) {
+  final english =
+      (UiSettingsProvider.of(context)?.locale ?? 'zh-CN').startsWith('en');
+  if (!english) return '${_trimZero(n / 10000)}万';
+  if (n >= 1000000) return '${_trimZero(n / 1000000)}M';
+  if (n >= 1000) return '${_trimZero(n / 1000)}k';
+  return '$n';
+}
+
+/// One decimal with a trailing `.0` removed (30万, not 30.0万).
+String _trimZero(double v) {
+  final s = v.toStringAsFixed(1);
+  return s.endsWith('.0') ? s.substring(0, s.length - 2) : s;
+}
+
 const _zh = {
   'app.title': 'ZLinker',
   'devices.empty.title': '还没有设备',
@@ -468,6 +486,16 @@ const _zh = {
   'chat.interact.custom': '自定义',
   'chat.interact.pick': '选择',
   'chat.interact.submit': '提交',
+  'chat.hook.title': '工作区 Hook 审阅',
+  'chat.hook.summary': '\$0 个事件 · \$1 个 hook · \$2 项待审',
+  'chat.hook.trustChecked': '信任勾选项',
+  'chat.hook.state.not_applicable': '不适用',
+  'chat.hook.state.pending_trust': '待信任',
+  'chat.hook.state.trusted_persistent': '已信任',
+  'chat.hook.state.blocked_untrusted': '已拦截',
+  'chat.hook.state.blocked_policy': '策略拦截',
+  'chat.hook.state.revoked': '已撤销',
+  'chat.hook.state.stale_digest': '摘要过期',
   'chat.mode.build': '变更前确认',
   'chat.mode.build.desc': '改文件前先问我。',
   'chat.mode.edit': '自动编辑',
@@ -604,6 +632,7 @@ const _zh = {
   'tasks.sidebar.filterSort': '筛选和排序',
   'tasks.sidebar.archive': '归档',
   'tasks.archive.empty': '没有归档的任务',
+  'tasks.tokenUsageLine': 'Token 用量：\$0（\$1 次请求）',
   'remote.error.title': '无法连接到桌面设备',
   'remote.error.hint': '请确认桌面 ZCode 已打开且网络可用',
   'remote.reload': '重新加载',
@@ -638,6 +667,7 @@ const _zh = {
   'usage.neverUsed': '从未使用',
   'tasks.menu.usage': '使用统计',
   'tasks.menu.providers': '模型设置',
+  'tasks.menu.providersUnsupported': '当前桌面端版本不支持',
   'usageRpc.title': '用量',
   'usageRpc.appUsage': '应用用量',
   'usageRpc.rangeAll': '全部',
@@ -804,6 +834,11 @@ const _zh = {
   'auto.err.cron': '请填写 Cron 表达式',
   'auto.err.interval': '间隔需为正整数',
   'auto.err.delay': '延迟需在 1 分钟到 1 年之间',
+  'auto.anchor': '锚点时间',
+  'auto.lifecycle.completed': '已完成',
+  'auto.lifecycle.failed': '失败',
+  'auto.lifecycle.paused': '已暂停',
+  'auto.error.limit': '定时任务已达数量上限（20 条），请先删除部分任务',
   'tasks.menu.offPeak': '闲时任务',
   'op.title': '闲时任务',
   'op.subtitle': '算力富余时段免费执行 · Coding Plan',
@@ -1285,6 +1320,16 @@ const _en = {
   'chat.interact.custom': 'Custom',
   'chat.interact.pick': 'Pick',
   'chat.interact.submit': 'Submit',
+  'chat.hook.title': 'Workspace hook review',
+  'chat.hook.summary': '\$0 events · \$1 hooks · \$2 pending',
+  'chat.hook.trustChecked': 'Trust checked',
+  'chat.hook.state.not_applicable': 'N/A',
+  'chat.hook.state.pending_trust': 'Pending trust',
+  'chat.hook.state.trusted_persistent': 'Trusted',
+  'chat.hook.state.blocked_untrusted': 'Blocked',
+  'chat.hook.state.blocked_policy': 'Policy blocked',
+  'chat.hook.state.revoked': 'Revoked',
+  'chat.hook.state.stale_digest': 'Digest stale',
   'chat.mode.build': 'Confirm changes',
   'chat.mode.build.desc': 'Ask me before editing files.',
   'chat.mode.edit': 'Auto edit',
@@ -1426,6 +1471,7 @@ const _en = {
   'tasks.sidebar.filterSort': 'Filter & sort',
   'tasks.sidebar.archive': 'Archive',
   'tasks.archive.empty': 'No archived tasks',
+  'tasks.tokenUsageLine': 'Token usage: \$0 (\$1 requests)',
   'remote.error.title': 'Cannot reach the desktop device',
   'remote.error.hint':
       'Make sure ZCode desktop is running and the network works',
@@ -1463,6 +1509,7 @@ const _en = {
   'usage.neverUsed': 'Never used',
   'tasks.menu.usage': 'Usage stats',
   'tasks.menu.providers': 'Model settings',
+  'tasks.menu.providersUnsupported': 'Not supported by this desktop version',
   'usageRpc.title': 'Usage',
   'usageRpc.appUsage': 'App usage',
   'usageRpc.rangeAll': 'All',
@@ -1633,6 +1680,12 @@ const _en = {
   'auto.err.cron': 'Cron expression is required',
   'auto.err.interval': 'Interval must be a positive integer',
   'auto.err.delay': 'Delay must be between 1 minute and 1 year',
+  'auto.anchor': 'Anchor time',
+  'auto.lifecycle.completed': 'Completed',
+  'auto.lifecycle.failed': 'Failed',
+  'auto.lifecycle.paused': 'Paused',
+  'auto.error.limit':
+      'Automation limit reached (20) — delete an existing automation first',
   'tasks.menu.offPeak': 'Off-peak tasks',
   'op.title': 'Off-peak tasks',
   'op.subtitle': 'Free runs in compute-rich windows · Coding Plan',

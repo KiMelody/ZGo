@@ -99,7 +99,10 @@ void main() {
     expect(dir.notificationRows(includeArchived: false), isEmpty);
   });
 
-  test('a live archived row wins the id and hides like any archived row', () {
+  test('a live row cannot set archived — the relay bit is the authority', () {
+    // R1 (2026-09-17): the relay `archived` field is the sole authority;
+    // the old live-frame fallback (entry.raw['archived']) is deleted. A
+    // live row carrying the field must neither hide nor archive itself.
     final dir = TaskDirectory(
       relayTasks: [_relayTask('t1', 'alpha')],
       sessions: _liveIndex([
@@ -112,8 +115,8 @@ void main() {
       ]),
       activeWorkspaceKey: 'alpha',
     );
-    expect(dir.allEntries(), isEmpty);
-    expect(dir.entriesFor('alpha', includeArchived: true), hasLength(1));
+    expect(dir.allEntries(), hasLength(1));
+    expect(dir.entriesFor('alpha', includeArchived: true), isEmpty);
     expect(dir.notificationRows(), hasLength(1));
   });
 

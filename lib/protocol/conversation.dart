@@ -30,6 +30,13 @@ class ConversationTransport {
   final BridgeSession session;
   final Map<String, dynamic> scope;
   final String appVersion;
+
+  /// Desktop version gate (>=3.12.3, `params.atLeast(3, 12, 3)` at the
+  /// RemoteClient): only then does clientHello carry
+  /// `capabilities: {workspaceHookReviewUi: true}` — the strict hello
+  /// schema of older desktops is untested against unknown fields, so the
+  /// key is omitted entirely (not sent as false).
+  final bool workspaceHookReviewUi;
   final void Function(String line)? onLog;
 
   final String clientId = generateUuid();
@@ -43,6 +50,7 @@ class ConversationTransport {
     required this.session,
     required this.scope,
     this.appVersion = '3.6.5',
+    this.workspaceHookReviewUi = false,
     this.onLog,
   }) {
     // A reopened bridge has no handshake state — start over (mirrors the
@@ -81,6 +89,10 @@ class ConversationTransport {
               'clientId': clientId,
               'clientKind': 'mobileApp',
               'appVersion': appVersion,
+              // 3.12.3+ strict schema: capabilities holds exactly this one
+              // key — anything else rejects the whole hello.
+              if (workspaceHookReviewUi)
+                'capabilities': {'workspaceHookReviewUi': true},
             },
           ]);
           _handshaken = true;
@@ -680,6 +692,34 @@ class ConversationTransport {
     },
   });
 
+  /// Answers the `workspaceHookReview` interaction (3.12.3 workspace
+  /// hooks). [frame] is the interaction payload — identity fields are
+  /// passed back verbatim into the strict payload; [reviewItemIds] carries
+  /// the checked hooks. The decision schema has exactly one action
+  /// (`trust_selected`, >=1 deduped ids); declining means not answering
+  /// and letting the interaction time out server-side.
+  Future<dynamic> respondWorkspaceHookReview(
+    String sessionId,
+    Map<String, dynamic> frame,
+    List<String> reviewItemIds,
+  ) => sendCommand(sessionId, 'respondWorkspaceHookReview', {
+    'sessionId': '${frame['sessionId'] ?? sessionId}',
+    'taskId': '${frame['taskId'] ?? ''}',
+    'runId': '${frame['runId'] ?? ''}',
+    if (frame['remoteSessionId'] is String &&
+        (frame['remoteSessionId'] as String).isNotEmpty)
+      'remoteSessionId': frame['remoteSessionId'],
+    'workspaceIdentity': '${frame['workspaceIdentity'] ?? ''}',
+    'bundleDigest': '${frame['bundleDigest'] ?? ''}',
+    'reviewFlowId': '${frame['reviewFlowId'] ?? ''}',
+    'generation': (frame['generation'] as num?)?.toInt() ?? 0,
+    'interactionId': '${frame['interactionId'] ?? ''}',
+    'decision': {
+      'action': 'trust_selected',
+      'reviewItemIds': reviewItemIds.toSet().toList(),
+    },
+  });
+
   Future<dynamic> rowsRange(
     String sessionId, {
     int? beforeRowId,
@@ -708,7 +748,7 @@ class ConversationTransport {
     return subscription;
   }
 
-  // ---------------------------------------------------- workspace config
+  // ----------------------------------------------- workspace presentation
 
   WorkspacePrep? _prep;
 
@@ -723,6 +763,24 @@ class ConversationTransport {
     final prep = WorkspacePrep._(res is Map ? res : const {});
     _prep = prep;
     return prep;
+  }
+
+  /// `zcode-agent.readWorkspacePresentation` — the 3.12.3+ slash-command
+  /// source (builtin + custom), same method the official web remote reads.
+  /// One-shot RPC, no subscription lifecycle. Null on non-Map answer or
+  /// channel rejection — a presentation miss must not fail the caller
+  /// (slashCommands stay empty instead).
+  Future<Map<String, dynamic>?> readWorkspacePresentation() async {
+    try {
+      final res = await _channels.call(
+        channel,
+        'readWorkspacePresentation',
+        [scope],
+      );
+      return res is Map ? Map<String, dynamic>.from(res) : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// `skills.list` — enabled skills of this workspace (mirrors the web

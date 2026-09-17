@@ -4,13 +4,15 @@ import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 
 import '../protocol/automation.dart';
-import '../protocol/channel_client.dart' show isChannelMissingError;
+import '../protocol/channel_client.dart'
+    show Channels, isChannelLevelError, isChannelMissingError;
 import '../protocol/connection_params.dart';
 import '../protocol/conversation.dart';
 import '../protocol/off_peak.dart';
 import '../protocol/relay_client.dart';
 import '../protocol/remote_client.dart';
 import '../protocol/task_commands.dart';
+import '../protocol/task_groups.dart';
 import 'device_store.dart';
 import 'entitlement_poller.dart';
 import 'quota_reset.dart';
@@ -915,6 +917,44 @@ class DeviceSession extends ChangeNotifier
     _forceRebuildAfterStall(reason);
   }
 
+  // --- model-provider capability gate (removed in desktop 3.12.3) ---
+  /// Cached probe verdict: null = not probed yet, true = the desktop still
+  /// serves the `model-provider` channel, false = removed. Cached for the
+  /// whole session lifetime — a channel does not come back mid-session.
+  bool? _modelProviderAvailable;
+
+  /// In-flight dedup for [probeModelProvider].
+  Future<bool>? _modelProviderProbe;
+
+  /// Current knowledge about the `model-provider` channel; null until the
+  /// first probe landed. Callers treat unknown as available — the providers
+  /// page carries its own channel-unavailable fallback for that case.
+  bool? get modelProviderAvailable => _modelProviderAvailable;
+
+  /// One lightweight `model-provider.getAll` capability probe, deduplicated
+  /// while in flight; both verdicts are cached for the session lifetime.
+  /// Channel-level failures (the desktop's `Channel name … timed out`
+  /// answer or an RPC timeout — [isChannelLevelError], no new heuristics)
+  /// mean the channel is gone; any other error proves nothing about the
+  /// channel and stays uncached so the next trigger re-runs the probe.
+  Future<bool> probeModelProvider() {
+    final cached = _modelProviderAvailable;
+    if (cached != null) return Future.value(cached);
+    return _modelProviderProbe ??= _probeModelProvider();
+  }
+
+  Future<bool> _probeModelProvider() async {
+    try {
+      await callChannel(Channels.modelProvider, 'getAll');
+      return _modelProviderAvailable = true;
+    } catch (e) {
+      if (!isChannelLevelError(e)) return true;
+      return _modelProviderAvailable = false;
+    } finally {
+      _modelProviderProbe = null;
+    }
+  }
+
   WorkspaceGate? _liveGate() {
     final bridge = _bridge;
     return bridge == null ? null : _LiveWorkspaceGate(bridge);
@@ -925,16 +965,22 @@ class DeviceSession extends ChangeNotifier
   void debugAttachGateForTest(WorkspaceGate gate) => _testGate = gate;
 
   /// Server-side automations of the connected desktop. Bound to the
-  /// zcode-agent channel (listAllAutomations was probed there).
+  /// zcode-agent channel (listAllAutomations was probed there). The wire
+  /// shape (scheduleRule/modelSelection/setAutomationEnabled) is gated on
+  /// the desktop version — it cannot change mid-session.
   @override
   late final AutomationPort automation = AutomationPort(
     (method, args) => callChannel('zcode-agent', method, args),
+    newWire: params.atLeast(3, 12, 3),
   );
 
-  /// Off-peak tasks of the connected desktop (off-peak-task channel).
+  /// Off-peak tasks of the connected desktop (off-peak-task channel). The
+  /// wire (lifecycle positional args, positional updateTask) is gated on
+  /// the desktop version — it cannot change mid-session.
   @override
   late final OffPeakPort offPeak = OffPeakPort(
     (method, args) => callChannel('off-peak-task', method, args),
+    newWire: params.atLeast(3, 12, 3),
   );
 
   /// Workspace scope (workspacePath/identity) for off-peak submissions and
@@ -1035,6 +1081,54 @@ class DeviceSession extends ChangeNotifier
   Future<dynamic> deleteTask(String sessionId) =>
       taskCommands.delete(sessionId);
 
+  /// Grouped task view of every known workspace (`zcode-task
+  /// .listGroupedTaskViewStructure`, desktop 3.12.3 — live-probed
+  /// 2026-09-18, shape fixed in task internal-task).
+  /// Read-only 一期: group titles/colors/ordering only. Null on any miss
+  /// (pre-3.12.3 desktops reject the method; no workspace open) — callers
+  /// keep the flat list, no version gate (R4 silent degrade).
+  Future<GroupedTaskView?> groupedTaskView() async {
+    final scopes = [
+      for (final ws in workspaces)
+        {
+          'workspacePath': ws['workspacePath'],
+          if (ws['workspaceIdentity'] != null)
+            'workspaceIdentity': ws['workspaceIdentity'],
+        },
+    ];
+    if (scopes.isEmpty) return null;
+    try {
+      final res = await callChannel(
+        'zcode-task',
+        'listGroupedTaskViewStructure',
+        [
+          {'workspaceScopes': scopes},
+        ],
+      );
+      return GroupedTaskView.fromMap(res);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Token usage of one task (`zcode-task.getTaskTokenUsage`, desktop
+  /// 3.12.3 — live-probed 2026-09-18). Flat
+  /// `{taskId, workspacePath, workspaceIdentity?}` payload, same scope form
+  /// as the task-config read. Null on any miss — callers hide the usage
+  /// row (R4).
+  Future<TaskTokenUsage?> taskTokenUsage(String taskId) async {
+    final scope = offPeakScope;
+    if (scope['workspacePath'] == null) return null;
+    try {
+      final res = await callChannel('zcode-task', 'getTaskTokenUsage', [
+        {'taskId': taskId, ...scope},
+      ]);
+      return res is Map ? TaskTokenUsage.fromMap(res) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Full reconnect after a KICK: drop everything and dial again.
   @override
   Future<void> reconnect() async {
@@ -1070,8 +1164,74 @@ class DeviceSession extends ChangeNotifier
   }
 
   @override
-  Future<WorkspacePrep> prepareWorkspace() =>
-      _requireConversation.prepareWorkspace();
+  Future<WorkspacePrep> prepareWorkspace() async {
+    if (params.atLeast(3, 12, 3)) {
+      // 3.12.3 removed prepareWorkspace: config selectors come from the
+      // task-level options RPC, slash commands (incl. custom ones) from
+      // readWorkspacePresentation alongside it — then the legacy call
+      // (misses on 3.12.3 — callers tolerate).
+      final v2 = await _prepareWorkspaceViaTaskOptions();
+      if (v2 != null) return v2;
+    }
+    return _requireConversation.prepareWorkspace();
+  }
+
+  /// getTaskConfigOptions arg assembly — static for unit tests. [relayFirst]
+  /// is the latest relay task (config is workspace-level, task-insensitive);
+  /// a null task or task id falls back to the bare workspace scope.
+  static Map<String, dynamic> taskConfigOptionsArgs(
+    Map<String, dynamic>? relayFirst,
+    Map<String, dynamic> workspaceScope,
+  ) {
+    final taskId = relayFirst?['taskId'];
+    if (taskId == null) return {...workspaceScope};
+    return {
+      'taskId': '$taskId',
+      'workspacePath': '${relayFirst!['workspacePath']}',
+      if (relayFirst['workspaceIdentity'] != null)
+        'workspaceIdentity': relayFirst['workspaceIdentity'],
+    };
+  }
+
+  Future<WorkspacePrep?> _prepareWorkspaceViaTaskOptions() async {
+    final scope = offPeakScope;
+    if (scope['workspacePath'] == null) return null;
+    try {
+      // Both sources fire in parallel; a presentation miss never fails
+      // the config selectors (see [_readSlashCommands]).
+      final pair = await Future.wait<dynamic>([
+        callChannel('zcode-task', 'getTaskConfigOptions', [
+          taskConfigOptionsArgs(_relayTasks.firstOrNull, scope),
+        ]),
+        _readSlashCommands(),
+      ]);
+      final res = pair[0];
+      final slash = pair[1] as List<Object>;
+      if (res is List && res.isNotEmpty) {
+        return WorkspacePrep.fromMap({
+          'configOptions': res,
+          'slashCommands': slash,
+        });
+      }
+    } catch (_) {
+      // Chain rolls on to the legacy prepareWorkspace call.
+    }
+    return null;
+  }
+
+  /// readWorkspacePresentation → raw slashCommands list; empty on any
+  /// miss (null / non-List field / channel rejection) — the composer
+  /// tolerates an empty panel, not a failed prep.
+  Future<List<Object>> _readSlashCommands() async {
+    try {
+      final presentation =
+          await _requireConversation.readWorkspacePresentation();
+      final raw = presentation?['slashCommands'];
+      return raw is List ? List<Object>.from(raw) : const [];
+    } catch (_) {
+      return const [];
+    }
+  }
 
   @override
   Future<List<SkillEntry>> skills() async {

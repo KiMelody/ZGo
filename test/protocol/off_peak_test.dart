@@ -28,12 +28,20 @@ void main() {
               'status': 'waitingQueue',
               'queuePosition': 3,
             },
-            {'offPeakTaskId': 't2', 'prompt': 'p', 'status': 'succeeded',
-             'sessionId': 's-2'},
-            {'offPeakTaskId': 't3', 'prompt': 'p', 'state': 'error',
-             'error': 'boom'},
+            {
+              'offPeakTaskId': 't2',
+              'prompt': 'p',
+              'status': 'succeeded',
+              'sessionId': 's-2'
+            },
+            {
+              'offPeakTaskId': 't3',
+              'prompt': 'p',
+              'state': 'error',
+              'error': 'boom'
+            },
           ]);
-      final port = OffPeakPort(fake.call);
+      final port = OffPeakPort(fake.call, newWire: false);
 
       final tasks = await port.list();
 
@@ -47,14 +55,13 @@ void main() {
       expect(tasks[2].error, 'boom');
     });
 
-    test('unwraps {tasks: [...]} and tolerates id/taskId spellings',
-        () async {
+    test('unwraps {tasks: [...]} and tolerates id/taskId spellings', () async {
       final fake = FakeChannel((m, _) => {
             'tasks': [
               {'taskId': 'x', 'prompt': 'p', 'status': 'running'},
             ],
           });
-      final port = OffPeakPort(fake.call);
+      final port = OffPeakPort(fake.call, newWire: false);
 
       final tasks = await port.list();
 
@@ -66,7 +73,7 @@ void main() {
   group('OffPeakPort.submit', () {
     test('sends the documented off-peak-run shape', () async {
       final fake = FakeChannel((m, _) => {'ok': true, 'sessionId': 's-9'});
-      final port = OffPeakPort(fake.call);
+      final port = OffPeakPort(fake.call, newWire: false);
 
       final res = await port.submit(OffPeakSubmitInput(
         prompt: ' 修复 flaky 测试 ',
@@ -93,7 +100,7 @@ void main() {
 
     test('empty workspaceIdentity is omitted', () async {
       final fake = FakeChannel((m, _) => null);
-      final port = OffPeakPort(fake.call);
+      final port = OffPeakPort(fake.call, newWire: false);
 
       await port.submit(OffPeakSubmitInput(
           prompt: 'p', workspacePath: '/w', workspaceIdentity: ''));
@@ -103,9 +110,9 @@ void main() {
     });
 
     test('classifies codingPlanOnly failures', () async {
-      final fake = FakeChannel(
-          (m, _) => throw ChannelRpcError('codingPlanOnly', null));
-      final port = OffPeakPort(fake.call);
+      final fake =
+          FakeChannel((m, _) => throw ChannelRpcError('codingPlanOnly', null));
+      final port = OffPeakPort(fake.call, newWire: false);
 
       await expectLater(
         port.submit(OffPeakSubmitInput(prompt: 'p', workspacePath: '/w')),
@@ -115,9 +122,9 @@ void main() {
     });
 
     test('classifies quota failures', () async {
-      final fake = FakeChannel((m, _) =>
-          throw ChannelRpcError('monthly quota exceeded', null));
-      final port = OffPeakPort(fake.call);
+      final fake = FakeChannel(
+          (m, _) => throw ChannelRpcError('monthly quota exceeded', null));
+      final port = OffPeakPort(fake.call, newWire: false);
 
       await expectLater(
         port.submit(OffPeakSubmitInput(prompt: 'p', workspacePath: '/w')),
@@ -128,7 +135,7 @@ void main() {
 
     test('feature-absent desktops classify as unavailable', () async {
       final fake = FakeChannel((m, _) => throw missing(m));
-      final port = OffPeakPort(fake.call);
+      final port = OffPeakPort(fake.call, newWire: false);
 
       await expectLater(
         port.submit(OffPeakSubmitInput(prompt: 'p', workspacePath: '/w')),
@@ -142,7 +149,7 @@ void main() {
     test('pause/resume/cancel hit the lifecycle methods with task ids',
         () async {
       final fake = FakeChannel((m, _) => null);
-      final port = OffPeakPort(fake.call);
+      final port = OffPeakPort(fake.call, newWire: false);
 
       await port.pause('t1');
       await port.resume('t1');
@@ -167,7 +174,7 @@ void main() {
             'quotaTotalMinutes': 600,
             'earliestAvailableAt': 1724400000000,
           });
-      final port = OffPeakPort(fake.call);
+      final port = OffPeakPort(fake.call, newWire: false);
 
       final status = await port.status();
       expect(status!.entitled, isTrue);
@@ -176,12 +183,12 @@ void main() {
       expect(status.earliestAvailableAt, 1724400000000);
 
       final old = FakeChannel((m, _) => throw missing(m));
-      expect(await OffPeakPort(old.call).status(), isNull);
+      expect(await OffPeakPort(old.call, newWire: false).status(), isNull);
     });
 
     test('wake never throws', () async {
       final fake = FakeChannel((m, _) => throw missing(m));
-      final port = OffPeakPort(fake.call);
+      final port = OffPeakPort(fake.call, newWire: false);
       await port.wake(); // must not throw
     });
   });
@@ -219,6 +226,237 @@ void main() {
     test('cancelled counts as terminal', () {
       expect(OffPeakTask({'status': 'cancelled'}).terminal, isTrue);
       expect(OffPeakTask({'status': 'running'}).terminal, isFalse);
+    });
+  });
+
+  group('OffPeakPort new wire (3.12.3)', () {
+    test('lifecycle sends positional [taskId], positional names first',
+        () async {
+      final fake = FakeChannel((m, _) => null);
+      final port = OffPeakPort(fake.call, newWire: true);
+
+      await port.pause('t1');
+      await port.resume('t1');
+      await port.cancel('t2');
+      await port.remove('t3');
+      await port.deleteHistory('t4');
+
+      expect(fake.calls.map((c) => c.$1).toList(), [
+        'pauseTask',
+        'continueTask',
+        'cancelTask',
+        'deleteTask',
+        'deleteHistory',
+      ]);
+      expect(fake.calls[0].$2, ['t1']);
+      expect(fake.calls[2].$2, ['t2']);
+      expect(fake.calls[4].$2, ['t4']);
+    });
+
+    test('lifecycle falls back to the legacy object form on a miss', () async {
+      final fake =
+          FakeChannel((m, _) => m == 'pauseTask' ? throw missing(m) : null);
+      final port = OffPeakPort(fake.call, newWire: true);
+
+      await port.pause('t1');
+
+      expect(fake.calls.map((c) => c.$1).toList(), ['pauseTask', 'pause']);
+      expect(fake.calls[1].$2, [
+        {'offPeakTaskId': 't1'}
+      ]);
+    });
+
+    test('lifecycle surfaces structured failures from normal acks', () async {
+      final fake = FakeChannel((m, _) => {
+            'ok': false,
+            'failureStage': 'ticket_request',
+            'errorCategory': 'eligibility_3101',
+            'errorCode': 'E3101',
+          });
+      final port = OffPeakPort(fake.call, newWire: true);
+
+      await expectLater(
+        port.pause('t1'),
+        throwsA(isA<OffPeakError>()
+            .having((e) => e.kind, 'kind', OffPeakError.codingPlanOnly)),
+      );
+    });
+
+    test(
+        'update probes the positional (taskId, patch) form first and '
+        'encodes modelSelection', () async {
+      final fake = FakeChannel((m, _) => null);
+      final port = OffPeakPort(fake.call, newWire: true);
+
+      await port.update(
+        't1',
+        OffPeakUpdateInput(
+          title: ' t ',
+          prompt: ' p ',
+          model: 'glm-5.2',
+          provider: 'zai',
+          thoughtLevel: 'high',
+        ),
+      );
+
+      expect(fake.calls.single.$1, 'updateTask');
+      expect(fake.calls.single.$2[0], 't1');
+      final wire = fake.calls.single.$2[1] as Map<String, dynamic>;
+      expect(wire['title'], 't');
+      expect(wire['modelSelection'], {
+        'providerId': 'zai',
+        'modelId': 'glm-5.2',
+        'options': {'reasoningLevel': 'high'},
+      });
+      // The flat model fields stay off the new wire.
+      expect(wire.containsKey('model'), isFalse);
+      expect(wire.containsKey('thoughtLevel'), isFalse);
+    });
+
+    test('update keeps the legacy object form first on old desktops', () async {
+      // Shape 0 (object args) misses everywhere; shape 1 hits.
+      final fake =
+          FakeChannel((m, args) => args.first is Map ? throw missing(m) : null);
+      final port = OffPeakPort(fake.call, newWire: false);
+
+      await port.update(
+          't1', OffPeakUpdateInput(title: 't', prompt: 'p', model: 'glm-5.2'));
+
+      expect(fake.calls.last.$1, 'updateTask');
+      expect(fake.calls.last.$2[0], 't1');
+      final wire = fake.calls.last.$2[1] as Map<String, dynamic>;
+      // Legacy flat wire keeps the documented fields verbatim.
+      expect(wire['model'], 'glm-5.2');
+      expect(wire['thoughtLevel'], isNull);
+    });
+  });
+
+  group('OffPeakUpdateInput.toWire', () {
+    test('legacy wire keeps flat model/thoughtLevel with explicit nulls', () {
+      expect(
+        OffPeakUpdateInput(title: 't', prompt: 'p').toWire(),
+        {
+          'title': 't',
+          'prompt': 'p',
+          'permissionMode': 'build',
+          'model': null,
+          'thoughtLevel': null,
+        },
+      );
+    });
+
+    test(
+        'new wire: pair emits modelSelection, null clears, lone model '
+        'waits for its provider', () {
+      // provider+model 齐备才发；thoughtLevel 依附进 options。
+      final full = OffPeakUpdateInput(
+              title: 't', prompt: 'p', model: 'm', provider: 'zai')
+          .toWire(newWire: true);
+      expect(full['modelSelection'], {
+        'providerId': 'zai',
+        'modelId': 'm',
+      });
+
+      // patch 明确 null → modelSelection: null（清除语义保留）。
+      final cleared =
+          OffPeakUpdateInput(title: 't', prompt: 'p').toWire(newWire: true);
+      expect(cleared.containsKey('modelSelection'), isTrue);
+      expect(cleared['modelSelection'], isNull);
+
+      // model 有而 provider 缺 → 不发整个对象（thoughtLevel 无载体丢弃）。
+      final half = OffPeakUpdateInput(
+              title: 't', prompt: 'p', model: 'm', thoughtLevel: 'high')
+          .toWire(newWire: true);
+      expect(half.containsKey('modelSelection'), isFalse);
+      expect(half.containsKey('thoughtLevel'), isFalse);
+    });
+  });
+
+  group('OffPeakError structured envelope', () {
+    test('errorCategory maps onto the official kinds', () {
+      expect(
+          OffPeakError.structuredFrom({
+            'ok': false,
+            'failureStage': 'ticket_request',
+            'errorCategory': 'eligibility_3101',
+            'errorCode': 'E3101',
+          })!
+              .kind,
+          OffPeakError.codingPlanOnly);
+      expect(
+          OffPeakError.structuredFrom({
+            'ok': false,
+            'errorCategory': 'quota_3103',
+            'errorCode': '',
+          })!
+              .kind,
+          OffPeakError.quota);
+      expect(
+          OffPeakError.structuredFrom({
+            'ok': false,
+            'errorCategory': 'network',
+          })!
+              .kind,
+          OffPeakError.unavailable);
+      expect(
+          OffPeakError.structuredFrom({
+            'ok': false,
+            'errorCategory': 'invalid_response',
+          })!
+              .kind,
+          OffPeakError.unavailable);
+      expect(
+          OffPeakError.structuredFrom({
+            'ok': false,
+            'failureStage': 'client_validation',
+            'errorCategory': 'client_validation',
+            'errorCode': '',
+          })!
+              .kind,
+          OffPeakError.other);
+      expect(
+          OffPeakError.structuredFrom({
+            'ok': false,
+            'errorCategory': 'local_persist',
+          })!
+              .kind,
+          OffPeakError.other);
+    });
+
+    test('non-envelopes stay null (void acks, legacy run-results)', () {
+      expect(OffPeakError.structuredFrom(null), isNull);
+      expect(OffPeakError.structuredFrom({'ok': true}), isNull);
+      // Legacy {ok, error} run-result has no errorCategory — the
+      // OffPeakRunResult path keeps handling it.
+      expect(
+          OffPeakError.structuredFrom({'ok': false, 'error': 'quota'}), isNull);
+    });
+
+    test('submit throws the classified error on structured acks', () async {
+      final fake = FakeChannel((m, _) => {
+            'ok': false,
+            'failureStage': 'local_persist',
+            'errorCategory': 'quota_3103',
+            'errorCode': 'Q1',
+          });
+      final port = OffPeakPort(fake.call, newWire: false);
+
+      await expectLater(
+        port.submit(OffPeakSubmitInput(prompt: 'p', workspacePath: '/w')),
+        throwsA(isA<OffPeakError>()
+            .having((e) => e.kind, 'kind', OffPeakError.quota)),
+      );
+    });
+
+    test('normalize reads the new enum words from RPC error text', () {
+      expect(OffPeakError.normalize('eligibility_3101: plan required'),
+          OffPeakError.codingPlanOnly);
+      expect(OffPeakError.normalize('quota_3103 exceeded'), OffPeakError.quota);
+      expect(OffPeakError.normalize('network unreachable'),
+          OffPeakError.unavailable);
+      expect(OffPeakError.normalize('invalid_response from upstream'),
+          OffPeakError.unavailable);
+      expect(OffPeakError.normalize('client_validation'), OffPeakError.other);
     });
   });
 }

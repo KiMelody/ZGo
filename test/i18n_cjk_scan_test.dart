@@ -57,11 +57,6 @@ const List<Exemption> exemptions = [
     reason: 'askQuestion: desktop model output marker (zh branch)',
   ),
   Exemption(
-    file: 'lib/ui/chat/chat_page.dart',
-    literal: r'${_trimZero(n / 10000)}万',
-    reason: '_fmtCompactTokens already branches by locale (zh 万 / en k-M)',
-  ),
-  Exemption(
     file: 'lib/protocol/off_peak.dart',
     literal: '订阅',
     reason: 'normalize(): classifies raw desktop error messages, not UI copy',

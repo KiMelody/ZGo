@@ -4793,22 +4793,38 @@ class _PendingInteractions extends StatelessWidget {
     return Column(
       children: [
         for (final interaction in interactions)
-          _InteractionCard(
-            interaction: interaction,
-            onResolve: ({optionId, freeText, action, content}) =>
-                gateway.conversationCommands.resolveInteraction(
-                  sessionId,
-                  interaction['interactionId'] as String? ?? '',
-                  optionId: optionId,
-                  freeText: freeText,
-                  action: action,
-                  content: content,
-                ),
-            onSnooze: () => gateway.conversationCommands.snoozeInteractionAutoResolution(
-                  sessionId,
-                  interaction['interactionId'] as String? ?? '',
-                ),
-          ),
+          if ((interaction['payload'] as Map?)?['kind'] == 'workspaceHookReview')
+            _HookReviewCard(
+              interaction: interaction,
+              onTrust: (reviewItemIds) {
+                final payload = interaction['payload'];
+                return gateway.conversationCommands
+                    .respondWorkspaceHookReview(
+                      sessionId,
+                      payload is Map
+                          ? Map<String, dynamic>.from(payload)
+                          : const {},
+                      reviewItemIds,
+                    );
+              },
+            )
+          else
+            _InteractionCard(
+              interaction: interaction,
+              onResolve: ({optionId, freeText, action, content}) =>
+                  gateway.conversationCommands.resolveInteraction(
+                    sessionId,
+                    interaction['interactionId'] as String? ?? '',
+                    optionId: optionId,
+                    freeText: freeText,
+                    action: action,
+                    content: content,
+                  ),
+              onSnooze: () => gateway.conversationCommands.snoozeInteractionAutoResolution(
+                    sessionId,
+                    interaction['interactionId'] as String? ?? '',
+                  ),
+            ),
       ],
     );
   }
@@ -5034,6 +5050,243 @@ class _InteractionCardState extends State<_InteractionCard> {
       'custom' => tr(context, 'chat.interact.custom'),
       _ => '${option['optionId'] ?? tr(context, 'chat.interact.pick')}',
     };
+  }
+}
+
+/// trustState values carried by the workspaceHookReview interaction items
+/// (3.12.3 wire enum) with a badge color each.
+const _hookTrustStates = <String, Color>{
+  'not_applicable': ZColors.neutral500,
+  'pending_trust': ZColors.warning,
+  'trusted_persistent': ZColors.success,
+  'blocked_untrusted': ZColors.danger,
+  'blocked_policy': ZColors.danger,
+  'revoked': ZColors.danger,
+  'stale_digest': ZColors.warning,
+};
+
+/// Renders the `workspaceHookReview` interaction (3.12.3 workspace hooks):
+/// workspace label, bundle summary and a per-hook checklist — every item
+/// starts checked, so the single action trusts all pending hooks at once
+/// (the desktop decision schema has no decline action; unanswered reviews
+/// time out server-side).
+class _HookReviewCard extends StatefulWidget {
+  final Map<String, dynamic> interaction;
+  final Future<dynamic> Function(List<String> reviewItemIds) onTrust;
+
+  const _HookReviewCard({required this.interaction, required this.onTrust});
+
+  @override
+  State<_HookReviewCard> createState() => _HookReviewCardState();
+}
+
+class _HookReviewCardState extends State<_HookReviewCard> {
+  final Set<String> _checked = {};
+  bool _busy = false;
+
+  /// Hook items of the interaction frame; tolerant of missing fields.
+  List<Map> get _items {
+    final payload = widget.interaction['payload'];
+    final items = payload is Map ? payload['items'] : null;
+    return items is List ? items.whereType<Map>().toList() : <Map>[];
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _checked.addAll([for (final item in _items) '${item['reviewItemId']}']);
+  }
+
+  Future<void> _trust() async {
+    if (_busy || _checked.isEmpty) return;
+    setState(() => _busy = true);
+    try {
+      await widget.onTrust(List.of(_checked));
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final payload = widget.interaction['payload'];
+    if (payload is! Map) return const SizedBox.shrink();
+    final summary = payload['summary'];
+    final summaryMap = summary is Map ? summary : const <String, dynamic>{};
+    int count(String key) => (summaryMap[key] as num?)?.toInt() ?? 0;
+    final workspaceLabel =
+        '${payload['workspaceLabel'] ?? payload['workspaceIdentity'] ?? ''}';
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(14, 4, 14, 0),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: ZColors.warning.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
+        border: Border.all(color: ZColors.warning.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.fact_check_outlined,
+                size: 14,
+                color: ZColors.warning,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  workspaceLabel.isNotEmpty
+                      ? workspaceLabel
+                      : tr(context, 'chat.hook.title'),
+                  style: ZType.body.copyWith(color: ZInk.solid(context)),
+                ),
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              trP(context, 'chat.hook.summary', [
+                '${count('eventCount')}',
+                '${count('hookCount')}',
+                '${count('pendingCount')}',
+              ]),
+              style: ZType.sub.copyWith(color: ZInk.soft(context)),
+            ),
+          ),
+          for (final item in _items)
+            _HookReviewItem(
+              item: item,
+              checked: _checked.contains('${item['reviewItemId']}'),
+              busy: _busy,
+              onChecked: (on) => setState(() {
+                on == true
+                    ? _checked.add('${item['reviewItemId']}')
+                    : _checked.remove('${item['reviewItemId']}');
+              }),
+            ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  minimumSize: Size.zero,
+                ),
+                onPressed: _busy || _checked.isEmpty ? null : _trust,
+                child: Text(
+                  tr(context, 'chat.hook.trustChecked'),
+                  style: ZType.sub,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One checklist row: hook name, event name, the command in mono small
+/// print and a trustState badge.
+class _HookReviewItem extends StatelessWidget {
+  final Map item;
+  final bool checked;
+  final bool busy;
+  final ValueChanged<bool?> onChecked;
+
+  const _HookReviewItem({
+    required this.item,
+    required this.checked,
+    required this.busy,
+    required this.onChecked,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final displayName =
+        '${item['displayName'] ?? item['reviewItemId'] ?? ''}';
+    final event = '${item['event'] ?? ''}';
+    final displayCommand = '${item['displayCommand'] ?? ''}';
+    final trustState = '${item['trustState'] ?? ''}';
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 32,
+          height: 28,
+          child: Checkbox(value: checked, onChanged: busy ? null : onChecked),
+        ),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        displayName,
+                        style: ZType.sub.copyWith(
+                          color: ZInk.solid(context),
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    _trustBadge(context, trustState),
+                  ],
+                ),
+                if (event.isNotEmpty)
+                  Text(
+                    event,
+                    style: ZType.caption.copyWith(
+                      color: ZInk.muted(context),
+                    ),
+                  ),
+                if (displayCommand.isNotEmpty)
+                  Text(
+                    displayCommand,
+                    style: ZType.caption.copyWith(
+                      color: ZInk.faint(context),
+                      fontFamily: 'monospace',
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _trustBadge(BuildContext context, String trustState) {
+    if (trustState.isEmpty) return const SizedBox.shrink();
+    final color = _hookTrustStates[trustState] ?? ZColors.neutral500;
+    // Known enums render their localized label; unknown ones fall back to
+    // the raw wire value instead of a broken tr key.
+    final label = _hookTrustStates.containsKey(trustState)
+        ? tr(context, 'chat.hook.state.$trustState')
+        : trustState;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(ZRadius.mini),
+      ),
+      child: Text(label, style: ZType.caption.copyWith(color: color)),
+    );
   }
 }
 
@@ -5670,8 +5923,8 @@ class _UsageSheet extends StatelessWidget {
             const SizedBox(width: 8),
             Text(
               trP(context, 'chat.usage.contextValue', [
-                _fmtCompactTokens(context, view.used!),
-                _fmtCompactTokens(context, view.max!),
+                compactTokens(context, view.used!),
+                compactTokens(context, view.max!),
                 _fmtPercent(ratio),
               ]),
               style: _usageNumber(context, ZType.body),
@@ -6071,23 +6324,6 @@ String _fmtPercent(double ratio) => _fmtPercentValue(ratio * 100);
 String _fmtPercentValue(double percent) => percent == percent.roundToDouble()
     ? '${percent.round()}%'
     : '${percent.toStringAsFixed(1)}%';
-
-/// Capacity-line token count: zh renders 万 with one decimal (19.4万),
-/// en the k/M scale (194k); trailing `.0` is dropped on both (R1).
-String _fmtCompactTokens(BuildContext context, int n) {
-  final english =
-      (UiSettingsProvider.of(context)?.locale ?? 'zh-CN').startsWith('en');
-  if (!english) return '${_trimZero(n / 10000)}万';
-  if (n >= 1000000) return '${_trimZero(n / 1000000)}M';
-  if (n >= 1000) return '${_trimZero(n / 1000)}k';
-  return '$n';
-}
-
-/// One decimal with a trailing `.0` removed (30万, not 30.0万).
-String _trimZero(double v) {
-  final s = v.toStringAsFixed(1);
-  return s.endsWith('.0') ? s.substring(0, s.length - 2) : s;
-}
 
 class _JsonSheet extends StatelessWidget {
   final String title;

@@ -1,9 +1,13 @@
 // Ported verbatim from the reference implementation; newer style lints
 // are suppressed so the file stays diffable against it.
 // ignore_for_file: use_null_aware_elements, prefer_initializing_formals
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:zlinker/protocol/channel_client.dart';
 import 'package:zlinker/protocol/conversation.dart';
+import 'package:zlinker/protocol/ipc_codec.dart';
+import 'package:zlinker/protocol/remote_client.dart';
 
 void main() {
   group('ConversationState delta application', () {
@@ -765,6 +769,239 @@ void main() {
       expect(state.sessions['main-1']!.parentSessionId, isNull);
     });
   });
+
+  group('readWorkspacePresentation', () {
+    test('HIT answers the presentation map via the agent channel', () async {
+      final calls = <(String, String, List<Object?>)>[];
+      final transport = _presentationTransport((channel, method, args) {
+        calls.add((channel, method, args));
+        return {
+          'workspace': {'workspacePath': '/repo'},
+          'mode': 'build',
+          'slashCommands': [
+            {'name': 'compact', 'description': 'Compress context', 'source': 'builtin'},
+            {'name': 'project:continue', 'description': 'd', 'source': 'custom'},
+          ],
+        };
+      });
+
+      final res = await transport.readWorkspacePresentation();
+
+      expect(calls, hasLength(1));
+      expect(calls.single.$1, Channels.zcodeAgent);
+      expect(calls.single.$2, 'readWorkspacePresentation');
+      expect(calls.single.$3, [
+        {'workspacePath': '/repo'}
+      ]);
+      expect(res, isNotNull);
+      expect(res!['mode'], 'build');
+      expect(res['slashCommands'], hasLength(2));
+    });
+
+    test('non-Map answer is a miss (null)', () async {
+      final transport =
+          _presentationTransport((channel, method, args) => 'nope');
+      expect(transport.readWorkspacePresentation(), completion(isNull));
+    });
+
+    test('channel rejection is a miss (null), never throws', () async {
+      final transport = _presentationTransport((channel, method, args) {
+        throw ChannelRpcError('method not found', null);
+      });
+      expect(transport.readWorkspacePresentation(), completion(isNull));
+    });
+  });
+
+  group('clientHello capabilities', () {
+    Future<Map<Object?, Object?>> handshakeHello(bool gate) async {
+      final calls = <(String, String, List<Object?>)>[];
+      final transport = ConversationTransport(
+        session: _FakeBridgeSession(
+          _respondingChannelClient((channel, method, args) {
+            calls.add((channel, method, args));
+            return method == 'helloConversationV4'
+                ? {'connectionId': 'c1'}
+                : const {};
+          }),
+        ),
+        scope: {'workspacePath': '/repo'},
+        workspaceHookReviewUi: gate,
+      );
+      await transport.handshake();
+      return calls
+          .firstWhere((c) => c.$2 == 'initializeConversationV4')
+          .$3
+          .single as Map;
+    }
+
+    test('gate on: capabilities declares exactly workspaceHookReviewUi', () async {
+      final hello = await handshakeHello(true);
+      expect(hello['kind'], 'clientHello');
+      expect(hello['protocolVersion'], 3);
+      expect(hello['clientKind'], 'mobileApp');
+      // 3.12.3 strict schema: the whole capabilities map must equal this —
+      // any extra key rejects the hello server-side.
+      expect(hello['capabilities'], {
+        'workspaceHookReviewUi': true,
+      });
+    });
+
+    test('gate off (<3.12.3): no capabilities key at all', () async {
+      final hello = await handshakeHello(false);
+      expect(hello.containsKey('capabilities'), isFalse);
+    });
+  });
+
+  group('respondWorkspaceHookReview', () {
+    Future<Map<Object?, Object?>> sendEnvelope(Map<String, dynamic> frame,
+        List<String> reviewItemIds) async {
+      final calls = <(String, String, List<Object?>)>[];
+      final transport = ConversationTransport(
+        session: _FakeBridgeSession(
+          _respondingChannelClient((channel, method, args) {
+            calls.add((channel, method, args));
+            return const {'status': 'accepted'};
+          }),
+        ),
+        scope: {'workspacePath': '/repo'},
+      );
+      await transport.respondWorkspaceHookReview('s1', frame, reviewItemIds);
+      final arg = calls
+          .firstWhere((c) => c.$2 == 'sendConversationCommandV4')
+          .$3
+          .single;
+      return (arg as Map)['envelope'] as Map;
+    }
+
+    test('strict payload: identity fields verbatim + trust_selected', () async {
+      final envelope = await sendEnvelope(const {
+        'kind': 'workspaceHookReview',
+        'sessionId': 's1',
+        'taskId': 't1',
+        'runId': 'r1',
+        'remoteSessionId': 'rs9',
+        'workspaceIdentity': 'wid',
+        'bundleDigest':
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'reviewFlowId': 'rf1',
+        'generation': 2,
+        'interactionId': 'i1',
+        'workspaceLabel': 'repo',
+      }, ['item1', 'item2']);
+
+      expect(envelope['sessionId'], 's1');
+      expect(envelope['type'], 'respondWorkspaceHookReview');
+      // .strict() schema — exact field set, no extras.
+      expect(envelope['payload'], {
+        'sessionId': 's1',
+        'taskId': 't1',
+        'runId': 'r1',
+        'remoteSessionId': 'rs9',
+        'workspaceIdentity': 'wid',
+        'bundleDigest':
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'reviewFlowId': 'rf1',
+        'generation': 2,
+        'interactionId': 'i1',
+        'decision': {
+          'action': 'trust_selected',
+          'reviewItemIds': ['item1', 'item2'],
+        },
+      });
+    });
+
+    test('remoteSessionId omitted when absent; ids deduped in order',
+        () async {
+      final envelope = await sendEnvelope(const {
+        'kind': 'workspaceHookReview',
+        'sessionId': 's1',
+        'taskId': 't1',
+        'runId': 'r1',
+        'workspaceIdentity': 'wid',
+        'bundleDigest': 'digest',
+        'reviewFlowId': 'rf1',
+        'generation': 1,
+        'interactionId': 'i1',
+      }, ['a', 'a', 'b']);
+
+      final payload = envelope['payload'] as Map;
+      expect(payload.containsKey('remoteSessionId'), isFalse);
+      expect(payload['decision'], {
+        'action': 'trust_selected',
+        'reviewItemIds': ['a', 'b'],
+      });
+    });
+  });
+}
+
+/// Builds a [ConversationTransport] over a hand-rolled bridge whose channel
+/// client answers each RPC from [respond]; a throw from [respond] becomes a
+/// resPromiseError frame (channel rejection).
+ConversationTransport _presentationTransport(
+  Object? Function(String channel, String method, List<Object?> args) respond,
+) {
+  return ConversationTransport(
+    session: _FakeBridgeSession(_respondingChannelClient(respond)),
+    scope: {'workspacePath': '/repo'},
+  );
+}
+
+/// Channel client that resolves every `call` synchronously out of [respond].
+ChannelClient _respondingChannelClient(
+  Object? Function(String channel, String method, List<Object?> args) respond,
+) {
+  late final ChannelClient client;
+  client = ChannelClient(sendBody: (body) {
+    final reader = ValueReader(body);
+    final header = decodeValue(reader) as List;
+    final arg = decodeValue(reader);
+    final id = header[1] as int;
+    Object? payload;
+    var type = ChannelClient.resPromiseSuccess;
+    try {
+      payload = respond(
+        '${header[2]}',
+        '${header[3]}',
+        arg is List ? arg : <Object?>[arg],
+      );
+    } catch (e) {
+      type = ChannelClient.resPromiseError;
+      payload = {'message': '$e'};
+    }
+    final w = ValueWriter();
+    encodeValue(w, [type, id]);
+    encodeValue(w, payload);
+    client.handleMessage(w.toBytes());
+  });
+  final init = ValueWriter();
+  encodeValue(init, [ChannelClient.resInitialize, 0]);
+  client.handleMessage(init.toBytes());
+  return client;
+}
+
+/// Bridge stand-in for transport-level RPC tests: only [channels],
+/// [recovered], [degraded] and [waitHealthy] (used by the transport's
+/// constructor and send gate) are real; anything else fails loud via
+/// noSuchMethod.
+class _FakeBridgeSession implements BridgeSession {
+  _FakeBridgeSession(this.channels);
+
+  @override
+  final ChannelClient channels;
+
+  @override
+  final ValueNotifier<int> recovered = ValueNotifier(0);
+
+  @override
+  final ValueNotifier<String?> degraded = ValueNotifier(null);
+
+  @override
+  Future<void> waitHealthy({
+    Duration timeout = const Duration(seconds: 45),
+  }) async {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 void _injectSnapshot(

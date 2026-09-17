@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:zlinker/protocol/channel_client.dart';
 import 'package:zlinker/state/device_session.dart';
 import 'package:zlinker/state/device_store.dart';
 import 'package:zlinker/ui/chat/chat_page.dart';
@@ -607,6 +608,68 @@ void main() {
     );
   });
 
+  testWidgets('default ordering sorts merged card rows by recency',
+      (tester) async {
+    // The directory's source order is the relay overview's with live-only
+    // rows appended at the tail — the 默认(更新时间) sort must actively
+    // order by lastActivityAt so a live-only row lands mid-list.
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final hour = 3600000;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      // Live-only row (no relay counterpart), 13h old — must sort between
+      // the fresh and the 2-day-old relay rows, not after them.
+      entries: [
+        {
+          'sessionId': 's1',
+          'title': '中位任务',
+          'phase': 'completedSuccess',
+          'lastActivityAt': now - 13 * hour,
+        },
+      ],
+      workspaces: [
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+      ],
+      relayTasks: [
+        {
+          'taskId': 'r1',
+          'title': '新中继',
+          'workspacePath': '/repo/alpha',
+          'workspaceIdentity': 'alpha',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+        {
+          'taskId': 'r2',
+          'title': '旧中继',
+          'workspacePath': '/repo/alpha',
+          'workspaceIdentity': 'alpha',
+          'displayStatus': 'idle',
+          'updatedAt': now - 48 * hour,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final order = tester
+        .widgetList<Text>(find.byWidgetPredicate((w) =>
+            w is Text &&
+            const ['新中继', '中位任务', '旧中继'].contains(w.data)))
+        .map((t) => t.data)
+        .toList();
+    expect(order, ['新中继', '中位任务', '旧中继']);
+  });
+
   testWidgets('收起全部 collapses everything, then active re-expands alone',
       (tester) async {
     await setupTwoWorkspaces(tester);
@@ -696,5 +759,346 @@ void main() {
         .map((t) => t.data)
         .toList();
     expect(order, ['任务乙', '任务甲']);
+  });
+
+  group('providers entry capability gate (3.12.3 model-provider removal)', () {
+    Future<(DeviceStore, Device, FakeDeviceSession)> setupGateSession(
+      WidgetTester tester, {
+      required Future<dynamic> Function(
+              String channel, String method, List<Object?> args)
+          channelHandler,
+    }) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        workspaces: [
+          {'workspacePath': '/repo/app'},
+        ],
+        channelHandler: channelHandler,
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      return (store, device, session);
+    }
+
+    Future<void> openOverflowMenu(WidgetTester tester) async {
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+    }
+
+    PopupMenuItem<String> providersItem(WidgetTester tester) =>
+        tester.widget<PopupMenuItem<String>>(
+          find.widgetWithText(PopupMenuItem<String>, '模型设置'),
+        );
+
+    testWidgets('failed probe disables the entry with the placeholder copy',
+        (tester) async {
+      var getAllCalls = 0;
+      final (_, _, session) = await setupGateSession(
+        tester,
+        channelHandler: (channel, method, args) async {
+          if (channel == 'model-provider') {
+            getAllCalls += 1;
+            throw ChannelRpcError(
+                "Channel name '$channel' timed out after 1000ms", null);
+          }
+          return null;
+        },
+      );
+      // The menu itself fires this fire-and-forget; awaiting it up front
+      // makes the disabled verdict deterministic for the first open.
+      expect(await session.probeModelProvider(), isFalse);
+
+      await openOverflowMenu(tester);
+      expect(providersItem(tester).enabled, isFalse);
+      expect(find.text('当前桌面端版本不支持'), findsOneWidget);
+
+      // Session-lifetime cache: a re-probe (second menu open) must not
+      // re-issue the channel call.
+      expect(await session.probeModelProvider(), isFalse);
+      expect(getAllCalls, 1);
+    });
+
+    testWidgets('successful probe keeps the entry tappable (old desktops)',
+        (tester) async {
+      var getAllCalls = 0;
+      final (_, _, session) = await setupGateSession(
+        tester,
+        channelHandler: (channel, method, args) async {
+          if (channel == 'model-provider') {
+            getAllCalls += 1;
+            return <Map<String, dynamic>>[];
+          }
+          return null;
+        },
+      );
+      expect(await session.probeModelProvider(), isTrue);
+
+      await openOverflowMenu(tester);
+      expect(providersItem(tester).enabled, isTrue);
+      expect(find.text('当前桌面端版本不支持'), findsNothing);
+
+      // Success is cached for the session lifetime too.
+      expect(await session.probeModelProvider(), isTrue);
+      expect(getAllCalls, 1);
+    });
+
+    testWidgets('non-channel-level failure stays unknown (not cached)',
+        (tester) async {
+      final (_, _, session) = await setupGateSession(
+        tester,
+        channelHandler: (channel, method, args) async => throw StateError('boom'),
+      );
+      // An unrelated error proves nothing about the channel — the probe
+      // reports unknown-as-available and must NOT cache it.
+      expect(await session.probeModelProvider(), isTrue);
+      expect(session.modelProviderAvailable, isNull);
+      expect(await session.probeModelProvider(), isTrue);
+    });
+  });
+
+  group('timeline task groups (3.12.3 read-only)', () {
+    Future<FakeDeviceSession> setupTimeline(
+      WidgetTester tester, {
+      required Future<dynamic> Function(
+              String channel, String method, List<Object?> args)
+          channelHandler,
+    }) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 's1',
+            'title': '未分组任务',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now,
+          },
+          {
+            'sessionId': 's2',
+            'title': '组内任务',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now - 10,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+        ],
+        channelHandler: channelHandler,
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      // Switch to the timeline grouping (the only grouped surface).
+      await tester.tap(find.byTooltip('整理任务'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('按时间线'));
+      await tester.pumpAndSettle();
+      return session;
+    }
+
+    Object groupedView() => {
+      'groups': [
+        {'id': 'g1', 'title': '重点任务组', 'color': 'blue', 'createdAt': 5},
+      ],
+      'members': [
+        {
+          'groupId': 'g1',
+          'taskId': 's2',
+          'workspaceKey': 'app-id',
+          'sortOrder': null,
+          'addedAt': 3,
+        },
+      ],
+      'topLevelOrders': [
+        {'type': 'group', 'groupId': 'g1', 'sortOrder': 4},
+      ],
+    };
+
+    testWidgets('grouped tasks render under a title header, rest stays flat',
+        (tester) async {
+      await setupTimeline(
+        tester,
+        channelHandler: (c, m, a) async =>
+            m == 'listGroupedTaskViewStructure' ? groupedView() : null,
+      );
+      expect(find.text('重点任务组'), findsOneWidget);
+      expect(find.text('组内任务'), findsOneWidget);
+      // The ungrouped task keeps its day bucket — no second header set.
+      expect(find.text('今天'), findsOneWidget);
+      expect(find.text('未分组任务'), findsOneWidget);
+    });
+
+    testWidgets('empty groups keep the flat timeline', (tester) async {
+      await setupTimeline(
+        tester,
+        channelHandler: (c, m, a) async =>
+            m == 'listGroupedTaskViewStructure'
+                ? {
+                    'groups': <dynamic>[],
+                    'members': <dynamic>[],
+                    'topLevelOrders': <dynamic>[],
+                  }
+                : null,
+      );
+      expect(find.text('今天'), findsOneWidget);
+      expect(find.text('未分组任务'), findsOneWidget);
+      expect(find.text('组内任务'), findsOneWidget);
+    });
+
+    testWidgets('a desktop without the method keeps the flat timeline',
+        (tester) async {
+      await setupTimeline(
+        tester,
+        channelHandler: (c, m, a) async {
+          if (m == 'listGroupedTaskViewStructure') {
+            throw ChannelRpcError('Method not found: $m', null);
+          }
+          return null;
+        },
+      );
+      expect(find.text('今天'), findsOneWidget);
+      expect(find.text('未分组任务'), findsOneWidget);
+    });
+  });
+
+  group('task sheet token usage line (3.12.3)', () {
+    Future<FakeDeviceSession> setupSheet(
+      WidgetTester tester, {
+      required Future<dynamic> Function(
+              String channel, String method, List<Object?> args)
+          channelHandler,
+    }) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 's1',
+            'title': '修复登录',
+            'phase': 'completedSuccess',
+            'lastActivityAt': DateTime.now().millisecondsSinceEpoch,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+        ],
+        channelHandler: channelHandler,
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.longPress(find.text('修复登录'));
+      await tester.pumpAndSettle();
+      return session;
+    }
+
+    testWidgets('shows compacted total tokens and request count',
+        (tester) async {
+      final session = await setupSheet(
+        tester,
+        channelHandler: (c, m, a) async =>
+            m == 'getTaskTokenUsage'
+                ? {'totalTokens': 123456, 'modelRequestCount': 12}
+                : null,
+      );
+      expect(find.textContaining('12.3万'), findsOneWidget);
+      expect(find.textContaining('12 次请求'), findsOneWidget);
+      // One-shot: exactly one usage RPC fired for the sheet.
+      expect(
+        session.channelCalls.where((c) => c.$2 == 'getTaskTokenUsage'),
+        hasLength(1),
+      );
+    });
+
+    testWidgets('hides the row when the desktop rejects the call',
+        (tester) async {
+      await setupSheet(
+        tester,
+        channelHandler: (c, m, a) async {
+          if (m == 'getTaskTokenUsage') {
+            throw ChannelRpcError('Method not found: $m', null);
+          }
+          return null;
+        },
+      );
+      expect(find.textContaining('Token 用量'), findsNothing);
+      // The sheet itself still opens.
+      expect(find.byType(BottomSheet), findsOneWidget);
+    });
+  });
+
+  testWidgets('archive view follows the relay archived bit only (R1)',
+      (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          // Live frame carrying the legacy archived field WITHOUT a relay
+          // counterpart — must stay visible (relay is the sole authority).
+          'sessionId': 'live1',
+          'title': 'live归档假象',
+          'phase': 'completedSuccess',
+          'lastActivityAt': now,
+          'archived': true,
+        },
+      ],
+      workspaces: [
+        {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+      ],
+      relayTasks: [
+        {
+          'taskId': 'r1',
+          'title': '真归档任务',
+          'workspacePath': '/repo/app',
+          'workspaceIdentity': 'app-id',
+          'displayStatus': 'idle',
+          'updatedAt': now - 5,
+          'archived': true,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('live归档假象'), findsOneWidget);
+    expect(find.text('真归档任务'), findsNothing);
+
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('查看归档'));
+    await tester.pumpAndSettle();
+    expect(find.text('真归档任务'), findsOneWidget);
+    expect(find.text('live归档假象'), findsNothing);
   });
 }

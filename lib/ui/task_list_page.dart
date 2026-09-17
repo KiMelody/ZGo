@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -5,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../protocol/conversation.dart';
+import '../protocol/task_groups.dart';
 import '../state/device_session.dart';
 import '../state/device_store.dart';
 import 'automations_page.dart';
@@ -71,6 +73,16 @@ class _TaskListPageState extends State<TaskListPage> {
   /// Desktop sidebar 归档 filter: shows only archived task rows (the web
   /// sidebar carries the same entry; empty when nothing is archived).
   bool _showArchived = false;
+
+  /// Grouped task view of the current session (3.12.3 read-only): loaded
+  /// once per session instance, null until the fetch lands. Null/empty
+  /// keeps the flat timeline (R4 silent degrade).
+  GroupedTaskView? _groupedView;
+  DeviceSession? _groupedViewSession;
+
+  /// Per-task token-usage futures (3.12.3): one RPC per task per page
+  /// lifetime; a miss completes null and the sheet hides the row (R4).
+  final Map<String, Future<TaskTokenUsage?>> _tokenUsage = {};
 
   /// Organize preferences persist across restarts (web parity: the mobile
   /// home stores them in localStorage
@@ -171,8 +183,14 @@ class _TaskListPageState extends State<TaskListPage> {
   /// Official 整理任务 ordering: 更新时间 = lastActivityAt (device default),
   /// 创建时间 = createdAt.
   List<SessionEntry> _sortedEntries(List<SessionEntry> entries) {
-    if (_sortBy != 'created') return entries;
-    return [...entries]..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    if (_sortBy == 'created') {
+      return [...entries]..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    }
+    // 更新时间 (device default): recency by last activity. The merged
+    // directory's source order is the relay overview's and appends
+    // live-only rows at the tail, so the default must sort actively too.
+    return [...entries]
+      ..sort((a, b) => b.lastActivityAt.compareTo(a.lastActivityAt));
   }
 
   // ------------------------------------------------- merged task data source
@@ -482,15 +500,16 @@ class _TaskListPageState extends State<TaskListPage> {
     final key = workspaceKeyOf(ws) ?? workspaceTitle(ws);
     final expanded = _isWorkspaceExpanded(key, isActive: isActive);
     // Merged directory view: the live index overrides the relay rows per
-    // task id; the archive toggle picks its half.
+    // task id; the archive toggle picks its half. Same ordering as the
+    // mobile card — relay order alone appends live-only rows at the tail.
     final dirKey = workspaceKeyOf(ws);
     final entries = dirKey == null
         ? const <SessionEntry>[]
-        : [
+        : _sortedEntries([
             for (final (e, _) in session.taskDirectory
                 .entriesFor(dirKey, includeArchived: _showArchived))
               e,
-          ];
+          ]);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -740,6 +759,35 @@ class _TaskListPageState extends State<TaskListPage> {
     );
   }
 
+  /// Providers entry with the 3.12.3 capability gate (the desktop removed
+  /// the `model-provider` channel): a failed probe disables the item and
+  /// explains why — a placeholder beats a silently vanishing entry. The
+  /// first menu open fires the probe fire-and-forget and answers "unknown"
+  /// (tappable; the page itself degrades to its channel-unavailable view),
+  /// the cached verdict shapes every later open. Never blocks the menu.
+  Widget _providersMenuItem() {
+    final session = _session;
+    unawaited(session?.probeModelProvider());
+    if (session?.modelProviderAvailable != false) {
+      return Text(tr(context, 'tasks.menu.providers'));
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          tr(context, 'tasks.menu.providers'),
+          style: ZType.body.copyWith(color: ZInk.faint(context)),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          tr(context, 'tasks.menu.providersUnsupported'),
+          style: ZType.caption.copyWith(color: ZInk.ghost(context)),
+        ),
+      ],
+    );
+  }
+
   Widget _overflowMenu() {
     return PopupMenuButton<String>(
       onSelected: _onMenu,
@@ -770,7 +818,8 @@ class _TaskListPageState extends State<TaskListPage> {
         ),
         PopupMenuItem(
           value: 'providers',
-          child: Text(tr(context, 'tasks.menu.providers')),
+          enabled: _session?.modelProviderAvailable != false,
+          child: _providersMenuItem(),
         ),
         PopupMenuItem(
           value: 'archive',
@@ -1111,6 +1160,8 @@ class _TaskListPageState extends State<TaskListPage> {
   /// Official 按时间线 grouping: day buckets (今天 / N 天前 / 上周 / 更早)
   /// with one row per task, each prefixed with its workspace name. Covers
   /// every workspace via the relay task list (web mobile-home semantics).
+  /// 3.12.3 task groups render as their own sections (色点 + 标题) above the
+  /// day buckets; tasks in no group keep the buckets untouched.
   List<Widget> _timelineGroups(BuildContext context, DeviceSession session) {
     final pairs = session.taskDirectory.allEntries();
     final entries = _sortedEntries([for (final (e, _) in pairs) e]);
@@ -1128,9 +1179,27 @@ class _TaskListPageState extends State<TaskListPage> {
         ),
       ];
     }
+    _ensureGroupedView(session);
+    final grouped = identical(_groupedViewSession, session)
+        ? _groupedView
+        : null;
+    final sections = <Widget>[];
+    var claimed = const <String>{};
+    if (grouped != null && grouped.groups.isNotEmpty) {
+      final byId = {for (final e in entries) e.sessionId: e};
+      sections.addAll(
+        _groupSections(context, session, grouped, byId, wsKeyOf),
+      );
+      claimed = {
+        for (final g in grouped.groups)
+          for (final m in grouped.membersOf(g.id))
+            if (byId.containsKey(m.taskId)) m.taskId,
+      };
+    }
     final now = DateTime.now();
     final buckets = <String, List<SessionEntry>>{};
     for (final e in entries) {
+      if (claimed.contains(e.sessionId)) continue;
       buckets
           .putIfAbsent(
             _timelineBucketLabel(context, e.lastActivityAt, now),
@@ -1139,6 +1208,7 @@ class _TaskListPageState extends State<TaskListPage> {
           .add(e);
     }
     return [
+      ...sections,
       for (final bucket in buckets.entries) ...[
         Padding(
           padding: const EdgeInsets.fromLTRB(4, 8, 0, 8),
@@ -1166,6 +1236,101 @@ class _TaskListPageState extends State<TaskListPage> {
       ],
     ];
   }
+
+  /// Kick the once-per-session grouped-view load; the result lands via
+  /// setState after the async RPC (a rejection lands as null → flat view).
+  void _ensureGroupedView(DeviceSession session) {
+    if (identical(_groupedViewSession, session)) return;
+    _groupedViewSession = session;
+    session.groupedTaskView().then((view) {
+      if (mounted && identical(_groupedViewSession, session)) {
+        setState(() => _groupedView = view);
+      }
+    });
+  }
+
+  /// Group sections in wire order (manual sortOrder, createdAt fallback),
+  /// one header row + its member rows each. Groups without a visible task
+  /// render no header. Member rows reuse the shared task row (workspace
+  /// prefix label from the member's workspace key).
+  List<Widget> _groupSections(
+    BuildContext context,
+    DeviceSession session,
+    GroupedTaskView view,
+    Map<String, SessionEntry> byId,
+    Map<String, String?> wsKeyOf,
+  ) {
+    final sections = <Widget>[];
+    for (final group in view.orderedGroups()) {
+      final members = [
+        for (final m in view.membersOf(group.id))
+          if (byId[m.taskId] != null) m,
+      ];
+      if (members.isEmpty) continue;
+      sections.add(_groupHeader(context, group));
+      for (final m in members) {
+        sections.add(
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: _taskRow(
+              context,
+              session,
+              byId[m.taskId]!,
+              workspaceLabel: _rowWorkspaceLabel(
+                session,
+                _workspaceForKey(session, wsKeyOf[m.taskId]),
+              ),
+            ),
+          ),
+        );
+      }
+    }
+    return sections;
+  }
+
+  /// Group section header: desktop palette color dot + group title, same
+  /// text style as the day-bucket headers.
+  Widget _groupHeader(BuildContext context, TaskGroupInfo group) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 8, 0, 8),
+      child: Row(
+        children: [
+          Container(
+            width: ZListRow.dot,
+            height: ZListRow.dot,
+            decoration: BoxDecoration(
+              color: _groupColor(group.color),
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              group.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: ZType.bodyStrong.copyWith(
+                fontWeight: FontWeight.w500,
+                color: ZInk.ghost(context),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Desktop task-group palette (7 colors on the web; live frames observed
+  /// 'purple'/'blue'/...). Unknown names fall back neutral.
+  Color _groupColor(String? name) => switch (name) {
+    'blue' => ZColors.sky500,
+    'green' => ZColors.success,
+    'red' => ZColors.danger,
+    'yellow' => ZColors.warning,
+    'orange' => ZColors.usageOrange,
+    'purple' => ZColors.violet400,
+    _ => ZColors.neutral400,
+  };
 
   /// Row prefix label: the task's own workspace (timeline grouping), else
   /// the label handed down by the card.
@@ -1632,6 +1797,44 @@ class _TaskListPageState extends State<TaskListPage> {
     );
   }
 
+  /// Per-task token-usage cache accessor: the future is shared per task id,
+  /// so re-opening the sheet never re-issues the RPC.
+  Future<TaskTokenUsage?> _tokenUsageOf(
+    DeviceSession session,
+    String taskId,
+  ) =>
+      _tokenUsage.putIfAbsent(taskId, () => session.taskTokenUsage(taskId));
+
+  /// Token-usage line at the top of the task sheet (3.12.3, lazy one-shot
+  /// read): total tokens compacted + model request count. Hidden while the
+  /// fetch is empty (pre-3.12.3 desktops, no usage yet) — R4.
+  Widget _tokenUsageLine(
+    BuildContext sheetCtx,
+    DeviceSession session,
+    SessionEntry entry,
+  ) {
+    return FutureBuilder<TaskTokenUsage?>(
+      future: _tokenUsageOf(session, entry.sessionId),
+      builder: (context, snap) {
+        final usage = snap.data;
+        if (usage == null ||
+            (usage.totalTokens <= 0 && usage.modelRequestCount <= 0)) {
+          return const SizedBox.shrink();
+        }
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(24, 12, 24, 4),
+          child: Text(
+            trP(context, 'tasks.tokenUsageLine', [
+              compactTokens(context, usage.totalTokens),
+              '${usage.modelRequestCount}',
+            ]),
+            style: ZType.sub.copyWith(color: ZInk.faint(context)),
+          ),
+        );
+      },
+    );
+  }
+
   /// Long-press action sheet, official task-item menu parity:
   /// 停止/暂停/继续 (phase-gated) + 置顶 / 重命名 / 归档 / 标记未读 / 删除.
   /// Delete carries the official confirm dialog (records cannot be
@@ -1657,6 +1860,7 @@ class _TaskListPageState extends State<TaskListPage> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              _tokenUsageLine(sheetCtx, session, entry),
               ListTile(
                 leading: const Icon(Icons.stop_circle_outlined),
                 title: Text(tr(sheetCtx, 'tasks.stop')),
