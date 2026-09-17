@@ -179,6 +179,13 @@ abstract interface class ChatGateway
   /// owns the transport; throws when no workspace is open.
   ConversationTransport get conversationCommands;
 
+  /// Offline replayable-command queue (3.12.3 `web-remote-replayable`):
+  /// sendText failures at bridge level land here and are replayed via
+  /// `enqueueTaskCommand` once the bridge recovers. Null on older desktops
+  /// (`params.atLeast(3, 12, 3)` gate — the chat page then never queues,
+  /// zero behavior change) and while no workspace is open.
+  ReplayableCommandQueue? get replayableQueue;
+
   /// Task metadata commands (rename/pin/archive/unread). Method names are
   /// source-confirmed — see [TaskCommandsPort].
   Future<dynamic> renameTask(String sessionId, String title);
@@ -1038,6 +1045,16 @@ class DeviceSession extends ChangeNotifier
   /// reading stay on the session below.
   @override
   ConversationTransport get conversationCommands => _requireConversation;
+
+  /// Offline replayable-command queue (ChatGateway), version-gated the
+  /// same way as the automation/off-peak wire gates above: pre-3.12.3
+  /// desktops have no enqueueTaskCommand, so send failures surface as
+  /// before instead of being queued.
+  @override
+  ReplayableCommandQueue? get replayableQueue {
+    if (!params.atLeast(3, 12, 3)) return null;
+    return _conversation?.replayableQueue;
+  }
 
   @override
   String? get chatWorkspaceId {

@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../protocol/channel_client.dart' show isChannelLevelError;
 import '../../protocol/conversation.dart';
 import '../../state/device_session.dart';
 import '../../state/entitlement_poller.dart';
@@ -432,6 +433,11 @@ class _ChatPageState extends State<ChatPage> {
       _showSlash = false;
       _progress = null;
     });
+    // True only while the plain sendText call is in flight — the
+    // replayable-queue capture in the catch below applies to that call
+    // alone (design B: createSession / slash / goal / upload paths surface
+    // errors as before).
+    var sendTextInFlight = false;
     try {
       var sessionId = _sessionId;
       if (sessionId == null) {
@@ -490,12 +496,14 @@ class _ChatPageState extends State<ChatPage> {
         attachments = await _uploadPending(sessionId);
         setState(() => _progress = null);
       }
+      sendTextInFlight = true;
       final res = await widget.gateway.conversationCommands.sendText(
         sessionId,
         text,
         attachments: attachments,
         heldQueueDisposition: heldDisposition,
       );
+      sendTextInFlight = false;
       if (_ackRejected(res)) {
         if (mounted) {
           _toast(trP(context, 'chat.send.failed', [_ackReason(res)]));
@@ -505,7 +513,23 @@ class _ChatPageState extends State<ChatPage> {
       _inputController.clear();
       setState(() => _pendingFiles.clear());
     } catch (e) {
-      if (mounted) _toast(trP(context, 'chat.send.failed', ['$e']));
+      // 3.12.3 replayable queue: a bridge-level sendText failure parks the
+      // message in the local offline queue (composer clears; the queue bar
+      // above shows it) instead of surfacing an error. Attachments-only
+      // sends are not queueable (enqueue schema is text-only) — toast.
+      final queue = widget.gateway.replayableQueue;
+      final taskId = _sessionId;
+      if (sendTextInFlight &&
+          queue != null &&
+          taskId != null &&
+          text.isNotEmpty &&
+          _pendingFiles.isEmpty &&
+          isChannelLevelError(e)) {
+        queue.queueLocal(taskId: taskId, content: text);
+        _inputController.clear();
+      } else if (mounted) {
+        _toast(trP(context, 'chat.send.failed', ['$e']));
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -1349,6 +1373,20 @@ class _ChatPageState extends State<ChatPage> {
               uploadProgress: _uploadProgress,
               onRemove: (i) => setState(() => _pendingFiles.removeAt(i)),
             ),
+          // Locally-queued replayable messages (3.12.3): sits directly
+          // above the composer like the official pendingCommands cards.
+          // Null queue (pre-3.12.3 desktop / not connected) renders nothing.
+          AnimatedBuilder(
+            animation: widget.gateway,
+            builder: (context, _) {
+              final replayable = widget.gateway.replayableQueue;
+              if (replayable == null) return const SizedBox.shrink();
+              return AnimatedBuilder(
+                animation: replayable,
+                builder: (context, _) => _ReplayableQueueBar(queue: replayable),
+              );
+            },
+          ),
           AnimatedBuilder(
             animation: (state == null)
               ? widget.gateway
@@ -4722,6 +4760,109 @@ class _QueueAction extends StatelessWidget {
       tooltip: tooltip,
       onPressed: onTap,
       visualDensity: VisualDensity.compact,
+    );
+  }
+}
+
+/// Locally-queued replayable messages (3.12.3 `web-remote-replayable`):
+/// sendText failures at bridge level, waiting for recovery to be enqueued.
+/// Official pendingCommands card semantics — one pill row per message with
+/// the first content line, the current state and an undo action (local
+/// removal + idempotent `cancelTaskCommand`).
+class _ReplayableQueueBar extends StatelessWidget {
+  final ReplayableCommandQueue queue;
+
+  const _ReplayableQueueBar({required this.queue});
+
+  @override
+  Widget build(BuildContext context) {
+    final items = queue.items;
+    if (items.isEmpty) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.fromLTRB(14, 4, 14, 0),
+      padding: const EdgeInsets.all(10),
+      // Same neutral sub-surface as the held queue bar (_QueueBar).
+      decoration: BoxDecoration(
+        color: ZInk.tile(context),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
+        border: Border.all(color: ZInk.hairline(context)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < items.length; i++)
+            Padding(
+              padding: EdgeInsets.only(bottom: i == items.length - 1 ? 0 : 4),
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(10, 2, 2, 2),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).brightness == Brightness.dark
+                      ? ZColors.darkCard
+                      : ZColors.lightCard,
+                  borderRadius: BorderRadius.circular(ZRadius.field),
+                  border: Border.all(color: ZInk.hairline(context)),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            items[i].content,
+                            style: ZType.sub.copyWith(
+                              color: ZInk.soft(context),
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          Text(
+                            switch (items[i].state) {
+                              ReplayableQueueItemState.queued =>
+                                tr(context, 'chat.replayable.queued'),
+                              ReplayableQueueItemState.sending =>
+                                tr(context, 'chat.replayable.sending'),
+                              ReplayableQueueItemState.failed =>
+                                tr(context, 'chat.replayable.failed'),
+                            },
+                            style: ZType.caption.copyWith(
+                              color:
+                                  items[i].state ==
+                                      ReplayableQueueItemState.failed
+                                  ? ZColors.danger
+                                  : ZInk.muted(context),
+                            ),
+                          ),
+                          if (items[i].state == ReplayableQueueItemState.failed &&
+                              items[i].error != null)
+                            Text(
+                              items[i].error!,
+                              style: ZType.caption.copyWith(
+                                color: ZInk.muted(context),
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                        ],
+                      ),
+                    ),
+                    if (items[i].state == ReplayableQueueItemState.failed)
+                      _QueueAction(
+                        icon: Icons.refresh,
+                        tooltip: tr(context, 'tasks.retry'),
+                        onTap: () => queue.retry(items[i].commandId),
+                      ),
+                    _QueueAction(
+                      icon: Icons.close,
+                      tooltip: tr(context, 'chat.replayable.undo'),
+                      onTap: () => queue.cancel(items[i].commandId),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

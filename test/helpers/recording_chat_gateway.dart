@@ -53,8 +53,22 @@ class RecordingConversationTransport implements ConversationTransport {
     String? offPeakRunType,
     String? botDeliveryTarget,
     List<String>? toolDisallowlist,
-  }) async =>
-      _accept('sendText', [sessionId, text, heldQueueDisposition]);
+  }) async {
+    _accept('sendText', [sessionId, text, heldQueueDisposition]);
+    // Dequeued front-first: an Exception/Error is thrown (replayable-queue
+    // capture tests), anything else is returned.
+    if (sendTextResults.isNotEmpty) {
+      final next = sendTextResults.removeAt(0);
+      if (next is Exception) throw next;
+      if (next is Error) throw next;
+      return next;
+    }
+    return const {'status': 'accepted'};
+  }
+
+  /// Programmed `sendText` answers, dequeued front-first (empty → accepted
+  /// ack; an Exception/Error entry is thrown — bridge-level failure tests).
+  final List<Object?> sendTextResults = [];
 
   @override
   Future<dynamic> resolveInteraction(
@@ -177,6 +191,11 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   @override
   ConversationTransport get conversationCommands => _commands;
 
+  /// Injectable replayable-command queue (set for queue-bar / send-failure
+  /// tests; null = pre-3.12.3 desktop, the page must not queue).
+  @override
+  ReplayableCommandQueue? replayableQueue;
+
   /// One persistent transport per gateway — programmed answers (e.g.
   /// [rowsRangeResults]) must survive across [conversationCommands] accesses.
   late final RecordingConversationTransport _commands =
@@ -186,6 +205,10 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   /// call (empty → plain accepted); load-older / management-sheet paging
   /// tests program this on the gateway.
   List<Object?> get rowsRangeResults => _commands.rowsRangeResults;
+
+  /// Programmed `sendText` answers (see the transport's field): an
+  /// Exception/Error entry is thrown — replayable-queue capture tests.
+  List<Object?> get sendTextResults => _commands.sendTextResults;
 
   /// Records (method, args) and returns the default `accepted` ack.
   dynamic _accept(String method, [List<Object?> args = const []]) {
