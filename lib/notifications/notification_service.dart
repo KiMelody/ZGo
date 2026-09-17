@@ -119,6 +119,21 @@ class NotificationService {
 
   /// Shows a notification on [channel]. [id] should be stable per topic so
   /// newer events replace older ones (e.g. one per task).
+  ///
+  /// Blank copy falls back to the channel name — the OS would otherwise
+  /// render a ghost notification (an off-peak task can carry neither
+  /// title nor prompt, and future tr gaps must never blank a notice).
+  static (String, String) ensureCopy(
+    String locale,
+    NotifyChannel channel,
+    String title,
+    String body,
+  ) {
+    final name = trLocale(locale, '${_channelKeys[channel]}.name');
+    final t = title.trim().isEmpty ? name : title;
+    return (t, body.trim().isEmpty ? t : body);
+  }
+
   Future<void> show(
     NotifyChannel channel,
     int id,
@@ -128,11 +143,12 @@ class NotificationService {
   ) async {
     if (!_initialized) return;
     await requestPermission();
+    final (copyTitle, copyBody) = ensureCopy(_locale, channel, title, body);
     try {
       await _plugin.show(
         id: id,
-        title: title,
-        body: body,
+        title: copyTitle,
+        body: copyBody,
         notificationDetails: NotificationDetails(
           android: AndroidNotificationDetails(
             _channelIds[channel]!,

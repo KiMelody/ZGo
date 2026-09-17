@@ -4,6 +4,13 @@
     <!-- Android 13+ runtime notification permission (local notifications
          for task/off-peak/automation results). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- "Keep receiving notifications in the background" toggle: the relay
+         connection only survives backgrounding while a foreground service
+         holds the process (see KeepAliveService). specialUse on 14+, dataSync
+         below (older platforms ignore the unknown type). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
     <!-- Device URLs carry sid/hash credentials — keep them out of cloud
          backups. -->
     <application
@@ -51,6 +58,16 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/zlinker_widget_info"/>
         </receiver>
+        <!-- Background keep-alive (opt-in). The subtype value is what the Play
+             specialUse declaration table is matched against. -->
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse|dataSync">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the relay connection alive to deliver task notifications"/>
+        </service>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

@@ -29,13 +29,21 @@ class TaskCompletionEvent {
 /// [previousPhases] doubles as the de-dupe: a running→terminal transition
 /// fires exactly once, and re-running a task fires again on its next
 /// completion (mirrors the verified zemote notify-state derivation).
+///
+/// Rows with a parentSessionId are auxiliary child sessions (subagents,
+/// compact/goal helpers) that ride the same index — they are not
+/// user-facing tasks and never notify.
 List<TaskCompletionEvent> taskCompletionEvents({
   required Map<String, String> previousPhases,
-  required List<({String sessionId, String title, String phase})> sessions,
+  required List<
+      ({String sessionId, String title, String phase, String? parentSessionId})
+    > sessions,
 }) {
   final events = <TaskCompletionEvent>[];
-  final nowPhases = {for (final s in sessions) s.sessionId: s.phase};
-  final byId = {for (final s in sessions) s.sessionId: s};
+  final tasks =
+      sessions.where((s) => s.parentSessionId == null).toList();
+  final nowPhases = {for (final s in tasks) s.sessionId: s.phase};
+  final byId = {for (final s in tasks) s.sessionId: s};
   previousPhases.forEach((sessionId, wasPhase) {
     if (!runningPhases.contains(wasPhase)) return;
     final now = nowPhases[sessionId];

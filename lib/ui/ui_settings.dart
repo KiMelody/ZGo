@@ -10,6 +10,7 @@ class UiSettings extends ChangeNotifier {
   static const _notifyTasksKey = 'zlinker_notify_tasks';
   static const _notifyOffPeakKey = 'zlinker_notify_offpeak';
   static const _notifyAutoKey = 'zlinker_notify_auto';
+  static const _keepAliveKey = 'zlinker_keepalive';
 
   String locale = 'zh-CN';
   bool nativeListEnabled = true;
@@ -17,6 +18,7 @@ class UiSettings extends ChangeNotifier {
   bool notifyTasksEnabled = true;
   bool notifyOffPeakEnabled = true;
   bool notifyAutoEnabled = true;
+  bool keepAliveEnabled = false;
 
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -26,6 +28,7 @@ class UiSettings extends ChangeNotifier {
     notifyTasksEnabled = prefs.getBool(_notifyTasksKey) ?? true;
     notifyOffPeakEnabled = prefs.getBool(_notifyOffPeakKey) ?? true;
     notifyAutoEnabled = prefs.getBool(_notifyAutoKey) ?? true;
+    keepAliveEnabled = prefs.getBool(_keepAliveKey) ?? false;
     notifyListeners();
   }
 
@@ -69,6 +72,15 @@ class UiSettings extends ChangeNotifier {
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_notifyAutoKey, value);
+  }
+
+  /// Background keep-alive is off by default: it trades a persistent
+  /// (silent on most devices) notice for the process not being frozen.
+  Future<void> setKeepAliveEnabled(bool value) async {
+    keepAliveEnabled = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keepAliveKey, value);
   }
 }
 
@@ -825,6 +837,13 @@ const _zh = {
   'settings.notify.tasks': '任务事件',
   'settings.notify.offPeak': '闲时事件',
   'settings.notify.auto': '自动化结果',
+  'settings.keepAlive': '后台保持连接接收通知',
+  'settings.keepAliveHint': '常驻一条静音通知降低进程被系统回收的概率，但息屏后的后台冻结'
+      '由系统省电策略决定（见下方提示）。从最近任务里划掉会停止。',
+  'settings.keepAlive.running': '保活服务运行中',
+  'settings.keepAlive.stopped': '保活服务未运行',
+  'settings.keepAlive.oemHint': '若息屏后收不到通知，请在系统设置中将本应用的省电策略设为'
+      '「无限制」（通常在 应用信息 → 省电/电池，各厂商路径略有差异）；允许自启动为可选加固。',
   'notify.task.done': '任务完成',
   'notify.task.failed': '任务失败',
   'notify.task.interrupted': '任务已中断',
@@ -840,6 +859,12 @@ const _zh = {
   'notify.channel.offPeak.desc': '闲时任务完成与失败提醒',
   'notify.channel.automations.name': '自动化结果',
   'notify.channel.automations.desc': '自动化定时触发的执行结果',
+  // Foreground-service notice (see keepalive_controller.dart): read via
+  // trLocale and handed to the native side, which caches the last copy so a
+  // STICKY restart can rebuild the notice.
+  'keepalive.channel.name': '后台连接',
+  'keepalive.notify.title': 'ZLinker 正在后台保持连接',
+  'keepalive.notify.body': '以便任务完成时实时通知你',
   'settings.checkUpdate': '检查更新',
   'update.latest': '已是最新版本',
   'update.newVersion': '发现新版本 v\$0',
@@ -1627,6 +1652,17 @@ const _en = {
   'settings.notify.tasks': 'Task events',
   'settings.notify.offPeak': 'Off-peak events',
   'settings.notify.auto': 'Automation results',
+  'settings.keepAlive': 'Keep connection alive in background',
+  'settings.keepAliveHint': 'A silent notice lowers the chance of the process '
+      'being reclaimed; background freezing after screen-off is decided by the '
+      'system battery policy (see note below). Swiping it away from Recents '
+      'stops it.',
+  'settings.keepAlive.running': 'Keep-alive service running',
+  'settings.keepAlive.stopped': 'Keep-alive service not running',
+  'settings.keepAlive.oemHint': 'If notifications stop arriving after the '
+      'screen turns off, set this app\'s battery saver policy to "No '
+      'restrictions" in system settings (usually App info → Battery; the path '
+      'varies by vendor). Autostart is an optional extra.',
   'notify.task.done': 'Task completed',
   'notify.task.failed': 'Task failed',
   'notify.task.interrupted': 'Task interrupted',
@@ -1641,6 +1677,10 @@ const _en = {
   'notify.channel.offPeak.desc': 'Off-peak task completion and failure alerts',
   'notify.channel.automations.name': 'Automation results',
   'notify.channel.automations.desc': 'Results of scheduled automation runs',
+  // Foreground-service notice (see the zh table note).
+  'keepalive.channel.name': 'Background connection',
+  'keepalive.notify.title': 'ZLinker is keeping the connection alive',
+  'keepalive.notify.body': 'So task notifications reach you in real time',
   'settings.checkUpdate': 'Check for updates',
   'update.latest': 'Up to date',
   'update.newVersion': 'New version v\$0',

@@ -4,6 +4,7 @@ import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:home_widget/home_widget.dart';
 
+import 'notifications/keepalive_controller.dart';
 import 'notifications/notification_service.dart';
 import 'state/device_session.dart';
 import 'state/device_store.dart';
@@ -36,6 +37,7 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
   final UiSettings _ui = UiSettings();
   final ScheduledStore _scheduled = ScheduledStore();
   final NotificationService _notifications = NotificationService();
+  final KeepAliveController _keepAlive = KeepAliveController();
   final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
   late final DeviceSessionHub _hub = DeviceSessionHub(
     nativeListEnabled: () => _ui.nativeListEnabled,
@@ -72,6 +74,12 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
     // Channel names are fixed the first time the channel is created, so wait
     // for the stored locale before registering them.
     unawaited(uiLoaded.then((_) => _notifications.init(locale: _ui.locale)));
+    // The foreground service dies with the process, so re-arm it on start
+    // when the switch was left on — same batch as the channel registration,
+    // for the same locale reason.
+    unawaited(uiLoaded.then((_) {
+      if (_ui.keepAliveEnabled) unawaited(_keepAlive.start(_ui.locale));
+    }));
     _hub.addListener(_syncNotifyHub);
     _syncNotifyHub();
     _notifyHub.start();
@@ -207,6 +215,7 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
             ui: _ui,
             hub: _hub,
             scheduled: _scheduled,
+            keepalive: _keepAlive,
           ),
         );
       },

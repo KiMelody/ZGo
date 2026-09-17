@@ -22,6 +22,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:zlinker/notifications/keepalive_controller.dart';
 import 'package:zlinker/state/device_session.dart';
 import 'package:zlinker/state/device_store.dart';
 import 'package:zlinker/state/scheduled_store.dart';
@@ -510,6 +511,7 @@ void main() {
         ui: ui,
         hub: hub,
         scheduled: ScheduledStore(),
+        keepalive: KeepAliveController(),
       ),
       theme,
       ui,

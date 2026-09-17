@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:zlinker/notifications/keepalive_controller.dart';
 import 'package:zlinker/state/device_store.dart';
 import 'package:zlinker/ui/settings_page.dart';
 import 'package:zlinker/ui/theme.dart';
@@ -27,7 +28,13 @@ void main() {
       final theme = ThemeController();
       final ui = UiSettings();
       await tester.pumpWidget(
-          host(SettingsPage(store: store, theme: theme, ui: ui), ui));
+          host(
+              SettingsPage(
+                  store: store,
+                  theme: theme,
+                  ui: ui,
+                  keepalive: KeepAliveController()),
+              ui));
       await tester.pumpAndSettle();
 
       expect(theme.mode, ThemeMode.dark); // default
@@ -43,7 +50,13 @@ void main() {
       final theme = ThemeController();
       final ui = UiSettings();
       await tester.pumpWidget(
-          host(SettingsPage(store: store, theme: theme, ui: ui), ui));
+          host(
+              SettingsPage(
+                  store: store,
+                  theme: theme,
+                  ui: ui,
+                  keepalive: KeepAliveController()),
+              ui));
       await tester.pumpAndSettle();
 
       expect(ui.nativeListEnabled, isTrue);
@@ -60,7 +73,13 @@ void main() {
       final theme = ThemeController();
       final ui = UiSettings();
       await tester.pumpWidget(
-          host(SettingsPage(store: store, theme: theme, ui: ui), ui));
+          host(
+              SettingsPage(
+                  store: store,
+                  theme: theme,
+                  ui: ui,
+                  keepalive: KeepAliveController()),
+              ui));
       await tester.pumpAndSettle();
 
       // Channel rows are visible while the master switch is on.
@@ -88,7 +107,13 @@ void main() {
       final theme = ThemeController();
       final ui = UiSettings();
       await tester.pumpWidget(
-          host(SettingsPage(store: store, theme: theme, ui: ui), ui));
+          host(
+              SettingsPage(
+                  store: store,
+                  theme: theme,
+                  ui: ui,
+                  keepalive: KeepAliveController()),
+              ui));
       await tester.pumpAndSettle();
 
       expect(find.text('外观'), findsOneWidget);

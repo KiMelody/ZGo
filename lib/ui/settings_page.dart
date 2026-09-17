@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../notifications/keepalive_controller.dart';
 import '../state/device_store.dart';
 import '../update/app_channel.dart';
 import '../update/update_service.dart';
@@ -17,11 +20,13 @@ class SettingsPage extends StatefulWidget {
   final DeviceStore store;
   final ThemeController theme;
   final UiSettings ui;
+  final KeepAliveController keepalive;
   const SettingsPage({
     super.key,
     required this.store,
     required this.theme,
     required this.ui,
+    required this.keepalive,
   });
 
   @override
@@ -30,6 +35,30 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   bool _checking = false;
+
+  /// Result of the last [KeepAliveController.isRunning] query, refreshed on
+  /// every toggle. Asked even while the switch is off, so the status line
+  /// still resolves if the persisted setting loads after this page opens.
+  Future<bool>? _keepAliveRunning;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!widget.keepalive.supported) return;
+    _keepAliveRunning = widget.keepalive.isRunning();
+  }
+
+  /// The switch owns the service lifecycle: the persisted setting is the
+  /// source of truth for "should it run", the controller reports "does it".
+  void _setKeepAlive(bool value) {
+    unawaited(widget.ui.setKeepAliveEnabled(value));
+    if (value) {
+      unawaited(widget.keepalive.start(widget.ui.locale));
+    } else {
+      unawaited(widget.keepalive.stop());
+    }
+    setState(() => _keepAliveRunning = widget.keepalive.isRunning());
+  }
 
   /// Channel-aware update entry: store builds open their store listing;
   /// the github build checks GitHub releases and offers a browser
@@ -204,6 +233,32 @@ class _SettingsPageState extends State<SettingsPage> {
                 value: ui.notifyAutoEnabled,
                 onChanged: (v) => ui.setNotifyAutoEnabled(v),
               ),
+              // Android-only foreground service (see KeepAliveService.kt):
+              // iOS/ohos hosts have no equivalent, so the row is hidden.
+              if (widget.keepalive.supported)
+                SwitchListTile(
+                  secondary: const SizedBox(width: 24),
+                  dense: true,
+                  title: Text(tr(context, 'settings.keepAlive')),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(tr(context, 'settings.keepAliveHint')),
+                      if (ui.keepAliveEnabled) ...[
+                        const SizedBox(height: 4),
+                        _keepAliveStatus(context),
+                        const SizedBox(height: 4),
+                        Text(
+                          tr(context, 'settings.keepAlive.oemHint'),
+                          style:
+                              ZType.sub.copyWith(color: ZInk.muted(context)),
+                        ),
+                      ],
+                    ],
+                  ),
+                  value: ui.keepAliveEnabled,
+                  onChanged: _setKeepAlive,
+                ),
             ],
             _header(context, tr(context, 'settings.data')),
             ListTile(
@@ -240,6 +295,21 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
     );
   }
+
+  /// Status line under the keep-alive switch: the service reports its own
+  /// state, so a stale switch value never lies about a running service.
+  Widget _keepAliveStatus(BuildContext context) => FutureBuilder<bool>(
+        future: _keepAliveRunning,
+        builder: (context, snap) => Text(
+          tr(
+            context,
+            snap.data == true
+                ? 'settings.keepAlive.running'
+                : 'settings.keepAlive.stopped',
+          ),
+          style: ZType.sub.copyWith(color: ZInk.muted(context)),
+        ),
+      );
 
   Widget _header(BuildContext context, String text) => Padding(
         padding: const EdgeInsets.fromLTRB(16, 20, 16, 6),

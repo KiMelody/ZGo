@@ -134,6 +134,12 @@ abstract interface class NotifiableSession
   @override
   DeviceStatus get status;
   SessionsIndexState? get sessions;
+
+  /// Relay-level task overview of EVERY workspace (bootstrap /
+  /// `workspace-list-updated`) — the notification hub's second phase source,
+  /// since [sessions] only ever covers the subscribed workspace. Raw `Dg`
+  /// maps; a device that never got an overview reports an empty list.
+  List<Map<String, dynamic>> get relayTasks;
 }
 
 /// A live conversation subscription handed to the chat UI: [state] is the
@@ -431,6 +437,7 @@ class DeviceSession extends ChangeNotifier
   String? get failureReason => _failureReason;
 
   /// Relay task list (raw `Dg` maps).
+  @override
   List<Map<String, dynamic>> get relayTasks => _relayTasks;
 
   /// True while a workspace bridge + sessions-index open is in flight.

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../notifications/keepalive_controller.dart';
 import '../protocol/connection_params.dart';
 import '../state/device_session.dart';
 import '../state/device_store.dart';
@@ -25,6 +26,7 @@ class DevicesPage extends StatefulWidget {
   final UiSettings ui;
   final DeviceSessionHub hub;
   final ScheduledStore scheduled;
+  final KeepAliveController keepalive;
   const DevicesPage({
     super.key,
     required this.store,
@@ -32,6 +34,7 @@ class DevicesPage extends StatefulWidget {
     required this.ui,
     required this.hub,
     required this.scheduled,
+    required this.keepalive,
   });
 
   @override
@@ -393,6 +396,7 @@ class _DevicesPageState extends State<DevicesPage>
                 store: widget.store,
                 theme: widget.theme,
                 ui: widget.ui,
+                keepalive: widget.keepalive,
               ),
             )),
           ),
