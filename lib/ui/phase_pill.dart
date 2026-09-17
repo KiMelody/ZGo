@@ -39,7 +39,7 @@ class PhasePill extends StatelessWidget {
               ? ZInk.pillRunningBg(context)
               : color.withValues(alpha: 0.15);
       final fg = done
-          ? Colors.black
+          ? ZInk.pillSuccessFg(context)
           : running
               ? ZInk.pillRunningFg(context)
               : color;

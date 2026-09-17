@@ -39,6 +39,15 @@ class ConversationTransport {
   final bool workspaceHookReviewUi;
   final void Function(String line)? onLog;
 
+  /// Subscribe-ack watchdog bound for the subscriptions this transport
+  /// creates ([subscribe] / [subscribeSessionsIndex]): a subscribe call
+  /// silent this long is abandoned and resubscribed. The desktop can park a
+  /// subscribe in session hydration for minutes (2026-09-19 live evidence:
+  /// 47s+ conversation acks vs <1s sessions-index) while the 60s channel
+  /// timeout merely waits — the watchdog detects the stall earlier.
+  /// Injectable so tests can shrink it (protocol tests are fake_async-free).
+  final Duration subscribeAckTimeout;
+
   final String clientId = generateUuid();
   bool _handshaken = false;
   Future<void>? _handshakeFuture;
@@ -51,6 +60,7 @@ class ConversationTransport {
     required this.scope,
     this.appVersion = '3.6.5',
     this.workspaceHookReviewUi = false,
+    this.subscribeAckTimeout = const Duration(seconds: 10),
     this.onLog,
   }) {
     // A reopened bridge has no handshake state — start over (mirrors the
@@ -1103,6 +1113,17 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
   bool _resyncing = false;
   Timer? _resubscribeTimer;
 
+  /// Monotonic subscribe-attempt generation: `_start()` bumps it on entry.
+  /// A late ack (or late failure) whose attempt no longer matches — a
+  /// watchdog/bridge-recovery resubscribe raced the pending call — is
+  /// dropped instead of overwriting the newer attempt's subscription
+  /// (same race family as internal-task).
+  int _startAttempt = 0;
+
+  /// Abandon-in-flight guard: fires unless the ack arrives first; a
+  /// superseded attempt neither arms nor cancels it.
+  Timer? _ackWatchdog;
+
   final _stagedFrames = <Map<String, dynamic>>[];
   final _fragments = <String, _LogicalFrameAssembly>{};
   Timer? _fragmentCleanup;
@@ -1173,6 +1194,7 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
   }
 
   Future<void> _start() async {
+    final attempt = ++_startAttempt;
     await _transport.handshake();
     _cancelFrameListener = _transport._channels.addEventListener(
       ConversationTransport.channel,
@@ -1180,17 +1202,48 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
       _handleWireFrame,
       arg: _transport.scope,
     );
-    final res = await _transport._channels.call(
-      ConversationTransport.channel,
-      _subscribeMethod,
-      [
-        {..._transport.scope, ..._subscribeArgs},
-      ],
-      // The desktop may need to warm the session runtime before answering —
-      // give the subscribe call generous room instead of timing out at the
-      // 30s channel default.
-      timeout: const Duration(seconds: 60),
-    );
+    _ackWatchdog?.cancel();
+    _ackWatchdog = Timer(_transport.subscribeAckTimeout, () {
+      if (_disposed || attempt != _startAttempt) return;
+      _transport._log(
+        '[$_logTag] subscribe ack stalled '
+        '${_transport.subscribeAckTimeout.inSeconds}s, resubscribing',
+      );
+      _resubscribe();
+    });
+    Object? res;
+    try {
+      res = await _transport._channels.call(
+        ConversationTransport.channel,
+        _subscribeMethod,
+        [
+          {..._transport.scope, ..._subscribeArgs},
+        ],
+        // The desktop may need to warm the session runtime before answering —
+        // give the subscribe call generous room instead of timing out at the
+        // 30s channel default.
+        timeout: const Duration(seconds: 60),
+      );
+    } catch (e) {
+      if (attempt != _startAttempt) {
+        // Superseded while pending (watchdog / bridge recovery raced us):
+        // the replacement attempt owns the outcome, so this failure must
+        // not surface as a subscribe error for the newer attempt.
+        _transport._log('[$_logTag] abandoned subscribe attempt $attempt: $e');
+        return;
+      }
+      _ackWatchdog?.cancel();
+      rethrow;
+    }
+    if (attempt != _startAttempt) {
+      // Late ack of a superseded attempt: do not touch _subscriptionId,
+      // staged frames or post-start hooks — a newer attempt owns them.
+      _transport._log(
+        '[$_logTag] dropped late subscribe ack for attempt $attempt ($topic)',
+      );
+      return;
+    }
+    _ackWatchdog?.cancel();
     final ack = (res as Map?)?['ack'] as Map?;
     _subscriptionId = ack?['subscriptionId'] as String?;
     _transport._log('[$_logTag] subscribed $topic id=$_subscriptionId');
@@ -1325,6 +1378,7 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
   Future<void> dispose() async {
     _disposed = true;
     _resubscribeTimer?.cancel();
+    _ackWatchdog?.cancel();
     _fragmentCleanup?.cancel();
     await _onDispose();
     _transport.session.recovered.removeListener(_onBridgeRecovered);
@@ -1548,6 +1602,16 @@ class ConfigOptionValue {
       name = '${raw['name'] ?? raw['value'] ?? ''}',
       description = raw['description'] as String?,
       modelProviderName = raw['modelProviderName'] as String?;
+
+  /// Public constructor: synthesizes sheet-side entries from other
+  /// catalogs (the chat config sheet's model-provider fallback, PRD
+  /// 09-19) in the same shape the wire parser produces.
+  ConfigOptionValue({
+    required this.value,
+    required this.name,
+    this.description,
+    this.modelProviderName,
+  });
 }
 
 class SlashCommand {
@@ -2269,10 +2333,101 @@ class ConversationState extends ChangeNotifier {
   String get inputRoutingMode =>
       (snapshot?['inputRouting'] as Map?)?['mode'] as String? ?? 'startNow';
 
+  /// Pending interaction cards, two wire forms:
+  /// - full interaction list (online `state.updated` deltas) — the snapshot
+  ///   field is a List and is authoritative as-is;
+  /// - summary count object `{permissionCount, userInputCount}` — the 3.12.3
+  ///   snapshot assembly only projects the summary (session overlay),
+  ///   so after a resubscribe the cards are rebuilt from the held rows
+  ///   instead ([_rebuildPendingAskUserQuestions]).
   List<Map<String, dynamic>> get pendingInteractions {
     final list = snapshot?['pendingInteractions'];
-    if (list is! List) return const [];
-    return list.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
+    if (list is List) {
+      return list
+          .whereType<Map>()
+          .map((e) => e.cast<String, dynamic>())
+          .toList();
+    }
+    return _rebuildPendingAskUserQuestions();
+  }
+
+  /// Rebuilds pending AskUserQuestion interactions from the held rows.
+  ///
+  /// Mirrors the agent core `onPermissionRequested`: a tool call row waiting
+  /// on the user carries `status:'pendingApproval'` plus
+  /// `approvalInteractionId` — the resolveInteraction id, derived
+  /// server-side as `requestId ?? 'perm-${toolCallId}'` — and the questions
+  /// travel in the row's `input`. The id is cleared (and the interaction
+  /// settled) server-side on resolve, so its presence is the pending signal.
+  /// Permission-kind interactions are not rebuilt: their option list is
+  /// generated outside the row and cannot be recovered.
+  List<Map<String, dynamic>> _rebuildPendingAskUserQuestions() {
+    final rebuilt = <Map<String, dynamic>>[];
+    for (final row in rows) {
+      if (row['kind'] != 'toolCall') continue;
+      final interactionId = row['approvalInteractionId'];
+      if (interactionId is! String || interactionId.isEmpty) continue;
+      if ('${row['toolName'] ?? ''}' != 'AskUserQuestion') continue;
+      final input = row['input'] is Map
+          ? (row['input'] as Map).cast<String, dynamic>()
+          : const <String, dynamic>{};
+      rebuilt.add({
+        'interactionId': interactionId,
+        'kind': 'userInput',
+        'anchorRowId': row['rowId'],
+        'createdAt': row['createdAt'],
+        'payload': {
+          'kind': 'userInput',
+          'freeText': true,
+          'toolCallId': '${row['toolCallId'] ?? ''}',
+          'toolName': 'AskUserQuestion',
+          'input': input,
+          'questions': _askUserQuestionsFromInput(input),
+        },
+      });
+    }
+    return rebuilt;
+  }
+
+  /// Normalizes the tool input's `questions` into the payload form the card
+  /// consumes (agent core `oIs`): drop entries without question text or
+  /// options, fall back header→question and label↔value, keep the rest
+  /// verbatim.
+  List<Map<String, dynamic>> _askUserQuestionsFromInput(
+    Map<String, dynamic> input,
+  ) {
+    final raw = input['questions'];
+    if (raw is! List) return const [];
+    final questions = <Map<String, dynamic>>[];
+    for (final entry in raw) {
+      if (entry is! Map) continue;
+      final question = '${entry['question'] ?? ''}';
+      final options = (entry['options'] as List?)?.whereType<Map>().toList();
+      if (question.isEmpty || options == null || options.isEmpty) continue;
+      final header = '${entry['header'] ?? ''}';
+      questions.add({
+        'question': question,
+        'header': header.isNotEmpty ? header : question,
+        if (entry['multiSelect'] == true) 'multiSelect': true,
+        'options': [
+          for (final option in options)
+            if (_normalizedQuestionOption(option) case final o?) o,
+        ],
+      });
+    }
+    return questions;
+  }
+
+  /// One option's `value`/`label` fallback pair; null when both are empty.
+  Map<String, dynamic>? _normalizedQuestionOption(Map option) {
+    final label = '${option['label'] ?? ''}';
+    final value = '${option['value'] ?? ''}';
+    if (label.isEmpty && value.isEmpty) return null;
+    return {
+      'value': value.isNotEmpty ? value : label,
+      'label': label.isNotEmpty ? label : value,
+      if (option['description'] is String) 'description': option['description'],
+    };
   }
 }
 

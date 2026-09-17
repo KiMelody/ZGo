@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zlinker/protocol/conversation.dart';
+import 'package:zlinker/protocol/remote_client.dart';
+import 'package:zlinker/state/device_session.dart';
 import 'package:zlinker/state/entitlement_poller.dart';
 import 'package:zlinker/state/quota_reset.dart';
 import 'package:zlinker/ui/chat/chat_page.dart';
@@ -18,6 +22,85 @@ import '../helpers/recording_chat_gateway.dart';
 /// conversation command surface goes through `conversationCommands`).
 class FakeChatGateway extends RecordingChatGateway {}
 
+/// Transport that never answers `resolveInteraction` — holds the questions
+/// card in its busy state for assertions (the real gateway ack is a passing
+/// instant no frame can catch). Unrelated members are never exercised.
+class _HoldTransport implements ConversationTransport {
+  @override
+  Future<dynamic> resolveInteraction(
+    String sessionId,
+    String interactionId, {
+    String? optionId,
+    String? freeText,
+    String? action,
+    Map<String, dynamic>? content,
+  }) async => Completer<dynamic>().future;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
+}
+
+class _HoldResolveGateway extends FakeChatGateway {
+  final _hold = _HoldTransport();
+
+  @override
+  ConversationTransport get conversationCommands => _hold;
+}
+
+/// Programmable `switchModelConfig` for the sheet `_apply` tests (PRD
+/// 09-19): records the named args (the shared recording transport only
+/// keeps positional ones) and answers from [results] — an Exception/Error
+/// entry is thrown (lost-ack path), anything else is returned verbatim
+/// (e.g. a `{'status': …}` rejection); exhausted list → accepted.
+class _SwitchTransport implements ConversationTransport {
+  _SwitchTransport({this.results = const []});
+
+  final List<Object?> results;
+  int _consumed = 0;
+  final List<({String provider, String model, String thought})> switches = [];
+
+  @override
+  Future<dynamic> switchModelConfig(
+    String sessionId, {
+    required String provider,
+    required String model,
+    required String thought,
+  }) async {
+    switches.add((provider: provider, model: model, thought: thought));
+    if (_consumed < results.length) {
+      final next = results[_consumed++];
+      if (next is Exception) throw next;
+      if (next is Error) throw next;
+      return next;
+    }
+    return const {'status': 'accepted'};
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
+}
+
+class _SwitchGateway extends FakeChatGateway {
+  _SwitchGateway(this.transport, {WorkspacePrep? prep}) : _prep = prep;
+
+  final _SwitchTransport transport;
+  final WorkspacePrep? _prep;
+
+  @override
+  ConversationTransport get conversationCommands => transport;
+
+  @override
+  Future<WorkspacePrep> prepareWorkspace() async =>
+      _prep ?? await super.prepareWorkspace();
+}
+
+/// prepareWorkspace that ships no config options — the sheet-fallback
+/// scenario (desktop answered but carried no model/thought selects).
+WorkspacePrep barePrep() => WorkspacePrep.fromMap(const {
+  'configOptions': <Map<String, dynamic>>[],
+  'slashCommands': <Map<String, dynamic>>[],
+});
+
 Widget wrap(Widget child) => MaterialApp(
   theme: buildDarkTheme(),
   darkTheme: buildDarkTheme(),
@@ -26,12 +109,34 @@ Widget wrap(Widget child) => MaterialApp(
   home: child,
 );
 
-/// Gateway seeded with one running subagent background work
-/// (`kind=='subagent'` works entry, live-probed 2026-09-13) whose matching
-/// `kind=='subagent'` stream row carries the summary text.
+/// Gateway seeded with one running subagent (`subagents.running[]` entry +
+/// its `kind=='subagent'` works entry, live-probed 2026-09-13) plus one
+/// plain bash work — the pill reads the former, the works bar the latter.
 FakeChatGateway _gatewayWithSubagentWork() => FakeChatGateway()
   ..snapshotExtra = {
+    'subagents': {
+      'revision': 1,
+      'childSessionIds': ['sess_child_1'],
+      'running': [
+        {
+          'childSessionId': 'sess_child_1',
+          'agentId': 'agent_1',
+          'toolCallId': 'call_1',
+          'subagentType': 'general-purpose',
+          'title': '实现加固',
+          'status': 'running',
+          'startedAt': 1789279676224,
+        },
+      ],
+    },
     'backgroundWorks': [
+      {
+        'workId': 'bash_1',
+        'kind': 'bash',
+        'title': 'Download Flutter SDK',
+        'status': 'running',
+        'cancellable': true,
+      },
       {
         'workId': 'agent_1',
         'kind': 'subagent',
@@ -183,6 +288,500 @@ void main() {
         .single;
     expect(call.$2[1], 'i1');
     expect(call.$2[2], 'o1');
+  });
+
+  /// Form-style `userInput` interaction (the `questions` payload) with the
+  /// official field names: `label`/`question` question text, `multiSelect`
+  /// flag and `value`/`label` options.
+  Map<String, dynamic> questionsInteraction(
+    List<Map<String, dynamic>> questions,
+  ) => {
+    'interactionId': 'iq',
+    'payload': {'kind': 'userInput', 'questions': questions},
+  };
+
+  const envQuestion = {
+    'value': 'env',
+    'label': '选择环境',
+    'multiSelect': false,
+    'options': [
+      {'value': 'dev', 'label': '开发'},
+      {'value': 'prod', 'label': '生产'},
+    ],
+  };
+
+  const extrasQuestion = {
+    'value': 'extras',
+    'label': '附加组件',
+    'multiSelect': true,
+    'options': [
+      {'value': 'lint', 'label': 'Lint'},
+      {'value': 'test', 'label': '测试'},
+    ],
+  };
+
+  Future<FakeChatGateway> pumpQuestions(
+    WidgetTester tester,
+    List<Map<String, dynamic>> questions, {
+    FakeChatGateway? gateway,
+  }) async {
+    final gw = gateway ?? FakeChatGateway();
+    gw.snapshotExtra = {
+      'pendingInteractions': [questionsInteraction(questions)],
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gw, sessionId: 's1', title: 't')),
+    );
+    gw.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+    return gw;
+  }
+
+  Finder chipOf(String label) =>
+      find.ancestor(of: find.text(label), matching: find.byType(FilterChip));
+
+  Finder customField(int index) => find.byKey(ValueKey('askq-custom-$index'));
+
+  final submitKey = find.byTooltip('提交回答');
+
+  testWidgets('questions collect locally and submit full content once', (
+    tester,
+  ) async {
+    final gateway = await pumpQuestions(tester, [envQuestion, extrasQuestion]);
+
+    await tester.tap(find.text('开发'));
+    await tester.tap(find.text('Lint'));
+    await tester.tap(find.text('测试'));
+    await tester.pump();
+    // Local collection only: no RPC until the explicit submit.
+    expect(
+      gateway.calls.where((c) => c.$1 == 'resolveInteraction'),
+      isEmpty,
+    );
+
+    await tester.tap(submitKey);
+    await tester.pump();
+    final call = gateway.calls
+        .where((c) => c.$1 == 'resolveInteraction')
+        .toList()
+        .single;
+    expect(call.$2[1], 'iq');
+    // Official buildBotElicitationContent shape, whole-map assertion.
+    expect(call.$2[3], {
+      'answers': {'选择环境': '开发', '附加组件': 'Lint, 测试'},
+      'answer_0': 'dev',
+      'answer_1': ['lint', 'test'],
+    });
+    expect(call.$2[4], 'accept');
+  });
+
+  testWidgets('unanswered questions are skipped, multiSelect unchecks', (
+    tester,
+  ) async {
+    final gateway = await pumpQuestions(tester, [envQuestion, extrasQuestion]);
+
+    await tester.tap(find.text('Lint'));
+    await tester.pump();
+    await tester.tap(find.text('测试'));
+    await tester.pump();
+    await tester.tap(find.text('Lint')); // uncheck again
+    await tester.pump();
+
+    await tester.tap(submitKey);
+    await tester.pump();
+    final call = gateway.calls
+        .where((c) => c.$1 == 'resolveInteraction')
+        .toList()
+        .single;
+    // Question 0 absent → no answers entry and no answer_0.
+    expect(call.$2[3], {
+      'answers': {'附加组件': '测试'},
+      'answer_1': ['test'],
+    });
+    expect(call.$2[4], 'accept');
+  });
+
+  testWidgets('single-select re-choice overrides the first pick', (
+    tester,
+  ) async {
+    final gateway = await pumpQuestions(tester, [envQuestion, extrasQuestion]);
+
+    await tester.tap(find.text('开发'));
+    await tester.pump();
+    await tester.tap(find.text('生产'));
+    await tester.pump();
+
+    await tester.tap(submitKey);
+    await tester.pump();
+    final call = gateway.calls
+        .where((c) => c.$1 == 'resolveInteraction')
+        .toList()
+        .single;
+    expect(call.$2[3], {
+      'answers': {'选择环境': '生产'},
+      'answer_0': 'prod',
+    });
+    expect(call.$2[4], 'accept');
+  });
+
+  testWidgets('single-question submit carries the flat answer field', (
+    tester,
+  ) async {
+    final gateway = await pumpQuestions(tester, [envQuestion]);
+
+    await tester.tap(find.text('开发'));
+    await tester.pump();
+    await tester.tap(submitKey);
+    await tester.pump();
+    final call = gateway.calls
+        .where((c) => c.$1 == 'resolveInteraction')
+        .toList()
+        .single;
+    expect(call.$2[3], {
+      'answers': {'选择环境': '开发'},
+      'answer_0': 'dev',
+      'answer': 'dev',
+    });
+    expect(call.$2[4], 'accept');
+  });
+
+  testWidgets('single toggle-off clears; empty submit is the no-answer send', (
+    tester,
+  ) async {
+    final gateway = await pumpQuestions(tester, [envQuestion]);
+
+    await tester.tap(chipOf('开发'));
+    await tester.pump();
+    expect(find.text('已答 1/1'), findsOneWidget);
+    await tester.tap(chipOf('开发')); // second tap deselects (unified toggle)
+    await tester.pump();
+    expect(tester.widget<FilterChip>(chipOf('开发')).selected, isFalse);
+    // Nothing answered: the counter hint is hidden again.
+    expect(find.textContaining('已答'), findsNothing);
+
+    // The ↑ key stays tappable with nothing picked — the explicit
+    // "no answer" submit carries just the empty answers map.
+    await tester.tap(submitKey);
+    await tester.pump();
+    final call = gateway.calls
+        .where((c) => c.$1 == 'resolveInteraction')
+        .toList()
+        .single;
+    expect(call.$2[3], {'answers': {}});
+    expect(call.$2[4], 'accept');
+  });
+
+  testWidgets('composer stays put while an interaction awaits', (tester) async {
+    final gateway = await pumpQuestions(tester, [envQuestion]);
+
+    // The interaction card is up and the composer coexists with it: answers
+    // live inside the card, the composer only ever sends new messages.
+    expect(submitKey, findsOneWidget);
+    expect(find.text('提出后续修改要求'), findsOneWidget);
+
+    // Once the interaction clears (desktop pushes a snapshot without it),
+    // the card goes away and the composer is still there.
+    gateway.snapshotExtra = const {};
+    gateway.feedSnapshot(const [
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      {'rowId': 2, 'kind': 'assistant', 'text': 'done'},
+    ]);
+    await tester.pumpAndSettle();
+    expect(find.text('提出后续修改要求'), findsOneWidget);
+    expect(submitKey, findsNothing);
+  });
+
+  testWidgets('reload snapshot (summary form) rebuilds the ask card', (
+    tester,
+  ) async {
+    final gateway = FakeChatGateway();
+    // 3.12.3 relay snapshot: the summary count object stands in for the
+    // interaction list — the card must rebuild from the pendingApproval
+    // tool call row instead.
+    gateway.snapshotExtra = {
+      'pendingInteractions': {'permissionCount': 0, 'userInputCount': 1},
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      {
+        'rowId': 2,
+        'kind': 'toolCall',
+        'toolCallId': 'call_7',
+        'toolName': 'AskUserQuestion',
+        'status': 'pendingApproval',
+        'approvalInteractionId': 'perm-call_7',
+        'input': {
+          'questions': [
+            {
+              'question': '选择环境',
+              'header': '环境',
+              'options': [
+                {'value': 'dev', 'label': '开发'},
+                {'value': 'prod', 'label': '生产'},
+              ],
+            },
+          ],
+        },
+      },
+    ]);
+    await tester.pumpAndSettle();
+
+    // Card is up (chips + submit key) and the composer coexists with it.
+    expect(find.text('开发'), findsOneWidget);
+    expect(submitKey, findsOneWidget);
+    expect(find.text('提出后续修改要求'), findsOneWidget);
+
+    await tester.tap(find.text('开发'));
+    await tester.pump();
+    await tester.tap(submitKey);
+    await tester.pump();
+    final call = gateway.calls
+        .where((c) => c.$1 == 'resolveInteraction')
+        .toList()
+        .single;
+    // The rebuilt card resolves under the row's approvalInteractionId —
+    // the exact id the desktop derived (`perm-<toolCallId>`).
+    expect(call.$2[1], 'perm-call_7');
+    expect(call.$2[3], {
+      'answers': {'选择环境': '开发'},
+      'answer_0': 'dev',
+      'answer': 'dev',
+    });
+  });
+
+  testWidgets('questions card renders no free-text reply row', (tester) async {
+    final gateway = FakeChatGateway();
+    gateway.snapshotExtra = {
+      'pendingInteractions': [
+        {
+          'interactionId': 'iq',
+          'payload': {
+            'kind': 'userInput',
+            'freeText': true,
+            'questions': [envQuestion],
+          },
+        },
+      ],
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    // AskUserQuestion payloads carry freeText=true, yet the questions form
+    // (with its per-question custom input) replaces the reply row.
+    expect(find.text('开发'), findsOneWidget);
+    expect(find.text('输入回复…'), findsNothing);
+  });
+
+  testWidgets('freeText-only interaction keeps the reply input row', (
+    tester,
+  ) async {
+    final gateway = FakeChatGateway();
+    gateway.snapshotExtra = {
+      'pendingInteractions': [
+        {
+          'interactionId': 'if',
+          'payload': {'kind': 'userInput', 'prompt': '说说想法', 'freeText': true},
+        },
+      ],
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    // No questions form → the reply row is the answering channel (the
+    // composer coexists for new messages, so target the reply field).
+    expect(find.text('输入回复…'), findsOneWidget);
+    await tester.enterText(find.widgetWithText(TextField, '输入回复…'), '就这样');
+    await tester.tap(find.byIcon(Icons.send));
+    await tester.pump();
+    final call = gateway.calls
+        .where((c) => c.$1 == 'resolveInteraction')
+        .toList()
+        .single;
+    expect(call.$2[1], 'if');
+  });
+
+  testWidgets('single custom input is exclusive and collapse always clears', (
+    tester,
+  ) async {
+    final gateway = await pumpQuestions(tester, [envQuestion]);
+
+    await tester.tap(chipOf('开发'));
+    await tester.pump();
+    await tester.tap(chipOf('自定义回答'));
+    await tester.pump();
+    // Expanding custom is the custom pick: the option deselects (mutually
+    // exclusive) and the inline input mounts focused.
+    expect(tester.widget<FilterChip>(chipOf('开发')).selected, isFalse);
+    await tester.enterText(customField(0), '本地容器');
+    await tester.pump();
+
+    // Tapping an option collapses the input and drops its text.
+    await tester.tap(chipOf('生产'));
+    await tester.pump();
+    expect(customField(0), findsNothing);
+    // 生产 was picked by that tap...
+    expect(tester.widget<FilterChip>(chipOf('生产')).selected, isTrue);
+
+    // ...and re-expanding custom clears it again (mutual exclusion), with
+    // the input coming back empty.
+    await tester.tap(chipOf('自定义回答'));
+    await tester.pump();
+    expect(tester.widget<FilterChip>(chipOf('生产')).selected, isFalse);
+    expect(
+      tester.widget<TextField>(customField(0)).controller!.text,
+      isEmpty,
+    );
+
+    // Tapping the custom chip again is the second collapse path: it must
+    // clear too, so a later re-expand comes back empty (no hidden state).
+    await tester.enterText(customField(0), '临时脚本');
+    await tester.pump();
+    await tester.tap(chipOf('自定义回答'));
+    await tester.pump();
+    expect(customField(0), findsNothing);
+    await tester.tap(chipOf('自定义回答'));
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(customField(0)).controller!.text,
+      isEmpty,
+    );
+
+    // Custom open but blank: blank text is not an answer (R3), so this is
+    // the no-answer content.
+    await tester.tap(submitKey);
+    await tester.pump();
+    final call = gateway.calls
+        .where((c) => c.$1 == 'resolveInteraction')
+        .toList()
+        .single;
+    expect(call.$2[3], {'answers': {}});
+    expect(call.$2[4], 'accept');
+  });
+
+  testWidgets('custom input takes focus on the frame after expanding', (
+    tester,
+  ) async {
+    await pumpQuestions(tester, [envQuestion]);
+
+    await tester.tap(chipOf('自定义回答'));
+    await tester.pump();
+    await tester.pump();
+    // Explicit next-frame focus — `autofocus` loses the race against slow
+    // OEM IME startup (Xiaomi/HyperOS): the show-keyboard request lands
+    // before the IME is ready and is dropped.
+    expect(
+      tester.widget<TextField>(customField(0)).focusNode!.hasFocus,
+      isTrue,
+    );
+  });
+
+  testWidgets('custom text submits verbatim as its label and value', (
+    tester,
+  ) async {
+    final gateway = await pumpQuestions(tester, [envQuestion]);
+
+    await tester.tap(chipOf('自定义回答'));
+    await tester.pump();
+    await tester.enterText(customField(0), '本地容器');
+    await tester.pump();
+    expect(find.text('已答 1/1'), findsOneWidget);
+
+    await tester.tap(submitKey);
+    await tester.pump();
+    final call = gateway.calls
+        .where((c) => c.$1 == 'resolveInteraction')
+        .toList()
+        .single;
+    expect(call.$2[3], {
+      'answers': {'选择环境': '本地容器'},
+      'answer_0': '本地容器',
+      'answer': '本地容器',
+    });
+    expect(call.$2[4], 'accept');
+  });
+
+  testWidgets('multi custom input coexists with the checked options', (
+    tester,
+  ) async {
+    final gateway = await pumpQuestions(tester, [extrasQuestion]);
+
+    await tester.tap(chipOf('Lint'));
+    await tester.pump();
+    await tester.tap(chipOf('自定义回答'));
+    await tester.pump();
+    // Multi-select: custom is an extra — Lint stays checked next to it.
+    expect(tester.widget<FilterChip>(chipOf('Lint')).selected, isTrue);
+    await tester.enterText(customField(0), '冒烟脚本');
+    await tester.pump();
+    expect(find.text('已答 1/1'), findsOneWidget);
+
+    // Both go into the answer array together.
+    await tester.tap(submitKey);
+    await tester.pump();
+    final call = gateway.calls
+        .where((c) => c.$1 == 'resolveInteraction')
+        .toList()
+        .single;
+    expect(call.$2[3], {
+      'answers': {'附加组件': 'Lint, 冒烟脚本'},
+      'answer_0': ['lint', '冒烟脚本'],
+      // Single-question form mirrors answer_0 into the flat answer.
+      'answer': ['lint', '冒烟脚本'],
+    });
+    expect(call.$2[4], 'accept');
+  });
+
+  testWidgets('busy disables chips and input; submit arrow becomes a spinner', (
+    tester,
+  ) async {
+    await pumpQuestions(
+      tester,
+      [extrasQuestion],
+      gateway: _HoldResolveGateway(),
+    );
+
+    await tester.tap(chipOf('Lint'));
+    await tester.pump();
+    await tester.tap(chipOf('自定义回答'));
+    await tester.pump();
+    await tester.enterText(customField(0), '冒烟');
+    await tester.tap(submitKey);
+    await tester.pump(); // resolve never answers → busy frame
+
+    // The ↑ key swapped its arrow for a spinner.
+    expect(
+      find.descendant(
+        of: submitKey,
+        matching: find.byType(CircularProgressIndicator),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: submitKey,
+        matching: find.byIcon(Icons.arrow_upward),
+      ),
+      findsNothing,
+    );
+    // Every control is disabled while the resolve is in flight.
+    expect(tester.widget<FilterChip>(chipOf('Lint')).onSelected, isNull);
+    expect(tester.widget<FilterChip>(chipOf('自定义回答')).onSelected, isNull);
+    expect(tester.widget<TextField>(customField(0)).enabled, isFalse);
   });
 
   Map<String, dynamic> hookReviewInteraction() => {
@@ -808,59 +1407,774 @@ void main() {
     expect(opacity(), 0);
   });
 
-  testWidgets('subagent background work renders a live row without a goal', (
-    tester,
-  ) async {
+  testWidgets('running subagent shows the composer pill; the works bar keeps '
+      'only the bash row', (tester) async {
     final gateway = _gatewayWithSubagentWork();
     await _pumpWithRunningSubagent(tester, gateway);
 
-    // goal=null: the goal panel stays hidden, the subagent entry doesn't.
-    expect(find.text('目标'), findsNothing);
-    expect(find.text('实现加固 · 正在读取 a.dart'), findsOneWidget);
+    // Pill sits right of the mode chip: agent glyph + running count.
+    expect(find.byTooltip('子智能体'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byTooltip('子智能体'),
+        matching: find.text('1'),
+      ),
+      findsOneWidget,
+    );
+
+    // Works bar: only the bash count line remains (subagent entries left
+    // the bar — they live in the pill + management sheet now).
+    expect(find.textContaining('后台任务 1 个运行中'), findsOneWidget);
     expect(find.byTooltip('取消此后台任务'), findsOneWidget);
+    expect(find.text('实现加固 · 正在读取 a.dart'), findsNothing);
+
+    // goal=null: the goal panel stays hidden.
+    expect(find.text('目标'), findsNothing);
   });
 
-  testWidgets('summaryText stream appends update the works bar row', (
+  testWidgets('agent tool call renders launch state and opens the detail page', (
     tester,
   ) async {
-    final gateway = _gatewayWithSubagentWork();
-    await _pumpWithRunningSubagent(tester, gateway);
+    final gateway = FakeChatGateway();
+    // The inline Agent expansion subscribes the child session; seed a
+    // separate (never-fed) child state so the parent rows don't leak into
+    // the expansion's transcript.
+    gateway.childStates['sess_child_1'] = ConversationState();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '去调研'},
+      {
+        'rowId': 2,
+        'kind': 'toolCall',
+        'toolName': 'Agent',
+        'toolCallId': 'call_1',
+        'status': 'success',
+        // Live-probed shape (2026-09-16): description/subagent_type in the
+        // input JSON, outputText empty — the result lives in the child.
+        'inputText':
+            '{"description":"调研通知层","prompt":"调研 lib/notifications 的结构","run_in_background":true,"subagent_type":"Explore"}',
+      },
+      {
+        'rowId': 3,
+        'kind': 'subagent',
+        'parentToolCallId': 'call_1',
+        'childSessionId': 'sess_child_1',
+        'subagentType': 'Explore',
+        'status': 'success',
+        'summaryText': '调研通知层',
+        'workId': 'agent_1',
+      },
+    ]);
+    await tester.pumpAndSettle();
 
+    // 启动状态词 + description 标题，subagentType 作副标题（官方
+    // chat.toolCall.agent.backgroundLaunch* 文案对等）。
+    expect(find.textContaining('已启动 · 调研通知层'), findsOneWidget);
+    expect(find.text('Explore'), findsOneWidget);
+    // 流内 subagent 行状态词本地化。
+    expect(find.textContaining('已完成  调研通知层'), findsOneWidget);
+
+    // 展开显示派发的提示词而非原始 JSON；展开体挂上订阅池的子会话
+    // 时间线（此处子会话无快照 → 常驻 spinner，用有限 pump）。
+    await tester.tap(find.textContaining('已启动 · 调研通知层'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(gateway.subscribedSessions, contains('sess_child_1'));
+    expect(find.text('提示词'), findsOneWidget);
+    expect(find.textContaining('调研 lib/notifications 的结构'), findsWidgets);
+    expect(find.textContaining('run_in_background'), findsNothing);
+
+    // 行尾箭头进入只读子会话详情页（首个箭头属于 Agent 行，
+    // 第二个是流内 subagent 行的）。
+    await tester.tap(find.byIcon(Icons.chevron_right).first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byType(SubagentDetailPage), findsOneWidget);
+    expect(gateway.subscribedSessions, contains('sess_child_1'));
+  });
+
+  testWidgets('running agent tool call shows 启动中 state', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '去调研'},
+      {
+        'rowId': 2,
+        'kind': 'toolCall',
+        'toolName': 'Agent',
+        'toolCallId': 'call_9',
+        'status': 'running',
+        'inputText': '{"description":"调研通知层","prompt":"p","subagent_type":"Explore"}',
+      },
+      {
+        'rowId': 3,
+        'kind': 'subagent',
+        'parentToolCallId': 'call_9',
+        'childSessionId': 'sess_child_9',
+        'subagentType': 'Explore',
+        'status': 'running',
+        'summaryText': '调研通知层',
+        'workId': 'agent_9',
+      },
+    ]);
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('启动中 · 调研通知层'), findsOneWidget);
+    expect(find.textContaining('运行中  调研通知层'), findsOneWidget);
+  });
+
+  // --------------------------------- subagent feed / terminal hysteresis
+
+  /// Feeds a child-session state with the same frame shape the real
+  /// subscription snapshot arrives in.
+  void feedChildState(
+    ConversationState child,
+    String sessionId,
+    List<Map<String, dynamic>> rows,
+  ) {
+    child.applyFrame({
+      'toSeq': child.seq + 1,
+      'payload': {
+        'kind': 'snapshot',
+        'snapshot': {
+          'sessionId': sessionId,
+          'logEpoch': 'ce1',
+          'revision': 1,
+          'rows': {
+            'window': rows,
+            'totalCount': rows.length,
+            'firstRowId': (rows.first['rowId'] as num?)?.toInt(),
+          },
+        },
+      },
+    }, onGap: () => fail('unexpected gap'));
+  }
+
+  /// A full `kind=='subagent'` stream row (row.upserted replaces the whole
+  /// row, so tests build it completely every time).
+  Map<String, dynamic> subagentRow({
+    required num rowId,
+    required String status,
+    String childSessionId = 'sess_child_1',
+    String summaryText = '调研通知层',
+  }) =>
+      {
+        'rowId': rowId,
+        'kind': 'subagent',
+        'childSessionId': childSessionId,
+        'subagentType': 'Explore',
+        'parentToolCallId': 'call_1',
+        'status': status,
+        'summaryText': summaryText,
+        'workId': 'agent_1',
+      };
+
+  void upsertRows(FakeChatGateway gateway, List<Map<String, dynamic>> rows) {
     gateway.state.applyFrame({
       'toSeq': gateway.state.seq + 1,
       'payload': {
         'kind': 'deltas',
         'deltas': [
-          {'op': 'row.delta', 'rowId': 9, 'path': 'summaryText', 'append': '，写入测试'},
+          for (final row in rows) {'op': 'row.upserted', 'row': row},
         ],
       },
     }, onGap: () => fail('unexpected gap'));
-    await tester.pump();
+  }
 
-    expect(find.text('实现加固 · 正在读取 a.dart，写入测试'), findsOneWidget);
+  /// Patches the snapshot (state.updated) with a replayed `subagents.running`
+  /// entry + matching works entry — the bridge-recovery replay shape.
+  void pushRunningReplay(FakeChatGateway gateway) {
+    final runningEntry = {
+      'childSessionId': 'sess_child_1',
+      'agentId': 'agent_1',
+      'subagentType': 'Explore',
+      'title': '调研通知层',
+      'status': 'running',
+      'startedAt': 1789279676224,
+    };
+    gateway.state.applyFrame({
+      'toSeq': gateway.state.seq + 1,
+      'payload': {
+        'kind': 'deltas',
+        'deltas': [
+          {
+            'op': 'state.updated',
+            'patch': {
+              'subagents': {
+                'revision': 2,
+                'childSessionIds': ['sess_child_1'],
+                'running': [runningEntry],
+              },
+              'backgroundWorks': [
+                {
+                  ...runningEntry,
+                  'kind': 'subagent',
+                  'workId': 'agent_1',
+                },
+              ],
+            },
+          },
+        ],
+      },
+    }, onGap: () => fail('unexpected gap'));
+  }
+
+  /// Opens the management sheet from the composer pill (finite pumps: the
+  /// pill's breathing dot and sheet spinners never let pumpAndSettle settle).
+  Future<void> openSubagentSheet(WidgetTester tester) async {
+    await tester.tap(find.byTooltip('子智能体'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+  }
+
+  testWidgets('management sheet streams the pooled child tail and opens the '
+      'detail page', (tester) async {
+    final gateway = _gatewayWithSubagentWork();
+    final child = ConversationState();
+    gateway.childStates['sess_child_1'] = child;
+    await _pumpWithRunningSubagent(tester, gateway);
+
+    // The sheet holds the pooled child subscription for its lifetime.
+    await openSubagentSheet(tester);
+    expect(
+      gateway.subscribedSessions.where((s) => s == 'sess_child_1'),
+      hasLength(1),
+    );
+
+    // Running section: title + 详情/停止 actions. No child toolCall yet →
+    // no tail line.
+    expect(find.text('实现加固'), findsOneWidget);
+    expect(find.text('详情'), findsOneWidget);
+    expect(find.text('停止'), findsOneWidget);
+    expect(find.text('终端 · flutter test'), findsNothing);
+
+    // Child tool progress streams into the live tail.
+    feedChildState(child, 'sess_child_1', [
+      {
+        'rowId': 1,
+        'kind': 'toolCall',
+        'toolName': 'Bash',
+        'status': 'running',
+        'inputText': '{"command":"flutter test"}',
+      },
+    ]);
+    await tester.pump();
+    expect(find.text('终端 · flutter test'), findsOneWidget);
+
+    // 详情 opens the read-only child-session detail page.
+    await tester.tap(find.text('详情'));
+    await tester.pump(); // route push + subscribe microtask
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byType(SubagentDetailPage), findsOneWidget);
   });
 
-  testWidgets('tapping the subagent work row opens the read-only detail page', (
+  testWidgets('sheet stop confirms then cancels the parent background work', (
     tester,
   ) async {
     final gateway = _gatewayWithSubagentWork();
     await _pumpWithRunningSubagent(tester, gateway);
 
-    await tester.tap(find.text('实现加固 · 正在读取 a.dart'));
-    await tester.pump(); // route push + subscribe microtask
-    await tester.pump(const Duration(milliseconds: 350)); // transition
+    await openSubagentSheet(tester);
+
+    await tester.tap(find.text('停止'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('确定停止这个子智能体吗？'), findsOneWidget);
+
+    // Cancelling the dialog must not fire the command.
+    await tester.tap(find.text('取消'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300)); // exit animation
+    expect(
+      gateway.calls.where((c) => c.$1 == 'cancelBackgroundWork'),
+      isEmpty,
+    );
+
+    // Reopen the confirm dialog and go through with it.
+    await tester.tap(find.text('停止'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.widgetWithText(FilledButton, '停止'));
+    await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    expect(find.byType(SubagentDetailPage), findsOneWidget);
-    expect(gateway.subscribedSessions, contains('sess_child_1'));
-    // the detail page is read-only: no composer inside it
+    // Parent session + the running entry's agentId (= workId, live-probed).
+    final call = gateway.calls
+        .where((c) => c.$1 == 'cancelBackgroundWork')
+        .toList()
+        .single;
+    expect(call.$2, ['s1', 'agent_1']);
+  });
+
+  testWidgets('closing the management sheet releases the held child '
+      'subscription (dispose-symmetric, chat-conventions §7)', (tester) async {
+    final gateway = _gatewayWithSubagentWork();
+    gateway.childStates['sess_child_1'] = ConversationState();
+    await _pumpWithRunningSubagent(tester, gateway);
+
+    await openSubagentSheet(tester);
     expect(
-      find.descendant(
-        of: find.byType(SubagentDetailPage),
-        matching: find.byType(TextField),
-      ),
-      findsNothing,
+      gateway.subscribedSessions.where((s) => s == 'sess_child_1'),
+      hasLength(1),
     );
+
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // The sheet's dispose released its acquire (refcount 0 → async close).
+    expect(gateway.closedSessions, contains('sess_child_1'));
+    // The pill is untouched by the sheet close.
+    expect(find.byTooltip('子智能体'), findsOneWidget);
+  });
+
+  testWidgets('inputStreaming child shows the 准备执行… tail in the sheet', (
+    tester,
+  ) async {
+    final gateway = _gatewayWithSubagentWork();
+    final child = ConversationState();
+    gateway.childStates['sess_child_1'] = child;
+    await _pumpWithRunningSubagent(tester, gateway);
+
+    await openSubagentSheet(tester);
+    feedChildState(child, 'sess_child_1', [
+      {
+        'rowId': 1,
+        'kind': 'toolCall',
+        'toolName': 'Bash',
+        'status': 'inputStreaming',
+        'inputText': '',
+      },
+    ]);
+    await tester.pump();
+    expect(find.text('准备执行…'), findsOneWidget);
+  });
+
+  testWidgets('sheet lists ended window rows and pages older subagent rows '
+      'until hasMore is false', (tester) async {
+    final gateway = FakeChatGateway()
+      ..snapshotExtra = {
+        'subagents': {
+          'revision': 1,
+          'childSessionIds': ['sess_child_1', 'sess_child_2', 'sess_child_9'],
+          'running': [
+            {
+              'childSessionId': 'sess_child_1',
+              'agentId': 'agent_1',
+              'subagentType': 'general-purpose',
+              'title': '实现加固',
+              'status': 'running',
+              'startedAt': 1789279676224,
+            },
+          ],
+        },
+      }
+      ..rowsRangeResults.addAll([
+        // Page 1 (cursor = oldest held row, 60): one more subagent + noise.
+        {
+          'hasMore': true,
+          'atLogEpoch': 'e1',
+          'rows': {
+            'window': [
+              {
+                'rowId': 50,
+                'kind': 'subagent',
+                'childSessionId': 'sess_child_9',
+                'subagentType': 'general-purpose',
+                'status': 'stopped',
+                'summaryText': '用量统计采集',
+                'workId': 'agent_9',
+              },
+              {
+                'rowId': 45,
+                'kind': 'assistantText',
+                'text': 'noise',
+              },
+            ],
+          },
+        },
+        // Page 2 (cursor followed to 50): exhausted.
+        {
+          'hasMore': false,
+          'atLogEpoch': 'e1',
+          'rows': {'window': <Map<String, dynamic>>[]},
+        },
+      ]);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 100, 'kind': 'userInput', 'text': '开工', 'state': 'done'},
+      subagentRow(rowId: 101, status: 'running'),
+      subagentRow(
+        rowId: 60,
+        status: 'failed',
+        childSessionId: 'sess_child_2',
+        summaryText: '索引重建',
+      ),
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await openSubagentSheet(tester);
+
+    // Ended section: the in-window failed row (status word + title).
+    expect(find.text('失败'), findsOneWidget);
+    expect(find.text('索引重建'), findsOneWidget);
+
+    // 「加载更早」 pages with the held-rows cursor.
+    await tester.tap(find.text('加载更早'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.text('已停止'), findsOneWidget);
+    expect(find.text('用量统计采集'), findsOneWidget);
+
+    await tester.tap(find.text('加载更早'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // Cursors: the window head, then the collected page head — never the
+    // placeholder.
+    final rangeCalls =
+        gateway.calls.where((c) => c.$1 == 'rowsRange').toList();
+    expect(rangeCalls, hasLength(2));
+    expect(rangeCalls[0].$2[1], 60);
+    expect(rangeCalls[1].$2[1], 50);
+
+    // Exhausted: the button collapses into the total line
+    // (N = subagents.childSessionIds).
+    expect(find.text('加载更早'), findsNothing);
+    expect(find.text('已全部加载 · 共 3 个'), findsOneWidget);
+  });
+
+  testWidgets('sheet auto-closes after all-terminal holds past the confirm '
+      'window', (tester) async {
+    final gateway = _gatewayWithSubagentWork();
+    await tester.pumpWidget(
+      wrap(ChatPage(
+        gateway: gateway,
+        sessionId: 's1',
+        title: 't',
+        turnFooterConfirmWindow: const Duration(milliseconds: 150),
+      )),
+    );
+    gateway.feedSnapshot([subagentRow(rowId: 3, status: 'running')]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await openSubagentSheet(tester);
+    expect(find.text('子智能体'), findsOneWidget); // sheet header
+
+    // Everything goes terminal: the running section empties immediately,
+    // but the sheet itself holds through the confirm window…
+    upsertRows(gateway, [subagentRow(rowId: 3, status: 'success')]);
+    await tester.pump();
+    expect(find.text('子智能体'), findsOneWidget); // header still up
+    expect(find.text('详情'), findsNothing); // running section emptied
+
+    // …then it closes itself (and the pill dies with it).
+    await tester.pump(const Duration(milliseconds: 150));
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(find.text('子智能体'), findsNothing);
+    expect(find.byTooltip('子智能体'), findsNothing);
+  });
+
+  testWidgets('pill is destroyed after all-terminal holds past the confirm '
+      'window', (tester) async {
+    final gateway = _gatewayWithSubagentWork();
+    await tester.pumpWidget(
+      wrap(ChatPage(
+        gateway: gateway,
+        sessionId: 's1',
+        title: 't',
+        turnFooterConfirmWindow: const Duration(milliseconds: 150),
+      )),
+    );
+    gateway.feedSnapshot([subagentRow(rowId: 3, status: 'running')]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byTooltip('子智能体'), findsOneWidget);
+
+    // All terminal: the pill survives the anti-replay window…
+    upsertRows(gateway, [subagentRow(rowId: 3, status: 'success')]);
+    await tester.pump();
+    expect(find.byTooltip('子智能体'), findsOneWidget);
+
+    // …and is destroyed once the window has passed.
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byTooltip('子智能体'), findsNothing);
+  });
+
+  testWidgets('a replayed running subagent inside the hysteresis window '
+      'never revives the pill', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(
+        gateway: gateway,
+        sessionId: 's1',
+        title: 't',
+        subagentHysteresis: const Duration(milliseconds: 150),
+        turnFooterConfirmWindow: const Duration(milliseconds: 150),
+      )),
+    );
+    gateway.feedSnapshot([subagentRow(rowId: 3, status: 'success')]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    // Terminal from the start: no pill, even after the confirm window.
+    expect(find.byTooltip('子智能体'), findsNothing);
+
+    // Bridge-recovery replay: subagents.running (+ the matching works
+    // entry) reports the finished subagent as running again. The hysteresis
+    // view keeps the terminal status → no pill.
+    pushRunningReplay(gateway);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.byTooltip('子智能体'), findsNothing);
+    // The expiry side (persisted running believed after the window) is
+    // covered by the SubagentFeed unit test — Future.delayed cannot advance
+    // real time inside testWidgets.
+  });
+
+  testWidgets('load-older pages from the oldest held row, not the placeholder '
+      'snapshot firstRowId', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    // Snapshot carries the placeholder firstRowId=1 while the window sits
+    // at rows 100+ (live-probed trap).
+    gateway.feedSnapshot(
+      [
+        {'rowId': 100, 'kind': 'userInput', 'text': '近期消息', 'state': 'done'},
+        {'rowId': 101, 'kind': 'assistantText', 'text': '回复', 'state': 'done'},
+      ],
+      firstRowId: 1,
+      totalCount: 160,
+    );
+    gateway.rowsRangeResults.addAll([
+      {
+        'hasMore': true,
+        'atLogEpoch': 'e1',
+        'rows': {
+          'window': [
+            for (var id = 40; id <= 99; id++)
+              {'rowId': id, 'kind': 'assistantText', 'text': '更早 $id'},
+          ],
+          'firstRowId': 1, // placeholder again — must be ignored
+        },
+      },
+      {
+        'hasMore': false,
+        'atLogEpoch': 'e1',
+        'rows': {
+          'window': [
+            {'rowId': 39, 'kind': 'userInput', 'text': '最早', 'state': 'done'},
+          ],
+        },
+      },
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final controller =
+        tester.widget<ListView>(find.byType(ListView)).controller!;
+    Future<void> tapLoadOlder() async {
+      controller.jumpTo(0);
+      await tester.pump();
+      await tester.tap(find.text('加载更早消息'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+
+    await tapLoadOlder();
+    await tapLoadOlder();
+
+    // Cursors: the oldest HELD row (100), then the prepended window head
+    // (40) — strictly older pages, placeholder firstRowId never used.
+    final rangeCalls =
+        gateway.calls.where((c) => c.$1 == 'rowsRange').toList();
+    expect(rangeCalls, hasLength(2));
+    expect(rangeCalls[0].$2[1], 100);
+    expect(rangeCalls[1].$2[1], 40);
+
+    // hasMore=false collapsed the affordance.
+    expect(find.text('加载更早消息'), findsNothing);
+    expect(find.text('最早'), findsOneWidget);
+  });
+
+  testWidgets('subagent tile holds 已完成 across a replayed running report '
+      'inside the hysteresis window', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(
+        gateway: gateway,
+        sessionId: 's1',
+        title: 't',
+        subagentHysteresis: const Duration(milliseconds: 150),
+      )),
+    );
+    gateway.feedSnapshot([subagentRow(rowId: 3, status: 'success')]);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('已完成  调研通知层'), findsOneWidget);
+
+    // Bridge-recovery replay: the finished subagent reports running again.
+    // The hysteresis is real-time based (notification_hub semantics), so
+    // inside the window the tile keeps the terminal caption. The expiry
+    // (persisted running is believed) is covered by the SubagentFeed unit
+    // test — Future.delayed cannot advance real time inside testWidgets.
+    upsertRows(gateway, [subagentRow(rowId: 3, status: 'running')]);
+    await tester.pump();
+    expect(find.textContaining('已完成  调研通知层'), findsOneWidget);
+    expect(find.textContaining('运行中  调研通知层'), findsNothing);
+  });
+
+  testWidgets('agent expansion renders the pooled child transcript inline', (
+    tester,
+  ) async {
+    final gateway = FakeChatGateway();
+    final child = ConversationState();
+    gateway.childStates['sess_child_1'] = child;
+    feedChildState(child, 'sess_child_1', [
+      {'rowId': 1, 'kind': 'userInput', 'text': '子任务提示'},
+      {'rowId': 2, 'kind': 'assistantText', 'text': '子会话结论：完成'},
+    ]);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '去调研'},
+      {
+        'rowId': 2,
+        'kind': 'toolCall',
+        'toolName': 'Agent',
+        'toolCallId': 'call_1',
+        'status': 'success',
+        'inputText':
+            '{"description":"调研通知层","prompt":"p","subagent_type":"Explore"}',
+      },
+      {
+        'rowId': 3,
+        'kind': 'subagent',
+        'parentToolCallId': 'call_1',
+        'childSessionId': 'sess_child_1',
+        'subagentType': 'Explore',
+        'status': 'success',
+        'summaryText': '调研通知层',
+        'workId': 'agent_1',
+      },
+    ]);
+    await tester.pumpAndSettle();
+
+    // Expansion mounts the inline transcript: pooled subscription (ONE for
+    // the whole tree) + child rows + 「输出」preview of the last text.
+    await tester.tap(find.textContaining('已启动 · 调研通知层'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      gateway.subscribedSessions.where((s) => s == 'sess_child_1'),
+      hasLength(1),
+    );
+    expect(find.text('子任务提示'), findsOneWidget);
+    expect(find.textContaining('子会话结论'), findsWidgets);
+    expect(find.text('输出'), findsOneWidget);
+  });
+
+  testWidgets('turn terminal footer waits for the confirm window', (
+    tester,
+  ) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(
+        gateway: gateway,
+        sessionId: 's1',
+        title: 't',
+        turnFooterConfirmWindow: const Duration(milliseconds: 150),
+      )),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      {
+        'rowId': 2,
+        'kind': 'assistantText',
+        'text': '回答中',
+        'state': 'streaming',
+      },
+      {'rowId': 3, 'kind': 'turnHeader', 'state': 'running'},
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('已完成'), findsNothing);
+
+    // Terminal blip: the header flips completed and the text stops
+    // streaming — inside the window neither the pill nor the feedback row
+    // may appear (user-reported flash of 「已结束」+ buttons mid-session).
+    upsertRows(gateway, [
+      {'rowId': 2, 'kind': 'assistantText', 'text': '回答完毕'},
+      {
+        'rowId': 3,
+        'kind': 'turnHeader',
+        'state': 'completedSuccess',
+        'activeMs': 65000,
+      },
+    ]);
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.text('已完成'), findsNothing);
+    expect(find.byIcon(Icons.thumb_up_alt_outlined), findsNothing);
+
+    // Persisted past the window → footer + feedback render.
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('已完成'), findsOneWidget);
+    expect(find.byIcon(Icons.thumb_up_alt_outlined), findsOneWidget);
+  });
+
+  testWidgets('a terminal blip that reverts inside the window never renders '
+      'the footer', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(
+        gateway: gateway,
+        sessionId: 's1',
+        title: 't',
+        turnFooterConfirmWindow: const Duration(milliseconds: 150),
+      )),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      {
+        'rowId': 2,
+        'kind': 'assistantText',
+        'text': '回答中',
+        'state': 'streaming',
+      },
+      {'rowId': 3, 'kind': 'turnHeader', 'state': 'running'},
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    upsertRows(gateway, [
+      {
+        'rowId': 3,
+        'kind': 'turnHeader',
+        'state': 'completedSuccess',
+        'activeMs': 65000,
+      },
+    ]);
+    await tester.pump(const Duration(milliseconds: 50));
+    // The session lives on: the header reverts to running inside the window.
+    upsertRows(gateway, [
+      {'rowId': 3, 'kind': 'turnHeader', 'state': 'running'},
+    ]);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('已完成'), findsNothing);
+    expect(find.text('运行中'), findsOneWidget);
+    expect(find.byIcon(Icons.thumb_up_alt_outlined), findsNothing);
   });
 
   // ---------------------------------------------- plan quota warning
@@ -1165,4 +2479,320 @@ void main() {
         findsOneWidget);
     expect(find.text('重置'), findsNothing);
   });
+
+  // ------------------- edit & resend dialog + keyboard overflow
+  // (PRD internal-task R1/R2)
+
+  testWidgets('edit-resend dialog button shows the localized label from '
+      'both the pencil and the long-press entry', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录', 'state': 'done'},
+    ]);
+    await tester.pumpAndSettle();
+
+    // Pencil beside the bubble.
+    await tester.tap(find.byIcon(Icons.edit_outlined));
+    await tester.pumpAndSettle();
+    // R1 regression: the button must read the table copy, never the raw
+    // (dotted) key.
+    expect(find.widgetWithText(FilledButton, '编辑并重发'), findsOneWidget);
+    expect(find.text('chat.action.edit.resend'), findsNothing);
+
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    // Long-press bottom sheet entry. The bubble is a SelectableText — its
+    // long-press selection would win the gesture arena, so press the bubble
+    // padding just outside the text where the row's GestureDetector owns
+    // the press.
+    final textTopLeft = tester.getTopLeft(find.text('帮我修复登录'));
+    await tester.longPressAt(textTopLeft - const Offset(8, 4));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('编辑并重发'));
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(FilledButton, '编辑并重发'), findsOneWidget);
+  });
+
+  testWidgets('pending questions card under the keyboard: the status strip '
+      'compresses instead of overflowing, composer stays on screen',
+      (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    await pumpQuestions(tester, [envQuestion]);
+
+    // No keyboard: card and composer render at intrinsic heights.
+    expect(find.text('开发'), findsOneWidget);
+    expect(find.text('提出后续修改要求'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    // Simulate the IME: the viewport shrinks and the min-height status
+    // strip (goal/works/queue/interactions) must turn into a scrollable
+    // area instead of pushing the composer off screen (was: RenderFlex
+    // overflowed by 344 pixels).
+    tester.view.viewInsets = const FakeViewPadding(bottom: 550);
+    await tester.pumpAndSettle();
+
+    final keyboardTop = 844.0 - 550.0;
+    final composer = find.text('提出后续修改要求');
+    expect(composer, findsOneWidget);
+    expect(
+      tester.getBottomRight(composer).dy,
+      lessThanOrEqualTo(keyboardTop + 0.5),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  // ------------------- chat config fixes (PRD internal-task)
+
+  testWidgets('empty model config keeps the composer model/thought chips '
+      'with placeholder labels', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    // The snapshot carries no config: currentModel/currentThought are both
+    // empty. Visibility keys off prep option availability (prep lands
+    // asynchronously), so the chips render with placeholders.
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    expect(find.text('模型'), findsOneWidget);
+    expect(find.text('思考'), findsOneWidget);
+
+    // The sheet opens from the placeholder chip and lists the prep options
+    // (option-name provider header falls back to the name — 2 hits).
+    await tester.tap(find.text('模型'));
+    await tester.pumpAndSettle();
+    expect(find.text('GLM-5.2'), findsNWidgets(2));
+  });
+
+  testWidgets('config-sheet fallback: no prep options renders the '
+      'model-provider catalog', (tester) async {
+    final gateway = _SwitchGateway(_SwitchTransport(), prep: barePrep())
+      ..entitlementResult = okQuota(
+        {'count': 0, 'percentage': 100, 'isShow': true},
+        tokenPercentage: 100,
+      )
+      ..modelProviderCatalogResult = [
+        {
+          'id': 'builtin:zai-coding-plan',
+          'name': 'BigModel',
+          'enabled': true,
+          'models': [
+            {'id': 'GLM-5.3'},
+            'GLM-5.3-Air',
+          ],
+        },
+      ];
+    await pumpWithQuota(tester, gateway);
+    // Entry path: prep has no model options → the composer chip is hidden,
+    // the quota banner's 切换模型 still opens the sheet.
+    expect(find.byIcon(Icons.memory_outlined), findsNothing);
+    expect(find.text('切换模型'), findsOneWidget);
+
+    await tester.tap(find.text('切换模型'));
+    await tester.pumpAndSettle();
+    expect(gateway.modelProviderCatalogCalls, 1);
+    expect(find.text('GLM-5.3'), findsOneWidget);
+    // Provider group header + one subtitle per catalog entry.
+    expect(find.text('BigModel'), findsNWidgets(3));
+
+    // Picking a catalog entry issues the switch with the split ids; the
+    // sheet closes (the composer chip stays hidden — visibility keys off
+    // the prep option, which this session lacks).
+    await tester.tap(find.text('GLM-5.3'));
+    await tester.pumpAndSettle();
+    expect(
+        gateway.transport.switches.single.provider, 'builtin:zai-coding-plan');
+    expect(gateway.transport.switches.single.model, 'GLM-5.3');
+    expect(find.text('GLM-5.3'), findsNothing); // sheet closed
+  });
+
+  testWidgets('config-sheet fallback: empty catalog keeps the degraded '
+      'current-model text', (tester) async {
+    final gateway = _SwitchGateway(_SwitchTransport(), prep: barePrep())
+      ..entitlementResult = okQuota(
+        {'count': 0, 'percentage': 100, 'isShow': true},
+        tokenPercentage: 100,
+      );
+    await pumpWithQuota(tester, gateway);
+
+    await tester.tap(find.text('切换模型'));
+    await tester.pumpAndSettle();
+    // Catalog probed but empty → the sheet keeps the degraded text.
+    expect(gateway.modelProviderCatalogCalls, 1);
+    expect(find.textContaining('当前模型'), findsOneWidget);
+    expect(find.textContaining('GLM-5.3'), findsNothing);
+  });
+
+  testWidgets('sheet switch: lost ack lands the optimistic patch and closes '
+      'the sheet with the pending toast', (tester) async {
+    final transport = _SwitchTransport(results: [
+      TimeoutException('switchModelConfig'),
+    ]);
+    final gateway = _SwitchGateway(transport);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('模型')); // placeholder chip
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('GLM-5.2 Air'));
+    await tester.pumpAndSettle();
+
+    // Not a rejection: the switch went out (thought fell back to the prep
+    // currentValue) and the patch landed anyway — the chip reads the
+    // optimistic (raw, prep-unmatched) model and the sheet closed.
+    expect(transport.switches.single.model, 'glm-5.2-air');
+    expect(transport.switches.single.thought, 'enabled');
+    expect(find.text('已提交，切换稍后生效'), findsOneWidget);
+    expect(find.text('glm-5.2-air'), findsOneWidget); // chip
+    expect(find.text('GLM-5.2 Air'), findsNothing); // sheet list gone
+  });
+
+  testWidgets('sheet switch: explicit status rejection keeps the rejection '
+      'snackbar and patches nothing', (tester) async {
+    final transport = _SwitchTransport(results: [
+      {
+        'status': 'rejected',
+        'reasonCode': 'model_locked',
+      },
+    ]);
+    final gateway = _SwitchGateway(transport);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('模型'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('GLM-5.2 Air'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('被拒绝: model_locked'), findsOneWidget);
+    // No optimistic patch (chip stays placeholder) and no sheet close.
+    expect(find.text('GLM-5.2 Air'), findsOneWidget); // sheet list
+    expect(find.text('模型'), findsNWidgets(2)); // chip + sheet section head
+  });
+
+  testWidgets('loading placeholder: degraded bridge line + slow hint after 5s', (
+    tester,
+  ) async {
+    final session = _DegradedBridgeSession()
+      ..degraded.value = 'rpc-transport-fault';
+    final gateway = _StalledGateway(_DegradedTransport(session));
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pump();
+
+    // Subscribe parked → no state: spinner plus the bridge-degraded copy,
+    // but the slow hint is not due yet (fake clock).
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.text('与桌面端的连接正在恢复…'), findsOneWidget);
+    expect(find.text('正在建立连接，可能需要一点时间…'), findsNothing);
+
+    await tester.pump(const Duration(seconds: 6));
+    expect(find.text('正在建立连接，可能需要一点时间…'), findsOneWidget);
+
+    // Recovery clears the bridge line while the slow hint stays.
+    session.degraded.value = null;
+    await tester.pump();
+    expect(find.text('与桌面端的连接正在恢复…'), findsNothing);
+    expect(find.text('正在建立连接，可能需要一点时间…'), findsOneWidget);
+
+    await _releaseStalledPage(tester, gateway);
+  });
+
+  testWidgets('loading placeholder: healthy bridge shows only the slow hint', (
+    tester,
+  ) async {
+    final gateway = _StalledGateway(_DegradedTransport(_DegradedBridgeSession()));
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pump();
+    expect(find.text('与桌面端的连接正在恢复…'), findsNothing);
+
+    await tester.pump(const Duration(seconds: 6));
+    expect(find.text('正在建立连接，可能需要一点时间…'), findsOneWidget);
+    expect(find.text('与桌面端的连接正在恢复…'), findsNothing);
+
+    await _releaseStalledPage(tester, gateway);
+  });
+}
+
+/// Unmounts the page, then unblocks a [_StalledGateway] subscribe: the
+/// completed future cancels the 60s `.timeout` timer, leaving no pending
+/// timer in the test zone.
+Future<void> _releaseStalledPage(
+  WidgetTester tester,
+  _StalledGateway gateway,
+) async {
+  await tester.pumpWidget(const SizedBox());
+  gateway.release();
+  await tester.pump();
+}
+
+/// Bridge stand-in carrying only the degraded flag — the loading
+/// placeholder's status source (`session.degraded`).
+class _DegradedBridgeSession implements BridgeSession {
+  @override
+  final ValueNotifier<String?> degraded = ValueNotifier(null);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Transport stand-in that only exposes the bridge session; everything
+/// else is never exercised on the loading path.
+class _DegradedTransport implements ConversationTransport {
+  _DegradedTransport(this.session);
+
+  @override
+  final BridgeSession session;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
+}
+
+/// Gateway whose subscribe never completes on its own — pins the page on
+/// the `state == null` loading placeholder. [release] unblocks it at
+/// teardown.
+class _StalledGateway extends FakeChatGateway {
+  _StalledGateway(this.transport);
+
+  final ConversationTransport transport;
+  final Completer<ChatHandle> _pending = Completer<ChatHandle>();
+
+  @override
+  Future<ChatHandle> subscribe(String sessionId) => _pending.future;
+
+  @override
+  ConversationTransport get conversationCommands => transport;
+
+  void release() {
+    if (!_pending.isCompleted) {
+      _pending.complete(
+        ChatHandle(state: ConversationState(), close: () async {}),
+      );
+    }
+  }
 }

@@ -66,7 +66,10 @@ class ZColors {
   static const usageGreenLight = Color(0xFF166B32); // confirmation-foreground
   static const pillRunningBgLight = Color(0xFFEBF4FF); // --color-accent
   static const pillRunningFgLight = Color(0xFF0066DD); // ask-foreground
-  static const pillSuccessBgLight = Color(0xFF1E8A3E); // --color-success
+  // Success pill light pair (design.md §1c, interaction-confirmation
+  // family — NOT the --color-usage-chart-2 green the old value belonged to).
+  static const pillSuccessBgLight = Color(0xFFEAF7EE); // confirmation bg
+  static const pillSuccessFgLight = Color(0xFF166B32); // confirmation fg
 
   // Task-group color dot ('purple' group — live-probed desktop palette;
   // the other palette names map onto the brand/status tokens above).
@@ -393,6 +396,12 @@ class ZInk {
       : ZColors.pillRunningFgLight;
   static Color pillSuccessBg(BuildContext c) =>
       _dark(c) ? ZColors.pillSuccessBg : ZColors.pillSuccessBgLight;
+
+  /// Completed-pill text: dark keeps the measured opaque pair with black
+  /// text (unchanged), light pairs the confirmation surface with the
+  /// official confirmation-foreground.
+  static Color pillSuccessFg(BuildContext c) =>
+      _dark(c) ? Colors.black : ZColors.pillSuccessFgLight;
 
   /// Neutral glyph tone (slash popup icons): official foreground family.
   static Color iconNeutral(BuildContext c) =>

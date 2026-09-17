@@ -87,7 +87,14 @@ void main() {
     final (darkDone, lightDone) =
         await capture(tester, ZInk.pillSuccessBg);
     expect(darkDone, const Color(0xFF46BF72));
-    expect(lightDone, const Color(0xFF1E8A3E));
+    // Official interaction-confirmation surface (not the usage-chart green
+    // the old 0xFF1E8A3E value belonged to).
+    expect(lightDone, const Color(0xFFEAF7EE));
+
+    final (darkDoneFg, lightDoneFg) =
+        await capture(tester, ZInk.pillSuccessFg);
+    expect(darkDoneFg, Colors.black); // dark pair unchanged
+    expect(lightDoneFg, const Color(0xFF166B32)); // confirmation-foreground
 
     final (darkGlyph, lightGlyph) =
         await capture(tester, ZInk.iconNeutral);

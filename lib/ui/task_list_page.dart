@@ -200,12 +200,33 @@ class _TaskListPageState extends State<TaskListPage> {
   // overrides it per task id. The page filters archived rows; notification
   // consumers keep them observable.
 
-  Map<String, dynamic>? _workspaceForKey(DeviceSession session, String? key) {
+  /// The workspace behind a directory key: the listed workspace whose
+  /// [workspaceKeyOf] matches, else a minimal scope built from the task
+  /// row's own origin fields (`workspacePath`/`workspaceIdentity` — relay
+  /// overview and sessions-index rows carry them). The fallback covers the
+  /// key divergence between the overview and the workspace list: without
+  /// it, opening a foreign task silently reused the active workspace's
+  /// scope and the server rejected every command (proto.sessionNotFound —
+  /// the "can see, can't act" dead page). Only fields the row actually
+  /// carries go into the map (path required — every scoped wire call needs
+  /// it); null means ownership is undeterminable and the caller must not
+  /// open the chat.
+  Map<String, dynamic>? _workspaceForKey(
+    DeviceSession session,
+    SessionEntry entry,
+    String? key,
+  ) {
     if (key == null) return null;
     for (final ws in session.workspaces) {
       if (workspaceKeyOf(ws) == key) return ws;
     }
-    return null;
+    final path = entry.raw['workspacePath'];
+    if (path is! String || path.isEmpty) return null;
+    return {
+      'workspacePath': path,
+      if (entry.raw['workspaceIdentity'] != null)
+        'workspaceIdentity': entry.raw['workspaceIdentity'],
+    };
   }
 
   @override
@@ -486,7 +507,7 @@ class _TaskListPageState extends State<TaskListPage> {
           session,
           e,
           selected: e.sessionId == _paneSessionId,
-          workspace: _workspaceForKey(session, key),
+          workspace: _workspaceForKey(session, e, key),
         ),
     ];
   }
@@ -563,7 +584,7 @@ class _TaskListPageState extends State<TaskListPage> {
               e,
               selected: e.sessionId == _paneSessionId,
               indent: true,
-              workspace: isActive ? null : ws,
+              workspace: ws,
             ),
           if (_showArchived && entries.isEmpty)
             Padding(
@@ -1108,8 +1129,10 @@ class _TaskListPageState extends State<TaskListPage> {
     final title = entry.title.trim().isEmpty
         ? tr(context, 'tasks.untitled')
         : entry.title;
-    final ws =
-        _workspaceForKey(session, workspaceKey) ?? session.activeWorkspace;
+    // No activeWorkspace fallback here: a pinned task of a foreign workspace
+    // must open under its OWN scope (the fallback-built map below), never
+    // silently under whatever workspace happens to be active.
+    final ws = _workspaceForKey(session, entry, workspaceKey);
     final subtitle = [
       if (ws != null) workspaceTitle(ws),
       relativeTimeShort(context, entry.lastActivityAt),
@@ -1223,18 +1246,30 @@ class _TaskListPageState extends State<TaskListPage> {
         for (final e in bucket.value)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
-            child: _taskRow(
-              context,
-              session,
-              e,
-              workspaceLabel: _rowWorkspaceLabel(
-                session,
-                _workspaceForKey(session, wsKeyOf[e.sessionId]),
-              ),
-            ),
+            child: _directoryTaskRow(context, session, e, wsKeyOf[e.sessionId]),
           ),
       ],
     ];
+  }
+
+  /// One row resolved from the merged directory: the workspace map (listed
+  /// match or fallback-built scope) feeds both the label prefix and the
+  /// open path, so tapping re-points the bridge to the task's TRUE
+  /// workspace.
+  Widget _directoryTaskRow(
+    BuildContext context,
+    DeviceSession session,
+    SessionEntry entry,
+    String? workspaceKey,
+  ) {
+    final ws = _workspaceForKey(session, entry, workspaceKey);
+    return _taskRow(
+      context,
+      session,
+      entry,
+      workspaceLabel: _rowWorkspaceLabel(session, ws),
+      workspace: ws,
+    );
   }
 
   /// Kick the once-per-session grouped-view load; the result lands via
@@ -1272,14 +1307,11 @@ class _TaskListPageState extends State<TaskListPage> {
         sections.add(
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
-            child: _taskRow(
+            child: _directoryTaskRow(
               context,
               session,
               byId[m.taskId]!,
-              workspaceLabel: _rowWorkspaceLabel(
-                session,
-                _workspaceForKey(session, wsKeyOf[m.taskId]),
-              ),
+              wsKeyOf[m.taskId],
             ),
           ),
         );
@@ -1536,7 +1568,10 @@ class _TaskListPageState extends State<TaskListPage> {
                   highlight:
                       current != null &&
                       entries[i].sessionId == current.sessionId,
-                  workspace: isActive ? null : ws,
+                  // Always the owning card workspace: for the active one the
+                  // identical check below skips the reopen, for the others
+                  // opening rides workspace-bridge-open.
+                  workspace: ws,
                 ),
           ],
         ],
@@ -1779,14 +1814,24 @@ class _TaskListPageState extends State<TaskListPage> {
 
   /// Opens a task row whatever workspace it lives in: tasks of the active
   /// workspace go straight to chat; others re-point the bridge first
-  /// (workspace-bridge-open rides the taskId, web parity).
+  /// (workspace-bridge-open rides the taskId, web parity). A null
+  /// [workspace] means ownership is undeterminable — refuse to open instead
+  /// of silently subscribing under the active workspace's scope, where the
+  /// server rejects every command (proto.sessionNotFound dead page).
   Future<void> _openWorkspaceTask(
     DeviceSession session,
     Map<String, dynamic>? workspace,
     SessionEntry entry,
     String title,
   ) async {
-    if (workspace != null && !_isWorkspaceActive(session, workspace)) {
+    if (workspace == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(tr(context, 'tasks.scopeUnknown'))),
+      );
+      return;
+    }
+    if (!_isWorkspaceActive(session, workspace)) {
       await session.openWorkspace(workspace, taskId: entry.sessionId);
     }
     if (!mounted) return;

@@ -215,6 +215,14 @@ abstract interface class ChatGateway
   Future<WorkspacePrep> prepareWorkspace();
   Future<List<SkillEntry>> skills();
 
+  /// Fallback model catalog for the chat config sheet (PRD 09-19): enabled
+  /// providers from the `model-provider` channel (`getAll`), used when
+  /// prepareWorkspace ships no model options. Cached for the session
+  /// lifetime like [DeviceSession.probeModelProvider]; never throws —
+  /// transport/channel failures resolve to an empty list (and stay
+  /// uncached, so the next sheet open retries).
+  Future<List<Map<String, dynamic>>> modelProviderCatalog();
+
   /// @-mention data sources (web chat.mention.* picker).
   /// Files of the active workspace: {name, path, relativePath, type}.
   Future<List<Map<String, dynamic>>> mentionFiles();
@@ -960,6 +968,29 @@ class DeviceSession extends ChangeNotifier
     } finally {
       _modelProviderProbe = null;
     }
+  }
+
+  /// In-flight/cached [ChatGateway.modelProviderCatalog] future.
+  Future<List<Map<String, dynamic>>>? _modelProviderCatalogFuture;
+
+  @override
+  Future<List<Map<String, dynamic>>> modelProviderCatalog() {
+    return _modelProviderCatalogFuture ??= () async {
+      try {
+        final res = await callChannel(Channels.modelProvider, 'getAll');
+        return [
+          for (final p in (res is List ? res : const <dynamic>[]))
+            if (p is Map && p['enabled'] != false)
+              Map<String, dynamic>.from(p),
+        ];
+      } catch (e) {
+        // Transport/channel failure proves nothing about the catalog —
+        // stay uncached so the next open retries (probeModelProvider's
+        // uncached-error branch).
+        _modelProviderCatalogFuture = null;
+        return const <Map<String, dynamic>>[];
+      }
+    }();
   }
 
   WorkspaceGate? _liveGate() {

@@ -91,11 +91,16 @@ class FakeDeviceSession extends DeviceSession {
   @override
   Future<void> reloadTasks() async {}
 
+  /// Recorded [openWorkspace] calls `(workspace, taskId)` for assertions on
+  /// the open path's workspace scope.
+  final List<(Map<String, dynamic>, String?)> openWorkspaceCalls = [];
+
   @override
   Future<void> openWorkspace(
     Map<String, dynamic> workspace, {
     String? taskId,
   }) async {
+    openWorkspaceCalls.add((workspace, taskId));
     _active = workspace;
     notifyListeners();
   }

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -321,7 +322,14 @@ class _ChatPageState extends State<ChatPage> {
         _toast('$errorPrefix: ${res['reasonCode'] ?? res['status']}');
       }
     } catch (e) {
-      _toast(businessErrorCopy('$e', locale) ?? '$errorPrefix: $e');
+      // Raw error to the log; the snack bar gets plain language for the
+      // known transport shapes (commandErrorCopy, R3).
+      debugPrint('[chat] $errorPrefix: $e');
+      _toast(
+        commandErrorCopy('$e', locale) ??
+            businessErrorCopy('$e', locale) ??
+            '$errorPrefix: $e',
+      );
     }
   }
 
@@ -710,7 +718,17 @@ class _ChatPageState extends State<ChatPage> {
     await _loadEntitlement();
   }
 
-  void _showModelSheet() {
+  Future<void> _showModelSheet() async {
+    // PRD 09-19: sessions created with an empty default model config can
+    // ship no usable model options from prepareWorkspace — fetch the
+    // model-provider catalog as the sheet's fallback selector data. Normal
+    // sessions (options present) never trigger the extra RPC.
+    var catalog = const <Map<String, dynamic>>[];
+    final modelOption = _prep?.option('model');
+    if (modelOption == null || modelOption.options.isEmpty) {
+      catalog = await widget.gateway.modelProviderCatalog();
+    }
+    if (!mounted) return;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -720,6 +738,7 @@ class _ChatPageState extends State<ChatPage> {
         state: _state,
         prep: _prep,
         sessionId: _sessionId,
+        providerCatalog: catalog,
         draftConfig: _draftConfig,
         onDraftChange: (key, value) {
           setState(() => _draftConfig[key] = value);
@@ -1040,14 +1059,19 @@ class _ChatPageState extends State<ChatPage> {
   /// over (see [build]).
   Widget _messageList(BuildContext context, ConversationState? state) {
     if (state == null) {
-      return Center(
-        child: _sessionId == null
-            ? Text(
-                tr(context, 'chat.draftHint'),
-                style: TextStyle(color: ZInk.faint(context)),
-              )
-            : const CircularProgressIndicator(),
-      );
+      if (_sessionId == null) {
+        return Center(
+          child: Text(
+            tr(context, 'chat.draftHint'),
+            style: TextStyle(color: ZInk.faint(context)),
+          ),
+        );
+      }
+      // Subscribe still pending (no ack → no state): keep the spinner, but
+      // surface bridge degradation and — after a few seconds — admit the
+      // wait: the ack latency is unbounded (desktop hydration), and a bare
+      // spinner reads as frozen (internal-task).
+      return Center(child: _LoadingPlaceholder(degraded: _bridgeDegraded()));
     }
     if (!state.ready) return const Center(child: CircularProgressIndicator());
     return AnimatedBuilder(
@@ -1113,9 +1137,25 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 
+  /// Bridge degradation flag of the live transport (`session.degraded`,
+  /// non-null while the native bridge is down/rebuilding). Null when no
+  /// transport is open (`conversationCommands` throws before the first
+  /// workspace) — the placeholder then just tracks the slow hint.
+  ValueListenable<String?>? _bridgeDegraded() {
+    try {
+      return widget.gateway.conversationCommands.session.degraded;
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = _state;
+    // Read ABOVE the Scaffold: it strips the bottom inset from the body's
+    // MediaQuery (removeBottomInset), so the status strip below cannot see
+    // it there. Drives the strip's compressible-flex branch (R2).
+    final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;
     final chat = Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: !widget.embedded,
@@ -1317,20 +1357,35 @@ class _ChatPageState extends State<ChatPage> {
           if (state != null)
             AnimatedBuilder(
               animation: state,
-              builder: (context, _) => Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _GoalBanner(state: state),
-                  _GoalProcessPanel(
-                    state: state,
-                    gateway: widget.gateway,
-                    feed: _feed,
-                  ),
-                  _BackgroundWorksBar(state: state, gateway: widget.gateway),
-                  _QueueBar(state: state, gateway: widget.gateway),
-                  _PendingInteractions(state: state, gateway: widget.gateway),
-                ],
-              ),
+              // Status strip (goal/works/queue/interactions). While the IME
+              // is up it becomes a loose flex child (inner scroll), so the
+              // strip compresses into a scrollable area and the composer
+              // stays on screen instead of the body Column overflowing by
+              // ~344px (PRD internal-task R2). With no keyboard
+              // it stays a plain intrinsic-height child: a permanent
+              // Flexible would split the leftover space with the message
+              // list's Expanded and shrink the strip below its intrinsic
+              // height on short viewports (visual change).
+              builder: (context, _) {
+                final Widget strip = Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _GoalBanner(state: state),
+                    _GoalProcessPanel(
+                      state: state,
+                      gateway: widget.gateway,
+                      feed: _feed,
+                    ),
+                    _BackgroundWorksBar(state: state, gateway: widget.gateway),
+                    _QueueBar(state: state, gateway: widget.gateway),
+                    _PendingInteractions(state: state, gateway: widget.gateway),
+                  ],
+                );
+                if (!keyboardOpen) return strip;
+                return Flexible(
+                  child: SingleChildScrollView(child: strip),
+                );
+              },
             ),
           if (_showSlash)
             _SlashCommandBar(
@@ -1391,28 +1446,30 @@ class _ChatPageState extends State<ChatPage> {
             animation: (state == null)
               ? widget.gateway
               : Listenable.merge([state, widget.gateway]),
-            builder: (context, _) => _contentCol(
-              _InputBar(
-                controller: _inputController,
-                sending: _sending,
-                hasAttachments: _pendingFiles.isNotEmpty,
-                isDraft: _sessionId == null,
-                state: state,
-                prep: _prep,
-                draftConfig: _draftConfig,
-                gateway: widget.gateway,
-                sessionId: _sessionId,
-                feed: state == null ? null : _feed,
-                subagentConfirmWindow: widget.turnFooterConfirmWindow,
-                onSend: _send,
-                onAttach: _pickFiles,
-                onSkills: _openSkillsPicker,
-                onModelSheet: _showModelSheet,
-                onUsage: _showUsageSheet,
-                onSubagents: _showSubagentSheet,
-              ),
-              maxWidth: _kComposerColumnWidth,
-            ),
+            builder: (context, _) {
+              return _contentCol(
+                _InputBar(
+                  controller: _inputController,
+                  sending: _sending,
+                  hasAttachments: _pendingFiles.isNotEmpty,
+                  isDraft: _sessionId == null,
+                  state: state,
+                  prep: _prep,
+                  draftConfig: _draftConfig,
+                  gateway: widget.gateway,
+                  sessionId: _sessionId,
+                  feed: state == null ? null : _feed,
+                  subagentConfirmWindow: widget.turnFooterConfirmWindow,
+                  onSend: _send,
+                  onAttach: _pickFiles,
+                  onSkills: _openSkillsPicker,
+                  onModelSheet: _showModelSheet,
+                  onUsage: _showUsageSheet,
+                  onSubagents: _showSubagentSheet,
+                ),
+                maxWidth: _kComposerColumnWidth,
+              );
+            },
           ),
         ],
       ),
@@ -1512,6 +1569,83 @@ class _ChatPageState extends State<ChatPage> {
 
 /// ---------------------------------------------------------------- rows
 
+/// Central placeholder while the Conversation V4 state has not arrived
+/// (subscribe ack pending). Spinner plus two optional status lines: the
+/// bridge-degraded copy while [degraded] is non-null, and — after a few
+/// seconds — the slow-connection copy. Both describe state only; the ack
+/// latency is unbounded so no countdown is promised.
+class _LoadingPlaceholder extends StatefulWidget {
+  final ValueListenable<String?>? degraded;
+
+  const _LoadingPlaceholder({this.degraded});
+
+  @override
+  State<_LoadingPlaceholder> createState() => _LoadingPlaceholderState();
+}
+
+class _LoadingPlaceholderState extends State<_LoadingPlaceholder> {
+  static const _slowHintAfter = Duration(seconds: 5);
+  Timer? _slowTimer;
+  bool _slow = false;
+  bool _degraded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _slowTimer = Timer(_slowHintAfter, () {
+      if (mounted) setState(() => _slow = true);
+    });
+    widget.degraded?.addListener(_onDegraded);
+    _degraded = widget.degraded?.value != null;
+  }
+
+  void _onDegraded() {
+    if (!mounted) return;
+    setState(() => _degraded = widget.degraded?.value != null);
+  }
+
+  @override
+  void didUpdateWidget(_LoadingPlaceholder old) {
+    super.didUpdateWidget(old);
+    if (old.degraded != widget.degraded) {
+      old.degraded?.removeListener(_onDegraded);
+      widget.degraded?.addListener(_onDegraded);
+      _degraded = widget.degraded?.value != null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _slowTimer?.cancel();
+    widget.degraded?.removeListener(_onDegraded);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const CircularProgressIndicator(),
+        if (_degraded) ...[
+          const SizedBox(height: 12),
+          Text(
+            tr(context, 'chat.load.bridgeRecovering'),
+            style: TextStyle(color: ZInk.muted(context)),
+          ),
+        ],
+        if (_slow) ...[
+          const SizedBox(height: 4),
+          Text(
+            tr(context, 'chat.load.slowHint'),
+            style: TextStyle(color: ZInk.faint(context)),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
 /// Banner driven by gateway link status: quiet when healthy, "reconnecting"
 /// while the relay link is down mid-chat (a send may pause until recovery).
 class _GatewayBanner extends StatelessWidget {
@@ -1588,6 +1722,26 @@ String? businessErrorCopy(String errorText, String locale) {
   return '${trLocale(locale, key)} ($retryLater)';
 }
 
+/// Plain-language rewrite for command errors surfaced in snack bars: with
+/// the link down / the bridge dead, commands throw
+/// `StateError('not connected')` (toString: `Bad state: …`) or
+/// `TimeoutException`, and the desktop answers with its raw
+/// workspace-reconnect line — `'$e'` in a SnackBar reads like crash
+/// output (PRD internal-task R3). Returns the mapped copy, or
+/// null for unknown shapes so callers keep the raw text (logged via
+/// debugPrint at each call site). Takes a locale (not a BuildContext) so
+/// it stays a pure function, mirroring [businessErrorCopy].
+String? commandErrorCopy(String errorText, String locale) {
+  final t = errorText.toLowerCase();
+  if (t.contains('bad state:') || t.contains('not connected')) {
+    return trLocale(locale, 'chat.error.notConnected');
+  }
+  if (t.contains('timeoutexception') || t.contains('timed out')) {
+    return trLocale(locale, 'chat.error.timeout');
+  }
+  return null;
+}
+
 /// Splits an assistant-turn group into ORDERED parts — consecutive
 /// assistantText rows merge into one text segment, while reasoning/tool/
 /// subagent rows stay exactly where they occurred in the stream (so
@@ -1626,58 +1780,6 @@ String? subagentActionText(BuildContext context, ConversationState? child) {
       return tr(context, 'chat.subagent.preparing');
     }
     return toolRowSemantics(row, locale: _localeOf(context)).title;
-  }
-  return null;
-}
-
-/// The `kind=='subagent'` stream row spawned by an Agent tool call, linked
-/// via parentToolCallId ↔ toolCallId (live-probed 2026-09-16); carries the
-/// childSessionId/workId needed for the detail-page entry.
-Map<String, dynamic>? _subagentRowFor(
-  List<Map<String, dynamic>> rows,
-  Map<String, dynamic> toolRow,
-) {
-  final id = '${toolRow['toolCallId'] ?? ''}';
-  if (id.isEmpty) return null;
-  for (final r in rows) {
-    if (r['kind'] == 'subagent' && '${r['parentToolCallId'] ?? ''}' == id) {
-      return r;
-    }
-  }
-  return null;
-}
-
-/// Agent tool calls dispatch a subagent: the input JSON carries
-/// description / subagent_type / prompt while outputText stays empty — the
-/// result lives in the child session (live-probed 2026-09-16).
-bool _isAgentTool(Map<String, dynamic> row) {
-  if (row['kind'] != 'toolCall') return false;
-  return '${row['toolName'] ?? ''}'.toLowerCase() == 'agent';
-}
-
-/// turnHeader states whose footer (terminal pill + feedback row) is gated
-/// behind the confirm window (see _TurnGroupWidgetState).
-const turnTerminalPhases = {
-  'completedSuccess',
-  'completedInterrupted',
-  'failed',
-  'error',
-};
-
-/// Live action text of a running subagent: the child session's LAST
-/// toolCall — `inputStreaming` with empty input → 「准备执行…」, otherwise
-/// the shared per-tool summary (已写入 x / 终端 · cmd / …, live-probed row
-/// shapes 2026-09-16). null when the child snapshot hasn't landed or has no
-/// toolCall yet — callers fall back to the title / parent-side summaryText.
-String? subagentActionText(BuildContext context, ConversationState? child) {
-  if (child == null || !child.ready) return null;
-  for (final row in child.rows.reversed) {
-    if (row['kind'] != 'toolCall') continue;
-    if ('${row['status'] ?? ''}' == 'inputStreaming' &&
-        '${row['inputText'] ?? ''}'.isEmpty) {
-      return tr(context, 'chat.subagent.preparing');
-    }
-    return _ToolCallTile.toolSummaryOf(context, row).title;
   }
   return null;
 }
@@ -2154,7 +2256,7 @@ class _RowWidget extends StatelessWidget {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: Text(tr(context, 'chat.action.edit.resend')),
+            child: Text(tr(context, 'chat.action.editResend')),
           ),
         ],
       ),
@@ -2206,11 +2308,14 @@ class _RowWidget extends StatelessWidget {
         ),
       );
     } catch (e) {
+      debugPrint('[chat] fileChanges: $e');
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              trP(context, 'chat.action.fileChanges.failed', ['$e']),
+              trP(context, 'chat.action.fileChanges.failed', [
+                commandErrorCopy('$e', _localeOf(context)) ?? '$e',
+              ]),
             ),
           ),
         );
@@ -2415,7 +2520,7 @@ class _UserBubbleState extends State<_UserBubble> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: Text(tr(context, 'chat.action.edit.resend')),
+            child: Text(tr(context, 'chat.action.editResend')),
           ),
         ],
       ),
@@ -2428,10 +2533,15 @@ class _UserBubbleState extends State<_UserBubble> {
         if (widget.row['entityId'] != null) 'entityId': widget.row['entityId'],
       }, newText);
     } catch (e) {
+      debugPrint('[chat] editUserQuery: $e');
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(trP(context, 'chat.action.edit.failed', ['$e'])),
+            content: Text(
+              trP(context, 'chat.action.edit.failed', [
+                commandErrorCopy('$e', _localeOf(context)) ?? '$e',
+              ]),
+            ),
           ),
         );
       }
@@ -2824,11 +2934,6 @@ class _ToolCallTileState extends State<_ToolCallTile> {
     final summary = toolRowSemantics(row, locale: _localeOf(context));
 
     final agentPrompt = isAgentTool(row) ? promptOf(inputText) : null;
-    final childSessionId = widget.subagent?['childSessionId'] as String?;
-    final canOpen =
-        widget.gateway != null && (childSessionId ?? '').isNotEmpty;
-
-    final agentPrompt = _isAgentTool(row) ? _promptOf(inputText) : null;
     final childSessionId = widget.subagent?['childSessionId'] as String?;
     final canOpen =
         widget.gateway != null && (childSessionId ?? '').isNotEmpty;
@@ -4796,9 +4901,7 @@ class _ReplayableQueueBar extends StatelessWidget {
               child: Container(
                 padding: const EdgeInsets.fromLTRB(10, 2, 2, 2),
                 decoration: BoxDecoration(
-                  color: Theme.of(context).brightness == Brightness.dark
-                      ? ZColors.darkCard
-                      : ZColors.lightCard,
+                  color: ZInk.card(context),
                   borderRadius: BorderRadius.circular(ZRadius.field),
                   border: Border.all(color: ZInk.hairline(context)),
                 ),
@@ -5034,6 +5137,12 @@ class _InteractionCardState extends State<_InteractionCard> {
     final options = payload['options'];
     final questions = payload['questions'];
     final freeText = payload['freeText'] == true;
+    // Official web parity: a questions form replaces the free-text row —
+    // each question carries its own custom-answer input, so a second input
+    // would only blur which field answers what. The plain input stays for
+    // freeText-only interactions (no questions): their only answering
+    // channel.
+    final hasQuestions = questions is List && questions.isNotEmpty;
 
     final title = kind == 'permission'
         ? trP(context, 'chat.interact.permission', [
@@ -5115,10 +5224,10 @@ class _InteractionCardState extends State<_InteractionCard> {
             _QuestionsView(
               questions: questions.cast<Map>(),
               busy: _busy,
-              onResolve: (question, selected) =>
-                  _resolve(content: {question: selected}),
+              onResolve: (content) =>
+                  _resolve(content: content, action: 'accept'),
             ),
-          if (freeText)
+          if (freeText && !hasQuestions)
             Row(
               children: [
                 Expanded(
@@ -5432,11 +5541,13 @@ class _HookReviewItem extends StatelessWidget {
 }
 
 /// Renders a form-style `userInput` interaction (the `questions` payload):
-/// the current question (by `currentQuestionIndex`) with its options.
-class _QuestionsView extends StatelessWidget {
+/// every question with its options. Selections stay local per question and
+/// only the explicit ↑ submit sends the full official-shape content
+/// (`buildBotElicitationContent`: answers text keys + answer_N + accept).
+class _QuestionsView extends StatefulWidget {
   final List<Map> questions;
   final bool busy;
-  final void Function(String question, List<String> selected) onResolve;
+  final void Function(Map<String, dynamic> content) onResolve;
 
   const _QuestionsView({
     required this.questions,
@@ -5445,56 +5556,272 @@ class _QuestionsView extends StatelessWidget {
   });
 
   @override
+  State<_QuestionsView> createState() => _QuestionsViewState();
+}
+
+class _QuestionsViewState extends State<_QuestionsView> {
+  /// Collected option values per question index — nothing resolves until
+  /// the explicit submit.
+  final Map<int, List<String>> _selections = {};
+
+  /// Questions with the inline custom-answer input expanded.
+  final Set<int> _customOpen = {};
+
+  /// One controller per question, created eagerly so the inline input can
+  /// mount/unmount freely; a collapse always clears its text (no hidden
+  /// state survives a collapse).
+  final Map<int, TextEditingController> _customControllers = {};
+
+  /// One focus node per question, paired with the controller. Focus is
+  /// requested explicitly one frame after the input mounts — `autofocus`
+  /// fires while the OEM IME (notably Xiaomi/HyperOS) is still starting and
+  /// the show-keyboard request gets dropped.
+  final Map<int, FocusNode> _customFocusNodes = {};
+
+  @override
+  void initState() {
+    super.initState();
+    for (var i = 0; i < widget.questions.length; i++) {
+      final controller = TextEditingController();
+      // Live rebuild while typing so the answered counter tracks the text.
+      controller.addListener(() {
+        if (mounted) setState(() {});
+      });
+      _customControllers[i] = controller;
+      _customFocusNodes[i] = FocusNode();
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final controller in _customControllers.values) {
+      controller.dispose();
+    }
+    for (final node in _customFocusNodes.values) {
+      node.dispose();
+    }
+    super.dispose();
+  }
+
+  /// Unified toggle: tapping the picked option deselects it (single-select
+  /// may return to "nothing picked"), tapping another single-select option
+  /// re-chooses. Any option tap collapses the custom input and drops its
+  /// text — single-select options and the custom answer are mutually
+  /// exclusive.
+  void _toggleOption(int index, Map question, String value) {
+    setState(() {
+      _closeCustom(index);
+      final selected = _selections.putIfAbsent(index, () => []);
+      if (question['multiSelect'] == true) {
+        // Set semantics: a duplicate toggle must not grow the list.
+        selected.contains(value) ? selected.remove(value) : selected.add(value);
+      } else if (selected.contains(value)) {
+        selected.remove(value);
+      } else {
+        selected
+          ..clear()
+          ..add(value);
+      }
+    });
+  }
+
+  /// Custom chip: expands the inline input and focuses it on the next frame
+  /// (see [_customFocusNodes] for why not `autofocus`); tapping again
+  /// collapses and clears. Multi-select keeps custom as an extra coexisting
+  /// answer; single-select clears the picked option first.
+  void _toggleCustom(int index, Map question) {
+    setState(() {
+      if (_customOpen.contains(index)) {
+        _closeCustom(index);
+        return;
+      }
+      if (question['multiSelect'] != true) _selections[index]?.clear();
+      _customOpen.add(index);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _customOpen.contains(index)) {
+        _customFocusNodes[index]?.requestFocus();
+      }
+    });
+  }
+
+  /// Collapse + clear in one place so every collapse path drops the text.
+  void _closeCustom(int index) {
+    if (_customOpen.remove(index)) _customControllers[index]?.clear();
+  }
+
+  /// A question's answer: selected option values ∪ (custom input open with
+  /// non-blank text ? [text] : ∅) — blank text is not an answer.
+  List<String> _answersOf(int index) {
+    final answer = List<String>.of(_selections[index] ?? const []);
+    if (_customOpen.contains(index)) {
+      final text = _customControllers[index]!.text.trim();
+      if (text.isNotEmpty) answer.add(text);
+    }
+    return answer;
+  }
+
+  /// Official `buildBotElicitationContent` shape: `answers` keyed by question
+  /// text with comma-joined option labels, `answer_N` carrying option values
+  /// (scalar for single-select, list for multiSelect), `answer` only for the
+  /// single-question form. Custom text joins verbatim (it is its own label).
+  /// Unanswered questions are silently skipped; nothing answered yields just
+  /// the empty `answers` map (the explicit "no answer" submit).
+  Map<String, dynamic> _buildContent() {
+    final content = <String, dynamic>{};
+    final answers = <String, String>{};
+    for (var i = 0; i < widget.questions.length; i++) {
+      final answer = _answersOf(i);
+      if (answer.isEmpty) continue;
+      final q = widget.questions[i];
+      final multi = q['multiSelect'] == true;
+      final options = (q['options'] as List?) ?? const [];
+      String labelOf(String value) {
+        for (final o in options) {
+          if (o is Map && '${o['value']}' == value) {
+            return '${o['label'] ?? o['value'] ?? value}';
+          }
+        }
+        return value;
+      }
+
+      answers['${q['label'] ?? q['question'] ?? q['value'] ?? 'answer_$i'}'] =
+          answer.map(labelOf).join(', ');
+      content['answer_$i'] = multi ? answer : answer.first;
+    }
+    content['answers'] = answers;
+    if (widget.questions.length == 1 && content.containsKey('answer_0')) {
+      content['answer'] = content['answer_0'];
+    }
+    return content;
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final answered = [
+      for (var i = 0; i < widget.questions.length; i++)
+        if (_answersOf(i).isNotEmpty) i,
+    ].length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (var i = 0; i < questions.length; i++)
+        for (var i = 0; i < widget.questions.length; i++)
           _QuestionItem(
             index: i,
-            question: questions[i],
-            busy: busy,
-            onSelect: (selected) =>
-                onResolve('${questions[i]['value'] ?? 'answer_$i'}', selected),
+            question: widget.questions[i],
+            busy: widget.busy,
+            selected: _selections[i] ?? const [],
+            customOpen: _customOpen.contains(i),
+            customController: _customControllers[i]!,
+            customFocusNode: _customFocusNodes[i]!,
+            onToggleOption: (value) =>
+                _toggleOption(i, widget.questions[i], value),
+            onToggleCustom: () => _toggleCustom(i, widget.questions[i]),
           ),
+        Align(
+          alignment: Alignment.centerRight,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Answered counter, only once something is answered.
+                if (answered > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 9),
+                    child: Text(
+                      trP(context, 'chat.interact.answered', [
+                        '$answered',
+                        '${widget.questions.length}',
+                      ]),
+                      style: ZType.caption.copyWith(
+                        color: ZInk.faint(context),
+                      ),
+                    ),
+                  ),
+                // ↑ submit: the composer send key's squircle, bottom-right of
+                // the card mirroring the composer. Always tappable — nothing
+                // picked sends the explicit "no answer" content; busy is the
+                // one disabled/spinner state.
+                SizedBox(
+                  width: 36,
+                  height: 36,
+                  child: Tooltip(
+                    message: tr(context, 'chat.interact.submitAnswers'),
+                    child: Material(
+                      color: widget.busy
+                          ? ZColors.sky500.withValues(alpha: 0.75)
+                          : ZColors.sky500,
+                      borderRadius: BorderRadius.circular(ZRadius.mini),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(ZRadius.mini),
+                        onTap: widget.busy
+                            ? null
+                            : () => widget.onResolve(_buildContent()),
+                        child: Center(
+                          child: widget.busy
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Icon(
+                                  Icons.arrow_upward,
+                                  size: 18,
+                                  color: Colors.white,
+                                ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ],
     );
   }
 }
 
-class _QuestionItem extends StatefulWidget {
+class _QuestionItem extends StatelessWidget {
   final int index;
   final Map question;
   final bool busy;
-  final void Function(List<String> selected) onSelect;
+  final List<String> selected;
+  final bool customOpen;
+  final TextEditingController customController;
+  final FocusNode customFocusNode;
+  final void Function(String value) onToggleOption;
+  final void Function() onToggleCustom;
 
   const _QuestionItem({
     required this.index,
     required this.question,
     required this.busy,
-    required this.onSelect,
+    required this.selected,
+    required this.customOpen,
+    required this.customController,
+    required this.customFocusNode,
+    required this.onToggleOption,
+    required this.onToggleCustom,
   });
 
   @override
-  State<_QuestionItem> createState() => _QuestionItemState();
-}
-
-class _QuestionItemState extends State<_QuestionItem> {
-  final List<String> _selected = [];
-
-  @override
   Widget build(BuildContext context) {
-    final q = widget.question;
+    final q = question;
     final label = q['label'] ?? q['question'] ?? q['value'] ?? '';
     final options = q['options'];
-    final multi = q['multiSelect'] == true;
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '${widget.index + 1}. $label',
+            '${index + 1}. $label',
             style: ZType.sub.copyWith(height: 1.4, color: ZInk.solid(context)),
           ),
           if (q['description'] != null)
@@ -5505,7 +5832,7 @@ class _QuestionItemState extends State<_QuestionItem> {
                 style: ZType.caption.copyWith(color: ZInk.faint(context)),
               ),
             ),
-          if (options is List && options.isNotEmpty)
+          if (options is List && options.isNotEmpty) ...[
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Wrap(
@@ -5519,44 +5846,39 @@ class _QuestionItemState extends State<_QuestionItem> {
                           '${o['label'] ?? o['value'] ?? ''}',
                           style: ZType.sub,
                         ),
-                        selected: _selected.contains('${o['value']}'),
-                        onSelected: widget.busy
+                        selected: selected.contains('${o['value']}'),
+                        onSelected: busy
                             ? null
-                            : (on) {
-                                setState(() {
-                                  if (multi) {
-                                    if (on) {
-                                      _selected.add('${o['value']}');
-                                    } else {
-                                      _selected.remove('${o['value']}');
-                                    }
-                                  } else {
-                                    _selected
-                                      ..clear()
-                                      ..add('${o['value']}');
-                                  }
-                                });
-                                if (!multi) {
-                                  widget.onSelect(List.of(_selected));
-                                }
-                              },
+                            : (on) => onToggleOption('${o['value']}'),
                       ),
+                  FilterChip(
+                    avatar: const Icon(Icons.edit, size: 13),
+                    label: Text(
+                      tr(context, 'chat.interact.customAnswer'),
+                      style: ZType.sub,
+                    ),
+                    selected: customOpen,
+                    onSelected: busy ? null : (on) => onToggleCustom(),
+                  ),
                 ],
               ),
             ),
-          if (multi)
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton(
-                onPressed: widget.busy
-                    ? null
-                    : () => widget.onSelect(List.of(_selected)),
-                child: Text(
-                  tr(context, 'chat.interact.submit'),
+            if (customOpen)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: TextField(
+                  key: ValueKey('askq-custom-$index'),
+                  controller: customController,
+                  focusNode: customFocusNode,
+                  enabled: !busy,
                   style: ZType.sub,
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: tr(context, 'chat.interact.customHint'),
+                  ),
                 ),
               ),
-            ),
+          ],
         ],
       ),
     );
@@ -5570,6 +5892,11 @@ class _ModelModeSheet extends StatelessWidget {
   final ConversationState? state;
   final WorkspacePrep? prep;
   final String? sessionId;
+
+  /// PRD 09-19 fallback: enabled providers from the `model-provider`
+  /// channel, fetched by the page only when [prep] carries no model
+  /// options. Empty when the channel is gone → the degraded text stays.
+  final List<Map<String, dynamic>> providerCatalog;
   final Map<String, String>? draftConfig;
   final void Function(String key, String value)? onDraftChange;
 
@@ -5578,6 +5905,7 @@ class _ModelModeSheet extends StatelessWidget {
     required this.state,
     required this.prep,
     required this.sessionId,
+    required this.providerCatalog,
     this.draftConfig,
     this.onDraftChange,
   });
@@ -5605,6 +5933,23 @@ class _ModelModeSheet extends StatelessWidget {
     final sid = sessionId ?? '';
     final config = state?.config ?? const {};
     final modelOption = prep?.option('model');
+    // PRD 09-19: when prepareWorkspace ships no usable model options, the
+    // model section renders the model-provider catalog instead; provider
+    // ids never contain '/', so `_splitModelValue` still splits cleanly.
+    final modelChoices =
+        (modelOption != null && modelOption.options.isNotEmpty)
+        ? modelOption.options
+        : <ConfigOptionValue>[
+            for (final p in providerCatalog)
+              for (final m in (p['models'] as List? ?? const []))
+                ConfigOptionValue(
+                  value:
+                      '${p['id'] ?? p['name'] ?? ''}/'
+                      '${m is Map ? '${m['id'] ?? m['modelId'] ?? ''}' : '$m'}',
+                  name: m is Map ? '${m['id'] ?? m['modelId'] ?? ''}' : '$m',
+                  modelProviderName: '${p['name'] ?? p['id'] ?? ''}',
+                ),
+          ];
     final modeOption = prep?.option('mode');
     final thoughtOption = prep?.option('thought_level');
     final followup = '${config['followupMode'] ?? 'queue'}';
@@ -5641,18 +5986,19 @@ class _ModelModeSheet extends StatelessWidget {
               style: ZType.heading,
             ),
             const SizedBox(height: 16),
-            if (modelOption != null && modelOption.options.isNotEmpty) ...[
+            if (modelChoices.isNotEmpty) ...[
               Text(
-                modelOption.name,
+                modelOption?.name ??
+                    tr(context, 'chat.composer.modelPlaceholder'),
                 style: ZType.body.copyWith(color: ZInk.solid(context)),
               ),
               const SizedBox(height: 8),
               // Official web menu groups models by provider (BigModel /
               // tx / kimi_zz …): header whenever the provider changes.
-              for (final (i, v) in modelOption.options.indexed) ...[
+              for (final (i, v) in modelChoices.indexed) ...[
                 if (i == 0 ||
                     v.modelProviderName !=
-                        modelOption.options[i - 1].modelProviderName)
+                        modelChoices[i - 1].modelProviderName)
                   Padding(
                     padding: EdgeInsets.only(top: i == 0 ? 0 : 10, bottom: 2),
                     child: Text(
@@ -5705,6 +6051,14 @@ class _ModelModeSheet extends StatelessWidget {
                                   false)
                           ? currentThought
                           : '${thoughtOpt?.currentValue ?? (currentThought.isNotEmpty ? currentThought : 'enabled')}';
+                      void patch() => state?.optimisticPatch({
+                        'config': {
+                          ...?state!.config,
+                          'provider': provider,
+                          'model': model,
+                          'thought': thought,
+                        },
+                      });
                       _apply(
                         context,
                         () => gateway.conversationCommands.switchModelConfig(
@@ -5713,14 +6067,10 @@ class _ModelModeSheet extends StatelessWidget {
                           model: model,
                           thought: thought,
                         ),
-                        onAccepted: () => state?.optimisticPatch({
-                          'config': {
-                            ...?state!.config,
-                            'provider': provider,
-                            'model': model,
-                            'thought': thought,
-                          },
-                        }),
+                        onAccepted: patch,
+                        // PRD 09-19: a lost ack (bridge reconnect window)
+                        // is not a rejection — land the patch anyway.
+                        onTimeoutOptimistic: patch,
                       );
                     }
                   },
@@ -5760,6 +6110,12 @@ class _ModelModeSheet extends StatelessWidget {
                                   '${config['provider'] ?? ''}',
                                   '${config['model'] ?? ''}',
                                 );
+                          void patch() => state?.optimisticPatch({
+                            'config': {
+                              ...?state!.config,
+                              'thought': v.value,
+                            },
+                          });
                           _apply(
                             context,
                             () => gateway.conversationCommands.switchModelConfig(
@@ -5768,9 +6124,9 @@ class _ModelModeSheet extends StatelessWidget {
                               model: model,
                               thought: v.value,
                             ),
-                            onAccepted: () => state?.optimisticPatch({
-                              'config': {...?state!.config, 'thought': v.value},
-                            }),
+                            onAccepted: patch,
+                            // Same lost-ack optimism as the model switch.
+                            onTimeoutOptimistic: patch,
                           );
                         }
                       },
@@ -5948,10 +6304,21 @@ class _ModelModeSheet extends StatelessWidget {
     );
   }
 
+  /// Runs a config command and lands [onAccepted] on an accepted answer.
+  ///
+  /// [onTimeoutOptimistic] marks a switchModelConfig call (PRD 09-19): the
+  /// server answers `accepted` but pushes no confirming frame, and the
+  /// bridge's ~10s reconnect window can swallow the response after the
+  /// server already applied the switch. A transport-level failure is
+  /// therefore not a rejection: the callback lands the optimistic patch,
+  /// the sheet closes with a "pending" toast, and the next sheet open (or
+  /// a later state frame) shows the real value. Explicit status
+  /// rejections keep the rejection SnackBar and never patch.
   Future<void> _apply(
     BuildContext context,
     Future<dynamic> Function() run, {
     void Function()? onAccepted,
+    void Function()? onTimeoutOptimistic,
   }) async {
     try {
       final res = await run();
@@ -5974,9 +6341,22 @@ class _ModelModeSheet extends StatelessWidget {
         }
       }
     } catch (e) {
-      if (context.mounted) {
+      debugPrint('[chat] sheet op: $e');
+      if (onTimeoutOptimistic != null && context.mounted) {
+        onTimeoutOptimistic();
+        Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(trP(context, 'chat.op.failed', ['$e']))),
+          SnackBar(content: Text(tr(context, 'chat.sheet.switchPending'))),
+        );
+      } else if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              trP(context, 'chat.op.failed', [
+                commandErrorCopy('$e', _localeOf(context)) ?? '$e',
+              ]),
+            ),
+          ),
         );
       }
     }
@@ -6836,6 +7216,26 @@ class _InputBarState extends State<_InputBar> {
 
   double? get _usageRatio => state?.contextUsage.ratio;
 
+  /// Visibility keys off option availability, not the current value (PRD
+  /// 09-19): a session created with an empty default model config still
+  /// gets the pickers. Drafts keep the value-driven visibility (unchanged).
+  bool get _modelPickerVisible {
+    if (isDraft) return _modelLabel.isNotEmpty;
+    final option = prep?.option('model');
+    return option != null && option.options.isNotEmpty;
+  }
+
+  bool get _thoughtPickerVisible {
+    if (isDraft) return _thoughtLabel.isNotEmpty;
+    final option = prep?.option('thought_level');
+    // thoughtLevels is the server's own copy of the thought choices inside
+    // the config snapshot — keep the chip when prep missed the option but
+    // the config carries levels, so a normal session never loses it
+    // (visual-zero-change constraint).
+    return (option != null && option.options.isNotEmpty) ||
+        (state?.thoughtLevels.isNotEmpty ?? false);
+  }
+
   List<String> get _thoughtChoices {
     final fromPrep =
         prep?.option('thought_level')?.options.map((o) => o.value).toList() ??
@@ -6917,16 +7317,20 @@ class _InputBarState extends State<_InputBar> {
                   const Spacer(),
                   if (_usageRatio != null)
                     _UsageRing(ratio: _usageRatio!, onTap: onUsage),
-                  if (_modelLabel.isNotEmpty)
+                  if (_modelPickerVisible)
                     _ControlChip(
-                      label: _modelLabel,
+                      label: _modelLabel.isEmpty
+                          ? tr(context, 'chat.composer.modelPlaceholder')
+                          : _modelLabel,
                       icon: Icons.memory_outlined,
                       onTap: onModelSheet,
                       showLabel: wide,
                     ),
-                  if (_thoughtLabel.isNotEmpty)
+                  if (_thoughtPickerVisible)
                     _ControlChip(
-                      label: _thoughtLabel,
+                      label: _thoughtLabel.isEmpty
+                          ? tr(context, 'chat.composer.thoughtPlaceholder')
+                          : _thoughtLabel,
                       icon: Icons.psychology_alt_outlined,
                       onTap: () => _pickThought(context),
                       showLabel: wide,

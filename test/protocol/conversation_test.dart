@@ -374,6 +374,176 @@ void main() {
     });
   });
 
+  group('pendingInteractions wire forms', () {
+    late ConversationState state;
+
+    setUp(() {
+      state = ConversationState();
+    });
+
+    /// A pending AskUserQuestion tool call row exactly as the desktop pushes
+    /// it (`onPermissionRequested`): status + the resolveInteraction id, the
+    /// tool input carrying the questions.
+    Map<String, dynamic> pendingAskRow({
+      String interactionId = 'perm-call_7',
+      bool pending = true,
+      List<Object?>? questions,
+    }) => {
+      'rowId': 12,
+      'kind': 'toolCall',
+      'toolCallId': 'call_7',
+      'toolName': 'AskUserQuestion',
+      'status': pending ? 'pendingApproval' : 'success',
+      if (pending) 'approvalInteractionId': interactionId,
+      'input': {
+        'questions': questions ??
+            [
+              {
+                'question': '选择环境',
+                'header': '环境',
+                'options': [
+                  {'value': 'dev', 'label': '开发'},
+                  {'value': 'prod', 'label': '生产'},
+                ],
+              },
+            ],
+      },
+    };
+
+    test('full list form is returned as-is (online delta form)', () {
+      final interaction = {
+        'interactionId': 'i1',
+        'kind': 'permission',
+        'payload': {
+          'kind': 'permission',
+          'toolName': 'Bash',
+          'summary': 'rm -rf',
+          'options': [
+            {'optionId': 'o1', 'kind': 'allowOnce'},
+          ],
+        },
+      };
+      _injectSnapshot(state, snapshot: {
+        'pendingInteractions': [interaction],
+      });
+
+      expect(state.pendingInteractions, [interaction]);
+    });
+
+    test(
+      'summary count object is never parsed as a list — cards rebuild from rows',
+      () {
+        // 3.12.3 snapshot assembly: the relay snapshot projects the summary
+        // into `pendingInteractions` (session overlay), never a list.
+        _injectSnapshot(state, rows: [pendingAskRow()], snapshot: {
+          'pendingInteractions': {'permissionCount': 0, 'userInputCount': 1},
+        });
+
+        final interactions = state.pendingInteractions;
+        expect(interactions, hasLength(1));
+        final interaction = interactions.single;
+        expect(interaction['interactionId'], 'perm-call_7');
+        expect(interaction['kind'], 'userInput');
+        expect(interaction['anchorRowId'], 12);
+        final payload = interaction['payload'] as Map;
+        expect(payload['kind'], 'userInput');
+        expect(payload['toolCallId'], 'call_7');
+        expect(payload['toolName'], 'AskUserQuestion');
+        final questions = payload['questions'] as List;
+        expect(questions.single['question'], '选择环境');
+        expect((questions.single['options'] as List).first['value'], 'dev');
+      },
+    );
+
+    test('summary form without pending rows yields no interactions', () {
+      _injectSnapshot(state, snapshot: {
+        'pendingInteractions': {'permissionCount': 1, 'userInputCount': 0},
+      });
+
+      expect(state.pendingInteractions, isEmpty);
+    });
+
+    test('rebuild skips settled rows, other tools and plain rows', () {
+      _injectSnapshot(state, rows: [
+        pendingAskRow(pending: false), // resolved: id cleared server-side
+        {
+          ...pendingAskRow(interactionId: 'perm-call_8'),
+          'rowId': 13,
+          'toolCallId': 'call_8',
+          'toolName': 'Bash', // permission-kind: not rebuildable from rows
+        },
+        {'rowId': 14, 'kind': 'userInput', 'text': 'hi'},
+      ]);
+
+      expect(state.pendingInteractions, isEmpty);
+    });
+
+    test('question normalization mirrors the agent core oIs', () {
+      _injectSnapshot(
+        state,
+        rows: [
+          pendingAskRow(questions: [
+            // valid: header falls back to nothing present → question text
+            {
+              'question': 'q1',
+              'options': [
+                {'label': '仅标签'},
+                {'value': 'v2'},
+                {'label': 'l3', 'value': 'v3', 'description': '描述'},
+                {}, // dropped: no value/label
+              ],
+            },
+            // dropped: no question text
+            {
+              'header': 'h',
+              'options': [
+                {'value': 'x'},
+              ],
+            },
+            // dropped: no options
+            {'question': 'q3', 'options': []},
+          ]),
+        ],
+      );
+
+      final questions =
+          (state.pendingInteractions.single['payload'] as Map)['questions']
+              as List;
+      expect(questions, hasLength(1));
+      final q1 = questions.single;
+      expect(q1['question'], 'q1');
+      expect(q1['header'], 'q1');
+      expect(q1['multiSelect'], isNull);
+      expect(q1['options'], [
+        {'value': '仅标签', 'label': '仅标签'},
+        {'value': 'v2', 'label': 'v2'},
+        {'value': 'v3', 'label': 'l3', 'description': '描述'},
+      ]);
+    });
+
+    test('resolve clears the rebuilt card through the row update', () {
+      _injectSnapshot(state, rows: [pendingAskRow()]);
+      expect(state.pendingInteractions, hasLength(1));
+
+      // settlePermission: the row upsert arrives with the id deleted.
+      state.applyFrame({
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {
+              'op': 'row.upserted',
+              'row': pendingAskRow(pending: false),
+            },
+          ],
+        },
+        'fromSeq': 5,
+        'toSeq': 6,
+      }, onGap: () => fail('should not gap'));
+
+      expect(state.pendingInteractions, isEmpty);
+    });
+  });
+
   group('usage_update events & contextUsage', () {
     late ConversationState state;
 
@@ -932,6 +1102,168 @@ void main() {
       });
     });
   });
+
+  group('subscribe stall defenses', () {
+    late _ManualChannels channels;
+    late List<String> logs;
+
+    ConversationTransport stalledTransport() {
+      logs = [];
+      channels = _ManualChannels();
+      return ConversationTransport(
+        session: _FakeBridgeSession(channels.client),
+        scope: {'workspacePath': '/repo'},
+        // Shrunk watchdog bound: protocol tests drive real timers, no
+        // fake_async (see spec/protocol/protocol-guidelines.md §7).
+        subscribeAckTimeout: const Duration(milliseconds: 100),
+        onLog: (line) => logs.add(line),
+      );
+    }
+
+    void answerSubscribe(String subscriptionId, String logEpoch, {int at = 0}) =>
+        channels.answer(
+          'subscribeConversationV4',
+          {
+            'ack': {'subscriptionId': subscriptionId, 'logEpoch': logEpoch},
+          },
+          at: at,
+        );
+
+    test('watchdog resubscribes a stalled ack; its late ack never wins',
+        () async {
+      final transport = stalledTransport();
+      final done = transport.subscribe('s1');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(channels.count('subscribeConversationV4'), 1);
+
+      // Before the bound: no watchdog fire, no second subscribe.
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(channels.count('subscribeConversationV4'), 1);
+
+      // Past the bound: the stalled attempt is abandoned and resubscribed.
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      expect(channels.count('subscribeConversationV4'), 2);
+      expect(logs.join('\n'), contains('subscribe ack stalled'));
+
+      // The new attempt acks and adopts the subscription…
+      answerSubscribe('sub-2', 'epoch-fresh', at: 1);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // …then the abandoned attempt acks late — dropped, no takeover.
+      answerSubscribe('sub-1', 'epoch-stale', at: 0);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final sub = await done;
+      expect(sub.subscriptionId, 'sub-2');
+      expect(sub.state.logEpoch, 'epoch-fresh');
+      expect(logs.join('\n'), contains('dropped late subscribe ack'));
+      // No extra resubscribe was triggered by the dropped ack.
+      expect(channels.count('subscribeConversationV4'), 2);
+      await sub.dispose();
+    });
+
+    test('bridge recovery racing an in-flight subscribe keeps the newer attempt',
+        () async {
+      final transport = stalledTransport();
+      final done = transport.subscribe('s1');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(channels.count('subscribeConversationV4'), 1);
+
+      // The bridge rebuilds before the first ack: the recovery resubscribe
+      // races the still-pending attempt (generation guard's live race).
+      transport.session.recovered.value++;
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(channels.count('subscribeConversationV4'), 2);
+
+      // New attempt acks first; the abandoned attempt's ack lands after.
+      answerSubscribe('sub-2', 'epoch-fresh', at: 1);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      answerSubscribe('sub-1', 'epoch-stale', at: 0);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final sub = await done;
+      expect(sub.subscriptionId, 'sub-2');
+      expect(sub.state.logEpoch, 'epoch-fresh');
+      expect(logs.join('\n'), contains('dropped late subscribe ack'));
+      await sub.dispose();
+    });
+
+    test('fast ack: single subscribe, id adopted, no watchdog noise', () async {
+      final transport = stalledTransport();
+      final done = transport.subscribe('s1');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      answerSubscribe('sub-1', 'epoch-1');
+      final sub = await done;
+
+      expect(sub.subscriptionId, 'sub-1');
+      // Well past the watchdog bound: nothing resubscribed, nothing logged.
+      await Future<void>.delayed(const Duration(milliseconds: 160));
+      expect(channels.count('subscribeConversationV4'), 1);
+      final joined = logs.join('\n');
+      expect(joined, isNot(contains('subscribe ack stalled')));
+      expect(joined, isNot(contains('dropped late subscribe ack')));
+      expect(joined, isNot(contains('resubscribe failed')));
+      await sub.dispose();
+    });
+  });
+}
+
+/// Channel client with test-driven responses: handshake (and unsubscribe)
+/// calls answer immediately; every other call parks as (method, id) until
+/// [answer] completes the [at]-th (0-based from oldest) parked call of that
+/// method — how subscribe-stall races are driven.
+class _ManualChannels {
+  final parked = <(String, int)>[];
+
+  /// Every call handed to [ChannelClient] (parked or auto-answered) —
+  /// [count] reads this so answered calls still count.
+  final sent = <String>[];
+  late final ChannelClient client;
+
+  _ManualChannels() {
+    late final ChannelClient c;
+    c = ChannelClient(sendBody: (body) {
+      final reader = ValueReader(body);
+      final header = decodeValue(reader) as List;
+      final method = '${header[3]}';
+      final id = header[1] as int;
+      sent.add(method);
+      switch (method) {
+        case 'helloConversationV4':
+          _reply(c, id, {'connectionId': 'conn-test'});
+        case 'initializeConversationV4':
+        case 'unsubscribeConversationV4':
+          _reply(c, id, const {'status': 'accepted'});
+        default:
+          parked.add((method, id));
+      }
+    });
+    final init = ValueWriter();
+    encodeValue(init, [ChannelClient.resInitialize, 0]);
+    c.handleMessage(init.toBytes());
+    client = c;
+  }
+
+  void _reply(ChannelClient c, int id, Object? payload) {
+    final w = ValueWriter();
+    encodeValue(w, [ChannelClient.resPromiseSuccess, id]);
+    encodeValue(w, payload);
+    c.handleMessage(w.toBytes());
+  }
+
+  void answer(String method, Object? payload, {int at = 0}) {
+    var seen = 0;
+    for (var i = 0; i < parked.length; i++) {
+      if (parked[i].$1 != method) continue;
+      if (seen++ != at) continue;
+      final (_, id) = parked.removeAt(i);
+      _reply(client, id, payload);
+      return;
+    }
+    fail('no parked call #$at for $method');
+  }
+
+  int count(String method) => sent.where((m) => m == method).length;
 }
 
 /// Builds a [ConversationTransport] over a hand-rolled bridge whose channel

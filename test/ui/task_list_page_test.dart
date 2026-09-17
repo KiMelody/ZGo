@@ -1101,4 +1101,221 @@ void main() {
     expect(find.text('真归档任务'), findsOneWidget);
     expect(find.text('live归档假象'), findsNothing);
   });
+
+  group("task open scope follows the task's true workspace (09-19)", () {
+    Future<FakeDeviceSession> setupScopeSession(
+      WidgetTester tester, {
+      required List<Map<String, dynamic>> workspaces,
+      required List<Map<String, dynamic>> relayTasks,
+      bool timeline = true,
+    }) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: const [],
+        workspaces: workspaces,
+        relayTasks: relayTasks,
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      if (timeline) {
+        await tester.tap(find.byTooltip('整理任务'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('按时间线'));
+        await tester.pumpAndSettle();
+        // The tidy sheet stays open on selection (existing behavior) —
+        // dismiss it via the modal barrier so the rows are tappable.
+        await tester.tapAt(const Offset(20, 30));
+        await tester.pumpAndSettle();
+      }
+      return session;
+    }
+
+    Future<void> tapTask(WidgetTester tester, String title) async {
+      await tester.tap(find.text(title));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+
+    testWidgets('active=A + task of unlisted B: openWorkspace keyed B',
+        (tester) async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = await setupScopeSession(tester, workspaces: [
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+      ], relayTasks: [
+        {
+          'taskId': 'tb1',
+          'title': '整理记忆',
+          'workspacePath': '/repo/beta',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ]);
+
+      await tapTask(tester, '整理记忆');
+
+      expect(session.openWorkspaceCalls, hasLength(1));
+      final (ws, taskId) = session.openWorkspaceCalls.single;
+      expect(workspaceKeyOf(ws), '/repo/beta');
+      expect(taskId, 'tb1');
+      expect(find.byType(ChatPage), findsOneWidget);
+    });
+
+    testWidgets('pinned card of a foreign workspace no longer rides active',
+        (tester) async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = await setupScopeSession(tester,
+          timeline: false,
+          workspaces: [
+            {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+          ],
+          relayTasks: [
+            {
+              'taskId': 'tp1',
+              'title': '置顶跨区',
+              'workspacePath': '/repo/beta',
+              'pinned': true,
+              'displayStatus': 'idle',
+              'updatedAt': now,
+            },
+          ]);
+      // The card labels the TRUE workspace (used to show the active one).
+      expect(find.textContaining('beta'), findsWidgets);
+
+      await tapTask(tester, '置顶跨区');
+
+      expect(session.openWorkspaceCalls, hasLength(1));
+      final (ws, taskId) = session.openWorkspaceCalls.single;
+      expect(workspaceKeyOf(ws), '/repo/beta');
+      expect(taskId, 'tp1');
+      expect(find.byType(ChatPage), findsOneWidget);
+    });
+
+    testWidgets('key semantics: task identity survives the fallback map',
+        (tester) async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = await setupScopeSession(tester, workspaces: [
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        // Listed by path only, while the task row carries an identity: the
+        // directory key ('beta-id') matches no entry and the fallback map
+        // must keep the identity so the bridge opens with the same key.
+        {'workspacePath': '/repo/beta'},
+      ], relayTasks: [
+        {
+          'taskId': 'ti1',
+          'title': '跨区任务',
+          'workspacePath': '/repo/beta',
+          'workspaceIdentity': 'beta-id',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ]);
+
+      await tapTask(tester, '跨区任务');
+
+      expect(session.openWorkspaceCalls, hasLength(1));
+      final (ws, taskId) = session.openWorkspaceCalls.single;
+      expect(workspaceKeyOf(ws), 'beta-id');
+      expect(ws['workspaceIdentity'], 'beta-id');
+      expect(ws['workspacePath'], '/repo/beta');
+      expect(taskId, 'ti1');
+    });
+
+    testWidgets('key semantics: path-only task against identity-first entry',
+        (tester) async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = await setupScopeSession(tester, workspaces: [
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        {'workspacePath': '/repo/beta', 'workspaceIdentity': 'beta-id'},
+      ], relayTasks: [
+        {
+          'taskId': 'tj1',
+          'title': '跨区任务',
+          'workspacePath': '/repo/beta',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ]);
+
+      await tapTask(tester, '跨区任务');
+
+      expect(session.openWorkspaceCalls, hasLength(1));
+      final (ws, taskId) = session.openWorkspaceCalls.single;
+      // No identity on the row — the fallback carries the path only and
+      // workspaceKeyOf falls back to it (nothing fabricated).
+      expect(workspaceKeyOf(ws), '/repo/beta');
+      expect(ws.containsKey('workspaceIdentity'), isFalse);
+      expect(taskId, 'tj1');
+    });
+
+    testWidgets('undeterminable ownership: SnackBar, no ChatPage, no reopen',
+        (tester) async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = await setupScopeSession(tester, workspaces: [
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+      ], relayTasks: [
+        {
+          'taskId': 'tx1',
+          'title': '无主任务',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ]);
+
+      await tapTask(tester, '无主任务');
+
+      expect(session.openWorkspaceCalls, isEmpty);
+      expect(find.byType(ChatPage), findsNothing);
+      expect(find.text('无法确定会话归属，未打开该任务'), findsOneWidget);
+
+      // Drain the SnackBar auto-dismiss timer.
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('active-workspace card row: straight to chat, no reopen',
+        (tester) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 's1',
+            'title': '区内任务',
+            'phase': 'completedSuccess',
+            'lastActivityAt': DateTime.now().millisecondsSinceEpoch,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.text('区内任务'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      // Identical-map judgment: the active workspace is NOT re-opened.
+      expect(session.openWorkspaceCalls, isEmpty);
+      expect(find.byType(ChatPage), findsOneWidget);
+    });
+  });
 }
