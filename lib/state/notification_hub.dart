@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart';
 import '../notifications/notification_service.dart';
 import '../notifications/notify_rules.dart';
 import '../notifications/phase_snapshot_store.dart';
-import '../protocol/conversation.dart';
 import '../ui/ui_settings.dart';
 import 'device_session.dart';
 
@@ -92,7 +91,7 @@ class NotificationHub {
         // fire completion notifications on the first tick.
         _snapshotPhases(
           session,
-          _effectivePhases(session.deviceId, _mergedTasks(session)),
+          _effectivePhases(session.deviceId, _taskRows(session)),
         );
         // The live list is not up yet, so a shutdown baseline may still be
         // the only record of a task that was running when we died.
@@ -151,34 +150,20 @@ class NotificationHub {
     _taskPhases[deviceId] = restored;
   }
 
-  /// Every task of the device as diffable rows: the relay overview covers
-  /// ALL workspaces, the live sessions-index of the subscribed one overrides
-  /// it per task id (it carries the precise phase, e.g.
-  /// `completedInterrupted`, which the overview folds into `completed`).
-  /// Keying by task id keeps a task reported by both sources a single row,
-  /// so the shared baseline de-dupes the pair.
-  Map<String, _TaskRow> _mergedTasks(NotifiableSession session) {
-    final byId = <String, _TaskRow>{};
-    for (final task in session.relayTasks) {
-      final entry = SessionEntry.fromRelayTask(task);
-      if (entry.sessionId.isEmpty) continue;
-      byId[entry.sessionId] = _rowOf(entry);
-    }
-    final sessions = session.sessions;
-    if (sessions != null) {
-      for (final entry in sessions.list) {
-        byId[entry.sessionId] = _rowOf(entry);
-      }
-    }
-    return byId;
-  }
-
-  static _TaskRow _rowOf(SessionEntry entry) => (
-    sessionId: entry.sessionId,
-    title: entry.title,
-    phase: entry.phase,
-    parentSessionId: entry.parentSessionId,
-  );
+  /// Every task of the device as diffable rows, read off the session's
+  /// [TaskDirectory] — the one merged view (relay overview ⊕ live
+  /// sessions-index, archived tasks included so a task archived mid-run
+  /// still reports its completion). Keying by task id keeps a task reported
+  /// by both sources a single row, so the shared baseline de-dupes the pair.
+  Map<String, _TaskRow> _taskRows(NotifiableSession session) => {
+        for (final entry in session.taskDirectory.notificationRows())
+          entry.sessionId: (
+            sessionId: entry.sessionId,
+            title: entry.title,
+            phase: entry.phase,
+            parentSessionId: entry.parentSessionId,
+          ),
+      };
 
   /// Neither source has reported yet: the workspace subscription is not up
   /// and no relay overview has arrived. The baseline must stay untouched
@@ -246,7 +231,7 @@ class NotificationHub {
   void _onSessionChanged(NotifiableSession session) {
     if (_disposed || _silent(session)) return;
     final prev = _taskPhases.putIfAbsent(session.deviceId, () => {});
-    final rows = _mergedTasks(session);
+    final rows = _taskRows(session);
     final phases = _effectivePhases(session.deviceId, rows);
     final events = taskCompletionEvents(
       previousPhases: prev,
@@ -290,7 +275,7 @@ class NotificationHub {
       if (_disposed) return;
       // The merged view, not just the subscribed index: a task of another
       // workspace only exists in the relay overview and would look gone here.
-      final still = _mergedTasks(session)[e.sessionId]?.phase;
+      final still = _taskRows(session)[e.sessionId]?.phase;
       if (still != e.phase) {
         debugPrint('[notify] task edge $key dropped, phase now $still');
         return;

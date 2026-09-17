@@ -61,15 +61,13 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
   /// Entitlement via the session-wide poller: opening reuses the cache
   /// within the staleness window, refresh (button / pull) forces a fetch.
   /// The call never throws — failures land in the view as phase=error.
-  /// The reset-opportunity scope rides the same snapshot (R2: provider
-  /// id from the ok state; anything else disables the feature).
+  /// The reset-opportunity scope rides the session's [DeviceSession.
+  /// entitlementSnapshot] (injected there); the plain refresh below picks
+  /// the pools up.
   Future<void> _load({bool force = false}) async {
     final view = await widget.session.entitlementSnapshot(force: force);
     if (!mounted) return;
     setState(() => _view = view);
-    final provider = view.data?['provider'];
-    final id = provider is Map ? provider['id'] : null;
-    _reset.updateScope(id is String && id.isNotEmpty ? id : null);
     await _reset.refresh(force: force);
   }
 
@@ -257,13 +255,26 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                       ),
                     ),
                     const SizedBox(height: 6),
-                    Text(
-                      trP(context, 'usageRpc.remainingDetail', [
-                        '${remaining['percentage'] ?? '-'}',
-                        _fmtTime(remaining['nextResetTime']),
-                      ]),
-                      style: ZType.caption.copyWith(color: ZInk.faint(context)),
-                    ),
+                    Builder(builder: (context) {
+                      // Projection: the earliest expiry among the pools
+                      // the plan can actually use — a hidden card never
+                      // drives the summary's「重置」time.
+                      final expiry = _view
+                          ?.earliestResetExpiry(_reset.pools)
+                          ?.millisecondsSinceEpoch;
+                      return Text(
+                        expiry == null
+                            ? trP(context, 'usageRpc.remainingNoReset', [
+                                '${remaining['percentage'] ?? '-'}',
+                              ])
+                            : trP(context, 'usageRpc.remainingDetail', [
+                                '${remaining['percentage'] ?? '-'}',
+                                relativeTime(context, expiry),
+                              ]),
+                        style:
+                            ZType.caption.copyWith(color: ZInk.faint(context)),
+                      );
+                    }),
                   ],
                 ),
               ),
@@ -334,9 +345,13 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
   }
 
   /// Reset opportunities, read-only (PRD: the sheet is the single reset
-  /// entry): one row per pool with the count, the earliest expiry and a
-  /// 「上次使用重置」 line when the pool has a usage history; the degraded
-  /// copy replaces the rows while no usable desktop data exists.
+  /// entry): one row per pool the projection credits ([EntitlementView.
+  /// resettablePools] — the official visibility composition over the same
+  /// entitlement snapshot the cards above read) — with the count, the
+  /// earliest expiry and a 「上次使用重置」 line when the pool has a usage
+  /// history. The degraded copy replaces the rows while no usable desktop
+  /// data exists, and the 「暂无可用机会」 line replaces them when no pool
+  /// is resettable.
   Widget _resetCard() {
     return Card(
       child: Padding(
@@ -345,6 +360,10 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
           listenable: _reset,
           builder: (context, _) {
             final pools = _reset.pools;
+            final resettable = _view?.resettablePools(pools) ?? const [];
+            final fiveHour =
+                resettable.any((r) => r.type == quotaResetTypeFiveHour);
+            final week = resettable.any((r) => r.type == quotaResetTypeWeek);
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -615,7 +634,7 @@ class _LimitRow extends StatelessWidget {
   /// own). Absent, the label is derived from the limit type.
   final String? label;
 
-  const _LimitRow({required this.limit, required this.fmtTime, this.label});
+  const _LimitRow({required this.limit, this.label});
 
   /// Human label for a limit type (research/entitlement-limits-probe.md):
   /// `TIME_LIMIT` is the monthly built-in MCP tool quota, the token-class
@@ -644,6 +663,13 @@ class _LimitRow extends StatelessWidget {
         '$type · unit ${limit['unit'] ?? '-'}';
     final percentage = (limit['percentage'] as num?)?.toDouble();
     final usageDetails = limit['usageDetails'];
+    // Window-rollover clock via the projection's single formatting copy
+    // (「重置」stays reserved for reset opportunities, 2026-09-16).
+    final nextReset = limit['nextResetTime'];
+    final clock = nextReset is num
+        ? EntitlementView.fmtResetClock(
+            DateTime.fromMillisecondsSinceEpoch(nextReset.toInt()))
+        : null;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Column(
@@ -652,7 +678,21 @@ class _LimitRow extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(title, style: ZType.sub),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(title, style: ZType.sub),
+                  if (clock case final rollover?)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 6),
+                      child: Text(
+                        rollover,
+                        style: ZType.caption
+                            .copyWith(color: ZInk.faint(context)),
+                      ),
+                    ),
+                ],
+              ),
               Text(
                 [
                   if (limit['usage'] != null)

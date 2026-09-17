@@ -552,6 +552,61 @@ void main() {
     expect(session.activeWorkspace?['workspaceIdentity'], 'alpha');
   });
 
+  testWidgets('live-ready active workspace still renders relay-only rows',
+      (tester) async {
+    // TaskDirectory merge anchor (CONTEXT.md「Task Directory」): relay 打底、
+    // live 按 id 胜出 —— live-ready 不得把索引里没有的 relay 任务挤掉卡片。
+    // 旧卡片实现是 live-ready 整面替换，曾把这样的行藏掉（C2 对齐）。
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 's1',
+          'title': '任务甲',
+          'phase': 'completedSuccess',
+          'lastActivityAt': now,
+        },
+      ],
+      workspaces: [
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        {'workspacePath': '/repo/beta', 'workspaceIdentity': 'beta'},
+      ],
+      // Relay-only row of the ACTIVE workspace: live index (ready, has s1)
+      // does not contain ra1 — the card must still render it.
+      relayTasks: [
+        {
+          'taskId': 'ra1',
+          'title': '中继任务甲',
+          'workspacePath': '/repo/alpha',
+          'workspaceIdentity': 'alpha',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(
+      find.descendant(of: cardOf('alpha'), matching: find.text('任务甲')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: cardOf('alpha'), matching: find.text('中继任务甲')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('收起全部 collapses everything, then active re-expands alone',
       (tester) async {
     await setupTwoWorkspaces(tester);

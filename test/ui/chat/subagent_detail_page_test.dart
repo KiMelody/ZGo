@@ -33,6 +33,10 @@ class _FakeSubagentGateway extends FakeDeviceSession {
   final List<(String, String)> cancelled = [];
 
   @override
+  ConversationTransport get conversationCommands =>
+      _FakeChildCommands(this);
+
+  @override
   Future<ChatHandle> subscribe(String sessionId) async {
     subscribed.add(sessionId);
     final state = ConversationState();
@@ -56,7 +60,6 @@ class _FakeSubagentGateway extends FakeDeviceSession {
     return ChatHandle(state: state, close: () async {});
   }
 
-  @override
   Future<dynamic> rowsRange(
     String sessionId, {
     int? beforeRowId,
@@ -66,11 +69,35 @@ class _FakeSubagentGateway extends FakeDeviceSession {
     return rangeResult;
   }
 
-  @override
   Future<dynamic> cancelBackgroundWork(String sessionId, String workId) async {
     cancelled.add((sessionId, workId));
     return {'status': 'accepted'};
   }
+}
+
+/// Routes the conversation command surface back onto the fake's recorded
+/// overrides — a session fake has no live [ConversationTransport] behind
+/// [DeviceSession.conversationCommands].
+class _FakeChildCommands implements ConversationTransport {
+  _FakeChildCommands(this._gateway);
+
+  final _FakeSubagentGateway _gateway;
+
+  @override
+  Future<dynamic> rowsRange(
+    String sessionId, {
+    int? beforeRowId,
+    int limit = 60,
+  }) =>
+      _gateway.rowsRange(sessionId, beforeRowId: beforeRowId, limit: limit);
+
+  @override
+  Future<dynamic> cancelBackgroundWork(String sessionId, String workId) =>
+      _gateway.cancelBackgroundWork(sessionId, workId);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      Future<Map<String, dynamic>>.value(const {'status': 'accepted'});
 }
 
 Widget wrap(Widget child) => MaterialApp(
@@ -122,7 +149,7 @@ void main() {
     expect(find.text('调研 Flutter 国内镜像可用性'), findsOneWidget); // task prompt
     expect(find.textContaining('已完成'), findsOneWidget); // assistant markdown
     // toolCall compact summary + inline diff
-    expect(find.textContaining('Edit ·'), findsOneWidget);
+    expect(find.textContaining('已写入'), findsOneWidget);
     expect(find.textContaining('-a'), findsWidgets);
     expect(find.textContaining('+b'), findsWidgets);
     // reasoning is collapsed by default, expands on tap

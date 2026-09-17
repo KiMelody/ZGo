@@ -7,6 +7,7 @@ import '../theme.dart';
 import '../ui_settings.dart';
 import 'diff_view.dart';
 import 'markdown_view.dart';
+import 'tool_row_semantics.dart';
 
 /// Read-only transcript of a subagent's child session (task 09-13 R3):
 /// the server treats `sess_subagent_agent_*` as a plain Conversation V4
@@ -109,7 +110,7 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
     if (state == null || _loadingOlder) return;
     setState(() => _loadingOlder = true);
     try {
-      final res = await widget.gateway.rowsRange(
+      final res = await widget.gateway.conversationCommands.rowsRange(
         widget.childSessionId,
         beforeRowId: state.firstRowId,
         limit: 60,
@@ -186,7 +187,7 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
     final workId = widget.workId ?? '';
     if (parent.isEmpty || workId.isEmpty) return;
     try {
-      await widget.gateway.cancelBackgroundWork(parent, workId);
+      await widget.gateway.conversationCommands.cancelBackgroundWork(parent, workId);
     } catch (e) {
       _toast('$e');
     }
@@ -368,8 +369,10 @@ class _ReasoningStrip extends StatelessWidget {
   }
 }
 
-/// Compact tool row: status icon + toolName (+ input preview), with the
-/// diff rendered inline when the row is a file edit.
+/// Compact tool row: status icon + the official per-tool summary (from
+/// [toolRowSemantics] — the old second name·preview summary is converged,
+/// Q6a; density comes from the compact type + truncation), with the diff
+/// rendered inline when the row is a file edit.
 class _ToolSummary extends StatelessWidget {
   final Map<String, dynamic> row;
 
@@ -377,18 +380,17 @@ class _ToolSummary extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final status = row['status'] as String? ?? '';
-    final (icon, color) = switch (status) {
-      'running' ||
-      'inputStreaming' ||
-      'pendingApproval' => (Icons.hourglass_top, ZColors.sky400),
-      'success' => (Icons.check, ZColors.success),
-      'error' => (Icons.error_outline, ZColors.danger),
-      'cancelled' => (Icons.block, ZColors.warning),
-      _ => (Icons.build_outlined, ZInk.faint(context)),
+    final summary = toolRowSemantics(
+      row,
+      locale: UiSettingsProvider.of(context)?.locale ?? 'zh-CN',
+    );
+    final color = switch (row['status'] as String? ?? '') {
+      'running' || 'inputStreaming' || 'pendingApproval' => ZColors.sky400,
+      'success' => ZColors.success,
+      'error' => ZColors.danger,
+      'cancelled' => ZColors.warning,
+      _ => ZInk.faint(context),
     };
-    final name = row['toolName'] as String? ?? 'tool';
-    final preview = row['inputText'] as String? ?? '';
     final diff = extractDiff(row);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
@@ -397,11 +399,11 @@ class _ToolSummary extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(icon, size: 13, color: color),
+              Icon(summary.icon, size: 13, color: color),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  preview.isEmpty ? name : '$name · $preview',
+                  summary.title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: ZType.sub.copyWith(

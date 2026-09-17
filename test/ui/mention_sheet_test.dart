@@ -2,32 +2,15 @@ import 'package:flutter/material.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/state/device_session.dart';
 import 'package:zlinker/ui/chat/mention_sheet.dart';
 
-class _FakeGateway implements ChatGateway {
-  List<Map<String, dynamic>> files = const [];
-  List<Map<String, dynamic>> subagents = const [];
-  List<({String id, String title})> sessions = const [];
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
-
-  @override
-  Future<List<Map<String, dynamic>>> mentionFiles() async => files;
-
-  @override
-  Future<List<Map<String, dynamic>>> mentionSubagents() async => subagents;
-
-  @override
-  List<({String id, String title})> mentionSessions() => sessions;
-}
+import '../helpers/recording_chat_gateway.dart';
 
 void main() {
   testWidgets('files category lists workspace files and returns the pick',
       (tester) async {
-    final gateway = _FakeGateway()
-      ..files = [
+    final gateway = RecordingChatGateway()
+      ..mentionFilesResult = [
         {
           'name': 'chat_page.dart',
           'relativePath': 'lib/ui/chat/chat_page.dart',

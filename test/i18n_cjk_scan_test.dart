@@ -37,22 +37,22 @@ typedef CjkHit = ({String file, String literal});
 /// copy already locale-branched by hand.
 const List<Exemption> exemptions = [
   Exemption(
-    file: 'lib/ui/chat/chat_page.dart',
+    file: 'lib/ui/chat/tool_row_semantics.dart',
     literal: '未提供回答',
     reason: 'askQuestion: matches desktop model output text (zh branch)',
   ),
   Exemption(
-    file: 'lib/ui/chat/chat_page.dart',
+    file: 'lib/ui/chat/tool_row_semantics.dart',
     literal: 'No answer',
     reason: 'askQuestion: matches desktop model output text (en branch)',
   ),
   Exemption(
-    file: 'lib/ui/chat/chat_page.dart',
+    file: 'lib/ui/chat/tool_row_semantics.dart',
     literal: 'auto-continued',
     reason: 'askQuestion: desktop model output marker',
   ),
   Exemption(
-    file: 'lib/ui/chat/chat_page.dart',
+    file: 'lib/ui/chat/tool_row_semantics.dart',
     literal: '自动继续',
     reason: 'askQuestion: desktop model output marker (zh branch)',
   ),

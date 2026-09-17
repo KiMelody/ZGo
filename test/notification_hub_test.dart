@@ -12,6 +12,7 @@ import 'package:zlinker/protocol/conversation.dart';
 import 'package:zlinker/protocol/off_peak.dart';
 import 'package:zlinker/state/device_session.dart';
 import 'package:zlinker/state/notification_hub.dart';
+import 'package:zlinker/state/task_directory.dart';
 import 'package:zlinker/ui/ui_settings.dart';
 
 /// Records what the hub would have shown; plugin-backed members no-op.
@@ -51,6 +52,10 @@ class FakeNotifiableSession extends ChangeNotifier
   /// Relay task overview of every workspace (empty until one arrives).
   @override
   List<Map<String, dynamic>> relayTasks = [];
+
+  @override
+  TaskDirectory get taskDirectory =>
+      TaskDirectory(relayTasks: relayTasks, sessions: sessions);
 
   @override
   late final AutomationPort automation =

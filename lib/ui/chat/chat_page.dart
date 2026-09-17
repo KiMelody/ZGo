@@ -18,6 +18,8 @@ import 'markdown_view.dart';
 import 'goal_panel.dart';
 import 'mention_sheet.dart';
 import 'subagent_detail_page.dart';
+import 'subagent_feed.dart';
+import 'tool_row_semantics.dart';
 
 /// Native chat view for one task (session), backed by Conversation V4 over
 /// [ChatGateway]. Draft mode (no [sessionId]): the first message issues
@@ -329,7 +331,7 @@ class _ChatPageState extends State<ChatPage> {
     final uploaded = <Map<String, dynamic>>[];
     for (var i = 0; i < _pendingFiles.length; i++) {
       final file = _pendingFiles[i];
-      final descriptor = await widget.gateway.attachmentPut(
+      final descriptor = await widget.gateway.conversationCommands.attachmentPut(
         sessionId,
         fileName: file.fileName,
         mime: file.mime,
@@ -353,7 +355,7 @@ class _ChatPageState extends State<ChatPage> {
       setState(() => _showSlash = false);
       await _run(
         tr(context, 'chat.compact.failed'),
-        () => widget.gateway.compact(_requireSession()),
+        () => widget.gateway.conversationCommands.compact(_requireSession()),
       );
       return;
     }
@@ -362,7 +364,7 @@ class _ChatPageState extends State<ChatPage> {
       setState(() => _showSlash = false);
       await _run(
         tr(context, 'chat.goal.pauseFailed'),
-        () => widget.gateway.pauseGoal(_requireSession()),
+        () => widget.gateway.conversationCommands.pauseGoal(_requireSession()),
       );
       return;
     }
@@ -371,7 +373,7 @@ class _ChatPageState extends State<ChatPage> {
       setState(() => _showSlash = false);
       await _run(
         tr(context, 'chat.goal.resumeFailed'),
-        () => widget.gateway.resumeGoal(_requireSession()),
+        () => widget.gateway.conversationCommands.resumeGoal(_requireSession()),
       );
       return;
     }
@@ -411,7 +413,7 @@ class _ChatPageState extends State<ChatPage> {
         if (workspaceId == null || workspaceId.isEmpty) {
           throw StateError(tr(context, 'tasks.noWorkspaces.title'));
         }
-        sessionId = await widget.gateway.createSession(
+        sessionId = await widget.gateway.conversationCommands.createSession(
           workspaceId,
           firstText: canUseFirstInput ? text : null,
           config: _buildDraftConfig(),
@@ -432,7 +434,7 @@ class _ChatPageState extends State<ChatPage> {
         await _subscribe();
       }
       if (text.startsWith('/goal ')) {
-        final res = await widget.gateway.sendGoalCommand(
+        final res = await widget.gateway.conversationCommands.sendGoalCommand(
           sessionId,
           text.substring('/goal '.length).trim(),
           heldQueueDisposition: heldDisposition,
@@ -452,7 +454,7 @@ class _ChatPageState extends State<ChatPage> {
         attachments = await _uploadPending(sessionId);
         setState(() => _progress = null);
       }
-      final res = await widget.gateway.sendText(
+      final res = await widget.gateway.conversationCommands.sendText(
         sessionId,
         text,
         attachments: attachments,
@@ -546,7 +548,11 @@ class _ChatPageState extends State<ChatPage> {
     if (state == null || sessionId == null || _loadingOlder) return;
     setState(() => _loadingOlder = true);
     try {
-      final res = await widget.gateway.rowsRange(
+      // Cursor = the oldest row actually held (state.oldestRowId). Snapshot
+      // `firstRowId` can be a placeholder (live-probed 1) — using it
+      // re-fetched the newest window and the「加载更早」button span forever
+      // (live_child_rows_probe documents the same trap).
+      final res = await widget.gateway.conversationCommands.rowsRange(
         sessionId,
         beforeRowId: state.firstRowId,
         limit: 60,
@@ -619,27 +625,22 @@ class _ChatPageState extends State<ChatPage> {
       final view = await widget.gateway.entitlementSnapshot();
       if (!mounted) return;
       setState(() => _entitlement = view);
-      _syncResetScope(view);
+      // The reset scope rides the snapshot (injected by the session's
+      // entitlementSnapshot); this plain refresh picks the pools up — a
+      // no-op without a provider id (the banner action never shows).
+      unawaited(widget.gateway.quotaResetController.refresh());
     } catch (_) {
       // Gateways may reject; the banner then stays hidden and the chat is
       // not disturbed.
     }
   }
 
-  /// Reset opportunities ride the same entitlement snapshot: inject the
-  /// provider scope into the session-wide controller and refresh it (a
-  /// no-op without a provider id — the banner action then never shows).
-  void _syncResetScope(EntitlementView view) {
-    final controller = widget.gateway.quotaResetController;
-    final provider = view.data?['provider'];
-    final id = provider is Map ? provider['id'] : null;
-    controller.updateScope(id is String && id.isNotEmpty ? id : null);
-    unawaited(controller.refresh());
-  }
-
   /// Banner「使用重置券」入口 removed (PRD: the sheet is the single
   /// reset entry) — the dialog + success chain live in [_showResetDialog].
-  Future<void> _showResetDialog() async {
+  /// [resettable] comes from the EntitlementView projection
+  /// (`resettablePools`, see the usage sheet), so the dialog lists exactly
+  /// the pools the row credited.
+  Future<void> _showResetDialog(Set<String> resettable) async {
     final type = await showQuotaResetDialog(
       context,
       controller: widget.gateway.quotaResetController,
@@ -746,7 +747,7 @@ class _ChatPageState extends State<ChatPage> {
     final sessionId = _sessionId;
     if (sessionId == null) return;
     try {
-      final plans = await widget.gateway.plans(sessionId);
+      final plans = await widget.gateway.conversationCommands.plans(sessionId);
       if (!mounted) return;
       showModalBottomSheet(
         context: context,
@@ -868,7 +869,7 @@ class _ChatPageState extends State<ChatPage> {
         if (sessionId != null) {
           _run(
             tr(context, 'chat.compact.failed'),
-            () => widget.gateway.compact(sessionId),
+            () => widget.gateway.conversationCommands.compact(sessionId),
           );
         }
       case 'usage':
@@ -914,7 +915,7 @@ class _ChatPageState extends State<ChatPage> {
     if (confirmed != true || !mounted) return;
     await _run(
       tr(context, 'tasks.opFailed'),
-      () => widget.gateway.deleteSession(sessionId),
+      () => widget.gateway.conversationCommands.deleteSession(sessionId),
     );
     if (mounted) Navigator.of(context).maybePop();
   }
@@ -1480,15 +1481,53 @@ typedef AssistantTurnParts = ({
   bool streaming,
 });
 
-/// Execute-family tool rows (bash/terminal/exec/...) share one summary
-/// card when consecutive — web executeGroup「终端 · N 个命令」parity.
-bool _isExecuteTool(Map<String, dynamic> row) {
-  if (row['kind'] != 'toolCall') return false;
-  final t = '${row['toolName'] ?? ''}'.toLowerCase();
-  return t.contains('bash') ||
-      t.contains('terminal') ||
-      t.contains('exec') ||
-      t.contains('command');
+/// Locale for the pure copy lookups (tool_row_semantics) at sites that
+/// hold a BuildContext but render through the module, not `tr`.
+String _localeOf(BuildContext context) =>
+    UiSettingsProvider.of(context)?.locale ?? 'zh-CN';
+
+/// turnHeader states whose footer (terminal pill + feedback row) is gated
+/// behind the confirm window (see _TurnGroupWidgetState).
+const turnTerminalPhases = {
+  'completedSuccess',
+  'completedInterrupted',
+  'failed',
+  'error',
+};
+
+/// Live action text of a running subagent: the child session's LAST
+/// toolCall — `inputStreaming` with empty input → 「准备执行…」, otherwise
+/// the shared per-tool summary (已写入 x / 终端 · cmd / …, live-probed row
+/// shapes 2026-09-16). null when the child snapshot hasn't landed or has no
+/// toolCall yet — callers fall back to the title / parent-side summaryText.
+String? subagentActionText(BuildContext context, ConversationState? child) {
+  if (child == null || !child.ready) return null;
+  for (final row in child.rows.reversed) {
+    if (row['kind'] != 'toolCall') continue;
+    if ('${row['status'] ?? ''}' == 'inputStreaming' &&
+        '${row['inputText'] ?? ''}'.isEmpty) {
+      return tr(context, 'chat.subagent.preparing');
+    }
+    return toolRowSemantics(row, locale: _localeOf(context)).title;
+  }
+  return null;
+}
+
+/// The `kind=='subagent'` stream row spawned by an Agent tool call, linked
+/// via parentToolCallId ↔ toolCallId (live-probed 2026-09-16); carries the
+/// childSessionId/workId needed for the detail-page entry.
+Map<String, dynamic>? _subagentRowFor(
+  List<Map<String, dynamic>> rows,
+  Map<String, dynamic> toolRow,
+) {
+  final id = '${toolRow['toolCallId'] ?? ''}';
+  if (id.isEmpty) return null;
+  for (final r in rows) {
+    if (r['kind'] == 'subagent' && '${r['parentToolCallId'] ?? ''}' == id) {
+      return r;
+    }
+  }
+  return null;
 }
 
 AssistantTurnParts assistantTurnParts(List<Map<String, dynamic>> rows) {
@@ -1555,7 +1594,7 @@ AssistantTurnParts assistantTurnParts(List<Map<String, dynamic>> rows) {
       }
     } else if (kind == 'turnHeader') {
       header = row;
-    } else if (_isExecuteTool(row)) {
+    } else if (isExecuteTool(row)) {
       flushText();
       executeRun.add(row);
     } else {
@@ -1800,7 +1839,7 @@ class _RowWidget extends StatelessWidget {
                 Navigator.pop(context);
                 onAction(
                   tr(context, 'chat.action.retry.failed'),
-                  () => gateway.retryTurn(sessionId, _target),
+                  () => gateway.conversationCommands.retryTurn(sessionId, _target),
                 );
               },
             ),
@@ -1811,7 +1850,7 @@ class _RowWidget extends StatelessWidget {
                 Navigator.pop(context);
                 onAction(
                   tr(context, 'chat.action.fork.failed'),
-                  () => gateway.forkAssistant(sessionId, _target),
+                  () => gateway.conversationCommands.forkAssistant(sessionId, _target),
                 );
               },
             ),
@@ -1866,7 +1905,7 @@ class _RowWidget extends StatelessWidget {
     if (text == null || text.isEmpty || !context.mounted) return;
     await onAction(
       tr(context, 'chat.action.edit.failed'),
-      () => gateway.editUserQuery(sessionId, _target, text),
+      () => gateway.conversationCommands.editUserQuery(sessionId, _target, text),
     );
   }
 
@@ -1892,13 +1931,13 @@ class _RowWidget extends StatelessWidget {
     if (confirmed != true || !context.mounted) return;
     await onAction(
       tr(context, 'chat.action.rewind.failed'),
-      () => gateway.applyFileRewind(sessionId, _target),
+      () => gateway.conversationCommands.applyFileRewind(sessionId, _target),
     );
   }
 
   Future<void> _showFileChanges(BuildContext context) async {
     try {
-      final changes = await gateway.fileChanges(sessionId, target: _target);
+      final changes = await gateway.conversationCommands.fileChanges(sessionId, target: _target);
       if (!context.mounted) return;
       showModalBottomSheet(
         context: context,
@@ -1940,7 +1979,14 @@ class _RowWidget extends StatelessWidget {
         text: row['text'] as String? ?? '',
         streaming: row['state'] == 'streaming',
       ),
-      'toolCall' => _ToolCallTile(row: row),
+      'toolCall' => _ToolCallTile(
+        row: row,
+        gateway: gateway,
+        sessionId: sessionId,
+        // Agent rows drill into the subagent's child-session detail page.
+        subagent: isAgentTool(row) ? _subagentRowFor(state.rows, row) : null,
+        feed: feed,
+      ),
       // turnHeader rows are lifted out of the stream by _TurnGroupWidget
       'turnHeader' => const SizedBox.shrink(),
       'subagent' => _SubagentTile(
@@ -2111,7 +2157,7 @@ class _UserBubbleState extends State<_UserBubble> {
     controller.dispose();
     if (newText == null || newText.isEmpty || !context.mounted) return;
     try {
-      await widget.gateway.editUserQuery(widget.sessionId, {
+      await widget.gateway.conversationCommands.editUserQuery(widget.sessionId, {
         'rowId': widget.row['rowId'],
         if (widget.row['entityId'] != null) 'entityId': widget.row['entityId'],
       }, newText);
@@ -2181,7 +2227,7 @@ class _AttachmentViewState extends State<_AttachmentView> {
     final ref = widget.attachment['ref'] as String?;
     if (ref == null) return;
     try {
-      final res = await widget.gateway.attachmentRead(
+      final res = await widget.gateway.conversationCommands.attachmentRead(
         widget.sessionId,
         ref: ref,
       );
@@ -2271,7 +2317,7 @@ class _AssistantBubble extends StatelessWidget {
     if (sessionId.isEmpty) return;
     // Optimistic: update the icon instantly; server row.upserted confirms.
     state.optimisticRowUpdate(row['rowId'] as num?, {'feedback': value});
-    gateway.setAssistantFeedback(sessionId, {
+    gateway.conversationCommands.setAssistantFeedback(sessionId, {
       'rowId': row['rowId'],
       if (row['entityId'] != null) 'entityId': row['entityId'],
     }, value);
@@ -2331,7 +2377,7 @@ class _AssistantBubble extends StatelessWidget {
                   _FeedbackButton(
                     icon: Icons.fork_right,
                     active: false,
-                    onTap: () => gateway.forkAssistant(sessionId, {
+                    onTap: () => gateway.conversationCommands.forkAssistant(sessionId, {
                       'rowId': row['rowId'],
                       if (row['entityId'] != null) 'entityId': row['entityId'],
                     }),
@@ -2445,7 +2491,32 @@ class _ReasoningTile extends StatelessWidget {
 class _ToolCallTile extends StatelessWidget {
   final Map<String, dynamic> row;
 
-  const _ToolCallTile({required this.row});
+  /// Agent rows only: gateway/sessionId + [subagent] wire the tile's
+  /// drill-in chevron to the child-session detail page.
+  final ChatGateway? gateway;
+  final String? sessionId;
+  final Map<String, dynamic>? subagent;
+
+  /// Agent rows only: the shared child-session pool backing the inline
+  /// transcript in the expansion (see [_AgentChildTimeline]).
+  final SubagentFeed? feed;
+
+  const _ToolCallTile({
+    required this.row,
+    this.gateway,
+    this.sessionId,
+    this.subagent,
+    this.feed,
+  });
+
+  @override
+  State<_ToolCallTile> createState() => _ToolCallTileState();
+}
+
+class _ToolCallTileState extends State<_ToolCallTile> {
+  /// Whether the ExpansionTile is open — the inline child transcript mounts
+  /// only while expanded so its pooled subscription follows the expansion.
+  bool _expanded = false;
 
   @override
   Widget build(BuildContext context) {
@@ -2458,14 +2529,14 @@ class _ToolCallTile extends StatelessWidget {
     final display = row['display'];
     final diff = extractDiff(row);
 
-    final (icon, color) = switch (status) {
-      'running' ||
-      'inputStreaming' ||
-      'pendingApproval' => (Icons.hourglass_top, ZColors.sky400),
-      'success' => (Icons.check, ZColors.success),
-      'error' => (Icons.error_outline, ZColors.danger),
-      'cancelled' => (Icons.block, ZColors.warning),
-      _ => (Icons.build_outlined, ZInk.faint(context)),
+    // Icon glyph comes from the module ([toolRowSemantics]); only the tint
+    // stays here because it is theme-dependent.
+    final color = switch (status) {
+      'running' || 'inputStreaming' || 'pendingApproval' => ZColors.sky400,
+      'success' => ZColors.success,
+      'error' => ZColors.danger,
+      'cancelled' => ZColors.warning,
+      _ => ZInk.faint(context),
     };
 
     final images =
@@ -2475,7 +2546,12 @@ class _ToolCallTile extends StatelessWidget {
         ? display['images'] as List
         : const [];
 
-    final summary = _toolSummary(context, row, diff);
+    final summary = toolRowSemantics(row, locale: _localeOf(context));
+
+    final agentPrompt = isAgentTool(row) ? promptOf(inputText) : null;
+    final childSessionId = widget.subagent?['childSessionId'] as String?;
+    final canOpen =
+        widget.gateway != null && (childSessionId ?? '').isNotEmpty;
 
     // Official tool row: bold-ish first line (已写入 <file> / 终端 · cmd /
     // 探索 · N 文件) with +/- counts right-aligned; second line = directory
@@ -2546,7 +2622,7 @@ class _ToolCallTile extends StatelessWidget {
                 minTileHeight: ZTile.headHeight,
                 onExpansionChanged: (_) => HapticFeedback.lightImpact(),
                 tilePadding: ZTile.head,
-                leading: Icon(icon, size: ZTile.iconSize, color: color),
+                leading: Icon(summary.icon, size: ZTile.iconSize, color: color),
                 title: title,
                 subtitle: subtitle,
                 children: [
@@ -2592,232 +2668,6 @@ class _ToolCallTile extends StatelessWidget {
         ),
       ),
     );
-  }
-
-  /// Official tool summary: first line (已写入 `<file>` / 终端 · cmd /
-  /// 探索 · N 文件), optional second line (directory path), +/- counts.
-  static ({String title, String? subtitle, int additions, int deletions})
-  _toolSummary(BuildContext context, Map<String, dynamic> row, DiffData? diff) {
-    final toolNameRaw = row['toolName'] as String? ?? 'tool';
-    final toolName = toolNameRaw.toLowerCase();
-    final inputText = row['inputText'] as String? ?? '';
-
-    if (toolName.contains('write') ||
-        toolName.contains('edit') ||
-        toolName.contains('notebook')) {
-      final file = _filePath(inputText) ?? diff?.filePath ?? toolNameRaw;
-      // title shows the basename; subtitle the directory (official style)
-      final segs = file.split(RegExp(r'[\\/]'));
-      final base = segs.last;
-      final dir = segs.length > 1
-          ? segs.sublist(0, segs.length - 1).join('/')
-          : null;
-      return (
-        title: trP(context, 'chat.tool.wrote', [base]),
-        subtitle: dir,
-        additions: diff?.additions ?? 0,
-        deletions: diff?.deletions ?? 0,
-      );
-    }
-    if (toolName.contains('taskoutput')) {
-      // Web chat.toolCall.taskOutput.* states, keyed off the row status
-      // machine (pending/running/completed/failed/denied/stopped).
-      final st = '${row['status'] ?? ''}';
-      final title = switch (st) {
-        'pending' => tr(context, 'chat.tool.taskOutput.fetching'),
-        'running' => tr(context, 'chat.tool.taskOutput.running'),
-        'failed' => tr(context, 'chat.tool.taskOutput.failed'),
-        'denied' => tr(context, 'chat.tool.taskOutput.denied'),
-        'stopped' => tr(context, 'chat.tool.taskOutput.stopped'),
-        _ => tr(context, 'chat.tool.taskOutput.retrieved'),
-      };
-      return (
-        title: '${tr(context, 'chat.tool.taskOutput.kind')} · $title',
-        subtitle: null,
-        additions: 0,
-        deletions: 0,
-      );
-    }
-    if (toolName.contains('taskstop')) {
-      final st = '${row['status'] ?? ''}';
-      final title = switch (st) {
-        'pending' || 'running' =>
-          tr(context, 'chat.tool.taskStop.stopping'),
-        'failed' => tr(context, 'chat.tool.taskStop.failed'),
-        'denied' => tr(context, 'chat.tool.taskStop.denied'),
-        'stopped' => tr(context, 'chat.tool.taskStop.cancelled'),
-        _ => tr(context, 'chat.tool.taskStop.stopped'),
-      };
-      return (
-        title: '${tr(context, 'chat.tool.taskStop.kind')} · $title',
-        subtitle: null,
-        additions: 0,
-        deletions: 0,
-      );
-    }
-    if (toolName.contains('sendmessage')) {
-      final st = '${row['status'] ?? ''}';
-      final title = switch (st) {
-        'pending' || 'running' => tr(context, 'chat.tool.send.sending'),
-        'failed' => tr(context, 'chat.tool.send.failed'),
-        'denied' => tr(context, 'chat.tool.send.denied'),
-        'stopped' => tr(context, 'chat.tool.send.stopped'),
-        _ => tr(context, 'chat.tool.send.sent'),
-      };
-      return (
-        title: '${tr(context, 'chat.tool.send.kind')} · $title',
-        subtitle: null,
-        additions: 0,
-        deletions: 0,
-      );
-    }
-    if (toolName.contains('askuserquestion') ||
-        toolName.contains('ask_user_question')) {
-      // Web chat.askQuestion.* parity: asking → asked · N questions →
-      // no-answer / auto-continued. Question count comes from the input
-      // JSON's questions array when parseable (no guessed fields beyond
-      // that); output text carries the auto-continue notice.
-      final running = row['status'] == 'running' || row['status'] == 'pending';
-      final outputText = row['outputText'] as String? ?? '';
-      var count = 0;
-      try {
-        final input = jsonDecode(inputText);
-        if (input is Map && input['questions'] is List) {
-          count = (input['questions'] as List).length;
-        }
-      } catch (_) {}
-      final noAnswer = outputText.isNotEmpty &&
-          (outputText.contains('未提供回答') ||
-              outputText.contains('No answer') ||
-              outputText.contains('auto-continued') ||
-              outputText.contains('自动继续'));
-      return (
-        title: running
-            ? tr(context, 'chat.tool.askQuestion.asking')
-            : noAnswer
-                ? tr(context, 'chat.tool.askQuestion.autoContinued')
-                : count > 0
-                    ? trP(context, 'chat.tool.askQuestion.askedN',
-                        ['$count'])
-                    : tr(context, 'chat.tool.askQuestion.asked'),
-        subtitle: null,
-        additions: 0,
-        deletions: 0,
-      );
-    }
-    if (toolName.contains('bash') ||
-        toolName.contains('terminal') ||
-        toolName.contains('exec') ||
-        toolName.contains('command')) {
-      final cmd = _firstLine(inputText);
-      return (
-        title: cmd.isEmpty
-            ? tr(context, 'chat.tool.terminal')
-            : '${tr(context, 'chat.tool.terminal')} · $cmd',
-        subtitle: toolNameRaw,
-        additions: 0,
-        deletions: 0,
-      );
-    }
-    if (toolName.contains('read') ||
-        toolName.contains('glob') ||
-        toolName.contains('grep') ||
-        toolName.contains('explore') ||
-        toolName.contains('search')) {
-      final count = _fileCount(inputText) ?? _fileCountFromText(inputText);
-      final file = _filePath(inputText);
-      if (count != null) {
-        return (
-          title: trP(context, 'chat.tool.exploreN', ['$count']),
-          subtitle: toolNameRaw,
-          additions: 0,
-          deletions: 0,
-        );
-      }
-      if (file != null) {
-        return (
-          title: '${tr(context, 'chat.tool.explore')} · $file',
-          subtitle: toolNameRaw,
-          additions: 0,
-          deletions: 0,
-        );
-      }
-      return (
-        title: tr(context, 'chat.tool.explore'),
-        subtitle: toolNameRaw,
-        additions: 0,
-        deletions: 0,
-      );
-    }
-    return (
-      title: toolNameRaw,
-      subtitle: null,
-      additions: diff?.additions ?? 0,
-      deletions: diff?.deletions ?? 0,
-    );
-  }
-
-  static String? _filePath(String inputText) {
-    try {
-      final decoded = jsonDecode(inputText);
-      if (decoded is Map) {
-        for (final key in const [
-          'filePath',
-          'file_path',
-          'path',
-          'file',
-          'notebookPath',
-        ]) {
-          final v = decoded[key];
-          if (v is String && v.isNotEmpty) return v;
-        }
-      }
-    } catch (_) {}
-    final match = RegExp(
-      r'"(?:file_?[Pp]ath|path|file)"\s*:\s*"([^"]+)"',
-    ).firstMatch(inputText);
-    return match?.group(1);
-  }
-
-  static int? _fileCount(String inputText) {
-    try {
-      final decoded = jsonDecode(inputText);
-      if (decoded is Map) {
-        for (final key in const ['paths', 'files', 'filePaths']) {
-          final v = decoded[key];
-          if (v is List) return v.length;
-          if (v is String && v.isNotEmpty) return 1;
-        }
-        for (final key in const ['path', 'filePath', 'file']) {
-          if (decoded[key] is String) return 1;
-        }
-      }
-    } catch (_) {}
-    return null;
-  }
-
-  /// Fallback counter for streaming (not-yet-valid-JSON) input.
-  static int? _fileCountFromText(String inputText) {
-    final matches = RegExp(r'"(?:path|file)"\s*:').allMatches(inputText).length;
-    return matches > 0 ? matches : null;
-  }
-
-  static String _firstLine(String inputText) {
-    try {
-      final decoded = jsonDecode(inputText);
-      if (decoded is Map) {
-        for (final key in const ['command', 'cmd', 'script']) {
-          final v = decoded[key];
-          if (v is String && v.isNotEmpty) {
-            final line = v.split('\n').first.trim();
-            return line.length > 60 ? line.substring(0, 60) : line;
-          }
-        }
-      }
-    } catch (_) {}
-    if (inputText.isEmpty) return '';
-    final line = inputText.split('\n').first.trim();
-    return line.length > 60 ? line.substring(0, 60) : line;
   }
 
   Widget _kv(BuildContext context, String label, String value) {
@@ -3045,12 +2895,12 @@ class _FileChangesBar extends StatelessWidget {
     final action = onAction(
       tr(context, 'chat.action.rewind.failed'),
       () async {
-        final preview = await gateway.fileRewindPreview(sessionId,
+        final preview = await gateway.conversationCommands.fileRewindPreview(sessionId,
             target: target);
         if (!context.mounted) return null;
         final ok = await _showPreviewDialog(context, preview);
         if (ok != true) return null;
-        return gateway.applyFileRewind(sessionId, target);
+        return gateway.conversationCommands.applyFileRewind(sessionId, target);
       },
     );
     await action;
@@ -3399,8 +3249,9 @@ class _GoalProcessPanel extends StatelessWidget {
     if (state.snapshot?['goal'] is! Map) return const SizedBox.shrink();
     return GoalPanel(
       state: state,
-      onPauseGoal: (sid) => gateway.pauseGoal(sid),
-      onResumeGoal: (sid) => gateway.resumeGoal(sid),
+      feed: feed,
+      onPauseGoal: (sid) => gateway.conversationCommands.pauseGoal(sid),
+      onResumeGoal: (sid) => gateway.conversationCommands.resumeGoal(sid),
       onOpenAgent: (agent) => _openSubagentDetail(
         context,
         gateway,
@@ -3504,47 +3355,16 @@ class _BackgroundWorksBar extends StatelessWidget {
                   _cancelButton(context, sessionId, w),
               ],
             ),
-          for (final w in subagentWorks)
-            Builder(
-              builder: (rowContext) {
-                final title = '${w['title'] ?? w['subagentType'] ?? ''}';
-                final tail = _subagentTail(
-                  w['childSessionId'] as String?,
-                  title,
-                );
-                return InkWell(
-                  onTap: () => _openSubagentDetail(
-                    rowContext,
-                    gateway,
-                    childSessionId: w['childSessionId'] as String?,
-                    title: w['title'] as String?,
-                    subagentType: w['subagentType'] as String?,
-                    workId: w['workId'] as String?,
-                    parentSessionId: sessionId,
-                    running: w['status'] == 'running',
-                  ),
-                  child: Row(
-                    children: [
-                      const SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(strokeWidth: 1.5),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          tail.isEmpty ? title : '$title · $tail',
-                          style: ZType.caption.copyWith(
-                            color: ZInk.soft(context),
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      _cancelButton(context, sessionId, w),
-                    ],
-                  ),
-                );
+          ),
+          for (final w in plainWorks)
+            IconButton(
+              icon: Icon(Icons.close, size: 14, color: ZInk.muted(context)),
+              tooltip: tr(context, 'chat.bgWorks.cancel'),
+              visualDensity: VisualDensity.compact,
+              onPressed: () {
+                final workId = "${w['workId'] ?? w['id'] ?? ''}";
+                if (workId.isEmpty) return;
+                gateway.conversationCommands.cancelBackgroundWork(sessionId, workId);
               },
             ),
         ],
@@ -3580,6 +3400,572 @@ void _openSubagentDetail(
       ),
     ),
   );
+}
+
+/// Subagent management sheet (internal-task, mock C):
+/// running section (live action tail + 详情/停止 actions) + ended rows from
+/// the parent window + 「加载更早」 paging back through rowsRange.
+///
+/// Subscription lifecycle: the sheet holds pooled child subscriptions for
+/// its own lifetime (acquire on rebuild sync, release ALL on dispose) —
+/// closing the sheet must never leak a feed reference (chat-conventions §7
+/// Common Mistake).
+class _SubagentSheet extends StatefulWidget {
+  final ConversationState state;
+  final ChatGateway gateway;
+  final SubagentFeed feed;
+
+  /// Auto-close confirm window: once the running view stayed empty this
+  /// long (all subagents terminal), the sheet closes itself.
+  final Duration confirmWindow;
+
+  const _SubagentSheet({
+    required this.state,
+    required this.gateway,
+    required this.feed,
+    required this.confirmWindow,
+  });
+
+  @override
+  State<_SubagentSheet> createState() => _SubagentSheetState();
+}
+
+class _SubagentSheetState extends State<_SubagentSheet> {
+  /// childSessionIds this sheet currently holds in the pooled subscription.
+  final Set<String> _held = {};
+
+  /// Older `kind=='subagent'` rows collected through rowsRange paging
+  /// (kept locally — paging from the sheet must not reshape the chat list).
+  final List<Map<String, dynamic>> _older = [];
+
+  bool _paging = false;
+  bool _noMore = false;
+  Timer? _closeTimer;
+  bool _seenRunning = false;
+
+  String get _sessionId =>
+      widget.state.snapshot?['sessionId'] as String? ?? '';
+
+  /// N in「已全部加载 · 共 N 个」— the cross-window total.
+  int get _totalCount {
+    final ids = widget.state.subagentsInfo?['childSessionIds'];
+    return ids is List ? ids.length : 0;
+  }
+
+  /// Reconciles pooled child subscriptions with the running rows on screen.
+  void _syncSubscriptions(List<Map<String, dynamic>> running) {
+    final wanted = {
+      for (final a in running)
+        if ((a['childSessionId'] as String? ?? '').isNotEmpty)
+          a['childSessionId'] as String,
+    };
+    for (final id in wanted.difference(_held)) {
+      widget.feed.acquire(id);
+      _held.add(id);
+    }
+    for (final id in _held.difference(wanted)) {
+      widget.feed.release(id);
+      _held.remove(id);
+    }
+  }
+
+  @override
+  void dispose() {
+    _closeTimer?.cancel();
+    // Symmetric release: every acquire made while the sheet lived is undone
+    // here, early-exit or not.
+    for (final id in _held) {
+      widget.feed.release(id);
+    }
+    _held.clear();
+    super.dispose();
+  }
+
+  /// All-terminal auto close (PRD: same 3s confirm semantics as the pill).
+  void _reconcileAutoClose(List<Map<String, dynamic>> running) {
+    if (running.isNotEmpty) {
+      _seenRunning = true;
+      _closeTimer?.cancel();
+      _closeTimer = null;
+      return;
+    }
+    if (!_seenRunning || _closeTimer != null) return;
+    _closeTimer = Timer(widget.confirmWindow, () {
+      _closeTimer = null;
+      if (!mounted) return;
+      if (subagentsRunningView(widget.state, widget.feed).isEmpty) {
+        Navigator.of(context).pop();
+      }
+    });
+  }
+
+  // ------------------------------------------------------------ paging
+
+  /// Pages older parent-session rows and collects their subagent rows.
+  /// Cursor = the smallest collected rowId (window rows included) — never
+  /// the snapshot's placeholder `firstRowId` (see [ConversationState.oldestRowId]).
+  Future<void> _loadEarlier() async {
+    if (_paging || _noMore || _sessionId.isEmpty) return;
+    setState(() => _paging = true);
+    try {
+      int? cursor = widget.state.oldestRowId;
+      for (final r in _older) {
+        final id = (r['rowId'] as num?)?.toInt();
+        if (id != null && (cursor == null || id < cursor)) cursor = id;
+      }
+      final res = await widget.gateway.conversationCommands.rowsRange(
+        _sessionId,
+        beforeRowId: cursor,
+        limit: 60,
+      );
+      if (res is! Map) {
+        _noMore = true;
+        return;
+      }
+      if (!widget.state.rangeEnvelopeMatches(res['atLogEpoch'] as String?)) {
+        if (mounted) _toast(tr(context, 'chat.loadOlder.stale'));
+        return;
+      }
+      final rowsObj = res['rows'];
+      List? rows;
+      if (rowsObj is Map) {
+        rows = rowsObj['window'] as List? ?? rowsObj['rows'] as List?;
+      } else if (rowsObj is List) {
+        rows = rowsObj;
+      }
+      rows ??= res['items'] as List? ?? res['window'] as List?;
+      final hasMore = res['hasMore'] as bool?;
+      if (rows == null || rows.isEmpty) {
+        _noMore = hasMore != true;
+        return;
+      }
+      final existing = _older
+          .map((r) => (r['rowId'] as num?)?.toInt())
+          .toSet();
+      for (final e in rows) {
+        if (e is! Map) continue;
+        final row = e.cast<String, dynamic>();
+        if (row['kind'] != 'subagent') continue;
+        if (existing.add((row['rowId'] as num?)?.toInt())) {
+          _older.add(row);
+        }
+      }
+      if (hasMore != true) _noMore = true;
+    } catch (e) {
+      if (mounted) _toast(trP(context, 'chat.loadOlder.failed', ['$e']));
+    } finally {
+      if (mounted) setState(() => _paging = false);
+    }
+  }
+
+  // ------------------------------------------------------------ stop
+
+  /// Stop confirm aligned with the detail page's dialog (chat.agents.stop*).
+  Future<void> _confirmStop(Map<String, dynamic> agent) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      useRootNavigator: false,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(tr(dialogContext, 'chat.agents.stop')),
+        content: Text(tr(dialogContext, 'chat.agents.stopConfirm')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: Text(tr(dialogContext, 'common.cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: Text(tr(dialogContext, 'chat.agents.stop')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    // `agentId` is the running entry's work id (live-probed 2026-09-13);
+    // some builds surface it as workId.
+    final workId = '${agent['agentId'] ?? agent['workId'] ?? ''}';
+    if (workId.isEmpty || _sessionId.isEmpty) return;
+    try {
+      await widget.gateway.conversationCommands.cancelBackgroundWork(_sessionId, workId);
+    } catch (e) {
+      _toast('$e');
+    }
+  }
+
+  void _toast(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
+  // ------------------------------------------------------------ data
+
+  /// Ended subagent rows: parent-window rows plus older collected ones,
+  /// deduped by childSessionId, running entries excluded, terminal view
+  /// applied, newest first.
+  List<Map<String, dynamic>> _endedRows() {
+    final liveIds = {
+      for (final a in subagentsRunningView(widget.state, widget.feed))
+        '${a['childSessionId'] ?? ''}',
+    };
+    final seen = <String>{};
+    final out = <Map<String, dynamic>>[];
+    final candidates = [
+      ...widget.state.rows,
+      ..._older,
+    ];
+    for (final row in candidates) {
+      if (row['kind'] != 'subagent') continue;
+      final sid = '${row['childSessionId'] ?? ''}';
+      if (liveIds.contains(sid) || sid.isEmpty || !seen.add(sid)) continue;
+      final status = widget.feed.effectiveStatus(sid, '${row['status'] ?? ''}');
+      if (!subagentTerminalStatuses.contains(status)) continue;
+      out.add(row);
+    }
+    out.sort(
+      (a, b) => ((b['rowId'] as num?) ?? 0).compareTo((a['rowId'] as num?) ?? 0),
+    );
+    return out;
+  }
+
+  // ------------------------------------------------------------ ui
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([widget.state, widget.feed]),
+      builder: (context, _) {
+        final running = subagentsRunningView(widget.state, widget.feed);
+        _syncSubscriptions(running);
+        _reconcileAutoClose(running);
+        final ended = _endedRows();
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(context).height * 0.78,
+            ),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 18),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildHeader(context, running.length),
+                  if (running.isNotEmpty) ...[
+                    _buildSectionLabel(context, 'chat.subagentSheet.sectionRunning'),
+                    for (final a in running)
+                      _buildRunItem(context, a),
+                  ],
+                  if (ended.isNotEmpty) ...[
+                    _buildSectionLabel(context, 'chat.subagentSheet.sectionEnded'),
+                    for (final row in ended) _buildEndedItem(context, row),
+                  ],
+                  const SizedBox(height: 8),
+                  _buildLoadMore(context),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildHeader(BuildContext context, int runningCount) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 4, 0, 6),
+      child: Row(
+        children: [
+          Text(
+            tr(context, 'chat.subagentSheet.title'),
+            style: ZType.heading.copyWith(color: ZInk.solid(context)),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              trP(context, 'chat.subagentSheet.count',
+                  ['$runningCount', '$_totalCount']),
+              style: ZType.caption.copyWith(color: ZInk.muted(context)),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            tooltip: tr(context, 'common.close'),
+            icon: Icon(Icons.close, size: 18, color: ZInk.muted(context)),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionLabel(BuildContext context, String key) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 2),
+      child: Row(
+        children: [
+          Text(
+            tr(context, key),
+            style: ZType.caption.copyWith(color: ZInk.muted(context)),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Container(height: 1, color: ZInk.hairline(context)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// One running row: spinner + title + elapsed, live action tail, then the
+  /// 详情/停止 action row (mock .run-item).
+  Widget _buildRunItem(BuildContext context, Map<String, dynamic> agent) {
+    final title = '${agent['title'] ?? agent['subagentType'] ?? ''}';
+    final sid = '${agent['childSessionId'] ?? ''}';
+    final tail = subagentActionText(context, widget.feed.childState(sid));
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(strokeWidth: 1.5),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: ZType.body.copyWith(color: ZInk.solid(context)),
+                ),
+              ),
+              _SheetElapsed(startedAt: agent['startedAt'] as num?),
+            ],
+          ),
+          if (tail != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 20, top: 2),
+              child: Text(
+                tail,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: ZType.caption.copyWith(color: ZInk.soft(context)),
+              ),
+            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              _SheetActionButton(
+                label: tr(context, 'chat.subagentSheet.detail'),
+                onTap: sid.isEmpty
+                    ? null
+                    : () => _openSubagentDetail(
+                          context,
+                          widget.gateway,
+                          childSessionId: sid,
+                          title: '${agent['title'] ?? ''}',
+                          subagentType: agent['subagentType'] as String?,
+                          workId: '${agent['agentId'] ?? agent['workId'] ?? ''}',
+                          parentSessionId: _sessionId,
+                          running: true,
+                        ),
+              ),
+              const SizedBox(width: 8),
+              _SheetActionButton(
+                label: tr(context, 'chat.agents.stop'),
+                danger: true,
+                onTap: () => _confirmStop(agent),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// One ended row: status glyph + title, whole row opens the detail page
+  /// (mock .end-item).
+  Widget _buildEndedItem(BuildContext context, Map<String, dynamic> row) {
+    final sid = '${row['childSessionId'] ?? ''}';
+    final status = widget.feed.effectiveStatus(sid, '${row['status'] ?? ''}');
+    final (icon, color, wordKey) = switch (status) {
+      'success' => (
+          Icons.check,
+          ZColors.success,
+          'chat.subagent.status.success',
+        ),
+      'error' || 'failed' || 'denied' => (
+          Icons.close,
+          ZColors.danger,
+          'chat.subagent.status.failed',
+        ),
+      _ => (
+          Icons.block,
+          ZColors.warning,
+          'chat.subagentSheet.status.stopped',
+        ),
+    };
+    final title = '${row['summaryText'] ?? row['subagentType'] ?? ''}';
+    return InkWell(
+      onTap: sid.isEmpty
+          ? null
+          : () => _openSubagentDetail(
+                context,
+                widget.gateway,
+                childSessionId: sid,
+                subagentType: row['subagentType'] as String?,
+                workId: row['workId'] as String?,
+                parentSessionId: _sessionId,
+              ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        child: Row(
+          children: [
+            Icon(icon, size: 14, color: color),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: ZType.body.copyWith(color: ZInk.solid(context)),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              tr(context, wordKey),
+              style: ZType.caption.copyWith(color: ZInk.faint(context)),
+            ),
+            Icon(Icons.chevron_right, size: 14, color: ZInk.ghost(context)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLoadMore(BuildContext context) {
+    if (_noMore) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Center(
+          child: Text(
+            trP(context, 'chat.subagentSheet.allLoaded', ['$_totalCount']),
+            style: ZType.caption.copyWith(color: ZInk.muted(context)),
+          ),
+        ),
+      );
+    }
+    return Center(
+      child: TextButton.icon(
+        onPressed: _paging ? null : _loadEarlier,
+        icon: _paging
+            ? const SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(strokeWidth: 1.5),
+              )
+            : const Icon(Icons.history, size: 14),
+        label: Text(
+          tr(context, 'chat.subagentSheet.loadMore'),
+          style: ZType.sub,
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact ghost/danger action button of the management sheet (mock
+/// .btn-ghost / .btn-stop).
+class _SheetActionButton extends StatelessWidget {
+  final String label;
+  final VoidCallback? onTap;
+  final bool danger;
+
+  const _SheetActionButton({
+    required this.label,
+    required this.onTap,
+    this.danger = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = danger ? ZColors.danger : ZInk.soft(context);
+    return OutlinedButton(
+      style: OutlinedButton.styleFrom(
+        visualDensity: VisualDensity.compact,
+        foregroundColor: color,
+        side: BorderSide(
+          color: danger ? ZColors.danger.withValues(alpha: 0.45) : ZInk.hairline(context),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        minimumSize: Size.zero,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(ZRadius.field),
+        ),
+      ),
+      onPressed: onTap,
+      child: Text(label, style: ZType.caption.copyWith(color: color)),
+    );
+  }
+}
+
+/// Elapsed mm:ss of a running sheet row (1s cadence — the mock shows
+/// second-precision durations).
+class _SheetElapsed extends StatefulWidget {
+  final num? startedAt;
+
+  const _SheetElapsed({this.startedAt});
+
+  @override
+  State<_SheetElapsed> createState() => _SheetElapsedState();
+}
+
+class _SheetElapsedState extends State<_SheetElapsed> {
+  Timer? _timer;
+  DateTime _now = DateTime.now();
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _now = DateTime.now());
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final started = widget.startedAt?.toInt();
+    if (started == null) return const SizedBox.shrink();
+    final secs = (_now.millisecondsSinceEpoch - started) ~/ 1000;
+    final m = secs ~/ 60;
+    final s = secs % 60;
+    final label = m <= 0
+        ? trP(context, 'chat.time.secOnly', ['$s'])
+        : trP(context, 'chat.time.minSec', ['$m', '$s']);
+    return Text(
+      label,
+      style: ZType.sub.copyWith(
+        color: ZInk.muted(context),
+        fontFeatures: const [FontFeature.tabularFigures()],
+      ),
+    );
+  }
 }
 
 class _QueueBar extends StatelessWidget {
@@ -3622,7 +4008,7 @@ class _QueueBar extends StatelessWidget {
                   state.optimisticPatch({
                     'queue': {...?state.queue, 'autoDrain': next},
                   });
-                  gateway.setAutoDrain(sessionId, next);
+                  gateway.conversationCommands.setAutoDrain(sessionId, next);
                 },
                 child: Text(
                   state.autoDrain
@@ -3687,7 +4073,7 @@ class _QueueBar extends StatelessWidget {
                         onTap: () {
                           final id = '${items[i]['queueItemId']}';
                           state.optimisticRemoveQueueItem(id);
-                          gateway.sendQueuedNow(sessionId, id);
+                          gateway.conversationCommands.sendQueuedNow(sessionId, id);
                         },
                       ),
                       _QueueAction(
@@ -3729,7 +4115,7 @@ class _QueueBar extends StatelessWidget {
                           );
                           if (confirmed != true) return;
                           state.optimisticRemoveQueueItem(id);
-                          gateway.deleteQueueItem(sessionId, id);
+                          gateway.conversationCommands.deleteQueueItem(sessionId, id);
                         },
                       ),
                     ],
@@ -3767,7 +4153,7 @@ class _QueueBar extends StatelessWidget {
     } else {
       beforeId = '${items[targetIndex]['queueItemId']}';
     }
-    gateway.reorderQueueItem(sessionId, id, beforeId);
+    gateway.conversationCommands.reorderQueueItem(sessionId, id, beforeId);
   }
 
   Future<void> _edit(
@@ -3813,7 +4199,7 @@ class _QueueBar extends StatelessWidget {
         'queue': {...q, 'items': items},
       });
     }
-    await gateway.editQueueItem(sessionId, '${item['queueItemId']}', text);
+    await gateway.conversationCommands.editQueueItem(sessionId, '${item['queueItemId']}', text);
   }
 }
 
@@ -4027,7 +4413,7 @@ class _PendingInteractions extends StatelessWidget {
           _InteractionCard(
             interaction: interaction,
             onResolve: ({optionId, freeText, action, content}) =>
-                gateway.resolveInteraction(
+                gateway.conversationCommands.resolveInteraction(
                   sessionId,
                   interaction['interactionId'] as String? ?? '',
                   optionId: optionId,
@@ -4035,7 +4421,7 @@ class _PendingInteractions extends StatelessWidget {
                   action: action,
                   content: content,
                 ),
-            onSnooze: () => gateway.snoozeInteraction(
+            onSnooze: () => gateway.conversationCommands.snoozeInteractionAutoResolution(
                   sessionId,
                   interaction['interactionId'] as String? ?? '',
                 ),
@@ -4544,7 +4930,7 @@ class _ModelModeSheet extends StatelessWidget {
                           : '${thoughtOpt?.currentValue ?? (currentThought.isNotEmpty ? currentThought : 'enabled')}';
                       _apply(
                         context,
-                        () => gateway.switchModelConfig(
+                        () => gateway.conversationCommands.switchModelConfig(
                           sid,
                           provider: provider,
                           model: model,
@@ -4599,7 +4985,7 @@ class _ModelModeSheet extends StatelessWidget {
                                 );
                           _apply(
                             context,
-                            () => gateway.switchModelConfig(
+                            () => gateway.conversationCommands.switchModelConfig(
                               sid,
                               provider: provider,
                               model: model,
@@ -4629,7 +5015,7 @@ class _ModelModeSheet extends StatelessWidget {
                       selected: state?.currentThought == level,
                       onSelected: (_) => _apply(
                         context,
-                        () => gateway.switchModelConfig(
+                        () => gateway.conversationCommands.switchModelConfig(
                           sid,
                           provider: '${config['provider'] ?? ''}',
                           model: '${config['model'] ?? ''}',
@@ -4678,7 +5064,7 @@ class _ModelModeSheet extends StatelessWidget {
                     } else {
                       _apply(
                         context,
-                        () => gateway.switchCollaborationMode(sid, v.value),
+                        () => gateway.conversationCommands.switchCollaborationMode(sid, v.value),
                         onAccepted: () => state?.optimisticPatch({
                           'config': {...?state!.config, 'mode': v.value},
                         }),
@@ -4714,7 +5100,7 @@ class _ModelModeSheet extends StatelessWidget {
                     } else {
                       _apply(
                         context,
-                        () => gateway.switchCollaborationMode(sid, m),
+                        () => gateway.conversationCommands.switchCollaborationMode(sid, m),
                         onAccepted: () => state?.optimisticPatch({
                           'config': {...?state!.config, 'mode': m},
                         }),
@@ -4742,7 +5128,7 @@ class _ModelModeSheet extends StatelessWidget {
                       selected: followup == f,
                       onSelected: (_) => _apply(
                         context,
-                        () => gateway.setFollowupMode(sid, f),
+                        () => gateway.conversationCommands.setFollowupMode(sid, f),
                         onAccepted: () => state?.optimisticPatch({
                           'config': {...?state!.config, 'followupMode': f},
                         }),
@@ -4984,28 +5370,38 @@ class _UsageSheet extends StatelessWidget {
     );
   }
 
-  /// R4 — remaining quota: reset countdown and the 5-hour pill come from
-  /// the `TOKENS_LIMIT(3,5)` window, the reset-credit row is the ZLinker
-  /// entry point. Rows (and the whole block) hide when their data is
-  /// absent; nothing renders as a placeholder.
+  /// R4 — remaining quota: the 5-hour pill carries its window expiry clock
+  /// inline (「重置」stays reserved for reset opportunities, 2026-09-16);
+  /// the reset-credit row is the ZLinker entry point. Rows (and the whole
+  /// block) hide when their data is absent; nothing renders as a placeholder.
   Widget _remainingSection(BuildContext context) {
-    final limit = _entitlementLimit(
-      entitlement,
-      'TOKENS_LIMIT',
-      unit: 3,
-      number: 5,
-    );
+    final view = entitlement;
+    final limit = view?.limitFor('TOKENS_LIMIT', unit: 3, number: 5);
     // Official semantics: the panel shows what's LEFT of the window, not
     // what's used (bundle PF: clamp(100 - percentage)).
-    final percent = _remainingPercent(limit);
-    final countdown = _resetCountdown(context, limit?['nextResetTime']);
+    final percent = view?.remainingPercent(limit);
+    final windowClock = switch (limit?.nextResetTime) {
+      null => null,
+      final ms => EntitlementView.fmtResetClock(
+          DateTime.fromMillisecondsSinceEpoch(ms),
+        ),
+    };
     return ListenableBuilder(
       listenable: controller,
       builder: (context, _) {
         final pools = controller.pools;
-        final credits =
-            pools == null ? 0 : pools.fiveHour.count + pools.week.count;
-        if (percent == null && countdown == null && credits == 0) {
+        // Projection: the pools the plan can actually reset (official
+        // composition shared with the usage page). A pool the plan has no
+        // window for (a V1 plan's weekly coupon) is never credited nor
+        // offered by the dialog.
+        final resettable = view?.resettablePools(pools) ?? const [];
+        final credits = resettable.fold(0, (sum, r) => sum + r.pool.count);
+        final earliestReset = switch (view?.earliestResetExpiry(pools)) {
+          null => null,
+          final at => EntitlementView.fmtResetClock(at),
+        };
+        final resettableTypes = {for (final r in resettable) r.type};
+        if (percent == null && windowClock == null && credits == 0) {
           return const SizedBox.shrink();
         }
         return Padding(
@@ -5085,7 +5481,7 @@ class _UsageSheet extends StatelessWidget {
                       ),
                       const SizedBox(width: 8),
                       TextButton(
-                        onPressed: onUseReset,
+                        onPressed: () => onUseReset(resettableTypes),
                         style: TextButton.styleFrom(
                           backgroundColor:
                               ZColors.usageGreen.withValues(alpha: 0.15),
@@ -5117,13 +5513,14 @@ class _UsageSheet extends StatelessWidget {
   /// the server-side aggregate (entitlementServerMcpUsage); a limit absent
   /// from the snapshot drops its column.
   Widget _limitsColumns(BuildContext context) {
-    final fiveHour = _remainingPercent(
-      _entitlementLimit(entitlement, 'TOKENS_LIMIT', unit: 3, number: 5),
+    final view = entitlement;
+    final fiveHour = view?.remainingPercent(
+      view.limitFor('TOKENS_LIMIT', unit: 3, number: 5),
     );
-    final toolCalls = _remainingPercent(
-      _entitlementLimit(entitlement, 'TIME_LIMIT', unit: 5, number: 1),
+    final toolCalls = view?.remainingPercent(
+      view.limitFor('TIME_LIMIT', unit: 5, number: 1),
     );
-    final zcodeMcp = _remainingPercent(_serverMcpLimit(entitlement));
+    final zcodeMcp = view?.remainingPercent(view.serverMcpLimit);
     final columns = <Widget>[
       if (fiveHour != null)
         _limitColumn(
@@ -5298,61 +5695,6 @@ String _fmtCompactTokens(BuildContext context, int n) {
 String _trimZero(double v) {
   final s = v.toStringAsFixed(1);
   return s.endsWith('.0') ? s.substring(0, s.length - 2) : s;
-}
-
-/// Exact `type`(+`unit`/`number`) lookup over the entitlement snapshot's
-/// `quota.limits` (the official `MF`), same parsing idea as the usage page.
-Map<String, dynamic>? _entitlementLimit(
-  EntitlementView? view,
-  String type, {
-  int? unit,
-  int? number,
-}) {
-  final quota = view?.data?['quota'];
-  final limits = quota is Map ? quota['limits'] : null;
-  if (limits is! List) return null;
-  for (final e in limits) {
-    if (e is! Map) continue;
-    if (e['type'] != type) continue;
-    if (unit != null && e['unit'] != unit) continue;
-    if (number != null && e['number'] != number) continue;
-    return e.cast<String, dynamic>();
-  }
-  return null;
-}
-
-double? _limitPercent(Map<String, dynamic>? limit) =>
-    (limit?['percentage'] as num?)?.toDouble();
-
-/// Official PF: remaining% = clamp(100 - percentage) — every quota metric
-/// on the panel shows what is LEFT of the limit, never what is used.
-double? _remainingPercent(Map<String, dynamic>? limit) {
-  final used = _limitPercent(limit);
-  if (used == null) return null;
-  return (100 - used).clamp(0.0, 100.0);
-}
-
-/// Server MCP usage (`mcpQuota.aggregate`) as a limit-shaped map so the
-/// columns can read it through the same remaining-percent path.
-Map<String, dynamic>? _serverMcpLimit(EntitlementView? view) {
-  final mcpQuota = view?.data?['mcpQuota'];
-  final aggregate = mcpQuota is Map ? mcpQuota['aggregate'] : null;
-  return aggregate is Map ? aggregate.cast<String, dynamic>() : null;
-}
-
-/// Reset countdown「20 小时 13 分钟」for a `nextResetTime` ms epoch; null
-/// when the timestamp is absent or already past (the row then hides).
-String? _resetCountdown(BuildContext context, Object? nextResetTime) {
-  if (nextResetTime is! num) return null;
-  final remaining = DateTime.fromMillisecondsSinceEpoch(nextResetTime.toInt())
-      .difference(DateTime.now());
-  if (remaining.isNegative) return null;
-  final minutes = remaining.inMinutes % 60;
-  return [
-    if (remaining.inHours > 0)
-      trP(context, 'chat.usage.duration.hours', ['${remaining.inHours}']),
-    trP(context, 'chat.usage.duration.minutes', ['$minutes']),
-  ].join(' ');
 }
 
 class _JsonSheet extends StatelessWidget {
@@ -5840,7 +6182,7 @@ class _InputBarState extends State<_InputBar> {
     );
     if (value == null || value == _modeValue) return;
     if (isDraft || sid == null) return; // draft chips go through the sheet
-    gateway.switchCollaborationMode(sid, value);
+    gateway.conversationCommands.switchCollaborationMode(sid, value);
   }
 
   Future<void> _pickThought(BuildContext context) async {
@@ -5876,7 +6218,7 @@ class _InputBarState extends State<_InputBar> {
     final modelValue =
         '${state?.config?['provider'] ?? ''}/${state?.config?['model'] ?? ''}';
     final idx = modelValue.lastIndexOf('/');
-    gateway.switchModelConfig(
+    gateway.conversationCommands.switchModelConfig(
       sid,
       provider: idx > 0 ? modelValue.substring(0, idx) : modelValue,
       model: idx > 0 ? modelValue.substring(idx + 1) : modelValue,
@@ -5887,7 +6229,7 @@ class _InputBarState extends State<_InputBar> {
   void _stop(BuildContext context) {
     final sid = sessionId;
     if (sid == null) return;
-    gateway.stop(sid);
+    gateway.conversationCommands.stop(sid);
   }
 }
 

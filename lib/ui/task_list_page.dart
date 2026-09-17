@@ -177,23 +177,10 @@ class _TaskListPageState extends State<TaskListPage> {
 
   // ------------------------------------------------- merged task data source
   //
-  // The relay overview (bootstrap / workspace-list-updated) carries every
-  // workspace's tasks (`Dg`: displayStatus/pinned/archived/unreadAt) — the
-  // web mobile home renders non-active workspaces and the archive view from
-  // it. The active workspace additionally has the live sessions-index with
-  // richer phase + pendingInteraction, which wins per task id.
-
-  /// Workspace key of a relay task (`Dg.workspaceIdentity ?? workspacePath`,
-  /// same rule as [workspaceKeyOf]).
-  String? _relayTaskKey(Map<String, dynamic> task) {
-    final identity = task['workspaceIdentity'];
-    if (identity is String && identity.trim().isNotEmpty) {
-      return identity.trim();
-    }
-    final path = task['workspacePath'];
-    if (path is String && path.isNotEmpty) return path;
-    return null;
-  }
+  // One merged directory (see [TaskDirectory]): the relay overview carries
+  // every workspace's tasks; the active workspace's live sessions-index
+  // overrides it per task id. The page filters archived rows; notification
+  // consumers keep them observable.
 
   Map<String, dynamic>? _workspaceForKey(DeviceSession session, String? key) {
     if (key == null) return null;
@@ -201,76 +188,6 @@ class _TaskListPageState extends State<TaskListPage> {
       if (workspaceKeyOf(ws) == key) return ws;
     }
     return null;
-  }
-
-  /// Relay tasks of one workspace as row entries (non-archived unless
-  /// [archivedOnly]).
-  List<SessionEntry> _relayEntriesFor(
-    DeviceSession session,
-    Map<String, dynamic> ws, {
-    bool archivedOnly = false,
-  }) {
-    final key = workspaceKeyOf(ws);
-    if (key == null) return const [];
-    return [
-      for (final t in session.relayTasks)
-        if (_relayTaskKey(t) == key && (t['archived'] == true) == archivedOnly)
-          SessionEntry.fromRelayTask(t),
-    ];
-  }
-
-  /// Every non-archived task of the device as `(entry, workspace)` pairs —
-  /// relay tasks first, live sessions-index entries overriding per id.
-  List<(SessionEntry, Map<String, dynamic>?)> _allTaskEntries(
-    DeviceSession session,
-  ) {
-    final byId = <String, (SessionEntry, Map<String, dynamic>?)>{};
-    for (final t in session.relayTasks) {
-      if (t['archived'] == true) continue;
-      final entry = SessionEntry.fromRelayTask(t);
-      byId[entry.sessionId] = (
-        entry,
-        _workspaceForKey(session, _relayTaskKey(t)),
-      );
-    }
-    final active = session.activeWorkspace;
-    if (session.sessions?.ready == true) {
-      for (final e in session.sessions!.list) {
-        if (e.raw['archived'] == true) continue;
-        byId[e.sessionId] = (e, active);
-      }
-    }
-    return byId.values.toList();
-  }
-
-  /// Pinned tasks across the device: live entries win, relay tasks fill in
-  /// the workspaces the native link hasn't opened.
-  List<SessionEntry> _pinnedEntries(DeviceSession session) {
-    final byId = <String, SessionEntry>{};
-    for (final t in session.relayTasks) {
-      if (t['pinned'] != true || t['archived'] == true) continue;
-      final e = SessionEntry.fromRelayTask(t);
-      byId[e.sessionId] = e;
-    }
-    if (session.sessions?.ready == true) {
-      for (final e in session.sessions!.list) {
-        if (e.raw['pinned'] == true) byId[e.sessionId] = e;
-      }
-    }
-    final list = byId.values.toList()
-      ..sort((a, b) => b.lastActivityAt.compareTo(a.lastActivityAt));
-    return list;
-  }
-
-  /// Task count for the official summary line: all non-archived tasks on
-  /// the device (falls back to the active workspace's live list).
-  int _totalTaskCount(DeviceSession session) {
-    final relay = session.relayTasks.where((t) => t['archived'] != true).length;
-    if (relay > 0) return relay;
-    return session.sessions?.list
-            .where((e) => e.raw['archived'] != true)
-            .length ??
-        0;
   }
 
   @override
@@ -531,8 +448,8 @@ class _TaskListPageState extends State<TaskListPage> {
   }
 
   List<Widget> _desktopPinned(BuildContext context, DeviceSession session) {
-    final entries = _pinnedEntries(session);
-    if (entries.isEmpty) return const [];
+    final pinned = session.taskDirectory.pinnedEntries();
+    if (pinned.isEmpty) return const [];
     return [
       Padding(
         padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
@@ -544,17 +461,13 @@ class _TaskListPageState extends State<TaskListPage> {
           ),
         ),
       ),
-      for (final e in entries)
+      for (final (e, key) in pinned)
         _desktopTaskRow(
           context,
           session,
           e,
           selected: e.sessionId == _paneSessionId,
-          workspace: _workspaceForKey(
-            session,
-            e.raw['workspaceIdentity'] as String? ??
-                e.raw['workspacePath'] as String?,
-          ),
+          workspace: _workspaceForKey(session, key),
         ),
     ];
   }
@@ -567,19 +480,15 @@ class _TaskListPageState extends State<TaskListPage> {
     final isActive = _isWorkspaceActive(session, ws);
     final key = workspaceKeyOf(ws) ?? workspaceTitle(ws);
     final expanded = _isWorkspaceExpanded(key, isActive: isActive);
-    final sessions = isActive ? session.sessions : null;
-    // Live index for the active workspace; relay tasks for the rest.
-    final allEntries = sessions?.ready == true
-        ? sessions!.list
-        : _relayEntriesFor(session, ws);
-    final entries = _showArchived
-        ? [
-            for (final e in allEntries)
-              if (e.raw['archived'] == true) e,
-          ]
+    // Merged directory view: the live index overrides the relay rows per
+    // task id; the archive toggle picks its half.
+    final dirKey = workspaceKeyOf(ws);
+    final entries = dirKey == null
+        ? const <SessionEntry>[]
         : [
-            for (final e in allEntries)
-              if (e.raw['archived'] != true) e,
+            for (final (e, _) in session.taskDirectory
+                .entriesFor(dirKey, includeArchived: _showArchived))
+              e,
           ];
 
     return Column(
@@ -979,7 +888,7 @@ class _TaskListPageState extends State<TaskListPage> {
   /// Official section header + collapse / tidy / refresh.
   Widget _headerRow(BuildContext context, DeviceSession? session) {
     final workspaces = session?.workspaces.length ?? 0;
-    final tasks = session == null ? 0 : _totalTaskCount(session);
+    final tasks = session == null ? 0 : session.taskDirectory.totalTaskCount;
     return Row(
       children: [
         Expanded(
@@ -1118,8 +1027,8 @@ class _TaskListPageState extends State<TaskListPage> {
   /// Official "已置顶" group above the workspace cards: one card per pinned
   /// task (title, workspace · time, phase pill).
   List<Widget> _pinnedGroup(BuildContext context, DeviceSession session) {
-    final entries = _pinnedEntries(session);
-    if (entries.isEmpty) return const [];
+    final pinned = session.taskDirectory.pinnedEntries();
+    if (pinned.isEmpty) return const [];
     return [
       Padding(
         padding: const EdgeInsets.only(left: 4, bottom: 8),
@@ -1131,10 +1040,10 @@ class _TaskListPageState extends State<TaskListPage> {
           ),
         ),
       ),
-      for (final e in entries)
+      for (final (e, key) in pinned)
         Padding(
           padding: const EdgeInsets.only(bottom: ZSpacing.cardGap),
-          child: _pinnedCard(context, session, e),
+          child: _pinnedCard(context, session, e, workspaceKey: key),
         ),
     ];
   }
@@ -1142,19 +1051,15 @@ class _TaskListPageState extends State<TaskListPage> {
   Widget _pinnedCard(
     BuildContext context,
     DeviceSession session,
-    SessionEntry entry,
-  ) {
+    SessionEntry entry, {
+    required String? workspaceKey,
+  }) {
     final (phaseLabel, _) = _phaseVisual(entry.phase);
     final title = entry.title.trim().isEmpty
         ? tr(context, 'tasks.untitled')
         : entry.title;
     final ws =
-        _workspaceForKey(
-          session,
-          entry.raw['workspaceIdentity'] as String? ??
-              entry.raw['workspacePath'] as String?,
-        ) ??
-        session.activeWorkspace;
+        _workspaceForKey(session, workspaceKey) ?? session.activeWorkspace;
     final subtitle = [
       if (ws != null) workspaceTitle(ws),
       relativeTimeShort(context, entry.lastActivityAt),
@@ -1206,9 +1111,9 @@ class _TaskListPageState extends State<TaskListPage> {
   /// with one row per task, each prefixed with its workspace name. Covers
   /// every workspace via the relay task list (web mobile-home semantics).
   List<Widget> _timelineGroups(BuildContext context, DeviceSession session) {
-    final pairs = _allTaskEntries(session);
+    final pairs = session.taskDirectory.allEntries();
     final entries = _sortedEntries([for (final (e, _) in pairs) e]);
-    final wsOf = {for (final (e, ws) in pairs) e.sessionId: ws};
+    final wsKeyOf = {for (final (e, key) in pairs) e.sessionId: key};
     if (entries.isEmpty) {
       return [
         Padding(
@@ -1251,7 +1156,10 @@ class _TaskListPageState extends State<TaskListPage> {
               context,
               session,
               e,
-              workspaceLabel: _rowWorkspaceLabel(session, wsOf[e.sessionId]),
+              workspaceLabel: _rowWorkspaceLabel(
+                session,
+                _workspaceForKey(session, wsKeyOf[e.sessionId]),
+              ),
             ),
           ),
       ],
@@ -1266,15 +1174,20 @@ class _TaskListPageState extends State<TaskListPage> {
   }
 
   /// Official archive view (归档列表): every archived task on the device,
-  /// from the relay overview, grouped by workspace. Rows long-press into the
-  /// shared action sheet (取消归档 / 删除 live there).
+  /// from the merged task directory, grouped by workspace. Rows long-press
+  /// into the shared action sheet (取消归档 / 删除 live there).
   List<Widget> _archiveView(BuildContext context, DeviceSession session) {
     final widgets = <Widget>[];
     var total = 0;
     for (final ws in session.workspaces) {
-      final entries = _sortedEntries(
-        _relayEntriesFor(session, ws, archivedOnly: true),
-      );
+      final dirKey = workspaceKeyOf(ws);
+      final entries = _sortedEntries(dirKey == null
+          ? const <SessionEntry>[]
+          : [
+              for (final (e, _) in session.taskDirectory
+                  .entriesFor(dirKey, includeArchived: true))
+                e,
+            ]);
       if (entries.isEmpty) continue;
       total += entries.length;
       widgets
@@ -1342,15 +1255,15 @@ class _TaskListPageState extends State<TaskListPage> {
     final expanded = _isWorkspaceExpanded(key, isActive: isActive);
 
     final sessions = isActive ? session.sessions : null;
-    // Active workspace: the live sessions-index (richer phase/interaction).
-    // Others: the relay task overview — the web mobile home does the same.
-    var entries = sessions?.ready == true
-        ? sessions!.list
-        : _relayEntriesFor(session, ws);
-    entries = [
-      for (final e in entries)
-        if (e.raw['archived'] != true) e,
-    ];
+    // Active workspace: the merged directory view (the live sessions-index
+    // with its richer phase/interaction overriding the relay rows per task
+    // id). Others: relay rows — the web mobile home does the same.
+    final dirKey = workspaceKeyOf(ws);
+    var entries = dirKey == null
+        ? const <SessionEntry>[]
+        : [
+            for (final (e, _) in session.taskDirectory.entriesFor(dirKey)) e,
+          ];
     entries = _sortedEntries(entries);
     final lastActivity = entries.isEmpty
         ? null

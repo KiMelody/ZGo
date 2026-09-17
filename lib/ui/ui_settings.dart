@@ -113,15 +113,24 @@ String trLocale(String locale, String key) {
   return table[key] ?? _zh[key] ?? key;
 }
 
-/// [tr] with positional substitution: `$0`, `$1`, ... in the template are
-/// replaced by [args] in order.
-String trP(BuildContext context, String key, List<String> args) {
-  var out = tr(context, key);
+/// Key-driven lookup for pure modules that take a locale instead of a
+/// BuildContext (tool_row_semantics); same two tables, zero new keys.
+String trByKey(String locale, String key) => trLocale(locale, key);
+
+/// [trByKey] with positional substitution: `$0`, `$1`, ... in the template
+/// are replaced by [args] in order (locale-only counterpart of [trP]).
+String trByKeyP(String locale, String key, List<String> args) {
+  var out = trByKey(locale, key);
   for (var i = 0; i < args.length; i++) {
     out = out.replaceAll('\$$i', args[i]);
   }
   return out;
 }
+
+/// [tr] with positional substitution: `$0`, `$1`, ... in the template are
+/// replaced by [args] in order.
+String trP(BuildContext context, String key, List<String> args) =>
+    trByKeyP(UiSettingsProvider.of(context)?.locale ?? 'zh-CN', key, args);
 
 /// Relative-time formatting using the 'time.*' table keys.
 String relativeTime(BuildContext context, int ms) {

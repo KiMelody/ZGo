@@ -3,19 +3,18 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/state/device_session.dart';
+import 'package:zlinker/state/device_session.dart' show ChatHandle;
 import 'package:zlinker/ui/chat/subagent_detail_page.dart';
+
+import '../helpers/recording_chat_gateway.dart';
 
 /// Gateway whose subscribe() never resolves — the live-observed stall where
 /// the desktop bridge dies mid-handshake and the subscription call hangs.
-class _StalledGateway implements ChatGateway {
+/// Everything else rides the shared loose-default recording gateway.
+class _StalledGateway extends RecordingChatGateway {
   @override
-  dynamic noSuchMethod(Invocation invocation) {
-    if (invocation.memberName == #subscribe) {
-      return Completer<ChatHandle>().future;
-    }
-    throw UnimplementedError('${invocation.memberName}');
-  }
+  Future<ChatHandle> subscribe(String sessionId) =>
+      Completer<ChatHandle>().future;
 }
 
 void main() {

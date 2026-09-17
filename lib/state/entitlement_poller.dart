@@ -1,6 +1,8 @@
 import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 
+import 'quota_reset.dart';
+
 /// Phase of one entitlement snapshot — mirrors the web entitlement panel's
 /// status enum (Active/Error/Loading/LoginRequired/NoPlan/NotConfigured);
 /// the desktop's `unavailableReason` maps onto these.
@@ -12,6 +14,33 @@ enum EntitlementPhase {
   loginRequired,
   error,
 }
+
+/// One `quota.limits` row as a value carrier — the projection's currency
+/// between the snapshot and the rendering surfaces. Pure carrier: only
+/// typed reads of the raw row, no decisions.
+class Limit {
+  /// The raw `quota.limits` entry (live-probed field structure only).
+  final Map<String, dynamic> raw;
+
+  const Limit(this.raw);
+
+  /// Used percent of the window; null when absent / mistyped (official PF
+  /// answers null → the surface hides the metric instead of guessing).
+  double? get percentage {
+    final p = raw['percentage'];
+    return p is num ? p.toDouble() : null;
+  }
+
+  /// Window rollover time (ms epoch); null when absent / mistyped.
+  int? get nextResetTime {
+    final t = raw['nextResetTime'];
+    return t is num ? t.toInt() : null;
+  }
+}
+
+/// One pool the projection credited as resettable: the reset type (the
+/// `useCodingPlanReset` argument) with its live pool numbers.
+typedef ResettablePool = ({String type, QuotaResetPool pool});
 
 /// Immutable result of one entitlement fetch, shared by the usage page and
 /// the chat warning banner.
@@ -55,6 +84,116 @@ class EntitlementView {
       if (percentage is num && percentage >= 100) return true;
     }
     return false;
+  }
+
+  // ----------------------------------------------------------- projection
+  //
+  // The official entitlement / reset semantics are encoded exactly once,
+  // here: limits mining, the PF remaining clamp, the reset scope, the
+  // resettable composition and the expiry clock. The UI surfaces only read
+  // these — no raw-map assembly in lib/ui (C1 收口).
+
+  /// The snapshot's `quota.limits`; null when absent or mistyped.
+  List? get _limits {
+    final quota = data?['quota'];
+    return quota is Map && quota['limits'] is List
+        ? quota['limits'] as List
+        : null;
+  }
+
+  /// Exact `type`(+`unit`/`number`) lookup over `quota.limits` (the
+  /// official `MF`); null when the row is absent.
+  Limit? limitFor(String type, {int? unit, int? number}) {
+    final limits = _limits;
+    if (limits == null) return null;
+    for (final e in limits) {
+      if (e is! Map) continue;
+      if (e['type'] != type) continue;
+      if (unit != null && e['unit'] != unit) continue;
+      if (number != null && e['number'] != number) continue;
+      return Limit(e.cast<String, dynamic>());
+    }
+    return null;
+  }
+
+  /// `mcpQuota.aggregate` as a limit-shaped carrier so the usage surfaces
+  /// read the server-side MCP total through [remainingPercent] too (the
+  /// aggregate is not a `quota.limits` row of its own).
+  Limit? get serverMcpLimit {
+    final mcpQuota = data?['mcpQuota'];
+    final aggregate = mcpQuota is Map ? mcpQuota['aggregate'] : null;
+    return aggregate is Map ? Limit(aggregate.cast<String, dynamic>()) : null;
+  }
+
+  /// Official PF: remaining% = clamp(100 - percentage) — every quota
+  /// metric shows what is LEFT of the limit, never what is used. A null
+  /// limit or an unreadable percentage answers null.
+  double? remainingPercent(Limit? limit) {
+    final used = limit?.percentage;
+    if (used == null) return null;
+    return (100 - used).clamp(0.0, 100.0);
+  }
+
+  /// `provider.id` of the snapshot — the reset controller's scope
+  /// (`preferredProviderId`); null (feature disabled) without a usable id.
+  String? get resetScopeProviderId {
+    final provider = data?['provider'];
+    final id = provider is Map ? provider['id'] : null;
+    return id is String && id.isNotEmpty ? id : null;
+  }
+
+  /// Pools the plan can actually reset — the official `_I` composition
+  /// ([poolVisible] over `quota.limits` × the live pools): the plan must
+  /// expose the pool's window row, an unexpired opportunity must exist and
+  /// the window must not be untouched (processing pools stay visible).
+  /// A pool without a plan window (a V1 plan's weekly coupon) is never
+  /// credited; null / unreadable pools credit nothing.
+  List<ResettablePool> resettablePools(QuotaResetPools? pools) {
+    if (pools == null) return const [];
+    final limits = _limits;
+    return [
+      if (poolVisible(
+        limits: limits,
+        poolType: quotaResetTypeFiveHour,
+        count: pools.fiveHour.count,
+        processing: pools.fiveHour.processing,
+      ))
+        (type: quotaResetTypeFiveHour, pool: pools.fiveHour),
+      if (poolVisible(
+        limits: limits,
+        poolType: quotaResetTypeWeek,
+        count: pools.week.count,
+        processing: pools.week.processing,
+      ))
+        (type: quotaResetTypeWeek, pool: pools.week),
+    ];
+  }
+
+  /// Earliest expiry among the resettable pools ([resettablePools]) — the
+  /// summary's reset time is opportunity expiry, and a pool the rendering
+  /// hides must not drive it. Null when nothing is usable.
+  DateTime? earliestResetExpiry(QuotaResetPools? pools) {
+    final times = [
+      for (final r in resettablePools(pools))
+        if (r.pool.earliestExpireAt case final ms?) ms,
+    ]..sort();
+    if (times.isEmpty) return null;
+    return DateTime.fromMillisecondsSinceEpoch(times.first);
+  }
+
+  /// Clock for a window / reset-chance expiry — `HH:mm` within 24h, else
+  /// `MM-dd HH:mm` (2026-09-16 semantics:「重置」stays reserved for reset
+  /// opportunities). Single copy: the two former verbatim `_fmtClock`
+  /// duplicates in the usage page and the chat sheet read this.
+  static String fmtResetClock(DateTime expiry) {
+    final hh = expiry.hour.toString().padLeft(2, '0');
+    final mm = expiry.minute.toString().padLeft(2, '0');
+    if (expiry
+        .isAfter(DateTime.now().subtract(const Duration(hours: 24)))) {
+      return '$hh:$mm';
+    }
+    return '${expiry.month.toString().padLeft(2, '0')}-'
+        '${expiry.day.toString().padLeft(2, '0')} $hh:$mm';
   }
 }
 

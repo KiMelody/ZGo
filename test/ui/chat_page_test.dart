@@ -1,10 +1,7 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zlinker/protocol/conversation.dart';
-import 'package:zlinker/state/device_session.dart';
 import 'package:zlinker/state/entitlement_poller.dart';
 import 'package:zlinker/state/quota_reset.dart';
 import 'package:zlinker/ui/chat/chat_page.dart';
@@ -12,353 +9,13 @@ import 'package:zlinker/ui/chat/subagent_detail_page.dart';
 import 'package:zlinker/ui/theme.dart';
 import 'package:zlinker/ui/ui_settings.dart';
 
-/// Recording fake: subscribes answer from a real [ConversationState] fed
-/// by hand; every mutating call is captured for assertions.
-class FakeChatGateway extends ChangeNotifier implements ChatGateway {
-  @override
-  DeviceStatus status = DeviceStatus.connected;
-  @override
-  bool kicked = false;
-  @override
-  String? error;
+import '../helpers/recording_chat_gateway.dart';
 
-  final ConversationState state = ConversationState();
-  final List<(String, List<Object?>)> calls = [];
-  final List<String> subscribedSessions = [];
-  Object Function(String method)? failSubscribeWith;
-
-  /// Plan-quota snapshot programming (quota pill / warning banner).
-  /// Default hides both (notConfigured → no data in the chat).
-  EntitlementView entitlementResult =
-      const EntitlementView(phase: EntitlementPhase.notConfigured);
-  int entitlementCalls = 0;
-
-  /// Raw `getCodingPlanResetStatus` answer (null → no usable data); use
-  /// failures throw [useQuotaError].
-  Map<String, dynamic>? quotaStatusResult;
-  int quotaStatusCalls = 0;
-  Object? useQuotaError;
-  final List<(String, String?, String)> useQuotaCalls = [];
-
-  QuotaResetController? _quotaReset;
-
-  @override
-  QuotaResetController get quotaResetController =>
-      _quotaReset ??= QuotaResetController(gateway: this);
-
-  @override
-  Future<Object?> quotaResetStatus({bool force = false}) async {
-    quotaStatusCalls++;
-    return quotaStatusResult;
-  }
-
-  @override
-  Future<void> useQuotaReset(
-    String resetType,
-    String idempotencyKey, {
-    String? preferredProviderId,
-  }) async {
-    useQuotaCalls.add((resetType, preferredProviderId, idempotencyKey));
-    final err = useQuotaError;
-    if (err != null) throw err;
-  }
-
-  @override
-  Future<EntitlementView> entitlementSnapshot({bool force = false}) async {
-    entitlementCalls++;
-    return entitlementResult;
-  }
-
-  /// Extra snapshot fields merged into every feed (queue, interactions...).
-  Map<String, dynamic> snapshotExtra = const {};
-
-  void feedSnapshot(
-    List<Map<String, dynamic>> rows, {
-    int? firstRowId,
-    int? totalCount,
-  }) {
-    state.applyFrame({
-      'toSeq': state.seq + 1,
-      'payload': {
-        'kind': 'snapshot',
-        'snapshot': {
-          'sessionId': 's1',
-          'logEpoch': 'e1',
-          'revision': 3,
-          'rows': {
-            'window': rows,
-            'totalCount': totalCount ?? rows.length,
-            'firstRowId': firstRowId,
-          },
-          ...snapshotExtra,
-        },
-      },
-    }, onGap: () => fail('unexpected gap'));
-  }
-
-  @override
-  Future<ChatHandle> subscribe(String sessionId) async {
-    subscribedSessions.add(sessionId);
-    final fail = failSubscribeWith;
-    if (fail != null) throw fail('subscribe');
-    return ChatHandle(state: state, close: () async {});
-  }
-
-  dynamic _rec(String method, [List<Object?> args = const []]) {
-    calls.add((method, args));
-    return {'status': 'accepted'};
-  }
-
-  @override
-  Future<WorkspacePrep> prepareWorkspace() async =>
-      WorkspacePrep.fromMap(const {
-        'configOptions': [
-          {
-            'id': 'model',
-            'name': '模型',
-            'currentValue': 'builtin/glm-5.2',
-            'options': [
-              {'value': 'builtin/glm-5.2', 'name': 'GLM-5.2'},
-              {'value': 'builtin/glm-5.2-air', 'name': 'GLM-5.2 Air'},
-            ],
-          },
-          {
-            'id': 'thought_level',
-            'name': '思考等级',
-            'currentValue': 'enabled',
-            'options': [
-              {'value': 'enabled', 'name': '开启'},
-              {'value': 'off', 'name': '关闭'},
-            ],
-          },
-        ],
-        'slashCommands': [
-          {'name': 'compact', 'description': '压缩上下文'},
-        ],
-      });
-
-  @override
-  Future<List<SkillEntry>> skills() async => const [];
-
-  @override
-  String? get chatWorkspaceId => 'ws-1';
-  @override
-  String? get workspacePath => '/repo/app';
-  @override
-  String? get remoteUrl =>
-      'https://zcode.z.ai/remote/v4?sid=abc&hash=xyz&t=123&mid=m1&name=demo';
-
-  @override
-  Future<void> reconnect() async => _rec('reconnect');
-
-  @override
-  Future<dynamic> renameTask(String sessionId, String title) async =>
-      _rec('renameTask', [sessionId, title]);
-  @override
-  Future<dynamic> setTaskPinned(String sessionId, bool pinned) async =>
-      _rec('setTaskPinned', [sessionId, pinned]);
-  @override
-  Future<dynamic> setTaskArchived(String sessionId, bool archived) async =>
-      _rec('setTaskArchived', [sessionId, archived]);
-  @override
-  Future<dynamic> setTaskUnread(String sessionId, bool unread) async =>
-      _rec('setTaskUnread', [sessionId, unread]);
-  @override
-  Future<dynamic> deleteTask(String sessionId) async =>
-      _rec('deleteTask', [sessionId]);
-
-  @override
-  void sendViewState({String? taskId}) {}
-
-  @override
-  Future<dynamic> reorderQueueItem(
-    String sessionId,
-    String queueItemId,
-    String? beforeQueueItemId,
-  ) async => _rec('reorderQueueItem', [sessionId, queueItemId,
-        beforeQueueItemId]);
-
-  @override
-  Future<dynamic> snoozeInteraction(String sessionId, String interactionId) =>
-      _rec('snoozeInteraction', [sessionId, interactionId]);
-
-  @override
-  Future<dynamic> cancelBackgroundWork(String sessionId, String workId) =>
-      _rec('cancelBackgroundWork', [sessionId, workId]);
-
-  @override
-  Future<dynamic> deleteSession(String sessionId) =>
-      _rec('deleteSession', [sessionId]);
-
-  @override
-  Future<dynamic> fileRewindPreview(
-    String sessionId, {
-    required Map<String, dynamic> target,
-  }) async =>
-      _rec('fileRewindPreview', [sessionId, target]);
-
-  List<Map<String, dynamic>> mentionFilesResult = const [];
-  List<Map<String, dynamic>> mentionSubagentsResult = const [];
-  List<Map<String, dynamic>> mentionSkillsResult = const [];
-  List<({String id, String title})> mentionSessionsResult = const [];
-
-  @override
-  Future<List<Map<String, dynamic>>> mentionFiles() async =>
-      mentionFilesResult;
-
-  @override
-  Future<List<Map<String, dynamic>>> mentionSkills() async =>
-      mentionSkillsResult;
-
-  @override
-  Future<List<Map<String, dynamic>>> mentionSubagents() async =>
-      mentionSubagentsResult;
-
-  @override
-  List<({String id, String title})> mentionSessions() =>
-      mentionSessionsResult;
-
-  @override
-  List<Map<String, dynamic>> mentionSkillsSync() => mentionSkillsResult;
-
-  @override
-  Future<String> createSession(
-    String workspaceId, {
-    String? firstText,
-    List<Map<String, dynamic>>? attachments,
-    Map<String, dynamic>? config,
-  }) async {
-    _rec('createSession', [workspaceId, firstText, config]);
-    return 'new-s1';
-  }
-
-  @override
-  Future<dynamic> sendText(
-    String sessionId,
-    String text, {
-    List<Map<String, dynamic>>? attachments,
-    String? heldQueueDisposition,
-  }) async => _rec('sendText', [sessionId, text, heldQueueDisposition]);
-
-  @override
-  Future<dynamic> sendGoalCommand(
-    String sessionId,
-    String text, {
-    String? heldQueueDisposition,
-  }) async => _rec('sendGoalCommand', [sessionId, text]);
-
-  @override
-  Future<dynamic> stop(String sessionId) async => _rec('stop', [sessionId]);
-  @override
-  Future<dynamic> compact(String sessionId) async =>
-      _rec('compact', [sessionId]);
-  @override
-  Future<dynamic> pauseGoal(String sessionId) async =>
-      _rec('pauseGoal', [sessionId]);
-  @override
-  Future<dynamic> resumeGoal(String sessionId) async =>
-      _rec('resumeGoal', [sessionId]);
-
-  @override
-  Future<dynamic> switchModelConfig(
-    String sessionId, {
-    required String provider,
-    required String model,
-    required String thought,
-  }) async => _rec('switchModelConfig', [sessionId, provider, model, thought]);
-
-  @override
-  Future<dynamic> switchCollaborationMode(String sessionId, String mode) =>
-      Future.value(_rec('switchCollaborationMode', [sessionId, mode]));
-
-  @override
-  Future<dynamic> setFollowupMode(String sessionId, String mode) async =>
-      _rec('setFollowupMode', [sessionId, mode]);
-
-  @override
-  Future<dynamic> setAssistantFeedback(
-    String sessionId,
-    Map<String, dynamic> target,
-    String? feedback,
-  ) =>
-      Future.value(_rec('setAssistantFeedback', [sessionId, target, feedback]));
-
-  @override
-  Future<dynamic> resolveInteraction(
-    String sessionId,
-    String interactionId, {
-    String? optionId,
-    String? freeText,
-    String? action,
-    Map<String, dynamic>? content,
-  }) => Future.value(
-    _rec('resolveInteraction', [sessionId, interactionId, optionId, content]),
-  );
-
-  @override
-  Future<dynamic> rowsRange(
-    String sessionId, {
-    int? beforeRowId,
-    int limit = 60,
-  }) async => _rec('rowsRange', [sessionId, beforeRowId, limit]);
-
-  @override
-  Future<Map<String, dynamic>> attachmentPut(
-    String sessionId, {
-    required String fileName,
-    required String mime,
-    required Uint8List bytes,
-    void Function(double progress)? onProgress,
-  }) async => {'ref': 'r1', 'fileName': fileName, 'mime': mime, 'bytes': 1};
-
-  @override
-  Future<({Uint8List bytes, String? mediaType})> attachmentRead(
-    String sessionId, {
-    required String ref,
-  }) async => (bytes: Uint8List(0), mediaType: 'application/octet-stream');
-
-  @override
-  Future<dynamic> sendQueuedNow(String sessionId, String queueItemId) async =>
-      _rec('sendQueuedNow', [sessionId, queueItemId]);
-  @override
-  Future<dynamic> editQueueItem(
-    String sessionId,
-    String queueItemId,
-    String newText,
-  ) async => _rec('editQueueItem', [sessionId, queueItemId, newText]);
-  @override
-  Future<dynamic> deleteQueueItem(String sessionId, String queueItemId) async =>
-      _rec('deleteQueueItem', [sessionId, queueItemId]);
-  @override
-  Future<dynamic> setAutoDrain(String sessionId, bool autoDrain) async =>
-      _rec('setAutoDrain', [sessionId, autoDrain]);
-  @override
-  Future<dynamic> plans(String sessionId) async => _rec('plans', [sessionId]);
-  @override
-  Future<dynamic> fileChanges(
-    String sessionId, {
-    required Map<String, dynamic> target,
-  }) async => _rec('fileChanges', [sessionId, target]);
-  @override
-  Future<dynamic> retryTurn(String sessionId, Map<String, dynamic> target) =>
-      Future.value(_rec('retryTurn', [sessionId, target]));
-  @override
-  Future<dynamic> forkAssistant(
-    String sessionId,
-    Map<String, dynamic> target,
-  ) => Future.value(_rec('forkAssistant', [sessionId, target]));
-  @override
-  Future<dynamic> editUserQuery(
-    String sessionId,
-    Map<String, dynamic> target,
-    String newText,
-  ) => Future.value(_rec('editUserQuery', [sessionId, target, newText]));
-  @override
-  Future<dynamic> applyFileRewind(
-    String sessionId,
-    Map<String, dynamic> target,
-  ) => Future.value(_rec('applyFileRewind', [sessionId, target]));
-}
+/// Chat-page fake: everything rides the shared loose-default recording
+/// gateway — real [ConversationState] frame injection via [RecordingChatGateway.feedSnapshot],
+/// command calls recorded in `calls` and answered `accepted` (the
+/// conversation command surface goes through `conversationCommands`).
+class FakeChatGateway extends RecordingChatGateway {}
 
 Widget wrap(Widget child) => MaterialApp(
   theme: buildDarkTheme(),
@@ -1276,5 +933,48 @@ void main() {
     );
     // Banner flips off with the refreshed healthy snapshot.
     expect(find.text('套餐额度已用尽'), findsNothing);
+  });
+
+  // The usage-sheet / dialog pool rules (V1 weekly hiding, untouched-window
+  // hiding, inline window clock + earliest coupon expiry) are asserted
+  // against the projection in test/state/entitlement_projection_test.dart;
+  // the test above stays as the wiring smoke (sheet → dialog → use →
+  // refresh → banner flip).
+
+  testWidgets('reset dialog degrades to the「暂无可用机会」copy when the '
+      'caller finds no resettable pool (defensive)', (tester) async {
+    final gateway = FakeChatGateway()
+      ..quotaStatusResult = {
+        'availableFiveHourResets': [
+          {
+            'expireAt': DateTime.now()
+                .add(const Duration(hours: 1))
+                .millisecondsSinceEpoch,
+          },
+        ],
+        'availableWeekResets': <Map<String, dynamic>>[],
+      };
+    final controller = QuotaResetController(gateway: gateway);
+    addTearDown(controller.dispose);
+    controller.updateScope('prov-1');
+    await controller.refresh();
+
+    await tester.pumpWidget(wrap(Builder(
+      builder: (context) => TextButton(
+        onPressed: () => showQuotaResetDialog(
+          context,
+          controller: controller,
+          resettable: const {},
+        ),
+        child: const Text('open'),
+      ),
+    )));
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    expect(find.descendant(
+        of: find.byType(AlertDialog), matching: find.text('暂无可用机会')),
+        findsOneWidget);
+    expect(find.text('重置'), findsNothing);
   });
 }

@@ -258,6 +258,11 @@ void main() {
   });
 
   // ------------------------------------------ reset opportunities (R1/R2)
+  //
+  // The reset-card rules (V1 weekly hiding, untouched-window hiding,
+  // summary-time sourcing, scope degradation) are asserted against the
+  // projection in test/state/entitlement_projection_test.dart; the smoke
+  // below stays as the page-level wiring proof.
 
   Map<String, dynamic> okPayloadWithProviderId() => {
         ...okPayload(),
@@ -303,59 +308,5 @@ void main() {
     expect(find.textContaining('上次使用重置'), findsOneWidget);
     // Read-only: no reset action anywhere.
     expect(find.text('重置'), findsNothing);
-  });
-
-  testWidgets('provider without an id renders the degraded copy', (tester) async {
-    final session = sessionWith(
-      () async => okPayload(), // provider has no id
-      resetStatusAnswer: () => resetStatusFixture(),
-    );
-    addTearDown(session.dispose);
-    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
-    await tester.pumpAndSettle();
-
-    expect(find.text('重置机会需桌面端套餐数据可用'), findsOneWidget);
-    expect(find.text('重置'), findsNothing);
-  });
-
-  testWidgets('the read-only card never issues a use RPC, and a failing '
-      'status fetch keeps the card', (tester) async {
-    var fail = false;
-    final session = FakeDeviceSession(
-      deviceId: 'd1',
-      params: paramsOf(),
-      channelHandler: (channel, method, args) async {
-        switch (method) {
-          case 'getEntitlementSnapshot':
-            return okPayloadWithProviderId();
-          case 'getCodingPlanResetStatus':
-            if (fail) throw StateError('no_bigmodel_api_key');
-            return resetStatusFixture();
-          case 'useCodingPlanReset':
-            return {'ok': true};
-        }
-        return {'dailyModelUsage': []};
-      },
-    );
-    addTearDown(session.dispose);
-    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
-    await tester.pumpAndSettle();
-
-    await tester.ensureVisible(find.text('重置机会'));
-    await tester.pumpAndSettle();
-    // Tapping the card area consumes nothing — the page is read-only.
-    await tester.tap(find.text('5 小时池'));
-    await tester.pumpAndSettle();
-    expect(
-      session.channelCalls.where((c) => c.$2 == 'useCodingPlanReset'),
-      isEmpty,
-    );
-
-    // A later failing status fetch keeps the card but flags the error —
-    // the page must not crash on the degraded path.
-    fail = true;
-    await tester.tap(find.byIcon(Icons.refresh));
-    await tester.pumpAndSettle();
-    expect(find.text('重置机会'), findsOneWidget);
   });
 }

@@ -14,6 +14,7 @@ import '../protocol/task_commands.dart';
 import 'device_store.dart';
 import 'entitlement_poller.dart';
 import 'quota_reset.dart';
+import 'task_directory.dart';
 
 /// Mirrors `HC()` in the web client:
 /// key = workspaceIdentity?.trim() || workspacePath.
@@ -140,6 +141,10 @@ abstract interface class NotifiableSession
   /// since [sessions] only ever covers the subscribed workspace. Raw `Dg`
   /// maps; a device that never got an overview reports an empty list.
   List<Map<String, dynamic>> get relayTasks;
+
+  /// The merged task directory over [relayTasks] ⊕ [sessions] — the one
+  /// projection of the merge rule (see [TaskDirectory]).
+  TaskDirectory get taskDirectory;
 }
 
 /// A live conversation subscription handed to the chat UI: [state] is the
@@ -155,11 +160,22 @@ class ChatHandle {
 /// [AutomationHost]/[OffPeakHost] seam pattern applied to conversations.
 /// [DeviceSession] implements it against the live transport; tests fake it
 /// (recording calls, answering from a real [ConversationState] fed by hand).
+///
+/// Lifecycle and state reading stay on the gateway; the whole conversation
+/// command surface collapses into [conversationCommands] (a
+/// [ConversationTransport] accessor — UI-holding protocol types has
+/// precedent in [ConversationState], so no layering rule is broken and no
+/// narrower command interface is invented for a single implementation).
 abstract interface class ChatGateway
     implements Listenable, QuotaResetGateway {
   DeviceStatus get status;
   bool get kicked;
   String? get error;
+
+  /// Conversation V4 commands of the active workspace (sendText / stop /
+  /// queue / model switches / row actions / attachments / …). The session
+  /// owns the transport; throws when no workspace is open.
+  ConversationTransport get conversationCommands;
 
   /// Task metadata commands (rename/pin/archive/unread). Method names are
   /// source-confirmed — see [TaskCommandsPort].
@@ -190,114 +206,6 @@ abstract interface class ChatGateway
   Future<WorkspacePrep> prepareWorkspace();
   Future<List<SkillEntry>> skills();
 
-  Future<String> createSession(
-    String workspaceId, {
-    String? firstText,
-    List<Map<String, dynamic>>? attachments,
-    Map<String, dynamic>? config,
-  });
-
-  Future<dynamic> sendText(
-    String sessionId,
-    String text, {
-    List<Map<String, dynamic>>? attachments,
-    String? heldQueueDisposition,
-  });
-
-  Future<dynamic> sendGoalCommand(
-    String sessionId,
-    String text, {
-    String? heldQueueDisposition,
-  });
-
-  Future<dynamic> stop(String sessionId);
-  Future<dynamic> compact(String sessionId);
-  Future<dynamic> pauseGoal(String sessionId);
-  Future<dynamic> resumeGoal(String sessionId);
-
-  Future<dynamic> switchModelConfig(
-    String sessionId, {
-    required String provider,
-    required String model,
-    required String thought,
-  });
-
-  Future<dynamic> switchCollaborationMode(String sessionId, String mode);
-  Future<dynamic> setFollowupMode(String sessionId, String mode);
-  Future<dynamic> setAssistantFeedback(
-    String sessionId,
-    Map<String, dynamic> target,
-    String? feedback,
-  );
-  Future<dynamic> resolveInteraction(
-    String sessionId,
-    String interactionId, {
-    String? optionId,
-    String? freeText,
-    String? action,
-    Map<String, dynamic>? content,
-  });
-
-  Future<dynamic> rowsRange(String sessionId, {int? beforeRowId, int limit});
-
-  Future<Map<String, dynamic>> attachmentPut(
-    String sessionId, {
-    required String fileName,
-    required String mime,
-    required Uint8List bytes,
-    void Function(double progress)? onProgress,
-  });
-
-  Future<({Uint8List bytes, String? mediaType})> attachmentRead(
-    String sessionId, {
-    required String ref,
-  });
-
-  Future<dynamic> sendQueuedNow(String sessionId, String queueItemId);
-  Future<dynamic> editQueueItem(
-    String sessionId,
-    String queueItemId,
-    String newText,
-  );
-  Future<dynamic> deleteQueueItem(String sessionId, String queueItemId);
-  Future<dynamic> setAutoDrain(String sessionId, bool autoDrain);
-  Future<dynamic> reorderQueueItem(
-    String sessionId,
-    String queueItemId,
-    String? beforeQueueItemId,
-  );
-
-  /// Defers the interaction auto-resolution (「提问自动继续」timer).
-  Future<dynamic> snoozeInteraction(String sessionId, String interactionId);
-
-  /// Cancels a background work item (terminal / subagent banner ✕).
-  Future<dynamic> cancelBackgroundWork(String sessionId, String workId);
-
-  /// Deletes the whole session (confirm in the UI first).
-  Future<dynamic> deleteSession(String sessionId);
-  Future<dynamic> plans(String sessionId);
-  Future<dynamic> fileChanges(
-    String sessionId, {
-    required Map<String, dynamic> target,
-  });
-  Future<dynamic> retryTurn(String sessionId, Map<String, dynamic> target);
-  Future<dynamic> forkAssistant(String sessionId, Map<String, dynamic> target);
-  Future<dynamic> editUserQuery(
-    String sessionId,
-    Map<String, dynamic> target,
-    String newText,
-  );
-  Future<dynamic> applyFileRewind(
-    String sessionId,
-    Map<String, dynamic> target,
-  );
-
-  /// Precheck for a rewind (conversationFileRewindPreviewV4).
-  Future<dynamic> fileRewindPreview(
-    String sessionId, {
-    required Map<String, dynamic> target,
-  });
-
   /// @-mention data sources (web chat.mention.* picker).
   /// Files of the active workspace: {name, path, relativePath, type}.
   Future<List<Map<String, dynamic>>> mentionFiles();
@@ -325,7 +233,7 @@ abstract interface class ChatGateway
   /// Session-wide reset-opportunity controller (usage page card + chat
   /// banner action). Lazily created with the gateway, disposed with the
   /// session; UI only reads [QuotaResetController.pools] and calls
-  /// updateScope/refresh/use.
+  /// refresh/use — the scope is injected by [entitlementSnapshot].
   QuotaResetController get quotaResetController;
 }
 
@@ -439,6 +347,16 @@ class DeviceSession extends ChangeNotifier
   /// Relay task list (raw `Dg` maps).
   @override
   List<Map<String, dynamic>> get relayTasks => _relayTasks;
+
+  /// Merged task directory (relay overview ⊕ live sessions-index),
+  /// recomputed on every read — see [TaskDirectory].
+  @override
+  TaskDirectory get taskDirectory => TaskDirectory(
+        relayTasks: relayTasks,
+        sessions: sessions,
+        activeWorkspaceKey:
+            activeWorkspace == null ? null : workspaceKeyOf(activeWorkspace!),
+      );
 
   /// True while a workspace bridge + sessions-index open is in flight.
   bool get openingWorkspace => _openingWorkspace;
@@ -1068,6 +986,13 @@ class DeviceSession extends ChangeNotifier
     return conv;
   }
 
+  /// Conversation V4 command surface (ChatGateway): the live transport of
+  /// the active workspace. Commands go straight to it — no per-command
+  /// forwarding — while lifecycle (subscribe/prepare/skills) and state
+  /// reading stay on the session below.
+  @override
+  ConversationTransport get conversationCommands => _requireConversation;
+
   @override
   String? get chatWorkspaceId {
     final fromIndex = sessions?.workspaceId;
@@ -1158,213 +1083,6 @@ class DeviceSession extends ChangeNotifier
   }
 
   @override
-  Future<String> createSession(
-    String workspaceId, {
-    String? firstText,
-    List<Map<String, dynamic>>? attachments,
-    Map<String, dynamic>? config,
-  }) => _requireConversation.createSession(
-    workspaceId,
-    firstText: firstText,
-    attachments: attachments,
-    config: config,
-  );
-
-  @override
-  Future<dynamic> sendText(
-    String sessionId,
-    String text, {
-    List<Map<String, dynamic>>? attachments,
-    String? heldQueueDisposition,
-  }) => _requireConversation.sendText(
-    sessionId,
-    text,
-    attachments: attachments,
-    heldQueueDisposition: heldQueueDisposition,
-  );
-
-  @override
-  Future<dynamic> sendGoalCommand(
-    String sessionId,
-    String text, {
-    String? heldQueueDisposition,
-  }) => _requireConversation.sendGoalCommand(
-    sessionId,
-    text,
-    heldQueueDisposition: heldQueueDisposition,
-  );
-
-  @override
-  Future<dynamic> stop(String sessionId) =>
-      _requireConversation.stop(sessionId);
-
-  @override
-  Future<dynamic> compact(String sessionId) =>
-      _requireConversation.compact(sessionId);
-
-  @override
-  Future<dynamic> pauseGoal(String sessionId) =>
-      _requireConversation.pauseGoal(sessionId);
-
-  @override
-  Future<dynamic> resumeGoal(String sessionId) =>
-      _requireConversation.resumeGoal(sessionId);
-
-  @override
-  Future<dynamic> switchModelConfig(
-    String sessionId, {
-    required String provider,
-    required String model,
-    required String thought,
-  }) => _requireConversation.switchModelConfig(
-    sessionId,
-    provider: provider,
-    model: model,
-    thought: thought,
-  );
-
-  @override
-  Future<dynamic> switchCollaborationMode(String sessionId, String mode) =>
-      _requireConversation.switchCollaborationMode(sessionId, mode);
-
-  @override
-  Future<dynamic> setFollowupMode(String sessionId, String mode) =>
-      _requireConversation.setFollowupMode(sessionId, mode);
-
-  @override
-  Future<dynamic> setAssistantFeedback(
-    String sessionId,
-    Map<String, dynamic> target,
-    String? feedback,
-  ) => _requireConversation.setAssistantFeedback(sessionId, target, feedback);
-
-  @override
-  Future<dynamic> resolveInteraction(
-    String sessionId,
-    String interactionId, {
-    String? optionId,
-    String? freeText,
-    String? action,
-    Map<String, dynamic>? content,
-  }) => _requireConversation.resolveInteraction(
-    sessionId,
-    interactionId,
-    optionId: optionId,
-    freeText: freeText,
-    action: action,
-    content: content,
-  );
-
-  @override
-  Future<dynamic> rowsRange(
-    String sessionId, {
-    int? beforeRowId,
-    int limit = 60,
-  }) => _requireConversation.rowsRange(
-    sessionId,
-    beforeRowId: beforeRowId,
-    limit: limit,
-  );
-
-  @override
-  Future<Map<String, dynamic>> attachmentPut(
-    String sessionId, {
-    required String fileName,
-    required String mime,
-    required Uint8List bytes,
-    void Function(double progress)? onProgress,
-  }) => _requireConversation.attachmentPut(
-    sessionId,
-    fileName: fileName,
-    mime: mime,
-    bytes: bytes,
-    onProgress: onProgress,
-  );
-
-  @override
-  Future<({Uint8List bytes, String? mediaType})> attachmentRead(
-    String sessionId, {
-    required String ref,
-  }) => _requireConversation.attachmentRead(sessionId, ref: ref);
-
-  @override
-  Future<dynamic> sendQueuedNow(String sessionId, String queueItemId) =>
-      _requireConversation.sendQueuedNow(sessionId, queueItemId);
-
-  @override
-  Future<dynamic> editQueueItem(
-    String sessionId,
-    String queueItemId,
-    String newText,
-  ) => _requireConversation.editQueueItem(sessionId, queueItemId, newText);
-
-  @override
-  Future<dynamic> deleteQueueItem(String sessionId, String queueItemId) =>
-      _requireConversation.deleteQueueItem(sessionId, queueItemId);
-
-  @override
-  Future<dynamic> setAutoDrain(String sessionId, bool autoDrain) =>
-      _requireConversation.setAutoDrain(sessionId, autoDrain);
-
-  @override
-  Future<dynamic> reorderQueueItem(
-          String sessionId, String queueItemId, String? beforeQueueItemId) =>
-      _requireConversation.reorderQueueItem(
-          sessionId, queueItemId, beforeQueueItemId);
-
-  @override
-  Future<dynamic> snoozeInteraction(String sessionId, String interactionId) =>
-      _requireConversation.snoozeInteractionAutoResolution(
-          sessionId, interactionId);
-
-  @override
-  Future<dynamic> cancelBackgroundWork(String sessionId, String workId) =>
-      _requireConversation.cancelBackgroundWork(sessionId, workId);
-
-  @override
-  Future<dynamic> deleteSession(String sessionId) =>
-      _requireConversation.deleteSession(sessionId);
-
-  @override
-  Future<dynamic> plans(String sessionId) =>
-      _requireConversation.plans(sessionId);
-
-  @override
-  Future<dynamic> fileChanges(
-    String sessionId, {
-    required Map<String, dynamic> target,
-  }) => _requireConversation.fileChanges(sessionId, target: target);
-
-  @override
-  Future<dynamic> retryTurn(String sessionId, Map<String, dynamic> target) =>
-      _requireConversation.retryTurn(sessionId, target);
-
-  @override
-  Future<dynamic> forkAssistant(
-    String sessionId,
-    Map<String, dynamic> target,
-  ) => _requireConversation.forkAssistant(sessionId, target);
-
-  @override
-  Future<dynamic> editUserQuery(
-    String sessionId,
-    Map<String, dynamic> target,
-    String newText,
-  ) => _requireConversation.editUserQuery(sessionId, target, newText);
-
-  @override
-  Future<dynamic> applyFileRewind(
-    String sessionId,
-    Map<String, dynamic> target,
-  ) => _requireConversation.applyFileRewind(sessionId, target);
-
-  @override
-  Future<dynamic> fileRewindPreview(
-    String sessionId, {
-    required Map<String, dynamic> target,
-  }) => _requireConversation.fileRewindPreview(sessionId, target: target);
-
-  @override
   Future<List<Map<String, dynamic>>> mentionFiles() async {
     final root = workspacePath;
     if (root == null || root.isEmpty) return const [];
@@ -1444,15 +1162,22 @@ class DeviceSession extends ChangeNotifier
       );
 
   @override
-  Future<EntitlementView> entitlementSnapshot({bool force = false}) =>
-      (_entitlementPoller ??= EntitlementPoller(fetch: _fetchEntitlement))
-          .refresh(force: force);
+  Future<EntitlementView> entitlementSnapshot({bool force = false}) async {
+    final view = await (_entitlementPoller ??=
+        EntitlementPoller(fetch: _fetchEntitlement))
+        .refresh(force: force);
+    // The reset scope rides the snapshot (design Q2a): the session injects
+    // the provider id, so consumers never touch the raw map. Same value is
+    // a no-op.
+    quotaResetController.updateScope(view.resetScopeProviderId);
+    return view;
+  }
 
   /// Session-wide reset-opportunity controller — lazily created like
   /// [_entitlementPoller], disposed with the session. The scope
-  /// (`preferredProviderId`) is injected by consumers from the
-  /// entitlement ok snapshot via [QuotaResetController.updateScope]; the
-  /// forwarded RPCs below read it back as the single source.
+  /// (`preferredProviderId`) is injected by [entitlementSnapshot] from
+  /// the entitlement snapshot; the forwarded RPCs below read it back as
+  /// the single source.
   QuotaResetController? _quotaReset;
 
   @override
