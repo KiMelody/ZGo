@@ -7,7 +7,8 @@ import 'theme.dart';
 /// Running phases get a spinner instead of a static icon.
 ///
 /// [solid] matches the official mobile list pills: an opaque surface
-/// (#46BF72 for done, #001D3D for running) with contrasting text.
+/// ([ZInk.pillSuccessBg] / [ZInk.pillRunningBg], theme-branched) with
+/// contrasting text.
 class PhasePill extends StatelessWidget {
   final String label;
   final String phase;
@@ -33,14 +34,14 @@ class PhasePill extends StatelessWidget {
     if (solid) {
       final done = phase == 'completedSuccess';
       final bg = done
-          ? ZColors.pillSuccessBg
+          ? ZInk.pillSuccessBg(context)
           : running
-              ? ZColors.pillRunningBg
+              ? ZInk.pillRunningBg(context)
               : color.withValues(alpha: 0.15);
       final fg = done
           ? Colors.black
           : running
-              ? ZColors.neutral200.withValues(alpha: 0.87)
+              ? ZInk.pillRunningFg(context)
               : color;
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),

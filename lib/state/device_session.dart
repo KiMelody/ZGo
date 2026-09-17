@@ -1152,14 +1152,92 @@ class DeviceSession extends ChangeNotifier
   /// on first use and disposed with the session.
   EntitlementPoller? _entitlementPoller;
 
-  /// usage-stats channel fetch for [_entitlementPoller].
-  Future<dynamic> _fetchEntitlement() => callChannel(
-        'usage-stats',
-        'getEntitlementSnapshot',
-        [
-          {'includeSubscription': true}
-        ],
-      );
+  /// Fallback plan access — the maintainer's plan. Other plans rely on the
+  /// derivation in [_resolvePlanAccess] or degrade to the pre-3.12.3
+  /// display until the desktop's provider registry backfills.
+  static const _planAccessConstant = {
+    'providerId': 'account:zai-individual-coding-plan',
+    'accountAccess': {
+      'type': 'zhipu-account',
+      'family': 'zai',
+      'planKind': 'individual-coding-plan',
+    },
+  };
+
+  /// Maps a coding-plan provider id (`account:<family>-<planKind>`) onto the
+  /// `{providerId, accountAccess}` pair the 3.12.3 quota wire requires;
+  /// null for ids outside the known families (zai|bigmodel, from the
+  /// desktop bundle's zod schema).
+  static Map<String, dynamic>? parsePlanAccess(String providerId) {
+    final m = RegExp(r'^account:(zai|bigmodel)-(.+)$').firstMatch(providerId);
+    if (m == null) return null;
+    return {
+      'providerId': providerId,
+      'accountAccess': {
+        'type': 'zhipu-account',
+        'family': m.group(1),
+        'planKind': m.group(2),
+      },
+    };
+  }
+
+  /// The coding-plan provider the 3.12.3+ quota wire targets, resolved once
+  /// per session: derived from the current model selection when its provider
+  /// is a coding-plan id, else the constant fallback. Cached including
+  /// misses so the 5-minute entitlement refresh never stacks an extra RPC.
+  Map<String, dynamic>? _planAccess;
+
+  Future<Map<String, dynamic>> _resolvePlanAccess() async {
+    final cached = _planAccess;
+    if (cached != null) return cached;
+    Map<String, dynamic> plan = _planAccessConstant;
+    try {
+      final relay = _relayTasks;
+      if (relay.isNotEmpty) {
+        final first = relay.first;
+        final sel = await callChannel('zcode-task', 'getTaskModelSelection', [
+          {
+            'taskId': '${first['taskId']}',
+            'workspacePath': '${first['workspacePath']}',
+            if (first['workspaceIdentity'] != null)
+              'workspaceIdentity': first['workspaceIdentity'],
+          }
+        ]);
+        final providerId = sel is Map ? sel['providerId'] : null;
+        if (providerId is String) {
+          plan = parsePlanAccess(providerId) ?? plan;
+        }
+      }
+    } catch (_) {
+      // Best-effort derivation; the constant fallback covers it.
+    }
+    return _planAccess = plan;
+  }
+
+  /// usage-stats channel fetch for [_entitlementPoller]. Pre-3.12.3 the
+  /// bare call is the official wire; 3.12.3+ gates the quota APIs on the
+  /// full official parameter set (accountAccess — live-probed 2026-09-17,
+  /// task internal-task). A failing full call throws into the
+  /// poller's error phase — no bare retry: on 3.12.3 the bare form answers
+  /// not_configured, so a retry would add zero information.
+  Future<dynamic> _fetchEntitlement() async {
+    if (!params.atLeast(3, 12, 3)) {
+      return callChannel('usage-stats', 'getEntitlementSnapshot', [
+        {'includeSubscription': true}
+      ]);
+    }
+    final plan = await _resolvePlanAccess();
+    return callChannel('usage-stats', 'getEntitlementSnapshot', [
+      {
+        'includeSubscription': true,
+        'preferredProviderId': plan['providerId'],
+        'accountAccess': plan['accountAccess'],
+        'allowDisabledPreferredProvider': true,
+        'requirePreferredProvider': true,
+        'allowEnvApiKey': false,
+      }
+    ]);
+  }
 
   @override
   Future<EntitlementView> entitlementSnapshot({bool force = false}) async {
@@ -1185,23 +1263,52 @@ class DeviceSession extends ChangeNotifier
       _quotaReset ??= QuotaResetController(gateway: this);
 
   @override
-  Future<Object?> quotaResetStatus({bool force = false}) =>
-      callChannel('usage-stats', 'getCodingPlanResetStatus', [
+  Future<Object?> quotaResetStatus({bool force = false}) async {
+    if (!params.atLeast(3, 12, 3)) {
+      return callChannel('usage-stats', 'getCodingPlanResetStatus', [
         {'preferredProviderId': quotaResetController.scopeProviderId},
       ]);
+    }
+    // 3.12.3 requires accountAccess (coding_plan_reset_account_access_
+    // required otherwise); before the first snapshot lands the scope is
+    // still null, so the resolved plan provider stands in.
+    final plan = await _resolvePlanAccess();
+    return callChannel('usage-stats', 'getCodingPlanResetStatus', [
+      {
+        'preferredProviderId':
+            quotaResetController.scopeProviderId ?? plan['providerId'],
+        'accountAccess': plan['accountAccess'],
+      }
+    ]);
+  }
 
   @override
   Future<void> useQuotaReset(
     String resetType,
     String idempotencyKey, {
     String? preferredProviderId,
-  }) => callChannel('usage-stats', 'useCodingPlanReset', [
+  }) async {
+    if (!params.atLeast(3, 12, 3)) {
+      return callChannel('usage-stats', 'useCodingPlanReset', [
         {
           'preferredProviderId': preferredProviderId,
           'idempotencyKey': idempotencyKey,
           'resetType': resetType,
         },
       ]);
+    }
+    // Same injection as the status call (destructive op — unverifiable by
+    // probe; the status call's accepted shape validates the form).
+    final plan = await _resolvePlanAccess();
+    await callChannel('usage-stats', 'useCodingPlanReset', [
+      {
+        'preferredProviderId': preferredProviderId ?? plan['providerId'],
+        'idempotencyKey': idempotencyKey,
+        'resetType': resetType,
+        'accountAccess': plan['accountAccess'],
+      }
+    ]);
+  }
 
   /// Cleanly closes the connection so the in-app WebView (or another
   /// terminal) can take the slot without a KICK race. Callers reconnect

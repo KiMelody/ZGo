@@ -69,4 +69,31 @@ class RemoteConnectionParams {
 
   bool get uriSchemeIsSecure =>
       source.scheme == 'https' || source.scheme == 'wss';
+
+  /// Parsed [appVersion] as up to three numeric segments; null when absent
+  /// or any segment is non-numeric (e.g. a `-beta` suffix) — callers must
+  /// treat null as "unknown", never as "new".
+  List<int>? get _versionTriple {
+    final parts = appVersion?.split('.');
+    if (parts == null) return null;
+    final triple = <int>[];
+    for (var i = 0; i < 3; i++) {
+      final n = i < parts.length ? int.tryParse(parts[i]) : 0;
+      if (n == null) return null;
+      triple.add(n);
+    }
+    return triple;
+  }
+
+  /// Whether the desktop's `app_version` is at least [major].[minor].[patch]
+  /// — the first-level gate for 3.12.3 wire shapes (quota `accountAccess`,
+  /// automation `scheduleRule`, off-peak positional args). Unknown, absent
+  /// or malformed versions answer false so legacy shapes stay the default.
+  bool atLeast(int major, int minor, int patch) {
+    final t = _versionTriple;
+    if (t == null) return false;
+    if (t[0] != major) return t[0] > major;
+    if (t[1] != minor) return t[1] > minor;
+    return t[2] >= patch;
+  }
 }

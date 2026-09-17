@@ -644,6 +644,7 @@ class _ChatPageState extends State<ChatPage> {
     final type = await showQuotaResetDialog(
       context,
       controller: widget.gateway.quotaResetController,
+      resettable: resettable,
     );
     if (!mounted || type == null) return;
     _toast(tr(context, 'usage.reset.success'));
@@ -1314,7 +1315,10 @@ class _ChatPageState extends State<ChatPage> {
   Widget _kickedOverlay(BuildContext context) {
     return Positioned.fill(
       child: Material(
-        color: ZColors.darkBackground.withValues(alpha: 0.92),
+        color: (ZInk.isDark(context)
+                ? ZColors.darkBackground
+                : ZColors.lightBackground)
+            .withValues(alpha: 0.92),
         child: Center(
           child: Padding(
             padding: const EdgeInsets.all(ZSpacing.emptyState),
@@ -2040,13 +2044,19 @@ class _UserBubbleState extends State<_UserBubble> {
             margin: const EdgeInsets.only(left: 56, top: 8, bottom: 8),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
-              color: ZColors.darkCard,
+              color: ZInk.card(context),
               borderRadius: const BorderRadius.only(
                 topLeft: Radius.circular(ZRadius.tile),
                 topRight: Radius.circular(ZRadius.tile),
                 bottomLeft: Radius.circular(ZRadius.tile),
                 bottomRight: Radius.circular(ZRadius.mini),
               ),
+              // Mock ruling 09-19: the light bubble is a white card and
+              // needs the hairline to separate from the light background;
+              // dark keeps the bare darkCard surface (zero dark delta).
+              border: ZInk.isDark(context)
+                  ? null
+                  : Border.all(color: ZInk.hairline(context)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.end,
@@ -4042,9 +4052,7 @@ class _QueueBar extends StatelessWidget {
                 padding: EdgeInsets.only(bottom: i == items.length - 1 ? 0 : 4),
                 child: Container(
                   decoration: BoxDecoration(
-                    color: Theme.of(context).brightness == Brightness.dark
-                        ? ZColors.darkCard
-                        : ZColors.lightCard,
+                    color: ZInk.card(context),
                     borderRadius: BorderRadius.circular(ZRadius.field),
                     border: Border.all(color: ZInk.hairline(context)),
                   ),
@@ -5217,7 +5225,9 @@ class _UsageSheet extends StatelessWidget {
   /// columns and the reset countdown read it; no polling inside the sheet.
   final EntitlementView? entitlement;
   final QuotaResetController controller;
-  final VoidCallback onUseReset;
+
+  /// Opens the reset dialog with the pools this sheet found resettable.
+  final void Function(Set<String>) onUseReset;
 
   const _UsageSheet({
     required this.state,
@@ -5266,7 +5276,7 @@ class _UsageSheet extends StatelessWidget {
   }
 
   /// R1 — capacity head: label + used/max/pct on the right, gradient bar
-  /// below (track #353535; orange above the >0.8 high-ratio threshold).
+  /// below (official `bg-surface` track; orange above the >0.8 threshold).
   Widget _contextSection(BuildContext context, ContextUsageView view) {
     final ratio = view.ratio ?? 0.0;
     return Column(
@@ -5298,7 +5308,7 @@ class _UsageSheet extends StatelessWidget {
           value: ratio,
           height: 10,
           radius: 5,
-          track: _usageTrackColor,
+          track: ZInk.barTrackSoft(context),
           orange: ratio > 0.8,
           gradient: true,
         ),
@@ -5325,7 +5335,7 @@ class _UsageSheet extends StatelessWidget {
                     width: 8,
                     height: 8,
                     decoration: BoxDecoration(
-                      color: ZColors.usageBlue
+                      color: ZInk.usageBlue(context)
                           .withValues(alpha: _legendOpacity(i)),
                       shape: BoxShape.circle,
                     ),
@@ -5416,14 +5426,6 @@ class _UsageSheet extends StatelessWidget {
                   color: ZInk.solid(context),
                 ),
               ),
-              if (countdown != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: Text(
-                    trP(context, 'chat.usage.remaining.resetsIn', [countdown]),
-                    style: ZType.sub.copyWith(color: ZColors.usageGreen),
-                  ),
-                ),
               if (percent != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 14),
@@ -5433,14 +5435,15 @@ class _UsageSheet extends StatelessWidget {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 10, vertical: 3),
                         decoration: BoxDecoration(
-                          color: ZColors.usageGreen.withValues(alpha: 0.15),
+                          color: ZInk.usageGreen(context)
+                              .withValues(alpha: 0.15),
                           borderRadius: BorderRadius.circular(ZRadius.field),
                         ),
                         child: Text(
                           tr(context, 'chat.usage.limit.fiveHour'),
                           style: ZType.caption.copyWith(
                             height: 1.2,
-                            color: ZColors.usageGreen,
+                            color: ZInk.usageGreen(context),
                           ),
                         ),
                       ),
@@ -5454,6 +5457,14 @@ class _UsageSheet extends StatelessWidget {
                         style:
                             ZType.sub.copyWith(color: ZInk.muted(context)),
                       ),
+                      if (windowClock != null) ...[
+                        const SizedBox(width: 6),
+                        Text(
+                          windowClock,
+                          style: ZType.caption.copyWith(
+                              color: ZInk.faint(context)),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -5466,7 +5477,8 @@ class _UsageSheet extends StatelessWidget {
                     color: ZInk.hairline(context),
                     borderRadius: BorderRadius.circular(ZRadius.field),
                     border: Border.all(
-                      color: ZColors.usageGreen.withValues(alpha: 0.35),
+                      color: ZInk.usageGreen(context)
+                          .withValues(alpha: 0.35),
                     ),
                   ),
                   child: Row(
@@ -5474,7 +5486,11 @@ class _UsageSheet extends StatelessWidget {
                     children: [
                       Expanded(
                         child: Text(
-                          trP(context, 'chat.usage.resetCredits', ['$credits']),
+                          earliestReset == null
+                              ? trP(context, 'chat.usage.resetCredits',
+                                  ['$credits'])
+                              : trP(context, 'chat.usage.resetCreditsExpiry',
+                                  ['$credits', earliestReset]),
                           style: ZType.sub.copyWith(color: ZInk.muted(context)),
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -5483,9 +5499,9 @@ class _UsageSheet extends StatelessWidget {
                       TextButton(
                         onPressed: () => onUseReset(resettableTypes),
                         style: TextButton.styleFrom(
-                          backgroundColor:
-                              ZColors.usageGreen.withValues(alpha: 0.15),
-                          foregroundColor: ZColors.usageGreen,
+                          backgroundColor: ZInk.usageGreen(context)
+                              .withValues(alpha: 0.15),
+                          foregroundColor: ZInk.usageGreen(context),
                           padding: const EdgeInsets.symmetric(
                               horizontal: 14, vertical: 5),
                           minimumSize: Size.zero,
@@ -5575,7 +5591,7 @@ class _UsageSheet extends StatelessWidget {
           value: percent / 100,
           height: 5,
           radius: 3,
-          track: ZColors.neutral700,
+          track: ZInk.barTrack(context),
           orange: orange,
         ),
       ],
@@ -5583,9 +5599,10 @@ class _UsageSheet extends StatelessWidget {
   }
 }
 
-/// Reference-panel tones without a ZColors token: the capacity-bar track
-/// and the gradient's deep stop (#353535 / #4185D5, pixel spec).
-const _usageTrackColor = Color(0xFF353535);
+/// Reference-panel tone without a ZColors token: the gradient's deep stop
+/// (#4185D5 pixel spec ≈ the official color-mix step; same value in both
+/// modes, design.md §3b). The old #353535 track moved into
+/// [ZInk.barTrackSoft].
 const _usageBlueDeep = Color(0xFF4185D5);
 
 /// Rounded track + fill bar of the usage panel. The capacity bar carries
@@ -5610,7 +5627,7 @@ class _UsageBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final fill = orange ? ZColors.usageOrange : ZColors.usageBlue;
+    final fill = orange ? ZInk.usageOrange(context) : ZInk.usageBlue(context);
     return LayoutBuilder(
       builder: (context, constraints) {
         return Container(
@@ -5626,8 +5643,8 @@ class _UsageBar extends StatelessWidget {
               decoration: BoxDecoration(
                 color: gradient && !orange ? null : fill,
                 gradient: gradient && !orange
-                    ? const LinearGradient(
-                        colors: [ZColors.usageBlue, _usageBlueDeep],
+                    ? LinearGradient(
+                        colors: [ZInk.usageBlue(context), _usageBlueDeep],
                       )
                     : null,
                 borderRadius: BorderRadius.circular(radius),
@@ -5779,7 +5796,7 @@ class _SlashCommandBar extends StatelessWidget {
         margin: const EdgeInsets.fromLTRB(14, 4, 14, 0),
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
-          color: ZColors.darkCard,
+          color: ZInk.card(context),
           borderRadius: BorderRadius.circular(ZRadius.tile),
         ),
         child: Text(
@@ -5792,7 +5809,7 @@ class _SlashCommandBar extends StatelessWidget {
       margin: const EdgeInsets.fromLTRB(14, 4, 14, 0),
       constraints: const BoxConstraints(maxHeight: 260),
       decoration: BoxDecoration(
-        color: ZColors.darkCard,
+        color: ZInk.card(context),
         borderRadius: BorderRadius.circular(ZRadius.tile),
         border: Border.all(color: ZInk.hairline(context)),
       ),
@@ -5803,11 +5820,9 @@ class _SlashCommandBar extends StatelessWidget {
             ListTile(
               dense: true,
               leading: Icon(
-                command.isSkill
-                    ? Icons.auto_awesome_outlined
-                    : (command.name == 'compact' ? Icons.compress : Icons.bolt),
+                command.isSkill ? ZSymbols.extension : ZSymbols.terminal,
                 size: 16,
-                color: command.isSkill ? ZColors.warning : ZColors.sky500,
+                color: ZInk.iconNeutral(context),
               ),
               title: Text(
                 command.isSkill ? '\$${command.name}' : '/${command.name}',
@@ -6074,7 +6089,7 @@ class _InputBarState extends State<_InputBar> {
         child: Container(
           padding: const EdgeInsets.fromLTRB(6, 6, 6, 6),
           decoration: BoxDecoration(
-            color: ZColors.darkCard,
+            color: ZInk.card(context),
             borderRadius: BorderRadius.circular(ZRadius.tile),
             border: Border.all(color: ZInk.hairline(context)),
           ),

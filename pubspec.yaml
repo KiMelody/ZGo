@@ -104,6 +104,11 @@ flutter:
           weight: 500
         - asset: assets/fonts/NotoSansSC-SemiBold.ttf
           weight: 600
+    # Material Symbols Rounded — static instance (Rounded/wght400/FILL0),
+    # subset to the ZSymbols codepoints by tool/material_symbols_subset.py.
+    - family: MaterialSymbolsRounded
+      fonts:
+        - asset: assets/fonts/MaterialSymbolsRounded.ttf
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

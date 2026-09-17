@@ -6,6 +6,7 @@ import 'package:zlinker/state/entitlement_poller.dart';
 import 'package:zlinker/state/quota_reset.dart';
 import 'package:zlinker/ui/chat/chat_page.dart';
 import 'package:zlinker/ui/chat/subagent_detail_page.dart';
+import 'package:zlinker/ui/quota_reset_dialog.dart';
 import 'package:zlinker/ui/theme.dart';
 import 'package:zlinker/ui/ui_settings.dart';
 
@@ -889,8 +890,10 @@ void main() {
     await tester.pumpAndSettle();
     // Remaining-quota block (R4): the aggregated reset-credit row is the
     // single reset entry (the per-pool lines were dropped in the restyle).
+    // 2026-09-16 semantics: the row carries the earliest coupon expiry.
     expect(find.text('剩余额度'), findsOneWidget);
-    expect(find.text('重置券 · 可用 1 张'), findsOneWidget);
+    expect(find.textContaining('可用 1 张'), findsOneWidget);
+    expect(find.textContaining('最早'), findsOneWidget);
     expect(find.text('使用重置券'), findsOneWidget);
 
     await tester.tap(find.text('使用重置券'));

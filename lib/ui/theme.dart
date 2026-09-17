@@ -53,10 +53,24 @@ class ZColors {
   // Usage panel (desktop/remote entitlement panel, pixel-measured
   // 2026-09-15 — research/reference-panel-spec.md). Panel-only accents:
   // the existing brand/status tokens take different values, so they stay
-  // untouched and these are additive.
-  static const usageBlue = Color(0xFF4099FF); // bar fill + legend dot base
-  static const usageOrange = Color(0xFFFF8A30); // high-ratio / >=90% limit
-  static const usageGreen = Color(0xFF87D9A4); // reset countdown + pill
+  // untouched and these are additive. Dark values; read them through the
+  // [ZInk.usage*] slots which branch to the light counterparts below
+  // (official light mode deepens/saturates — design.md §3b).
+  static const usageBlue = Color(0xFF4099FF); // --color-usage-chart-1
+  static const usageOrange = Color(0xFFFF8A30); // --color-usage-chart-5
+  static const usageGreen = Color(0xFF87D9A4); // confirmation-foreground
+
+  // theme-zai-light counterparts (09-19 value table, all direct lifts).
+  static const usageBlueLight = Color(0xFF0B7FFF); // --color-usage-chart-1
+  static const usageOrangeLight = Color(0xFFE07B00); // --color-usage-chart-5
+  static const usageGreenLight = Color(0xFF166B32); // confirmation-foreground
+  static const pillRunningBgLight = Color(0xFFEBF4FF); // --color-accent
+  static const pillRunningFgLight = Color(0xFF0066DD); // ask-foreground
+  static const pillSuccessBgLight = Color(0xFF1E8A3E); // --color-success
+
+  // Task-group color dot ('purple' group — live-probed desktop palette;
+  // the other palette names map onto the brand/status tokens above).
+  static const violet400 = Color(0xFFA78BFA);
 }
 
 /// Card-list spacing scale (usage / settings screens).
@@ -153,6 +167,12 @@ abstract final class ZTile {
 /// Noto Sans SC variable font, subset to the app character set by
 /// `tool/font_subset.py`.
 const String zFontFamily = 'NotoSansSC';
+
+/// Icon-glyph family bundled beside the text font: Material Symbols
+/// Rounded, subset to the codepoints below by
+/// `tool/material_symbols_subset.py`. Variant parameters are frozen at
+/// Rounded / wght 400 / FILL 0 — the asset is a static instance.
+const String zSymbolsFamily = 'MaterialSymbolsRounded';
 
 /// Fallback chain: the bundled family first (for styles used outside a themed
 /// `Text`), then emoji faces, then the platform CJK faces. Without an explicit
@@ -328,8 +348,78 @@ class ZInk {
   static Color codeText(BuildContext c) =>
       _dark(c) ? ZColors.neutral200 : ZColors.neutral700;
 
+  /// Card / panel surface (composer, slash popup, user bubble) — the
+  /// official `--color-card` pair; collects every former direct
+  /// `ZColors.darkCard`/`lightCard` reference.
+  static Color card(BuildContext c) =>
+      _dark(c) ? ZColors.darkCard : ZColors.lightCard;
+
+  /// Progress-bar track, quota-bar strength — the official sidebar quota
+  /// rows draw the track as a semi-transparent overlay (`bg-surface-hover`:
+  /// 10% white / 5% black), never an opaque fill.
+  static Color barTrack(BuildContext c) =>
+      _dark(c) ? const Color(0x1AFFFFFF) : const Color(0x0D0D0D0D);
+
+  /// Context-bar track — the lighter official `bg-surface` strength
+  /// (5% white / 3% black) the chat context capacity bar uses.
+  static Color barTrackSoft(BuildContext c) =>
+      _dark(c) ? const Color(0x0DFFFFFF) : const Color(0x080D0D0D);
+
+  /// Destructive tone (`--color-terminal-red` pair; the light value is the
+  /// former [ZColors.dangerLight] — the two tokens are one now).
+  static Color dangerTone(BuildContext c) =>
+      _dark(c) ? ZColors.danger : ZColors.dangerLight;
+
+  /// Usage accents (chart-1/5 + confirmation-foreground): official light
+  /// mode deepens and saturates, so these branch (design.md §3b).
+  static Color usageBlue(BuildContext c) =>
+      _dark(c) ? ZColors.usageBlue : ZColors.usageBlueLight;
+  static Color usageOrange(BuildContext c) =>
+      _dark(c) ? ZColors.usageOrange : ZColors.usageOrangeLight;
+  static Color usageGreen(BuildContext c) =>
+      _dark(c) ? ZColors.usageGreen : ZColors.usageGreenLight;
+
+  /// Official status-pill surfaces (solid [PhasePill] and the online
+  /// marker): dark keeps the measured opaque pairs, light lifts the
+  /// official `--color-accent` / `--color-success` values.
+  static Color pillRunningBg(BuildContext c) =>
+      _dark(c) ? ZColors.pillRunningBg : ZColors.pillRunningBgLight;
+
+  /// Running-pill text: dark keeps the pre-split 87% ink (zero dark
+  /// delta), light pairs with the `--color-accent` surface via the
+  /// official ask-foreground.
+  static Color pillRunningFg(BuildContext c) => _dark(c)
+      ? ZColors.neutral200.withValues(alpha: 0.87)
+      : ZColors.pillRunningFgLight;
+  static Color pillSuccessBg(BuildContext c) =>
+      _dark(c) ? ZColors.pillSuccessBg : ZColors.pillSuccessBgLight;
+
+  /// Neutral glyph tone (slash popup icons): official foreground family.
+  static Color iconNeutral(BuildContext c) =>
+      _dark(c) ? ZColors.neutral300 : ZColors.neutral500;
+
+  /// The single brightness read, exposed for the rare per-mode structural
+  /// choice a color slot cannot express (overlay base color, border on/off).
+  static bool isDark(BuildContext c) => _dark(c);
+
   static bool _dark(BuildContext c) =>
       Theme.of(c).brightness == Brightness.dark;
+}
+
+/// Slash-popup glyphs (mock ruling 09-19: commands = terminal, skills =
+/// extension — the bolt / auto_awesome / compress set is retired), tinted
+/// neutral via [ZInk.iconNeutral].
+abstract final class ZSymbols {
+  ZSymbols._();
+
+  /// Command entries (codepoints from the official Material Symbols
+  /// codepoints table).
+  static const IconData terminal =
+      IconData(0xEB8E, fontFamily: zSymbolsFamily);
+
+  /// Skill entries.
+  static const IconData extension =
+      IconData(0xE87B, fontFamily: zSymbolsFamily);
 }
 
 /// Light/dark mode, persisted. Defaults to dark like the official page.

@@ -227,7 +227,8 @@ class _TaskListPageState extends State<TaskListPage> {
                     ? tr(context, 'tasks.banner.onlineSubtitle')
                     : deviceDisplayName(context, widget.device.label),
                 style: ZType.sub.copyWith(
-                  color: online ? ZColors.pillSuccessBg : ZInk.faint(context),
+                  color:
+                      online ? ZInk.pillSuccessBg(context) : ZInk.faint(context),
                 ),
               ),
             ],

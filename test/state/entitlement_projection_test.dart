@@ -133,6 +133,86 @@ void main() {
     });
   });
 
+  // --------------------------------------------------------- primaryLimit
+
+  group('primaryLimit', () {
+    test('the most-tense row (highest used percent) wins', () {
+      final v = view(payload([
+        limitRow(percentage: 40), // 5h window
+        limitRow(unit: 6, number: null, percentage: 78), // weekly window
+      ]));
+      expect(v.primaryLimit!.raw['unit'], 6);
+    });
+
+    test('≡ ties break to the nearest window rollover', () {
+      final sooner = clock.now().millisecondsSinceEpoch + 600000;
+      final later = clock.now().millisecondsSinceEpoch + 3600000;
+      final v = view(payload([
+        limitRow(percentage: 50, nextResetTime: later),
+        limitRow(unit: 6, number: null, percentage: 50, nextResetTime: sooner),
+      ]));
+      expect(v.primaryLimit!.nextResetTime, sooner);
+    });
+
+    test('on a tie a row without a rollover clock loses', () {
+      final v = view(payload([
+        limitRow(percentage: 50), // no nextResetTime
+        limitRow(unit: 6, number: null, percentage: 50, nextResetTime: 1),
+      ]));
+      expect(v.primaryLimit!.nextResetTime, 1);
+    });
+
+    test('TIME_LIMIT (tool calls) participates and wins when exhausted', () {
+      final v = view(payload([
+        limitRow(percentage: 40),
+        limitRow(
+          type: 'TIME_LIMIT',
+          unit: 5,
+          number: 1,
+          percentage: 100,
+        ),
+      ]));
+      expect(v.primaryLimit!.raw['type'], 'TIME_LIMIT');
+    });
+
+    test('rows without a usable percentage cannot rank', () {
+      final v = view(payload([
+        limitRow(percentage: null),
+        limitRow(
+          type: 'CREDIT_LIMIT',
+          unit: null,
+          number: null,
+          percentage: null,
+        ),
+      ]));
+      expect(v.primaryLimit, isNull);
+    });
+
+    test('≡ empty limits / absent quota degrade to null (mirror fallback)',
+        () {
+      expect(view(payload(const [])).primaryLimit, isNull);
+      expect(
+        const EntitlementView(phase: EntitlementPhase.ok).primaryLimit,
+        isNull,
+      );
+      expect(
+        view({
+          'quota': {'limits': 'not-a-list'},
+        }).primaryLimit,
+        isNull,
+      );
+    });
+
+    test('garbage entries are skipped', () {
+      final v = view(payload([
+        'garbage',
+        42,
+        limitRow(percentage: 22),
+      ]));
+      expect(v.primaryLimit!.percentage, 22);
+    });
+  });
+
   // -------------------------------------------------- resetScopeProviderId
 
   group('resetScopeProviderId', () {

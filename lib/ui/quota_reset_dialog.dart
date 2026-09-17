@@ -4,25 +4,33 @@ import '../state/quota_reset.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 
-/// Reset dialog aligned with the official flow (research 状态机): both
-/// pools as resettable rows (name + available count + expiry countdown),
-/// cancel/reset actions, and processing/failed states rendered live from
-/// the controller's notify cycle. [controller.use] runs unchanged inside;
-/// resolves with the consumed reset type on success, null otherwise
+/// Reset dialog aligned with the official flow (research 状态机): the pools
+/// the caller's `poolVisible` predicate approved over the entitlement limits
+/// as rows (name + available count + expiry countdown), cancel/reset
+/// actions, and processing/failed states rendered live from the controller's
+/// notify cycle. [controller.use] runs unchanged inside; resolves with the
+/// consumed reset type on success, null otherwise
 /// (cancel or failure — a failure stays visible inline for a retry).
 Future<String?> showQuotaResetDialog(
   BuildContext context, {
   required QuotaResetController controller,
+  required Set<String> resettable,
 }) => showDialog<String>(
   context: context,
   useRootNavigator: false,
-  builder: (context) => _QuotaResetDialog(controller: controller),
+  builder: (context) =>
+      _QuotaResetDialog(controller: controller, resettable: resettable),
 );
 
 class _QuotaResetDialog extends StatelessWidget {
   final QuotaResetController controller;
 
-  const _QuotaResetDialog({required this.controller});
+  /// Pool types that may be offered here — the caller applies the same
+  /// predicate as the entry that opened this dialog, so a plan without the
+  /// weekly window must not offer its (account-held) weekly coupon either.
+  final Set<String> resettable;
+
+  const _QuotaResetDialog({required this.controller, required this.resettable});
 
   bool get _processing {
     final pools = controller.pools;
@@ -36,6 +44,12 @@ class _QuotaResetDialog extends StatelessWidget {
       listenable: controller,
       builder: (context, _) {
         final pools = controller.pools;
+        final rows = <(String, String, QuotaResetPool)>[
+          if (pools != null && resettable.contains(quotaResetTypeFiveHour))
+            (quotaResetTypeFiveHour, 'usage.reset.fiveHour', pools.fiveHour),
+          if (pools != null && resettable.contains(quotaResetTypeWeek))
+            (quotaResetTypeWeek, 'usage.reset.week', pools.week),
+        ];
         return AlertDialog(
           title: Text(tr(context, 'usage.reset.title')),
           content: Column(
@@ -47,10 +61,16 @@ class _QuotaResetDialog extends StatelessWidget {
                   tr(context, 'usage.reset.unavailable'),
                   style: ZType.sub.copyWith(color: ZInk.muted(context)),
                 )
-              else ...[
-                _poolRow(context, 'usage.reset.fiveHour', pools.fiveHour),
-                _poolRow(context, 'usage.reset.week', pools.week),
-              ],
+              else if (rows.isEmpty)
+                // Defensive: the entry is gated on the same predicate, so a
+                // dialog without a single resettable pool is unreachable.
+                Text(
+                  tr(context, 'usage.reset.none'),
+                  style: ZType.sub.copyWith(color: ZInk.muted(context)),
+                )
+              else
+                for (final (_, nameKey, pool) in rows)
+                  _poolRow(context, nameKey, pool),
               if (controller.error != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 8),
@@ -67,20 +87,9 @@ class _QuotaResetDialog extends StatelessWidget {
               onPressed: () => Navigator.pop(context),
               child: Text(tr(context, 'common.cancel')),
             ),
-            if (pools != null) ...[
-              if (pools.fiveHour.count > 0)
-                _resetAction(
-                  context,
-                  quotaResetTypeFiveHour,
-                  disabled: _processing,
-                ),
-              if (pools.week.count > 0)
-                _resetAction(
-                  context,
-                  quotaResetTypeWeek,
-                  disabled: _processing,
-                ),
-            ],
+            for (final (type, _, pool) in rows)
+              if (pool.count > 0)
+                _resetAction(context, type, disabled: _processing),
           ],
         );
       },

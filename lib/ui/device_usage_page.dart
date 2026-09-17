@@ -6,6 +6,23 @@ import '../state/quota_reset.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 
+/// IANA `Etc/GMT` zone name for the device's UTC offset, for the
+/// `getAppUsageSnapshot {timeZone}` argument: the desktop resolves it via
+/// `Intl.DateTimeFormat` into `tzOffsetMs`, which drives the day-boundary
+/// grouping — bare abbreviations like the Windows `"CST"` are ambiguous
+/// (ICU reads them as US Central, UTC-6, skewing the day index by 14h).
+///
+/// POSIX `Etc/GMT` zones carry an inverted sign: UTC+8 → `Etc/GMT-8`,
+/// UTC-6 → `Etc/GMT+6`. Whole-hour offsets map to the matching zone;
+/// fractional ones (e.g. +05:30) have no `Etc/GMT` zone and fall back to
+/// `UTC` — a UTC day boundary beats a 14h-skewed one.
+String ianaEtcTimeZone(Duration offset) {
+  if (offset.inMinutes % 60 != 0) return 'UTC';
+  if (offset.inHours == 0) return 'UTC';
+  final hours = offset.inHours.abs();
+  return 'Etc/GMT${offset.inHours > 0 ? '-' : '+'}$hours';
+}
+
 /// Entitlement / quota usage of one device
 /// (usage-stats.getEntitlementSnapshot over the workspace bridge).
 class DeviceUsagePage extends StatefulWidget {
@@ -27,7 +44,13 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
   Map<String, dynamic>? _appUsage;
   bool _appLoading = false;
 
-  static const _appRanges = ['7d', '30d', '90d', 'all'];
+  /// Last app-usage load failure (`null` = ok). Kept separate from
+  /// [_appUsage] so a failed range switch keeps the previous chart visible
+  /// instead of rendering it as「暂无用量」(misleading: failure ≠ no data).
+  String? _appError;
+
+  // Official zod enum is `all|7d|30d` — anything else is rejected.
+  static const _appRanges = ['7d', '30d', 'all'];
 
   @override
   void initState() {
@@ -38,13 +61,21 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
 
   Future<void> _loadAppUsage() async {
     if (!mounted) return;
-    setState(() => _appLoading = true);
+    setState(() {
+      _appLoading = true;
+      _appError = null;
+    });
     try {
       final res = await widget.session.callChannel(
         'usage-stats',
         'getAppUsageSnapshot',
         [
-          {'range': _appRange, 'timeZone': DateTime.now().timeZoneName},
+          {
+            'range': _appRange,
+            // IANA form: `timeZoneName` yields bare abbreviations ("CST")
+            // that desktop ICU misreads as US Central (UTC-6).
+            'timeZone': ianaEtcTimeZone(DateTime.now().timeZoneOffset),
+          },
         ],
       );
       if (mounted) {
@@ -54,7 +85,13 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _appLoading = false);
+      debugPrint('[usage] app snapshot failed: $e');
+      if (mounted) {
+        setState(() {
+          _appError = e.toString();
+          _appLoading = false;
+        });
+      }
     }
   }
 
@@ -222,63 +259,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
           ),
           const SizedBox(height: ZSpacing.cardGap),
           if (remaining is Map && remaining['isShow'] == true)
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(tr(context, 'usageRpc.remaining'),
-                            style: ZType.body),
-                        Text(
-                          '${remaining['count'] ?? '-'}',
-                          style: ZType.display.copyWith(
-                              color: ZColors.sky500,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(ZRadius.mini),
-                      child: LinearProgressIndicator(
-                        value:
-                            ((remaining['percentage'] as num?) ?? 0) / 100,
-                        minHeight: 6,
-                        backgroundColor:
-                            Theme.of(context).colorScheme.surfaceContainerHighest,
-                        valueColor:
-                            const AlwaysStoppedAnimation(ZColors.sky500),
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Builder(builder: (context) {
-                      // Projection: the earliest expiry among the pools
-                      // the plan can actually use — a hidden card never
-                      // drives the summary's「重置」time.
-                      final expiry = _view
-                          ?.earliestResetExpiry(_reset.pools)
-                          ?.millisecondsSinceEpoch;
-                      return Text(
-                        expiry == null
-                            ? trP(context, 'usageRpc.remainingNoReset', [
-                                '${remaining['percentage'] ?? '-'}',
-                              ])
-                            : trP(context, 'usageRpc.remainingDetail', [
-                                '${remaining['percentage'] ?? '-'}',
-                                relativeTime(context, expiry),
-                              ]),
-                        style:
-                            ZType.caption.copyWith(color: ZInk.faint(context)),
-                      );
-                    }),
-                  ],
-                ),
-              ),
-            ),
+            _remainingCard(remaining.cast<String, dynamic>()),
           if ((quota is Map && quota['limits'] is List) ||
               mcpAggregate != null) ...[
             const SizedBox(height: ZSpacing.cardGap),
@@ -295,12 +276,10 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                       for (final limit in quota['limits'] as List)
                         if (limit is Map)
                           _LimitRow(
-                              limit: limit.cast<String, dynamic>(),
-                              fmtTime: _fmtTime),
+                              limit: limit.cast<String, dynamic>()),
                     if (mcpAggregate != null)
                       _LimitRow(
                         limit: mcpAggregate,
-                        fmtTime: _fmtTime,
                         label: tr(context, 'usageRpc.serverMcp'),
                       ),
                   ],
@@ -344,6 +323,164 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
     );
   }
 
+  /// R1 A2 projection (09-19): the summary card mirrors the most-tense
+  /// limit row ([EntitlementView.primaryLimit]) in the official
+  /// remainingShort semantics — big number = what's LEFT, label = the
+  /// limit type, reset clock = that row's window rollover. The top-level
+  /// `remaining` block is only the mirror fallback ([_remainingMirrorCard]):
+  /// its count/bar are the TIME_LIMIT aggregate and mislead as「0 + 100%」
+  /// on plans without a monthly tool quota.
+  Widget _remainingCard(Map<String, dynamic> remaining) {
+    final primary = _view?.primaryLimit;
+    if (primary == null) return _remainingMirrorCard(remaining);
+
+    final used = primary.percentage!;
+    final left = (100 - used).clamp(0.0, 100.0);
+    final count = primary.raw['remaining'];
+    // count（次数）is the main number only for the tool-calls class
+    // (TIME_LIMIT — the monthly built-in tool quota counts calls).
+    final countMain = primary.raw['type'] == 'TIME_LIMIT' && count is num;
+    final clock = switch (primary.nextResetTime) {
+      null => null,
+      final ms => EntitlementView.fmtResetClock(
+          DateTime.fromMillisecondsSinceEpoch(ms),
+        ),
+    };
+    final caption = [
+      if (!countMain) trP(context, 'usageRpc.primaryLeft', [_fmtPct(left)]),
+      if (clock != null) clock,
+    ].join(' · ');
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(tr(context, 'usageRpc.remaining'), style: ZType.body),
+                    Text(
+                      _primaryTypeLabel(primary),
+                      style:
+                          ZType.caption.copyWith(color: ZInk.muted(context)),
+                    ),
+                  ],
+                ),
+                Text(
+                  countMain
+                      ? trP(context, 'usageRpc.primaryCount', ['$count'])
+                      : _fmtPct(left),
+                  style: ZType.display.copyWith(color: ZColors.sky500),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(ZRadius.mini),
+              child: LinearProgressIndicator(
+                value: (used / 100).clamp(0.0, 1.0),
+                minHeight: 6,
+                backgroundColor: ZInk.barTrack(context),
+                valueColor: const AlwaysStoppedAnimation(ZColors.sky500),
+              ),
+            ),
+            if (caption.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(caption,
+                  style: ZType.caption.copyWith(color: ZInk.faint(context))),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Pre-R1 mirror rendering (limits empty / no rankable row): the
+  /// top-level `remaining` count + bar, reset time still anchored on the
+  /// earliest usable reset opportunity.
+  Widget _remainingMirrorCard(Map<String, dynamic> remaining) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(tr(context, 'usageRpc.remaining'), style: ZType.body),
+                Text(
+                  '${remaining['count'] ?? '-'}',
+                  style: ZType.display.copyWith(
+                    color: ZColors.sky500,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(ZRadius.mini),
+              child: LinearProgressIndicator(
+                value: ((remaining['percentage'] as num?) ?? 0) / 100,
+                minHeight: 6,
+                backgroundColor: ZInk.barTrack(context),
+                valueColor: const AlwaysStoppedAnimation(ZColors.sky500),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Builder(builder: (context) {
+              // Projection: the earliest expiry among the pools
+              // the plan can actually use — a hidden card never
+              // drives the summary's「重置」time.
+              final expiry =
+                  _view?.earliestResetExpiry(_reset.pools)?.millisecondsSinceEpoch;
+              return Text(
+                expiry == null
+                    ? trP(context, 'usageRpc.remainingNoReset', [
+                        '${remaining['percentage'] ?? '-'}',
+                      ])
+                    : trP(context, 'usageRpc.remainingDetail', [
+                        '${remaining['percentage'] ?? '-'}',
+                        relativeTime(context, expiry),
+                      ]),
+                style: ZType.caption.copyWith(color: ZInk.faint(context)),
+              );
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Primary-limit type label — official sidebar key semantics
+  /// (weekly / fiveHour / toolCalls / tokensLimit / otherLimit).
+  String _primaryTypeLabel(Limit limit) {
+    switch (limit.raw['type']) {
+      case 'TOKENS_LIMIT':
+        if (limit.raw['unit'] == 6) {
+          return tr(context, 'usageRpc.primaryWeekly');
+        }
+        if (limit.raw['unit'] == 3 && limit.raw['number'] == 5) {
+          return tr(context, 'usageRpc.primaryFiveHour');
+        }
+        return tr(context, 'usageRpc.primaryTokens');
+      case 'CREDIT_LIMIT':
+        return tr(context, 'usageRpc.primaryTokens');
+      case 'TIME_LIMIT':
+        return tr(context, 'usageRpc.primaryToolCalls');
+    }
+    return tr(context, 'usageRpc.primaryOther');
+  }
+
+  /// Percent with at most one decimal.
+  static String _fmtPct(double p) => p == p.roundToDouble()
+      ? '${p.round()}%'
+      : '${p.toStringAsFixed(1)}%';
+
   /// Reset opportunities, read-only (PRD: the sheet is the single reset
   /// entry): one row per pool the projection credits ([EntitlementView.
   /// resettablePools] — the official visibility composition over the same
@@ -376,15 +513,23 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                     child: Text(tr(context, 'usage.reset.unavailable'),
                         style: ZType.sub.copyWith(color: ZInk.faint(context))),
                   )
+                else if (!fiveHour && !week)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Text(tr(context, 'usage.reset.none'),
+                        style: ZType.sub.copyWith(color: ZInk.faint(context))),
+                  )
                 else ...[
-                  _poolRow(
-                    name: tr(context, 'usage.reset.fiveHour'),
-                    pool: pools.fiveHour,
-                  ),
-                  _poolRow(
-                    name: tr(context, 'usage.reset.week'),
-                    pool: pools.week,
-                  ),
+                  if (fiveHour)
+                    _poolRow(
+                      name: tr(context, 'usage.reset.fiveHour'),
+                      pool: pools.fiveHour,
+                    ),
+                  if (week)
+                    _poolRow(
+                      name: tr(context, 'usage.reset.week'),
+                      pool: pools.week,
+                    ),
                 ],
               ],
             );
@@ -508,6 +653,22 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                 padding: EdgeInsets.all(16),
                 child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
               )
+            else if (rows.isEmpty && _appError != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(tr(context, 'usageRpc.appUsageFailed'),
+                        style: ZType.sub.copyWith(color: ZColors.danger)),
+                    TextButton.icon(
+                      icon: const Icon(Icons.refresh, size: 16),
+                      onPressed: _loadAppUsage,
+                      label: Text(tr(context, 'tasks.retry')),
+                    ),
+                  ],
+                ),
+              )
             else if (rows.isEmpty)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 12),
@@ -582,6 +743,26 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                     ),
                 ],
               ),
+              // Stale-chart failure banner: the range switch above failed
+              // but the previous chart stays (PRD: failure ≠ no data).
+              if (_appError != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(tr(context, 'usageRpc.appUsageFailed'),
+                            style: ZType.caption
+                                .copyWith(color: ZColors.danger)),
+                      ),
+                      TextButton.icon(
+                        icon: const Icon(Icons.refresh, size: 16),
+                        onPressed: _loadAppUsage,
+                        label: Text(tr(context, 'tasks.retry')),
+                      ),
+                    ],
+                  ),
+                ),
             ],
           ],
         ),
@@ -628,7 +809,6 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
 
 class _LimitRow extends StatelessWidget {
   final Map<String, dynamic> limit;
-  final String Function(Object?) fmtTime;
 
   /// Row title override (the server MCP aggregate carries no type of its
   /// own). Absent, the label is derived from the limit type.
@@ -716,7 +896,7 @@ class _LimitRow extends StatelessWidget {
                   backgroundColor:
                       Theme.of(context).colorScheme.surfaceContainerHighest,
                   valueColor: AlwaysStoppedAnimation(
-                    percentage > 80 ? ZColors.danger : ZColors.sky500,
+                    percentage > 80 ? ZInk.dangerTone(context) : ZColors.sky500,
                   ),
                 ),
               ),
@@ -733,10 +913,6 @@ class _LimitRow extends StatelessWidget {
                     ZType.caption.copyWith(color: ZInk.faint(context)),
               ),
             ),
-          Text(
-            trP(context, 'usageRpc.resetAt', [fmtTime(limit['nextResetTime'])]),
-            style: ZType.caption.copyWith(color: ZInk.ghost(context)),
-          ),
         ],
       ),
     );

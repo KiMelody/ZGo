@@ -134,6 +134,35 @@ class EntitlementView {
     return (100 - used).clamp(0.0, 100.0);
   }
 
+  /// A2 primary-limit projection (usage page summary card, 09-19): the
+  /// most-tense `quota.limits` row — highest used percent — drives the
+  /// card; ties break to the nearest window rollover (a row without one
+  /// loses). Rows without a usable percentage cannot rank. Null when no
+  /// row ranks: the card then falls back to the top-level `remaining`
+  /// mirror (the TIME_LIMIT aggregate whose count/bar mislead as
+  /// 「0 / 100%」 on plans without a monthly tool quota).
+  Limit? get primaryLimit {
+    Limit? best;
+    for (final e in _limits ?? const []) {
+      if (e is! Map) continue;
+      final candidate = Limit(e.cast<String, dynamic>());
+      final used = candidate.percentage;
+      if (used == null) continue;
+      final bestUsed = best?.percentage;
+      if (best == null || bestUsed == null || used > bestUsed) {
+        best = candidate;
+        continue;
+      }
+      if (used < bestUsed) continue;
+      final reset = candidate.nextResetTime;
+      final bestReset = best.nextResetTime;
+      if (reset != null && (bestReset == null || reset < bestReset)) {
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
   /// `provider.id` of the snapshot — the reset controller's scope
   /// (`preferredProviderId`); null (feature disabled) without a usable id.
   String? get resetScopeProviderId {

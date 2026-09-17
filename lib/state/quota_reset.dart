@@ -127,6 +127,61 @@ QuotaResetPools parseQuotaResetPools(Map? raw, {DateTime? now}) {
   );
 }
 
+/// Token-class limit types: a `TOKENS_LIMIT` query also matches
+/// `CREDIT_LIMIT` rows (official alias set `qYe` behind `YYe`/`MF`).
+const _tokensLimitTypes = {'TOKENS_LIMIT', 'CREDIT_LIMIT'};
+
+/// Whether one reset pool may be offered, reimplemented from the official
+/// bundle (`_I` aggregate + `hI` entry) over the entitlement snapshot's
+/// `quota['limits']`:
+///
+/// 1. the plan exposes the pool's window row (official `MF`):
+///    [quotaResetTypeFiveHour] → `TOKENS_LIMIT unit 3 number 5`,
+///    [quotaResetTypeWeek] → `TOKENS_LIMIT unit 6` (no number constraint).
+///    A V1 plan ships no weekly row, so its weekly coupon — which the
+///    account may still hold — must not be offered.
+/// 2. [count] > 0: an unexpired opportunity exists (official
+///    `opportunityVisible`).
+/// 3. the window is not untouched (official `!FF(limit)`, where `FF` is
+///    `PF(limit) == 100` and `PF` is the remaining percent `clamp(100 -
+///    percentage)` — so `FF` means 0% used, i.e. nothing worth resetting
+///    yet). A missing / non-numeric / non-finite `percentage` is not full
+///    (official `PF` answers null → `FF` false) and never throws.
+///
+/// [processing] is the official optimistic exception (`hI` keeps the entry
+/// alive while a use is in flight, or before its confirmation refresh):
+/// such a pool must not disappear mid-flight.
+bool poolVisible({
+  required List? limits,
+  required String poolType,
+  required int count,
+  required bool processing,
+}) {
+  if (processing) return true;
+  if (count <= 0) return false;
+  final int unit;
+  final int? number;
+  switch (poolType) {
+    case quotaResetTypeFiveHour:
+      unit = 3;
+      number = 5;
+    case quotaResetTypeWeek:
+      unit = 6;
+      number = null;
+    default:
+      return false;
+  }
+  for (final entry in limits ?? const <Object?>[]) {
+    if (entry is! Map) continue;
+    if (!_tokensLimitTypes.contains(entry['type'])) continue;
+    if (entry['unit'] != unit) continue;
+    if (number != null && entry['number'] != number) continue;
+    final percentage = entry['percentage'];
+    return percentage is! num || !percentage.isFinite || percentage > 0;
+  }
+  return false;
+}
+
 /// Session-wide reset-opportunity controller (usage page card + chat
 /// banner action). Same shape as EntitlementPoller: staleness-cached
 /// status fetch, force bypass, errors never cached and never thrown —

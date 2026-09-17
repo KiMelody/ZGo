@@ -152,4 +152,46 @@ void main() {
       expect(params!.theme, 'dark');
     });
   });
+
+  group('atLeast', () {
+    RemoteConnectionParams withVersion(String? v) => RemoteConnectionParams(
+          deviceSid: 'sid',
+          passHash: 'hash',
+          timestamp: 1,
+          source: Uri.parse('https://zcode.z.ai/remote/v4'),
+          appVersion: v,
+        );
+
+    test('exact version → true', () {
+      expect(withVersion('3.12.3').atLeast(3, 12, 3), isTrue);
+    });
+
+    test('higher patch/minor/major → true', () {
+      expect(withVersion('3.12.4').atLeast(3, 12, 3), isTrue);
+      expect(withVersion('3.13.0').atLeast(3, 12, 3), isTrue);
+      expect(withVersion('4.0.0').atLeast(3, 12, 3), isTrue);
+    });
+
+    test('lower → false', () {
+      expect(withVersion('3.12.2').atLeast(3, 12, 3), isFalse);
+      expect(withVersion('3.11.9').atLeast(3, 12, 3), isFalse);
+      expect(withVersion('2.99.99').atLeast(3, 12, 3), isFalse);
+    });
+
+    test('two segments pad with zero', () {
+      expect(withVersion('3.12').atLeast(3, 12, 0), isTrue);
+      expect(withVersion('3.12').atLeast(3, 12, 1), isFalse);
+    });
+
+    test('non-numeric suffix → false (unknown keeps legacy shapes)', () {
+      expect(withVersion('3.12.3-beta').atLeast(3, 12, 3), isFalse);
+      expect(withVersion('v3.12.3').atLeast(3, 12, 3), isFalse);
+    });
+
+    test('absent or garbage → false', () {
+      expect(withVersion(null).atLeast(3, 12, 3), isFalse);
+      expect(withVersion('').atLeast(3, 12, 3), isFalse);
+      expect(withVersion('abc').atLeast(3, 12, 3), isFalse);
+    });
+  });
 }

@@ -103,6 +103,211 @@ void main() {
     });
   });
 
+  // ---------------------------------------------------- visibility predicate
+
+  /// One entitlement `quota.limits` row (probe shape, live fixtures).
+  Map<String, dynamic> limitRow({
+    String type = 'TOKENS_LIMIT',
+    Object? unit = 3,
+    Object? number = 5,
+    Object? percentage = 40,
+  }) => {
+        'type': type,
+        'unit': unit,
+        if (number != null) 'number': number,
+        if (percentage != null) 'percentage': percentage,
+      };
+
+  /// 5-hour window row + weekly window row (a plan with both tiers).
+  List<Map<String, dynamic>> bothRows({Object? fiveHourPercentage = 40}) => [
+        limitRow(percentage: fiveHourPercentage),
+        limitRow(unit: 6, number: null, percentage: 20),
+      ];
+
+  group('poolVisible', () {
+    test('V1 plan (no weekly row) hides the weekly pool it still holds a '
+        'coupon for', () {
+      final limits = [limitRow()]; // 5h only, no TOKENS_LIMIT unit 6
+      expect(
+        poolVisible(
+          limits: limits,
+          poolType: quotaResetTypeWeek,
+          count: 1, // the weekly coupon the account does hold
+          processing: false,
+        ),
+        isFalse,
+      );
+      expect(
+        poolVisible(
+          limits: limits,
+          poolType: quotaResetTypeFiveHour,
+          count: 1,
+          processing: false,
+        ),
+        isTrue,
+      );
+    });
+
+    test('a missing pool row hides that pool; the weekly row needs no '
+        'number', () {
+      expect(
+        poolVisible(
+          limits: bothRows(),
+          poolType: quotaResetTypeFiveHour,
+          count: 2,
+          processing: false,
+        ),
+        isTrue,
+      );
+      expect(
+        poolVisible(
+          limits: bothRows(),
+          poolType: quotaResetTypeWeek,
+          count: 2,
+          processing: false,
+        ),
+        isTrue,
+      );
+      // A weekly row with an unrelated `number` still matches (official MF
+      // constrains unit only).
+      expect(
+        poolVisible(
+          limits: [limitRow(unit: 6, number: 99)],
+          poolType: quotaResetTypeWeek,
+          count: 1,
+          processing: false,
+        ),
+        isTrue,
+      );
+      // Right unit, wrong type → no row.
+      expect(
+        poolVisible(
+          limits: [limitRow(type: 'TIME_LIMIT')],
+          poolType: quotaResetTypeFiveHour,
+          count: 1,
+          processing: false,
+        ),
+        isFalse,
+      );
+      expect(
+        poolVisible(
+          limits: [limitRow(number: 1)],
+          poolType: quotaResetTypeFiveHour,
+          count: 1,
+          processing: false,
+        ),
+        isFalse,
+      );
+    });
+
+    test('CREDIT_LIMIT counts as a token-class row (official alias set)', () {
+      expect(
+        poolVisible(
+          limits: [limitRow(type: 'CREDIT_LIMIT')],
+          poolType: quotaResetTypeFiveHour,
+          count: 1,
+          processing: false,
+        ),
+        isTrue,
+      );
+    });
+
+    test('an empty pool never shows, even with a matching row', () {
+      expect(
+        poolVisible(
+          limits: bothRows(),
+          poolType: quotaResetTypeFiveHour,
+          count: 0,
+          processing: false,
+        ),
+        isFalse,
+      );
+    });
+
+    test('an exhausted window stays resettable; an untouched one (0% used, '
+        'official FF "quotaFull") hides', () {
+      expect(
+        poolVisible(
+          limits: [limitRow(percentage: 100)],
+          poolType: quotaResetTypeFiveHour,
+          count: 1,
+          processing: false,
+        ),
+        isTrue,
+      );
+      expect(
+        poolVisible(
+          limits: [limitRow(percentage: 0)],
+          poolType: quotaResetTypeFiveHour,
+          count: 1,
+          processing: false,
+        ),
+        isFalse,
+      );
+    });
+
+    test('missing / mistyped percentage is "not full" and never throws', () {
+      for (final percentage in <Object?>[null, 'oops', double.nan]) {
+        expect(
+          poolVisible(
+            limits: [limitRow(percentage: percentage)],
+            poolType: quotaResetTypeFiveHour,
+            count: 1,
+            processing: false,
+          ),
+          isTrue,
+          reason: 'percentage=$percentage',
+        );
+      }
+    });
+
+    test('processing pools survive missing rows, empty counts and null '
+        'limits', () {
+      for (final limits in <List?>[null, const [], [limitRow(percentage: 0)]]) {
+        expect(
+          poolVisible(
+            limits: limits,
+            poolType: quotaResetTypeWeek,
+            count: 0,
+            processing: true,
+          ),
+          isTrue,
+          reason: 'limits=$limits',
+        );
+      }
+    });
+
+    test('unknown pool types and garbage rows degrade to invisible', () {
+      expect(
+        poolVisible(
+          limits: bothRows(),
+          poolType: 'NOPE',
+          count: 3,
+          processing: false,
+        ),
+        isFalse,
+      );
+      expect(
+        poolVisible(
+          limits: <Object?>['garbage', 42, limitRow()],
+          poolType: quotaResetTypeFiveHour,
+          count: 1,
+          processing: false,
+        ),
+        isTrue, // the mistyped entries are skipped, the real row matches
+      );
+      expect(
+        poolVisible(
+          limits: null,
+          poolType: quotaResetTypeFiveHour,
+          count: 1,
+          processing: false,
+        ),
+        isFalse,
+      );
+    });
+  });
+
   // ---------------------------------------------------------- controller
 
   /// Session with programmable status / use answers routed through the
