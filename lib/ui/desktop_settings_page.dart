@@ -128,35 +128,38 @@ class _DesktopSettingsPageState extends State<DesktopSettingsPage> {
             Text(tr(context, 'deskSet.interactionHint'),
                 style: ZType.caption.copyWith(color: ZInk.faint(context))),
             const SizedBox(height: 8),
-            Column(
-              children: [
-                for (final (v, label, hint) in [
-                  (
-                    'queue',
-                    tr(context, 'deskSet.interactionQueue'),
-                    tr(context, 'deskSet.interactionQueueHint'),
-                  ),
-                  (
-                    'guide',
-                    tr(context, 'deskSet.interactionGuide'),
-                    tr(context, 'deskSet.interactionGuideHint'),
-                  ),
-                ])
-                  RadioListTile<String>(
-                    groupValue: value == 'guide' ? 'guide' : 'queue',
-                    value: v,
-                    onChanged: (sel) {
-                      if (sel != null && sel != value) {
-                        _update({'zcodeInteractionBehavior': sel});
-                      }
-                    },
-                    title: Text(label, style: ZType.body),
-                    subtitle: Text(hint,
-                        style:
-                            ZType.caption.copyWith(color: ZInk.faint(context))),
-                    contentPadding: EdgeInsets.zero,
-                  ),
-              ],
+            RadioGroup<String>(
+              groupValue: value == 'guide' ? 'guide' : 'queue',
+              onChanged: (sel) {
+                if (sel != null &&
+                    sel != (value == 'guide' ? 'guide' : 'queue')) {
+                  _update({'zcodeInteractionBehavior': sel});
+                }
+              },
+              child: Column(
+                children: [
+                  for (final (v, label, hint) in [
+                    (
+                      'queue',
+                      tr(context, 'deskSet.interactionQueue'),
+                      tr(context, 'deskSet.interactionQueueHint'),
+                    ),
+                    (
+                      'guide',
+                      tr(context, 'deskSet.interactionGuide'),
+                      tr(context, 'deskSet.interactionGuideHint'),
+                    ),
+                  ])
+                    RadioListTile<String>(
+                      value: v,
+                      title: Text(label, style: ZType.body),
+                      subtitle: Text(hint,
+                          style:
+                              ZType.caption.copyWith(color: ZInk.faint(context))),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                ],
+              ),
             ),
           ],
         ),

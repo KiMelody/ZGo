@@ -1035,25 +1035,27 @@ class _TaskListPageState extends State<TaskListPage> {
                 style: ZType.heading,
               ),
             ),
-            Column(
-              children: [
-                for (final (value, label) in [
-                  ('workspace', tr(context, 'tasks.tidy.group')),
-                  ('timeline', tr(context, 'tasks.tidy.timeline')),
-                ])
-                  RadioListTile<String>(
-                    groupValue: _groupBy,
-                    value: value,
-                    onChanged: (v) {
-                      setState(() => _groupBy = v ?? _groupBy);
-                      _saveOrganizePrefs();
-                    },
-                    title: Text(label),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12,
+            RadioGroup<String>(
+              groupValue: _groupBy,
+              onChanged: (v) {
+                setState(() => _groupBy = v ?? _groupBy);
+                _saveOrganizePrefs();
+              },
+              child: Column(
+                children: [
+                  for (final (value, label) in [
+                    ('workspace', tr(context, 'tasks.tidy.group')),
+                    ('timeline', tr(context, 'tasks.tidy.timeline')),
+                  ])
+                    RadioListTile<String>(
+                      value: value,
+                      title: Text(label),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                      ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
             const Divider(
                 height: 1, indent: ZSpacing.screen, endIndent: ZSpacing.screen),
@@ -1068,25 +1070,27 @@ class _TaskListPageState extends State<TaskListPage> {
                 ),
               ),
             ),
-            Column(
-              children: [
-                for (final (value, label) in [
-                  ('created', tr(context, 'tasks.tidy.sort.created')),
-                  ('updated', tr(context, 'tasks.tidy.sort.updated')),
-                ])
-                  RadioListTile<String>(
-                    groupValue: _sortBy,
-                    value: value,
-                    onChanged: (v) {
-                      setState(() => _sortBy = v ?? _sortBy);
-                      _saveOrganizePrefs();
-                    },
-                    title: Text(label),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12,
+            RadioGroup<String>(
+              groupValue: _sortBy,
+              onChanged: (v) {
+                setState(() => _sortBy = v ?? _sortBy);
+                _saveOrganizePrefs();
+              },
+              child: Column(
+                children: [
+                  for (final (value, label) in [
+                    ('created', tr(context, 'tasks.tidy.sort.created')),
+                    ('updated', tr(context, 'tasks.tidy.sort.updated')),
+                  ])
+                    RadioListTile<String>(
+                      value: value,
+                      title: Text(label),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                      ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
             const SizedBox(height: 8),
           ],

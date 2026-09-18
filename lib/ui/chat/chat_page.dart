@@ -7361,19 +7361,21 @@ class _InputBarState extends State<_InputBar> {
       builder: (context) => SimpleDialog(
         title: Text(tr(context, 'chat.sheet.mode')),
         children: [
-          Column(
-            children: [
-              for (final m in const ['build', 'edit', 'plan', 'yolo'])
-                RadioListTile<String>(
-                  dense: true,
-                  groupValue: _modeValue,
-                  value: m,
-                  onChanged: (v) =>
-                      Navigator.pop(context, v ?? _modeValue),
-                  title: Text(tr(context, 'chat.mode.$m')),
-                  subtitle: Text(tr(context, 'chat.mode.$m.desc')),
-                ),
-            ],
+          RadioGroup<String>(
+            groupValue: _modeValue,
+            onChanged: (v) =>
+                Navigator.pop(context, v ?? _modeValue),
+            child: Column(
+              children: [
+                for (final m in const ['build', 'edit', 'plan', 'yolo'])
+                  RadioListTile<String>(
+                    dense: true,
+                    value: m,
+                    title: Text(tr(context, 'chat.mode.$m')),
+                    subtitle: Text(tr(context, 'chat.mode.$m.desc')),
+                  ),
+              ],
+            ),
           ),
         ],
       ),
@@ -7395,18 +7397,20 @@ class _InputBarState extends State<_InputBar> {
       builder: (context) => SimpleDialog(
         title: Text(tr(context, 'chat.sheet.thought')),
         children: [
-          Column(
-            children: [
-              for (final t in choices)
-                RadioListTile<String>(
-                  dense: true,
-                  groupValue: _thoughtLabel,
-                  value: t,
-                  onChanged: (v) =>
-                      Navigator.pop(context, v ?? _thoughtLabel),
-                  title: Text(t),
-                ),
-            ],
+          RadioGroup<String>(
+            groupValue: _thoughtLabel,
+            onChanged: (v) =>
+                Navigator.pop(context, v ?? _thoughtLabel),
+            child: Column(
+              children: [
+                for (final t in choices)
+                  RadioListTile<String>(
+                    dense: true,
+                    value: t,
+                    title: Text(t),
+                  ),
+              ],
+            ),
           ),
         ],
       ),

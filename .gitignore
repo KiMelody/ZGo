@@ -34,6 +34,8 @@ migrate_working_dir/
 
 # Screenshot tooling
 tool/node_modules/
+# UI mock-first workflow scratch (HTML mockups, never shipped)
+tool/design/
 /coverage/
 
 # Symbolication related
