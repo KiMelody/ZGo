@@ -183,4 +183,9 @@ class Channels {
   static const repoWiki = 'repo-wiki';
   static const promptAttachmentTransfer = 'prompt-attachment-transfer';
   static const offPeakTask = 'off-peak-task';
+
+  /// Desktop ≥3.14 read-only model registry (getView). Replaces the removed
+  /// `model-provider` channel as the chat model sheet's fallback catalog
+  /// source — the CRUD family (save/delete) has no counterpart here.
+  static const modelSelection = 'model-selection';
 }
