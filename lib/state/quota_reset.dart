@@ -3,12 +3,34 @@ import 'dart:math';
 import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 
+import '../protocol/id.dart';
 import 'entitlement_poller.dart';
 
 /// Reset-pool identifiers accepted by `useCodingPlanReset`
 /// (research/quota-reset-bundle-analysis.md).
 const quotaResetTypeFiveHour = 'FIVE_HOUR';
 const quotaResetTypeWeek = 'WEEK';
+
+/// Reset windows a `quota.limits` row can map onto — the same mapping
+/// [poolVisible] applies when deciding pool visibility (unit 3 + number 5
+/// → five-hour, unit 6 → week). A row matching neither (e.g. the monthly
+/// TIME_LIMIT tool quota's `unit 5 number 1`) maps to no window and the
+/// reset surfaces must treat it as "cannot reset this window".
+enum QuotaWindowKind { fiveHour, week }
+
+/// The reset window a raw limit row maps onto; null when the row's
+/// unit/number shape matches no pool window.
+QuotaWindowKind? quotaWindowKindOf(Map<Object?, Object?> raw) {
+  if (raw['unit'] == 6) return QuotaWindowKind.week;
+  if (raw['unit'] == 3 && raw['number'] == 5) return QuotaWindowKind.fiveHour;
+  return null;
+}
+
+/// The `useCodingPlanReset` argument for a window.
+String quotaResetTypeOf(QuotaWindowKind kind) =>
+    kind == QuotaWindowKind.fiveHour
+        ? quotaResetTypeFiveHour
+        : quotaResetTypeWeek;
 
 /// Gateway surface the reset controller needs — implemented by
 /// [ChatGateway] (device_session.dart); fakes implement just these three.
@@ -194,7 +216,14 @@ class QuotaResetController extends ChangeNotifier {
   final QuotaResetGateway gateway;
   final Duration staleness;
 
+  /// Bound on one status fetch — same 2026-09-21 diagnosis as the
+  /// entitlement poller's timeout: a relay-bridge rebuild can lose the
+  /// response and pin [_inFlight] forever. Must stay under the quota-watch
+  /// controller's rpcTimeout.
+  final Duration timeout;
+
   static const defaultStaleness = Duration(seconds: 10);
+  static const defaultTimeout = Duration(seconds: 10);
 
   QuotaResetPools? _pools;
   DateTime? _fetchedAt;
@@ -206,6 +235,7 @@ class QuotaResetController extends ChangeNotifier {
   QuotaResetController({
     required this.gateway,
     this.staleness = defaultStaleness,
+    this.timeout = defaultTimeout,
   });
 
   /// Latest pools with the optimistic processing flags merged in; null
@@ -248,7 +278,7 @@ class QuotaResetController extends ChangeNotifier {
 
   Future<void> _fetchNow() async {
     try {
-      final res = await gateway.quotaResetStatus();
+      final res = await gateway.quotaResetStatus().timeout(timeout);
       _pools = parseQuotaResetPools(res is Map ? res : null);
       _fetchedAt = clock.now();
       _error = null;
@@ -281,7 +311,11 @@ class QuotaResetController extends ChangeNotifier {
         pool.processing) {
       return false;
     }
-    final key = _generateIdempotencyKey();
+    // UUID v4 like the official client (`randomUUID` with a hand-rolled
+    // v4 fallback in the bundle); the cloud `/use` endpoint returns
+    // business code 3001 for other shapes even though the client-side
+    // check is merely non-empty ≤64 (2026-09-20).
+    final key = generateUuid();
     _processing.add(resetType);
     _error = null;
     notifyListeners();
@@ -303,13 +337,4 @@ class QuotaResetController extends ChangeNotifier {
     notifyListeners();
     return true;
   }
-}
-
-/// Hand-rolled idempotency key (ms epoch hex + random hex) — one call
-/// site, no uuid dependency.
-String _generateIdempotencyKey() {
-  final rnd = Random();
-  final rand =
-      List.generate(8, (_) => rnd.nextInt(16).toRadixString(16)).join();
-  return '${clock.now().millisecondsSinceEpoch.toRadixString(16)}-$rand';
 }

@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Persistent quota-watch notice (QuotaWatchNotifier): collapsed row is
+     ring + text + same-row action + always-visible refresh icon; the
+     detail box renders only in the bigContentView (expanded) variant. All
+     copy/colors are set from Dart payloads in QuotaWatchNotifier.views(). -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="16dp"
+    android:paddingEnd="16dp"
+    android:paddingTop="12dp"
+    android:paddingBottom="10dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <FrameLayout
+            android:id="@+id/quota_ring_box"
+            android:layout_width="52dp"
+            android:layout_height="52dp">
+
+            <ProgressBar
+                android:id="@+id/quota_ring"
+                style="@android:style/Widget.ProgressBar.Horizontal"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:max="100"
+                android:progress="0"
+                android:indeterminate="false"
+                android:progressDrawable="@drawable/zlinker_quota_ring" />
+
+            <TextView
+                android:id="@+id/quota_ring_pct"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:maxLines="1" />
+        </FrameLayout>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="12dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/quota_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:maxLines="1"
+                android:ellipsize="end" />
+
+            <TextView
+                android:id="@+id/quota_sub"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:textSize="12sp"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/quota_action"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:background="@drawable/zlinker_quota_pill"
+            android:visibility="gone" />
+
+        <!-- Manual re-poll, visible in every phase (any state can go
+             stale). Click is bound once in QuotaWatchNotifier.views(). -->
+        <ImageView
+            android:id="@+id/quota_refresh"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="2dp"
+            android:padding="10dp"
+            android:src="@drawable/zlinker_quota_refresh" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/quota_detail_box"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="9dp"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <!-- RemoteViews cannot inflate a bare <View> (not on the allowed
+             whitelist); a 1dp TextView renders the same hairline. -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginBottom="7dp"
+            android:background="@color/quota_ring_track" />
+
+        <TextView
+            android:id="@+id/quota_detail_1"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:maxLines="1"
+            android:ellipsize="end" />
+
+        <TextView
+            android:id="@+id/quota_detail_2"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:textSize="12sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:visibility="gone" />
+    </LinearLayout>
+</LinearLayout>

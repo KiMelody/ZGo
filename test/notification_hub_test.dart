@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -24,7 +25,8 @@ class RecordingService implements NotificationService {
 
   @override
   Future<void> show(NotifyChannel channel, int id, String title,
-      String body, Map<String, dynamic> payload) async {
+      String body, Map<String, dynamic> payload,
+      {List<AndroidNotificationAction>? actions}) async {
     shown.add((channel, id, title, body, payload));
   }
 

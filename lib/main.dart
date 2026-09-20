@@ -2,16 +2,21 @@ import 'dart:async';
 
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:home_widget/home_widget.dart';
 
 import 'notifications/keepalive_controller.dart';
 import 'notifications/notification_service.dart';
+import 'notifications/quota_watch_presenter.dart';
 import 'state/device_session.dart';
 import 'state/device_store.dart';
 import 'state/notification_hub.dart';
+import 'state/quota_watch.dart';
 import 'state/scheduled_store.dart';
 import 'ui/chat/chat_page.dart';
+import 'ui/device_usage_page.dart';
 import 'ui/devices_page.dart';
+import 'ui/quota_reset_dialog.dart';
 import 'ui/remote_page.dart';
 import 'ui/task_list_page.dart';
 import 'ui/theme.dart';
@@ -31,7 +36,8 @@ class ZLinkerApp extends StatefulWidget {
   State<ZLinkerApp> createState() => _ZLinkerAppState();
 }
 
-class _ZLinkerAppState extends State<ZLinkerApp> {
+class _ZLinkerAppState extends State<ZLinkerApp>
+    with WidgetsBindingObserver {
   final DeviceStore _store = DeviceStore();
   final ThemeController _theme = ThemeController();
   final UiSettings _ui = UiSettings();
@@ -53,6 +59,27 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
     deviceLabelOf: (id) =>
         _store.devices.where((d) => d.id == id).firstOrNull?.label ?? id,
   );
+  // Quota watch (PRD 09-19): the presenter owns all copy/notice surfaces,
+  // the controller owns polling + the edge rules; the deep links below
+  // (usage page / reset dialog) live here in the composition root.
+  late final QuotaWatchPresenter _quotaPresenter = QuotaWatchPresenter(
+    service: _notifications,
+    localeOf: () => _ui.locale,
+    onReset: (kind) async {
+      if (kind == null) {
+        await _openQuotaResetDialog();
+      } else {
+        await _quotaWatch.performReset(kind);
+      }
+    },
+    onOpenUsage: _openQuotaUsagePage,
+        onRefresh: () => _quotaWatch.pollNow(force: true),
+  );
+  late final QuotaWatchController _quotaWatch = QuotaWatchController(
+    sessionsOf: () => _hub.activeSessions,
+    onEvent: _quotaPresenter.onEvent,
+  );
+  static const _quotaWatchChannel = MethodChannel('zlinker/quota_watch');
   StreamSubscription? _widgetClickSub;
   StreamSubscription? _appLinkSub;
   final _appLinks = AppLinks();
@@ -60,6 +87,7 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _theme.load();
     final uiLoaded = _ui.load();
     _scheduled.load();
@@ -71,6 +99,37 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
     // Local notifications: task events ride the sessions stream; off-peak
     // and automation results poll. Tapping deep-links to the conversation.
     _notifications.onTap = _handleNotificationTap;
+    _notifications.onAction = (payload, actionId) {
+      if (actionId == QuotaWatchPresenter.resetActionId) {
+        unawaited(_quotaPresenter.handleResetPress());
+      }
+    };
+    // Quota watch: push settings in (now and on every change), render the
+    // persistent notice from each judged snapshot, and serve the native
+    // reset tap (warm push + cold-start pull).
+    unawaited(uiLoaded.then((_) => _applyQuotaWatchSettings()));
+    _ui.addListener(_applyQuotaWatchSettings);
+    _quotaWatch
+        .addListener(() => _quotaPresenter.onSnapshot(_quotaWatch.snapshot));
+    _quotaWatchChannel.setMethodCallHandler((call) async {
+      if (call.method == 'resetPressed') {
+        unawaited(_quotaPresenter.handleResetPress());
+        return true;
+      }
+      // The notice's refresh icon (native push; a dead engine is served by
+      // the next app open, whose resumed lifecycle re-polls instead).
+      if (call.method == 'refreshPressed') {
+        debugPrint('[quota-watch] manual refresh pressed');
+        unawaited(_quotaPresenter.handleRefreshPress());
+        return true;
+      }
+      return null;
+    });
+    unawaited(_quotaWatchChannel
+        .invokeMethod<bool>('takePendingReset')
+        .then((pending) {
+      if (pending == true) unawaited(_quotaPresenter.handleResetPress());
+    }).catchError((_) {}));
     // Channel names are fixed the first time the channel is created, so wait
     // for the stored locale before registering them.
     unawaited(uiLoaded.then((_) => _notifications.init(locale: _ui.locale)));
@@ -139,10 +198,69 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
     if (mounted) _notifyHub.syncWith(_hub.activeSessions);
   }
 
+  /// Pushes the settings节 values into the watch (no-op when unchanged).
+  void _applyQuotaWatchSettings() {
+    _quotaWatch.configure(
+      enabled: _ui.quotaWatchEnabled,
+      thresholdPercent: _ui.quotaWatchThreshold,
+      interval: Duration(minutes: _ui.quotaWatchIntervalMinutes),
+      expiryReminderEnabled: _ui.quotaWatchExpiryReminderEnabled,
+      fiveHourExpiryLeadMinutes: _ui.quotaWatchExpiryLeadFiveHourMinutes,
+      weeklyExpiryLeadHours: _ui.quotaWatchExpiryLeadWeeklyHours,
+    );
+  }
+
+  /// Deep link target of the quota-watch notices: the monitored device's
+  /// usage page (the reset area lives there). No monitored session →
+  /// nothing to open.
+  Future<void> _openQuotaUsagePage() async {
+    final deviceId = _quotaWatch.monitoredDeviceId;
+    if (deviceId == null) return;
+    if (!_store.loaded) await _store.load();
+    final device = _store.devices.where((d) => d.id == deviceId).firstOrNull;
+    if (device == null) return;
+    final session = _hub.ensure(device);
+    final context = _navigatorKey.currentContext;
+    if (session == null || context == null || !context.mounted) return;
+    await Navigator.of(context).push(zRoute(
+      (_) => DeviceUsagePage(session: session),
+    ));
+  }
+
+  /// N3b degrade: open the existing reset dialog over the current page for
+  /// the monitored session (the pools come off the session-wide
+  /// controllers, so the dialog lists exactly the resettable windows).
+  Future<void> _openQuotaResetDialog() async {
+    final deviceId = _quotaWatch.monitoredDeviceId;
+    if (deviceId == null) return;
+    if (!_store.loaded) await _store.load();
+    final device = _store.devices.where((d) => d.id == deviceId).firstOrNull;
+    if (device == null) return;
+    final session = _hub.ensure(device);
+    if (session == null) return;
+    final view = await session.entitlementSnapshot();
+    await session.quotaResetController.refresh();
+    final context = _navigatorKey.currentContext;
+    if (context == null || !context.mounted) return;
+    await showQuotaResetDialog(
+      context,
+      controller: session.quotaResetController,
+      resettable: {
+        for (final r in view.resettablePools(session.quotaResetController.pools))
+          r.type,
+      },
+    );
+  }
+
   /// Notification tap → the producing conversation: native chat page when
   /// the protocol link is up (no WebView suspend), WebView deep link as
-  /// fallback for devices without a native session.
+  /// fallback for devices without a native session. Quota-watch notices
+  /// deep-link to the monitored device's usage page instead.
   Future<void> _handleNotificationTap(Map<String, dynamic> payload) async {
+    if (payload['type'] == 'quotaWatch') {
+      await _openQuotaUsagePage();
+      return;
+    }
     final deviceId = payload['deviceId'] as String?;
     if (deviceId == null) return;
     final device = _store.devices.where((d) => d.id == deviceId).firstOrNull;
@@ -177,11 +295,28 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
     _hub.scheduleResume(device);
   }
 
+  /// Quota watch cadence (2026-09-20 真机诊断): doze stalls the RPCs, so
+  /// going to the background (paused — home screen, app switch, screen
+  /// off) drops to the slow 5-minute cadence, and a resume refreshes at
+  /// once instead of waiting out the next periodic tick. `inactive` /
+  /// `hidden` (dialogs, system sheets) leave the cadence alone.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _quotaWatch.foregrounded();
+    } else if (state == AppLifecycleState.paused) {
+      _quotaWatch.backgrounded();
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _widgetClickSub?.cancel();
     _appLinkSub?.cancel();
     _notifyHub.dispose();
+    _ui.removeListener(_applyQuotaWatchSettings);
+    _quotaWatch.dispose();
     _hub.removeListener(_syncNotifyHub);
     _scheduler.dispose();
     super.dispose();
@@ -216,6 +351,7 @@ class _ZLinkerAppState extends State<ZLinkerApp> {
             hub: _hub,
             scheduled: _scheduled,
             keepalive: _keepAlive,
+            quotaWatch: _quotaWatch,
           ),
         );
       },

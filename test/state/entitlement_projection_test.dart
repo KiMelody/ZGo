@@ -394,7 +394,7 @@ void main() {
     });
 
     test('beyond 24h renders MM-dd HH:mm', () {
-      final at = DateTime.now().subtract(const Duration(days: 3));
+      final at = DateTime.now().add(const Duration(days: 3));
       final expected =
           '${at.month.toString().padLeft(2, '0')}-'
           '${at.day.toString().padLeft(2, '0')} '

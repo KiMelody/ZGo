@@ -17,6 +17,7 @@ import '../protocol/task_groups.dart';
 import 'device_store.dart';
 import 'entitlement_poller.dart';
 import 'quota_reset.dart';
+import 'quota_watch.dart' show QuotaWatchSource;
 import 'task_directory.dart';
 
 /// Mirrors `HC()` in the web client:
@@ -270,7 +271,12 @@ abstract interface class ChatGateway
 /// - Being KICKED by another terminal is terminal for this session: no
 ///   auto-reconnect (the relay already suppresses it).
 class DeviceSession extends ChangeNotifier
-    implements AutomationHost, OffPeakHost, NotifiableSession, ChatGateway {
+    implements
+        AutomationHost,
+        OffPeakHost,
+        NotifiableSession,
+        ChatGateway,
+        QuotaWatchSource {
   @override
   final String deviceId;
   final RemoteConnectionParams params;
