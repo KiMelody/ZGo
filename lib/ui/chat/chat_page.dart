@@ -119,6 +119,19 @@ class _ChatPageState extends State<ChatPage> {
   /// opening the chat lands at the bottom; the user scrolling up unpins it.
   bool _stickToBottom = true;
 
+  /// List viewport dimension seen by the last metrics pass — primer for the
+  /// keyboard shrink-follow ([_onListMetrics]); null until the first
+  /// [ScrollMetricsNotification] arrives.
+  double? _lastViewportDim;
+
+  /// Set right after a shrink-follow jump: the jump used the max extent the
+  /// layout had at that instant, and SliverList then settles the freshly
+  /// revealed bottom rows and revises the extent (visible when the inset
+  /// lands in one step — split screen, keyboard shortcuts — instead of
+  /// animating frame by frame). The next metrics notification earns one
+  /// catch-up jump so a pinned view really sits on the newest row.
+  bool _pinCatchUpPending = false;
+
   /// Content bottom seen by the last scroll-follow pass; null until the
   /// initial snapshot is positioned.
   double? _lastContentBottom;
@@ -211,6 +224,42 @@ class _ChatPageState extends State<ChatPage> {
     // free.
     if (stick == _stickToBottom) return;
     if (mounted) setState(() => _stickToBottom = stick);
+  }
+
+  /// Keyboard shrink-follow (2026-09-20 真机): with resizeToAvoidBottomInset
+  /// the IME animation compresses the list viewport frame by frame while the
+  /// scroll offset stays put — content stays anchored to the viewport top and
+  /// the newest rows slide under the composer. While pinned to the bottom,
+  /// jump along on every shrink frame. jumpTo, not animateTo: the IME
+  /// animation already paces the motion (insets arrive per frame), a second
+  /// easing curve would fight it. One extra catch-up jump follows the shrink
+  /// jump (see [_pinCatchUpPending]) — the SliverList revises its max extent
+  /// a frame later. Keyboard-down recovery needs nothing: the offset is
+  /// clamped back and the pixels >= max - 40 stick test above keeps holding.
+  /// Content growth is not this listener's business — the viewport dimension
+  /// doesn't shrink then, and [_scrollToBottom] owns the follow. The
+  /// notification's metrics is a detached copy, so routing happens by
+  /// position identity: only the main list's scrollable drives the jump (the
+  /// floating status strip's own scrollable — a sibling Stack branch — cannot
+  /// bubble here; the check keeps the listener honest if it ever moves above
+  /// the Stack).
+  bool _onListMetrics(ScrollMetricsNotification notification) {
+    if (!_scrollController.hasClients) return false;
+    final scrollable = Scrollable.maybeOf(notification.context);
+    if (scrollable == null ||
+        !identical(scrollable.position, _scrollController.position)) {
+      return false;
+    }
+    final previous = _lastViewportDim;
+    final dim = notification.metrics.viewportDimension;
+    _lastViewportDim = dim;
+    final shrunk = previous != null && previous - dim > 0.5;
+    final catchUp = _pinCatchUpPending;
+    _pinCatchUpPending = shrunk;
+    if (_stickToBottom && (shrunk || catchUp)) {
+      _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+    }
+    return false;
   }
 
   Future<void> _loadPrep() async {
@@ -1074,66 +1123,96 @@ class _ChatPageState extends State<ChatPage> {
       return Center(child: _LoadingPlaceholder(degraded: _bridgeDegraded()));
     }
     if (!state.ready) return const Center(child: CircularProgressIndicator());
-    return AnimatedBuilder(
-      animation: state,
-      builder: (context, _) {
-        final groups = _groupRows(state.rows);
-        final itemCount = groups.length + (state.canLoadOlder ? 1 : 0);
-        if (groups.isEmpty && !state.canLoadOlder) {
-          return Center(
-            child: Text(
-              tr(context, 'chat.empty'),
-              style: TextStyle(color: ZInk.faint(context)),
+    // The shrink-follow listener rides the list subtree only (see
+    // [_onListMetrics]) — the floating status strip's scrollable lives in a
+    // sibling Stack branch whose notifications can't bubble into it.
+    return NotificationListener<ScrollMetricsNotification>(
+      onNotification: _onListMetrics,
+      child: AnimatedBuilder(
+        animation: state,
+        builder: (context, _) {
+          final groups = _groupRows(state.rows);
+          final itemCount = groups.length + (state.canLoadOlder ? 1 : 0);
+          if (groups.isEmpty && !state.canLoadOlder) {
+            return Center(
+              child: Text(
+                tr(context, 'chat.empty'),
+                style: TextStyle(color: ZInk.faint(context)),
+              ),
+            );
+          }
+          return _contentCol(
+            ListView.builder(
+              controller: _scrollController,
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+              itemCount: itemCount,
+              itemBuilder: (context, index) {
+                if (state.canLoadOlder && index == 0) {
+                  return Center(
+                    child: TextButton.icon(
+                      onPressed: _loadingOlder ? null : _loadOlder,
+                      icon: _loadingOlder
+                          ? const SizedBox(
+                              width: 12,
+                              height: 12,
+                              child: CircularProgressIndicator(strokeWidth: 1.5),
+                            )
+                          : const Icon(Icons.history, size: 14),
+                      label: Text(
+                        tr(context, 'chat.loadOlder'),
+                        style: ZType.sub,
+                      ),
+                    ),
+                  );
+                }
+                final groupIndex = index - (state.canLoadOlder ? 1 : 0);
+                final group = groups[groupIndex];
+                final previous = groupIndex > 0 ? groups[groupIndex - 1] : null;
+                final divider = _timeDividerLabel(previous, group);
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (divider != null) _TimeDivider(label: divider),
+                    _TurnGroupWidget(
+                      rows: group,
+                      gateway: widget.gateway,
+                      sessionId: _sessionId ?? '',
+                      onAction: _run,
+                      state: state,
+                      feed: _feed,
+                      confirmWindow: widget.turnFooterConfirmWindow,
+                    ),
+                  ],
+                );
+              },
             ),
           );
-        }
-        return _contentCol(
-          ListView.builder(
-            controller: _scrollController,
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-            itemCount: itemCount,
-            itemBuilder: (context, index) {
-              if (state.canLoadOlder && index == 0) {
-                return Center(
-                  child: TextButton.icon(
-                    onPressed: _loadingOlder ? null : _loadOlder,
-                    icon: _loadingOlder
-                        ? const SizedBox(
-                            width: 12,
-                            height: 12,
-                            child: CircularProgressIndicator(strokeWidth: 1.5),
-                          )
-                        : const Icon(Icons.history, size: 14),
-                    label: Text(
-                      tr(context, 'chat.loadOlder'),
-                      style: ZType.sub,
-                    ),
-                  ),
-                );
-              }
-              final groupIndex = index - (state.canLoadOlder ? 1 : 0);
-              final group = groups[groupIndex];
-              final previous = groupIndex > 0 ? groups[groupIndex - 1] : null;
-              final divider = _timeDividerLabel(previous, group);
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (divider != null) _TimeDivider(label: divider),
-                  _TurnGroupWidget(
-                    rows: group,
-                    gateway: widget.gateway,
-                    sessionId: _sessionId ?? '',
-                    onAction: _run,
-                    state: state,
-                    feed: _feed,
-                    confirmWindow: widget.turnFooterConfirmWindow,
-                  ),
-                ],
-              );
-            },
+        },
+      ),
+    );
+  }
+
+  /// Status strip (goal/works/queue/interactions). Keyboard-open callers
+  /// wrap it in a bottom-aligned positioned slot inside the message Stack,
+  /// where the scroll view shrink-wraps to min(intrinsic, stack height) and
+  /// scrolls when the banners overflow; no-keyboard callers place it as a
+  /// plain Column child.
+  Widget _statusStrip(BuildContext context, ConversationState state) {
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _GoalBanner(state: state),
+          _GoalProcessPanel(
+            state: state,
+            gateway: widget.gateway,
+            feed: _feed,
           ),
-        );
-      },
+          _BackgroundWorksBar(state: state, gateway: widget.gateway),
+          _QueueBar(state: state, gateway: widget.gateway),
+          _PendingInteractions(state: state, gateway: widget.gateway),
+        ],
+      ),
     );
   }
 
@@ -1152,10 +1231,18 @@ class _ChatPageState extends State<ChatPage> {
   @override
   Widget build(BuildContext context) {
     final state = _state;
-    // Read ABOVE the Scaffold: it strips the bottom inset from the body's
-    // MediaQuery (removeBottomInset), so the status strip below cannot see
-    // it there. Drives the strip's compressible-flex branch (R2).
-    final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;
+    // This build deliberately does NOT read the IME inset: the keyboard
+    // animation delivers a fresh inset every frame (~300ms), and a dependency
+    // here rebuilt the whole page per frame — app bar, row regrouping,
+    // markdown relayout (2026-09-20 真机掉帧). The dependency lives in
+    // _KeyboardProbe instead (placed ABOVE the Scaffold: the body's
+    // MediaQuery strips the bottom inset, so nothing inside the body could
+    // read it anyway) and only the strip slots consume it. The Scaffold
+    // itself still depends on the inset and re-lays-out every frame — that
+    // part is unavoidable — but as long as this build stays idle the body
+    // widget instance it receives is identical, Element updates short-circuit
+    // on widget identity and the entire chat content subtree skips rebuild;
+    // only the cheap layout shrink remains (an order of magnitude cheaper).
     final chat = Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: !widget.embedded,
@@ -1347,6 +1434,27 @@ class _ChatPageState extends State<ChatPage> {
                     ),
                   ),
                 ),
+                // Status strip while the IME is up: floats over the list
+                // bottom instead of being a Column flex child. The loose
+                // Flexible it used before (09-18 R2) split the remaining
+                // height with the Expanded list 1:1 and RenderFlex never
+                // redistributes what a loose child leaves unused — the free
+                // space pooled at the Column tail, leaving a blank band the
+                // height of the strip's unused share between the composer
+                // and the keyboard (2026-09-20 真机报告). Anchored to the
+                // bottom it shrink-wraps to min(intrinsic, stack height),
+                // so the strip still scrolls when the banners overflow and
+                // the composer stays pinned above the IME.
+                // The Positioned.fill is unconditional — the slot inside
+                // consults _KeyboardScope; a conditional here would flip the
+                // Stack's child count on every keyboard toggle.
+                Positioned.fill(
+                  child: _StatusStripSlot(
+                    floating: true,
+                    state: state,
+                    buildStrip: _statusStrip,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1354,39 +1462,23 @@ class _ChatPageState extends State<ChatPage> {
             animation: widget.gateway,
             builder: (context, _) => _GatewayBanner(gateway: widget.gateway),
           ),
-          if (state != null)
-            AnimatedBuilder(
-              animation: state,
-              // Status strip (goal/works/queue/interactions). While the IME
-              // is up it becomes a loose flex child (inner scroll), so the
-              // strip compresses into a scrollable area and the composer
-              // stays on screen instead of the body Column overflowing by
-              // ~344px (PRD internal-task R2). With no keyboard
-              // it stays a plain intrinsic-height child: a permanent
-              // Flexible would split the leftover space with the message
-              // list's Expanded and shrink the strip below its intrinsic
-              // height on short viewports (visual change).
-              builder: (context, _) {
-                final Widget strip = Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _GoalBanner(state: state),
-                    _GoalProcessPanel(
-                      state: state,
-                      gateway: widget.gateway,
-                      feed: _feed,
-                    ),
-                    _BackgroundWorksBar(state: state, gateway: widget.gateway),
-                    _QueueBar(state: state, gateway: widget.gateway),
-                    _PendingInteractions(state: state, gateway: widget.gateway),
-                  ],
-                );
-                if (!keyboardOpen) return strip;
-                return Flexible(
-                  child: SingleChildScrollView(child: strip),
-                );
-              },
-            ),
+          // Status strip (goal/works/queue/interactions), no-keyboard
+          // variant: a plain intrinsic-height child so it never splits
+          // leftover space with the message list's Expanded (a permanent
+          // Flexible would shrink the strip below its intrinsic height on
+          // short viewports — visual change; see internal-task
+          // R2). While the IME is up the strip renders inside the Stack
+          // above; this slot must stay occupied (constant type, constant
+          // Column position) — letting the child disappear would shift every
+          // later Column child, force the composer's Element to remount on
+          // the first IME inset frame, drop the TextField focus and cancel
+          // the keyboard right after it started showing (2026-09-20 真机
+          // IME_ANIMATION_CANCEL 回归).
+          _StatusStripSlot(
+            floating: false,
+            state: state,
+            buildStrip: _statusStrip,
+          ),
           if (_showSlash)
             _SlashCommandBar(
               query: _inputController.text,
@@ -1474,11 +1566,13 @@ class _ChatPageState extends State<ChatPage> {
         ],
       ),
     );
-    return AnimatedBuilder(
-      animation: widget.gateway,
-      builder: (context, _) => widget.gateway.kicked
-          ? Stack(children: [chat, _kickedOverlay(context)])
-          : chat,
+    return _KeyboardProbe(
+      child: AnimatedBuilder(
+        animation: widget.gateway,
+        builder: (context, _) => widget.gateway.kicked
+            ? Stack(children: [chat, _kickedOverlay(context)])
+            : chat,
+      ),
     );
   }
 
@@ -1564,6 +1658,97 @@ class _ChatPageState extends State<ChatPage> {
       if (v is num && v > 0) return v.toInt();
     }
     return null;
+  }
+}
+
+/// ------------------------------------------------------- keyboard scope
+
+/// Publishes the keyboard-open state to the strip slots via [_KeyboardScope].
+/// Deliberately the only widget in the page that depends on the IME inset
+/// (besides the Scaffold's own layout): the animation delivers a fresh inset
+/// every frame for ~300ms, and a dependency in ChatPage.build would rebuild
+/// the whole page per frame (2026-09-20 真机掉帧). This probe rebuilds
+/// instead and returns the identical child widget, so Element updates
+/// short-circuit below it; the scope only notifies its dependents when the
+/// boolean flips.
+class _KeyboardProbe extends StatefulWidget {
+  const _KeyboardProbe({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_KeyboardProbe> createState() => _KeyboardProbeState();
+}
+
+class _KeyboardProbeState extends State<_KeyboardProbe> {
+  bool _open = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Read here, above the Scaffold: the Scaffold strips the bottom view
+    // inset from the body's MediaQuery (removeViewInsets), so widgets inside
+    // the body can never see the real value (that is why the old read lived
+    // in ChatPage.build).
+    _open = MediaQuery.viewInsetsOf(context).bottom > 0;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _KeyboardScope(open: _open, child: widget.child);
+  }
+}
+
+class _KeyboardScope extends InheritedWidget {
+  const _KeyboardScope({required this.open, required super.child});
+
+  final bool open;
+
+  static bool of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<_KeyboardScope>()?.open ??
+      false;
+
+  @override
+  bool updateShouldNotify(_KeyboardScope oldWidget) => oldWidget.open != open;
+}
+
+/// Status-strip slot — the keyboard-aware leaf of the chat page. One class
+/// for both call sites in [ChatPage.build]: the floating variant anchors the
+/// open-keyboard strip to the message Stack's bottom, the Column variant
+/// renders it as a plain child while the keyboard is closed and shrinks
+/// otherwise (the placeholder discipline that keeps the composer mounted is
+/// documented at the call site).
+class _StatusStripSlot extends StatelessWidget {
+  const _StatusStripSlot({
+    required this.floating,
+    required this.state,
+    required this.buildStrip,
+  });
+
+  final bool floating;
+  final ConversationState? state;
+  final Widget Function(BuildContext context, ConversationState state)
+      buildStrip;
+
+  @override
+  Widget build(BuildContext context) {
+    final keyboardOpen = _KeyboardScope.of(context);
+    final state = this.state;
+    if (state == null) return const SizedBox.shrink();
+    // The state dependency is kept inside the leaf, separate from the inset
+    // one: an inset frame rebuilds only this slot, a state change only
+    // refreshes the strip content.
+    return AnimatedBuilder(
+      animation: state,
+      builder: (context, _) {
+        final visible = floating ? keyboardOpen : !keyboardOpen;
+        if (!visible) return const SizedBox.shrink();
+        final strip = buildStrip(context, state);
+        return floating
+            ? Align(alignment: Alignment.bottomCenter, child: strip)
+            : strip;
+      },
+    );
   }
 }
 

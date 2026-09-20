@@ -473,6 +473,170 @@ void main() {
     expect(call.$2[4], 'accept');
   });
 
+  testWidgets(
+    'IME up: strip floats over the list, composer touches the viewport '
+    'bottom (09-20 真机 blank-band regression)', (tester) async {
+      final gateway = FakeChatGateway();
+      await tester.pumpWidget(
+        wrap(
+          MediaQuery(
+            data: const MediaQueryData(viewInsets: EdgeInsets.only(bottom: 344)),
+            child: ChatPage(gateway: gateway, sessionId: 's1', title: 't'),
+          ),
+        ),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+        {'rowId': 2, 'kind': 'assistant', 'text': 'done'},
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      const hint = '提出后续修改要求';
+      expect(find.text(hint), findsOneWidget);
+      final composerRect = tester.getRect(find.byType(TextField).first);
+      final viewportH = tester.view.physicalSize.height /
+          tester.view.devicePixelRatio;
+      const inset = 344.0;
+      // The composer rides above the keyboard (its toolbar row sits below
+      // the field), and — the regression this pins — the status strip
+      // renders inside the message Stack (bottom-anchored) instead of a
+      // loose Flexible column child, whose unused flex share pooled at the
+      // Column tail as a blank band between composer and keyboard.
+      expect(
+        composerRect.bottom,
+        greaterThan(viewportH - inset - 100),
+      );
+      final stackStrip = find.descendant(
+        of: find.byType(Stack),
+        matching: find.byType(SingleChildScrollView),
+      );
+      expect(stackStrip, findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'IME inset rising keeps composer focus alive (09-20 真机 hide '
+    'regression: letting the strip slot leave the Column shifted every '
+    'later child, remounted the composer on the first inset frame and '
+    'cancelled the keyboard ~130ms after show)', (tester) async {
+      final gateway = FakeChatGateway();
+      Widget page(double inset) => wrap(
+        MediaQuery(
+          data: MediaQueryData(viewInsets: EdgeInsets.only(bottom: inset)),
+          child: ChatPage(gateway: gateway, sessionId: 's1', title: 't'),
+        ),
+      );
+      await tester.pumpWidget(page(0));
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+        {'rowId': 2, 'kind': 'assistant', 'text': 'done'},
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Tap to focus the composer — step one of the real IME dance.
+      await tester.tap(find.byType(TextField).first);
+      await tester.pump();
+      final focusedBefore = FocusManager.instance.primaryFocus;
+      expect(focusedBefore, isNotNull);
+
+      // The inset arrives and the page rebuilds in place (same root widget
+      // type → same Element). This is the frame where the old code let the
+      // composer remount, dropping focus and auto-hiding the just-shown IME.
+      await tester.pumpWidget(page(344));
+      await tester.pump();
+      expect(FocusManager.instance.primaryFocus, same(focusedBefore));
+      // And the composer's Element is the same one — text typed during the
+      // keyboard-up rebuild survives another rebuild.
+      await tester.enterText(find.byType(TextField).first, 'abc');
+      await tester.pumpWidget(page(344));
+      await tester.pump();
+      expect(FocusManager.instance.primaryFocus, same(focusedBefore));
+      expect(find.widgetWithText(TextField, 'abc'), findsOneWidget);
+      // The real IME animates through many intermediate insets (one rebuild
+      // per frame); the focus must survive the whole dance.
+      for (final next in <double>[250, 120]) {
+        await tester.pumpWidget(page(next));
+        await tester.pump();
+        expect(FocusManager.instance.primaryFocus, same(focusedBefore));
+      }
+      // And the boolean flip back to closed — the one frame where the two
+      // strip slots swap places (Column slot expands, Stack slot collapses).
+      await tester.pumpWidget(page(0));
+      await tester.pump();
+      expect(FocusManager.instance.primaryFocus, same(focusedBefore));
+    },
+  );
+
+  testWidgets(
+    'keyboard shrink keeps the pinned list on the newest row (09-20 真机: '
+    'the viewport shrank, the offset stayed and the latest messages were '
+    'cut off below the composer)', (tester) async {
+      final gateway = FakeChatGateway();
+      Widget page(double inset) => wrap(
+        MediaQuery(
+          data: MediaQueryData(viewInsets: EdgeInsets.only(bottom: inset)),
+          child: ChatPage(gateway: gateway, sessionId: 's1', title: 't'),
+        ),
+      );
+      await tester.pumpWidget(page(0));
+      gateway.feedSnapshot([
+        for (var i = 0; i < 60; i++) ...[
+          {'rowId': i * 2, 'kind': 'userInput', 'text': '问题 $i'},
+          {
+            'rowId': i * 2 + 1,
+            'kind': 'assistantText',
+            'text': '回答 $i，足够长以保证内容远超视口高度。',
+          },
+        ],
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // The message ListView is the only one on a resting page.
+      ScrollController controller() =>
+          tester.widget<ListView>(find.byType(ListView)).controller!;
+      final pinned = controller();
+      expect(
+        pinned.position.pixels,
+        closeTo(pinned.position.maxScrollExtent, 1),
+      );
+
+      // IME up: the viewport shrinks (maxScrollExtent grows), and a pinned
+      // list must ride along to the newest row instead of keeping its old
+      // offset while the content stays anchored to the viewport top.
+      await tester.pumpWidget(page(344));
+      await tester.pump();
+      await tester.pump();
+      final shrunk = controller();
+      expect(
+        shrunk.position.pixels,
+        closeTo(shrunk.position.maxScrollExtent, 1),
+      );
+
+      // Unpinned list: the shrink must NOT pull it back down — following is
+      // a pinned-state privilege.
+      shrunk.jumpTo(shrunk.position.maxScrollExtent - 500);
+      await tester.pump();
+      await tester.pumpWidget(page(0)); // keyboard collapses; clamp recovers
+      await tester.pump();
+      final relaxed = controller();
+      expect(
+        relaxed.position.pixels,
+        lessThan(relaxed.position.maxScrollExtent - 40),
+      );
+      await tester.pumpWidget(page(344)); // IME up again, still unpinned
+      await tester.pump();
+      final still = controller();
+      expect(
+        still.position.pixels,
+        lessThan(still.position.maxScrollExtent - 40),
+      );
+    },
+  );
+
   testWidgets('composer stays put while an interaction awaits', (tester) async {
     final gateway = await pumpQuestions(tester, [envQuestion]);
 
