@@ -193,6 +193,92 @@ void main() {
     });
   });
 
+  group('OffPeakPort 3.14 take-a-number status', () {
+    test('statusV314 skips the ladder and normalizes both probes', () async {
+      final fake = FakeChannel((m, _) => switch (m) {
+            'getCodingPlanSupport' =>
+              {'supported': true, 'kind': 'zai-personal'},
+            'getTakeNumberAvailability' =>
+              {'canTakeNumber': false, 'nextTakeAt': 1724400000000},
+            _ => throw StateError('unexpected $m'),
+          });
+      final port = OffPeakPort(fake.call, newWire: true, statusV314: true);
+
+      final status = await port.status();
+
+      expect(fake.calls.map((c) => c.$1).toSet(),
+          {'getCodingPlanSupport', 'getTakeNumberAvailability'});
+      // Both probes are parameter-less.
+      expect(fake.calls.every((c) => c.$2.isEmpty), isTrue);
+      expect(status!.takeNumberSemantics, isTrue);
+      expect(status.supported, isTrue);
+      expect(status.canTakeNumber, isFalse);
+      expect(status.nextTakeAtMs, 1724400000000);
+      // The legacy quota fields have no counterpart on 3.14.
+      expect(status.quotaRemainingMinutes, isNull);
+      expect(status.earliestAvailableAt, isNull);
+    });
+
+    test('nextTakeAtMs tolerates the seconds scale', () async {
+      final fake = FakeChannel((m, _) => switch (m) {
+            'getCodingPlanSupport' => {'supported': false},
+            'getTakeNumberAvailability' =>
+              {'canTakeNumber': false, 'nextTakeAt': 1724400000},
+            _ => throw StateError('unexpected $m'),
+          });
+      final port = OffPeakPort(fake.call, newWire: true, statusV314: true);
+
+      final status = await port.status();
+
+      expect(status!.supported, isFalse);
+      expect(status.canTakeNumber, isFalse);
+      expect(status.nextTakeAtMs, 1724400000000);
+    });
+
+    test('either RPC failing yields the S4 availabilityError view',
+        () async {
+      final fake = FakeChannel((m, _) => m == 'getCodingPlanSupport'
+          ? throw missing(m)
+          : {'canTakeNumber': true});
+      final port = OffPeakPort(fake.call, newWire: true, statusV314: true);
+
+      final status = await port.status();
+
+      expect(status!.availabilityError, isTrue);
+      expect(status.supported, isNull);
+      expect(status.canTakeNumber, isNull);
+      expect(status.takeNumberSemantics, isTrue);
+    });
+
+    test('non-map probe answers count as failed (S4)', () async {
+      final fake = FakeChannel((m, _) => switch (m) {
+            'getCodingPlanSupport' => {'supported': true},
+            'getTakeNumberAvailability' => null,
+            _ => throw StateError('unexpected $m'),
+          });
+      final port = OffPeakPort(fake.call, newWire: true, statusV314: true);
+
+      final status = await port.status();
+
+      expect(status!.availabilityError, isTrue);
+    });
+
+    test('statusV314=false keeps the legacy ladder untouched', () async {
+      final fake = FakeChannel((m, _) =>
+          m == 'getTakeNumberAvailability' || m == 'getCodingPlanSupport'
+              ? throw StateError('must not be called')
+              : {'available': true, 'quotaRemainingMinutes': 60});
+      final port = OffPeakPort(fake.call, newWire: true, statusV314: false);
+
+      final status = await port.status();
+
+      expect(fake.calls.single.$1, 'getStatus');
+      expect(status!.takeNumberSemantics, isFalse);
+      expect(status.entitled, isTrue);
+      expect(status.quotaRemainingMinutes, 60);
+    });
+  });
+
   group('OffPeakRunResult', () {
     test('error field downgrades ok', () {
       final res = OffPeakRunResult.from(const {

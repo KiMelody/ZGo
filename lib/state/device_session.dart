@@ -8,6 +8,7 @@ import '../protocol/channel_client.dart'
     show Channels, isChannelLevelError, isChannelMissingError;
 import '../protocol/connection_params.dart';
 import '../protocol/conversation.dart';
+import '../protocol/model_selection.dart' show parseModelSelectionCatalog;
 import '../protocol/off_peak.dart';
 import '../protocol/relay_client.dart';
 import '../protocol/remote_client.dart';
@@ -216,7 +217,9 @@ abstract interface class ChatGateway
   Future<List<SkillEntry>> skills();
 
   /// Fallback model catalog for the chat config sheet (PRD 09-19): enabled
-  /// providers from the `model-provider` channel (`getAll`), used when
+  /// providers from the `model-provider` channel (`getAll`), or — on ≥3.14
+  /// desktops where that channel is gone — the `model-selection.getView`
+  /// registry mapped to the same shape. Used when
   /// prepareWorkspace ships no model options. Cached for the session
   /// lifetime like [DeviceSession.probeModelProvider]; never throws —
   /// transport/channel failures resolve to an empty list (and stay
@@ -977,6 +980,15 @@ class DeviceSession extends ChangeNotifier
   Future<List<Map<String, dynamic>>> modelProviderCatalog() {
     return _modelProviderCatalogFuture ??= () async {
       try {
+        // Desktop ≥3.14 removed model-provider outright; the read-only
+        // model-selection.getView registry (same catalog shape via
+        // parseModelSelectionCatalog) takes over as the sheet's data
+        // source. CRUD (save/delete) has no counterpart — the providers
+        // page stays capability-gated on [probeModelProvider].
+        if (params.atLeast(3, 14, 0)) {
+          return parseModelSelectionCatalog(
+              await callChannel(Channels.modelSelection, 'getView'));
+        }
         final res = await callChannel(Channels.modelProvider, 'getAll');
         return [
           for (final p in (res is List ? res : const <dynamic>[]))
@@ -1013,12 +1025,14 @@ class DeviceSession extends ChangeNotifier
   );
 
   /// Off-peak tasks of the connected desktop (off-peak-task channel). The
-  /// wire (lifecycle positional args, positional updateTask) is gated on
-  /// the desktop version — it cannot change mid-session.
+  /// wire (lifecycle positional args, positional updateTask) and the status
+  /// family (3.14 take-a-number probes) are gated on the desktop version —
+  /// it cannot change mid-session.
   @override
   late final OffPeakPort offPeak = OffPeakPort(
     (method, args) => callChannel('off-peak-task', method, args),
     newWire: params.atLeast(3, 12, 3),
+    statusV314: params.atLeast(3, 14, 0),
   );
 
   /// Workspace scope (workspacePath/identity) for off-peak submissions and

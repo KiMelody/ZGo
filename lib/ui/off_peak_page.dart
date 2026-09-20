@@ -368,6 +368,9 @@ class _OffPeakPageState extends State<OffPeakPage>
   Widget _quotaHeader(BuildContext context) {
     final status = _status;
     if (status == null) return const SizedBox.shrink();
+    // ≥3.14 desktops answer the take-a-number probes → four-state header;
+    // legacy desktops keep the quota/earliest/locked header verbatim.
+    if (status.takeNumberSemantics) return _takeNumberHeader(context, status);
     if (!status.entitled) {
       final text = switch (status.reason) {
         OffPeakError.codingPlanOnly => tr(context, 'op.err.codingPlanOnly'),
@@ -430,6 +433,95 @@ class _OffPeakPageState extends State<OffPeakPage>
               child: Text(parts.join(' · '),
                   style:
                       ZType.body.copyWith(color: ZInk.soft(context))),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 3.14 take-a-number header, four states per the approved mock
+  /// (tool/design/offpeak-3-14-header-mock.html). Priority:
+  /// availabilityError (S4) > gate (S3) > availability (S2/S1). Rendered
+  /// once per load — the countdown never ticks while the page stays open.
+  Widget _takeNumberHeader(BuildContext context, OffPeakStatus status) {
+    if (status.availabilityError) {
+      return _takeNumberCard(context, Icons.more_horiz, ZInk.muted(context),
+          tr(context, 'op.take.unavailable'));
+    }
+    if (status.supported != true) {
+      return _takeNumberCard(context, Icons.lock_outline, ZColors.danger,
+          tr(context, 'op.take.planOnly'));
+    }
+    if (status.canTakeNumber != true) {
+      final remainingMs = (status.nextTakeAtMs ?? 0) -
+          DateTime.now().millisecondsSinceEpoch;
+      return _takeNumberCardSpans(
+        context,
+        Icons.pending_outlined,
+        ZColors.warning,
+        _emphasizedSubstitution(
+            'op.take.limitReached', formatTakeRemaining(context, remainingMs)),
+      );
+    }
+    return _takeNumberCardSpans(
+        context,
+        Icons.check_circle_outline,
+        ZColors.success,
+        _emphasizedHead(tr(context, 'op.take.available')));
+  }
+
+  /// S1: bolds the segment before the first ` · ` separator (mock S1 bold
+  /// head). A translation without the separator degrades to plain text.
+  List<InlineSpan> _emphasizedHead(String text) {
+    final i = text.indexOf(' · ');
+    if (i <= 0) return [TextSpan(text: text)];
+    return [
+      TextSpan(
+          text: text.substring(0, i),
+          style: ZType.bodyStrong.copyWith(color: ZInk.soft(context))),
+      TextSpan(text: text.substring(i)),
+    ];
+  }
+
+  /// S2: bolds the substituted {time} value (mock bold duration). The marker
+  /// split degrades to plain text if a translation drops the placeholder.
+  List<InlineSpan> _emphasizedSubstitution(String key, String value) {
+    const marker = '\u0001';
+    final template = trP(context, key, [marker]);
+    final i = template.indexOf(marker);
+    if (i < 0) return [TextSpan(text: trP(context, key, [value]))];
+    return [
+      TextSpan(text: template.substring(0, i)),
+      TextSpan(
+          text: value,
+          style: ZType.bodyStrong.copyWith(color: ZInk.soft(context))),
+      TextSpan(text: template.substring(i + marker.length)),
+    ];
+  }
+
+  Widget _takeNumberCard(
+      BuildContext context, IconData icon, Color color, String text) {
+    return _takeNumberCardSpans(
+        context, icon, color, [TextSpan(text: text)]);
+  }
+
+  Widget _takeNumberCardSpans(BuildContext context, IconData icon,
+      Color color, List<InlineSpan> spans) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(ZSpacing.card),
+        child: Row(
+          children: [
+            Icon(icon, size: 18, color: color),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text.rich(
+                TextSpan(
+                  style: ZType.body.copyWith(color: ZInk.soft(context)),
+                  children: spans,
+                ),
+              ),
             ),
           ],
         ),
@@ -1220,6 +1312,21 @@ String formatRemaining(BuildContext context, int ms) {
   return minutes == 0
       ? trP(context, 'op.hours', ['$hours'])
       : trP(context, 'op.remaining.hoursMin', ['$hours', '$minutes']);
+}
+
+/// 3.14 取号等待: official four tiers — {hours} 小时 {minutes} 分钟 /
+/// {hours} 小时 / {minutes} 分钟 / 不到 1 分钟.
+String formatTakeRemaining(BuildContext context, int ms) {
+  if (ms < 60000) return tr(context, 'op.take.remaining.lessThanMinute');
+  if (ms < 3600000) {
+    return trP(context, 'op.take.remaining.minutes',
+        ['${(ms / 60000).round().clamp(1, 59)}']);
+  }
+  final hours = ms ~/ 3600000;
+  final minutes = ((ms % 3600000) / 60000).round();
+  return minutes == 0
+      ? trP(context, 'op.take.remaining.hours', ['$hours'])
+      : trP(context, 'op.take.remaining.hoursMinutes', ['$hours', '$minutes']);
 }
 
 /// 90 → 90 分钟; 5400 → 1.5 小时.

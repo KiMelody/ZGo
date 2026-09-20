@@ -44,6 +44,12 @@ import 'method_probe.dart';
 /// `{ok:false, failureStage, errorCategory, errorCode}` which maps onto
 /// [OffPeakError] kinds. Older desktops keep the legacy wire exactly as
 /// before — gated, never double-sent.
+///
+/// Desktops ≥3.14 ([statusV314]) lose the legacy status family entirely
+/// (getStatus/getQuota/status → Method not found); the header comes from
+/// two parameter-less probes instead — getCodingPlanSupport and
+/// getTakeNumberAvailability (live-confirmed 2026-09-19, both tolerate an
+/// empty args list).
 class OffPeakPort {
   /// Binds one RPC: the channel is fixed by the port owner, method/args vary.
   final Future<dynamic> Function(String method, List<Object?> args) call;
@@ -52,7 +58,12 @@ class OffPeakPort {
   /// session's app_version; a desktop never changes version mid-session).
   final bool newWire;
 
-  OffPeakPort(this.call, {required this.newWire}) : _probe = MethodProbe(call);
+  /// 3.14 status gate (RemoteConnectionParams.atLeast(3, 14, 0)): switches
+  /// [status] from the legacy method ladder to the take-a-number probes.
+  final bool statusV314;
+
+  OffPeakPort(this.call, {required this.newWire, this.statusV314 = false})
+      : _probe = MethodProbe(call);
 
   final MethodProbe _probe;
 
@@ -238,7 +249,14 @@ class OffPeakPort {
   /// Entitlement + quota status (订阅门槛、月度额度、最早可用时间).
   /// Returns null when every status method is rejected (older desktop) —
   /// the UI then omits the quota header instead of failing.
+  ///
+  /// On [statusV314] desktops the legacy ladder is gone (Method not found
+  /// on all three candidates); the two take-a-number probes run in
+  /// parallel and normalize into an [OffPeakStatus] view. Either RPC
+  /// failing yields the `availabilityError` view instead of throwing —
+  /// a failed header degrades (S4), it never toasts.
   Future<OffPeakStatus?> status() async {
+    if (statusV314) return _statusTakeNumber();
     dynamic res;
     try {
       res = await _probe.run('status', _statusMethods);
@@ -247,6 +265,32 @@ class OffPeakPort {
     }
     if (res is! Map) return null;
     return OffPeakStatus(res.cast<String, dynamic>());
+  }
+
+  /// 3.14: getCodingPlanSupport + getTakeNumberAvailability (both
+  /// parameter-less), normalized to
+  /// `{supported, canTakeNumber, nextTakeAt?}` — the quota/earliest fields
+  /// have no counterpart on this channel anymore.
+  Future<OffPeakStatus> _statusTakeNumber() async {
+    try {
+      final results = await Future.wait<dynamic>([
+        call('getCodingPlanSupport', const []),
+        call('getTakeNumberAvailability', const []),
+      ]);
+      final support = results[0];
+      final availability = results[1];
+      if (support is! Map || availability is! Map) {
+        return OffPeakStatus(const {'availabilityError': true});
+      }
+      return OffPeakStatus({
+        'supported': support['supported'],
+        'canTakeNumber': availability['canTakeNumber'],
+        if (availability['nextTakeAt'] != null)
+          'nextTakeAt': availability['nextTakeAt'],
+      });
+    } on ChannelRpcError {
+      return OffPeakStatus(const {'availabilityError': true});
+    }
   }
 
   /// Nudges the desktop scheduler (`off-peak-scheduler-wake-request`
@@ -452,7 +496,10 @@ class OffPeakTask {
   String? get model => raw['model'] as String?;
 }
 
-/// Entitlement + quota snapshot for the page header.
+/// Entitlement + quota snapshot for the page header. Carries two shapes:
+/// the legacy desktop payload (quota minutes / earliest window, below) and
+/// the 3.14 take-a-number view (getters at the bottom) — each desktop only
+/// ever produces one of them.
 class OffPeakStatus {
   final Map<String, dynamic> raw;
   OffPeakStatus(this.raw);
@@ -495,6 +542,35 @@ class OffPeakStatus {
     // Heuristic: seconds-based waits never reach an hour of magnitude.
     return remMs > 1000000 ? remMs : remMs * 1000;
   }
+
+  // ------------------------------------------------ 3.14 take-a-number view
+
+  /// getCodingPlanSupport's subscription gate (≥3.14 take-a-number era).
+  /// Absent on legacy payloads → null.
+  bool? get supported =>
+      raw['supported'] is bool ? raw['supported'] as bool : null;
+
+  /// getTakeNumberAvailability's verdict: may a new run take a number now.
+  bool? get canTakeNumber =>
+      raw['canTakeNumber'] is bool ? raw['canTakeNumber'] as bool : null;
+
+  /// When taking a number opens up again, epoch ms (only sent while
+  /// [canTakeNumber] is false). Tolerates s/ms scales — same convention as
+  /// AutomationItem.nextRunAtMs.
+  int? get nextTakeAtMs {
+    final v = (raw['nextTakeAt'] as num?)?.toInt();
+    if (v == null) return null;
+    return v < 100000000000 ? v * 1000 : v;
+  }
+
+  /// A ≥3.14 status RPC failed — the S4 degraded view.
+  bool get availabilityError => raw['availabilityError'] == true;
+
+  /// UI branch: true renders the 3.14 four-state take-a-number header
+  /// (S1–S4, see tool/design/offpeak-3-14-header-mock.html); false keeps
+  /// the legacy quota/earliest/locked header.
+  bool get takeNumberSemantics =>
+      supported != null || canTakeNumber != null || availabilityError;
 }
 
 /// Classified off-peak failure (门槛/额度/服务不可用), used to pick the

@@ -17,6 +17,17 @@ class FakeOffPeakHost implements OffPeakHost {
 
   final List<Map<String, dynamic>> tasks;
   final Map<String, dynamic> statusInfo;
+
+  /// 3.14 take-a-number probe answers (only reached with [v314]).
+  final Map<String, dynamic> supportInfo;
+  final Map<String, dynamic> availabilityInfo;
+
+  /// Methods that reject with "no such method" (S4 paths).
+  final Set<String> failMethods;
+
+  /// 3.14 status gate handed to the port.
+  final bool v314;
+
   final List<(String, List<Object?>)> calls = [];
   Object Function(String method, List<Object?> args)? failWith;
 
@@ -24,6 +35,10 @@ class FakeOffPeakHost implements OffPeakHost {
     this.status, {
     this.tasks = const [],
     this.statusInfo = const {},
+    this.supportInfo = const {},
+    this.availabilityInfo = const {},
+    this.failMethods = const {},
+    this.v314 = false,
   });
 
   @override
@@ -33,19 +48,26 @@ class FakeOffPeakHost implements OffPeakHost {
   };
 
   @override
-  late final OffPeakPort offPeak = OffPeakPort(_call, newWire: false);
+  late final OffPeakPort offPeak =
+      OffPeakPort(_call, newWire: false, statusV314: v314);
 
   Future<dynamic> _call(String method, List<Object?> args) async {
     final fail = failWith;
     if (fail != null) {
       throw fail(method, args);
     }
+    if (failMethods.contains(method)) throw missing(method);
     calls.add((method, args));
+    if (method == 'getCodingPlanSupport') return supportInfo;
+    if (method == 'getTakeNumberAvailability') return availabilityInfo;
     if (method.contains('list') || method.contains('List')) return tasks;
     if (method.startsWith('get') || method == 'status') return statusInfo;
     return null;
   }
 }
+
+ChannelRpcError missing(String method) =>
+    ChannelRpcError('no such method: $method', null);
 
 Widget wrap(Widget child) => MaterialApp(
       theme: buildLightTheme(),
@@ -416,5 +438,99 @@ void main() {
     expect(cancel.single.$2, [
       {'offPeakTaskId': 't1'}
     ]);
+  });
+
+  testWidgets('formatTakeRemaining renders the four official tiers',
+      (tester) async {
+    await tester.pumpWidget(wrap(Builder(
+      builder: (c) => Column(
+        children: [
+          Text(formatTakeRemaining(c, 30 * 1000)),
+          Text(formatTakeRemaining(c, 5 * 60000)),
+          Text(formatTakeRemaining(c, 2 * 3600000)),
+          Text(formatTakeRemaining(c, 2 * 3600000 + 15 * 60000)),
+        ],
+      ),
+    )));
+
+    expect(find.text('不到 1 分钟'), findsOneWidget);
+    expect(find.text('5 分钟'), findsOneWidget);
+    expect(find.text('2 小时'), findsOneWidget);
+    expect(find.text('2 小时 15 分钟'), findsOneWidget);
+  });
+
+  group('3.14 take-a-number header', () {
+    Future<void> pumpV314(
+      WidgetTester tester, {
+      Map<String, dynamic> support = const {},
+      Map<String, dynamic> availability = const {},
+      Set<String> failMethods = const {},
+    }) async {
+      final (store, hub) = await setupDevice();
+      final host = FakeOffPeakHost(
+        DeviceStatus.connected,
+        v314: true,
+        supportInfo: support,
+        availabilityInfo: availability,
+        failMethods: failMethods,
+      );
+      await tester.pumpWidget(wrap(OffPeakPage(
+        store: store,
+        hub: hub,
+        device: store.devices.first,
+        hostOverride: host,
+      )));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('S1 available shows the positive card, not the legacy header',
+        (tester) async {
+      await pumpV314(
+        tester,
+        support: {'supported': true},
+        availability: {'canTakeNumber': true},
+      );
+
+      expect(find.text('闲时任务可用 · 取号通道开放'), findsOneWidget);
+      expect(find.textContaining('剩余额度'), findsNothing);
+      expect(find.textContaining('最早可用'), findsNothing);
+    });
+
+    testWidgets('S2 limit reached shows the official countdown',
+        (tester) async {
+      await pumpV314(
+        tester,
+        support: {'supported': true},
+        availability: {
+          'canTakeNumber': false,
+          'nextTakeAt': DateTime.now()
+              .add(const Duration(hours: 2, minutes: 15))
+              .millisecondsSinceEpoch,
+        },
+      );
+
+      expect(find.textContaining('闲时任务额度已用完，可在 2 小时 15 分钟后再次创建'),
+          findsOneWidget);
+    });
+
+    testWidgets('S3 non-subscriber shows the locked card', (tester) async {
+      await pumpV314(
+        tester,
+        support: {'supported': false},
+        availability: {'canTakeNumber': false},
+      );
+
+      expect(find.text('闲时任务仅向 Coding Plan 订阅用户开放。'), findsOneWidget);
+    });
+
+    testWidgets('S4 failed probe degrades to the muted card', (tester) async {
+      await pumpV314(
+        tester,
+        support: {'supported': true},
+        failMethods: {'getTakeNumberAvailability'},
+      );
+
+      expect(find.text('暂时无法确认创建资格，请刷新后重试。'), findsOneWidget);
+    });
   });
 }

@@ -980,6 +980,15 @@ const _zh = {
   'op.thought.default': '默认（不指定）',
   'op.remaining.min': '\$0 分钟',
   'op.remaining.hoursMin': '\$0 小时 \$1 分钟',
+  // 3.14 take-a-number header (S1–S4, official 3.14 copy except S1).
+  'op.take.available': '闲时任务可用 · 取号通道开放',
+  'op.take.limitReached': '闲时任务额度已用完，可在 \$0后再次创建。',
+  'op.take.planOnly': '闲时任务仅向 Coding Plan 订阅用户开放。',
+  'op.take.unavailable': '暂时无法确认创建资格，请刷新后重试。',
+  'op.take.remaining.hoursMinutes': '\$0 小时 \$1 分钟',
+  'op.take.remaining.hours': '\$0 小时',
+  'op.take.remaining.minutes': '\$0 分钟',
+  'op.take.remaining.lessThanMinute': '不到 1 分钟',
 
   // ---- Automations functional alignment (official desktop dictionary) ----
   'auto.preset': '调度方式',
@@ -1863,6 +1872,18 @@ const _en = {
   'op.thought.default': 'Default (unspecified)',
   'op.remaining.min': '\$0 min',
   'op.remaining.hoursMin': '\$0 hr \$1 min',
+  // 3.14 take-a-number header (S1–S4, official 3.14 copy except S1).
+  'op.take.available': 'Idle-time tasks available · take-a-number open',
+  'op.take.limitReached':
+      'Idle-time task quota used up. You can create another task in \$0.',
+  'op.take.planOnly':
+      'Idle-time tasks are only available to Coding Plan subscribers.',
+  'op.take.unavailable':
+      'Unable to confirm eligibility right now. Please refresh and try again.',
+  'op.take.remaining.hoursMinutes': '\$0 hr \$1 min',
+  'op.take.remaining.hours': '\$0 hr',
+  'op.take.remaining.minutes': '\$0 min',
+  'op.take.remaining.lessThanMinute': 'Less than 1 min',
 
   // ---- Automations functional alignment (official desktop dictionary) ----
   'auto.preset': 'Frequency',
