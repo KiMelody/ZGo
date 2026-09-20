@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:clock/clock.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zlinker/protocol/connection_params.dart';
+import 'package:zlinker/state/entitlement_poller.dart';
 import 'package:zlinker/state/quota_reset.dart';
 
 import '../helpers/fake_device_session.dart';
@@ -444,6 +447,44 @@ void main() {
     });
   });
 
+  // Plain test (not testWidgets): a real Duration.timeout needs real time,
+  // which the FakeAsync test clock never advances without pumps.
+  test('a stalled status fetch times out and frees the slot (09-21)',
+      () async {
+    var stall = false;
+    final gateway = _StallingGateway(() {
+      if (stall) return Completer<Object?>().future;
+      return Future.value({
+        'availableFiveHourResets': <Object?>[
+          {'expireAt': clock.now().millisecondsSinceEpoch + 3600000},
+        ],
+        'availableWeekResets': <Object?>[],
+      });
+    });
+    final controller = QuotaResetController(
+      gateway: gateway,
+      timeout: const Duration(milliseconds: 20),
+    );
+    controller.updateScope('prov-1');
+
+    await controller.refresh();
+    expect(controller.pools?.fiveHour.count, 1);
+    expect(controller.error, isNull);
+
+    // A bridge rebuild mid-RPC never answers: the timeout must settle the
+    // dead fetch as an error (previous pools kept) and release the slot.
+    stall = true;
+    await controller.refresh(force: true);
+    expect(controller.error, contains('TimeoutException'));
+    expect(controller.pools?.fiveHour.count, 1);
+
+    // The next refresh starts a NEW fetch instead of sharing the dead one.
+    stall = false;
+    await controller.refresh(force: true);
+    expect(gateway.calls, 3);
+    expect(controller.error, isNull);
+  });
+
   testWidgets('use success chain: optimistic processing, idempotency key, '
       'force status re-fetch and forced entitlement refresh', (tester) async {
     final env = build();
@@ -471,7 +512,13 @@ void main() {
     final body = useCall.$3.single as Map;
     expect(body['preferredProviderId'], 'prov-1');
     expect(body['resetType'], 'FIVE_HOUR');
-    expect(body['idempotencyKey'], isNotEmpty);
+    // UUID v4 like the official client — the cloud rejects other shapes
+    // (3001), and the client-side check is merely non-empty ≤64.
+    expect(
+      body['idempotencyKey'],
+      matches(RegExp(
+          r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')),
+    );
 
     // Status confirmed with a force re-fetch after the reset.
     expect(env.statusCalls.length, 2);
@@ -525,4 +572,30 @@ void main() {
     // Empty week pool → refused.
     expect(await env.controller.use(quotaResetTypeWeek), isFalse);
   });
+}
+
+/// Minimal gateway whose status call can be stalled forever — simulates a
+/// relay-bridge rebuild losing the RPC response (09-21 diagnosis).
+class _StallingGateway implements QuotaResetGateway {
+  _StallingGateway(this._status);
+
+  final Future<Object?> Function() _status;
+  var calls = 0;
+
+  @override
+  Future<Object?> quotaResetStatus({bool force = false}) {
+    calls++;
+    return _status();
+  }
+
+  @override
+  Future<void> useQuotaReset(
+    String resetType,
+    String idempotencyKey, {
+    String? preferredProviderId,
+  }) async {}
+
+  @override
+  Future<EntitlementView> entitlementSnapshot({bool force = false}) async =>
+      const EntitlementView(phase: EntitlementPhase.loading);
 }

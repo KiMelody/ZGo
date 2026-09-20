@@ -58,6 +58,13 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/zlinker_widget_info"/>
         </receiver>
+        <!-- The quota notice's inline buttons (refresh icon, reset pill):
+             explicit-intent broadcasts from the notice's own
+             PendingIntents (never exported — nothing else may trigger a
+             re-poll or a reset). -->
+        <receiver
+            android:name=".QuotaWatchActionReceiver"
+            android:exported="false"/>
         <!-- Background keep-alive (opt-in). The subtype value is what the Play
              specialUse declaration table is matched against. -->
         <service

@@ -7,8 +7,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../ui/ui_settings.dart';
 
 /// Notification channels (each can be silenced separately, in-app and by
-/// the OS): 任务事件 / 闲时事件 / 自动化结果.
-enum NotifyChannel { tasks, offPeak, automations }
+/// the OS): 任务事件 / 闲时事件 / 自动化结果 / 额度监控.
+enum NotifyChannel { tasks, offPeak, automations, quota }
 
 /// Thin wrapper over flutter_local_notifications. Not initialized on
 /// test hosts — every method then no-ops, so callers never gate.
@@ -26,12 +26,18 @@ class NotificationService {
   /// Set by main: routes a tapped notification to its conversation.
   Future<void> Function(Map<String, dynamic> payload)? onTap;
 
+  /// Set by main: routes a tapped ACTION button (not the body) — the
+  /// payload rides along with the action id declared on
+  /// [AndroidNotificationAction].
+  void Function(Map<String, dynamic> payload, String actionId)? onAction;
+
   /// Android channel ids — stable across releases (a changed id would create
   /// a duplicate channel and orphan the user's per-channel silencing).
   static const _channelIds = {
     NotifyChannel.tasks: 'zlinker_tasks',
     NotifyChannel.offPeak: 'zlinker_offpeak',
     NotifyChannel.automations: 'zlinker_automations',
+    NotifyChannel.quota: 'zlinker_quota',
   };
 
   /// Table key prefix per channel (`<prefix>.name` / `<prefix>.desc`).
@@ -39,6 +45,7 @@ class NotificationService {
     NotifyChannel.tasks: 'notify.channel.tasks',
     NotifyChannel.offPeak: 'notify.channel.offPeak',
     NotifyChannel.automations: 'notify.channel.automations',
+    NotifyChannel.quota: 'notify.channel.quota',
   };
 
   String _channelName(NotifyChannel channel) =>
@@ -101,12 +108,17 @@ class NotificationService {
         onDidReceiveNotificationResponse: (response) {
           final raw = response.payload;
           if (raw == null || raw.isEmpty) return;
-          try {
-            final decoded = jsonDecode(raw);
-            if (decoded is Map) {
-              onTap?.call(decoded.cast<String, dynamic>());
-            }
-          } catch (_) {}
+          final decoded = tryDecodePayload(raw);
+          if (decoded == null) return;
+          final actionId = response.actionId;
+          if (response.notificationResponseType ==
+                  NotificationResponseType.selectedNotificationAction &&
+              actionId != null &&
+              actionId.isNotEmpty) {
+            onAction?.call(decoded, actionId);
+          } else {
+            onTap?.call(decoded);
+          }
         },
       );
       _initialized = true;
@@ -134,13 +146,25 @@ class NotificationService {
     return (t, body.trim().isEmpty ? t : body);
   }
 
+  /// Decoded payload shared by the tap and action routes; null when the
+  /// payload is not a JSON map (never the case for our own notices).
+  static Map<String, dynamic>? tryDecodePayload(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map ? decoded.cast<String, dynamic>() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> show(
     NotifyChannel channel,
     int id,
     String title,
     String body,
-    Map<String, dynamic> payload,
-  ) async {
+    Map<String, dynamic> payload, {
+    List<AndroidNotificationAction>? actions,
+  }) async {
     if (!_initialized) return;
     await requestPermission();
     final (copyTitle, copyBody) = ensureCopy(_locale, channel, title, body);
@@ -156,6 +180,7 @@ class NotificationService {
             channelDescription: _channelDescription(channel),
             importance: Importance.defaultImportance,
             priority: Priority.defaultPriority,
+            actions: actions,
           ),
           // v22: DarwinNotificationDetails has no payload — the tap
           // payload rides the show() call below.

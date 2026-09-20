@@ -11,6 +11,14 @@ class UiSettings extends ChangeNotifier {
   static const _notifyOffPeakKey = 'zlinker_notify_offpeak';
   static const _notifyAutoKey = 'zlinker_notify_auto';
   static const _keepAliveKey = 'zlinker_keepalive';
+  static const _quotaWatchKey = 'zlinker_quota_watch';
+  static const _quotaWatchThresholdKey = 'zlinker_quota_watch_threshold';
+  static const _quotaWatchIntervalKey = 'zlinker_quota_watch_interval';
+  static const _quotaWatchExpiryKey = 'zlinker_quota_watch_expiry';
+  static const _quotaWatchExpiryLead5hKey =
+      'zlinker_quota_watch_expiry_lead_5h_min';
+  static const _quotaWatchExpiryLeadWeekKey =
+      'zlinker_quota_watch_expiry_lead_week_h';
 
   String locale = 'zh-CN';
   bool nativeListEnabled = true;
@@ -19,6 +27,18 @@ class UiSettings extends ChangeNotifier {
   bool notifyOffPeakEnabled = true;
   bool notifyAutoEnabled = true;
   bool keepAliveEnabled = false;
+
+  /// Quota watch (Android persistent monitoring notice, PRD
+  /// internal-task): master switch, low-quota threshold
+  /// (remaining %, 5–50 step 5), poll cadence in minutes (1/5/15), the
+  /// coupon-expiry reminder and its per-type lead times (2026-09-20:
+  /// five-hour coupons 5–60 min, weekly coupons 5–10 h).
+  bool quotaWatchEnabled = false;
+  int quotaWatchThreshold = 20;
+  int quotaWatchIntervalMinutes = 5;
+  bool quotaWatchExpiryReminderEnabled = true;
+  int quotaWatchExpiryLeadFiveHourMinutes = 60;
+  int quotaWatchExpiryLeadWeeklyHours = 6;
 
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -29,6 +49,15 @@ class UiSettings extends ChangeNotifier {
     notifyOffPeakEnabled = prefs.getBool(_notifyOffPeakKey) ?? true;
     notifyAutoEnabled = prefs.getBool(_notifyAutoKey) ?? true;
     keepAliveEnabled = prefs.getBool(_keepAliveKey) ?? false;
+    quotaWatchEnabled = prefs.getBool(_quotaWatchKey) ?? false;
+    quotaWatchThreshold = prefs.getInt(_quotaWatchThresholdKey) ?? 20;
+    quotaWatchIntervalMinutes = prefs.getInt(_quotaWatchIntervalKey) ?? 5;
+    quotaWatchExpiryReminderEnabled =
+        prefs.getBool(_quotaWatchExpiryKey) ?? true;
+    quotaWatchExpiryLeadFiveHourMinutes =
+        (prefs.getInt(_quotaWatchExpiryLead5hKey) ?? 60).clamp(5, 60);
+    quotaWatchExpiryLeadWeeklyHours =
+        (prefs.getInt(_quotaWatchExpiryLeadWeekKey) ?? 6).clamp(5, 10);
     notifyListeners();
   }
 
@@ -81,6 +110,50 @@ class UiSettings extends ChangeNotifier {
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_keepAliveKey, value);
+  }
+
+  Future<void> setQuotaWatchEnabled(bool value) async {
+    quotaWatchEnabled = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_quotaWatchKey, value);
+  }
+
+  Future<void> setQuotaWatchThreshold(int value) async {
+    quotaWatchThreshold = value.clamp(5, 50);
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_quotaWatchThresholdKey, quotaWatchThreshold);
+  }
+
+  Future<void> setQuotaWatchIntervalMinutes(int value) async {
+    quotaWatchIntervalMinutes = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_quotaWatchIntervalKey, value);
+  }
+
+  Future<void> setQuotaWatchExpiryReminderEnabled(bool value) async {
+    quotaWatchExpiryReminderEnabled = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_quotaWatchExpiryKey, value);
+  }
+
+  Future<void> setQuotaWatchExpiryLeadFiveHourMinutes(int value) async {
+    quotaWatchExpiryLeadFiveHourMinutes = value.clamp(5, 60);
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(
+        _quotaWatchExpiryLead5hKey, quotaWatchExpiryLeadFiveHourMinutes);
+  }
+
+  Future<void> setQuotaWatchExpiryLeadWeeklyHours(int value) async {
+    quotaWatchExpiryLeadWeeklyHours = value.clamp(5, 10);
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(
+        _quotaWatchExpiryLeadWeekKey, quotaWatchExpiryLeadWeeklyHours);
   }
 }
 
@@ -928,6 +1001,19 @@ const _zh = {
   'settings.keepAlive.stopped': '保活服务未运行',
   'settings.keepAlive.oemHint': '若息屏后收不到通知，请在系统设置中将本应用的省电策略设为'
       '「无限制」（通常在 应用信息 → 省电/电池，各厂商路径略有差异）；允许自启动为可选加固。',
+  // Quota watch settings section (PRD internal-task).
+  'settings.quotaWatch.section': '额度监控',
+  'settings.quotaWatch': '额度监控通知',
+  'settings.quotaWatchHint': '常驻显示剩余额度 · 需开启后台保活',
+  'settings.quotaWatch.keepAliveGuide': '开启后台保活以持续监控 →',
+  'settings.quotaWatch.threshold': '低额度阈值',
+  'settings.quotaWatch.thresholdHint': '剩余低于此值时告警（当前 \$0%）',
+  'settings.quotaWatch.interval': '刷新频率',
+  'settings.quotaWatch.expiryReminder': '重置券临期提醒',
+  'settings.quotaWatch.expiryReminderHint': '按下方各券类型提前量，过期前提醒一次',
+  'settings.quotaWatch.expiryLead5h': '5 小时券提醒提前量',
+  'settings.quotaWatch.expiryLeadWeek': '周额度券提醒提前量',
+  'settings.quotaWatch.noPlan': '未检测到订阅',
   'notify.task.done': '任务完成',
   'notify.task.failed': '任务失败',
   'notify.task.interrupted': '任务已中断',
@@ -943,6 +1029,8 @@ const _zh = {
   'notify.channel.offPeak.desc': '闲时任务完成与失败提醒',
   'notify.channel.automations.name': '自动化结果',
   'notify.channel.automations.desc': '自动化定时触发的执行结果',
+  'notify.channel.quota.name': '额度监控',
+  'notify.channel.quota.desc': '套餐剩余额度监控与低额度告警',
   // Foreground-service notice (see keepalive_controller.dart): read via
   // trLocale and handed to the native side, which caches the last copy so a
   // STICKY restart can rebuild the notice.
@@ -989,6 +1077,39 @@ const _zh = {
   'op.take.remaining.hours': '\$0 小时',
   'op.take.remaining.minutes': '\$0 分钟',
   'op.take.remaining.lessThanMinute': '不到 1 分钟',
+
+  // ---- Quota watch notices (PRD 09-19, mock 过稿词表 op.watch.*) ----
+  'op.watch.window.fiveHour': '5 小时窗口',
+  'op.watch.window.week': '周额度',
+  'op.watch.mainLine': '\$0 · \$1后重置',
+  'op.watch.coupon.fiveHour': '5 小时',
+  'op.watch.coupon.week': '周',
+  'op.watch.couponLine': '\$0重置券 \$1 张 · \$2后过期',
+  'op.watch.couponLineAbs': '\$0重置券 \$1 张 · \$2 过期',
+  'op.watch.couponNone': '无\$0重置券 · 等待窗口自然重置',
+  'op.watch.expiringLine': '\$0重置券 \$1后过期',
+  'op.watch.detail.window': '\$0 \$1 · \$2后重置',
+  'op.watch.detail.coupons': '5 小时重置券 \$0 张 · 周重置券 \$1 张',
+  'op.watch.detail.couponsFiveHour': '5 小时重置券 \$0 张',
+  'op.watch.duration.days': '\$0 天 \$1 小时',
+  'op.watch.duration.daysOnly': '\$0 天',
+  'op.watch.alert.title': '\$0即将耗尽（剩余 \$1%）',
+  'op.watch.alert.titleGeneric': '额度即将耗尽（剩余 \$0%）',
+  'op.watch.alert.noResetBody': '无可用重置券 · 窗口 \$0 后自然重置',
+  'op.watch.alert.degradeBody': '有可重置额度 · 点按选择重置类型',
+  'op.watch.action.resetNow': '立即重置',
+  'op.watch.action.reset': '重置',
+  'op.watch.action.choose': '选择重置类型',
+  'op.watch.expiry.body': '当前剩余 \$0% · 过期前未使用将作废',
+  'op.watch.reset.doneTitle': '已重置 · \$0',
+  'op.watch.reset.target.fiveHour': '5 小时额度',
+  'op.watch.reset.target.week': '周额度',
+  'op.watch.reset.doneBody': '新窗口已开始，剩余 100%',
+  'op.watch.reset.failTitle': '重置失败',
+  'op.watch.reset.failBody': '连接中断或桌面拒绝 · 点按进 app 查看并重试',
+  'op.watch.fail.title': '额度获取失败 · \$0 更新',
+  'op.watch.fail.body': '桌面离线或连接中断 · 每 \$0 自动重试',
+  'op.watch.stale.line': '数据更新于 \$0',
 
   // ---- Automations functional alignment (official desktop dictionary) ----
   'auto.preset': '调度方式',
@@ -1817,6 +1938,23 @@ const _en = {
       'screen turns off, set this app\'s battery saver policy to "No '
       'restrictions" in system settings (usually App info → Battery; the path '
       'varies by vendor). Autostart is an optional extra.',
+  // Quota watch settings section (see the zh table note).
+  'settings.quotaWatch.section': 'Quota watch',
+  'settings.quotaWatch': 'Quota watch notification',
+  'settings.quotaWatchHint':
+      'Persistent remaining-quota display · needs background keep-alive',
+  'settings.quotaWatch.keepAliveGuide':
+      'Turn on background keep-alive to keep watching →',
+  'settings.quotaWatch.threshold': 'Low-quota threshold',
+  'settings.quotaWatch.thresholdHint':
+      'Alert when remaining falls below (now \$0%)',
+  'settings.quotaWatch.interval': 'Refresh interval',
+  'settings.quotaWatch.expiryReminder': 'Reset expiry reminder',
+  'settings.quotaWatch.expiryReminderHint':
+      'Reminds once before expiry, using the lead times below',
+  'settings.quotaWatch.expiryLead5h': '5-hour coupon lead time',
+  'settings.quotaWatch.expiryLeadWeek': 'Weekly coupon lead time',
+  'settings.quotaWatch.noPlan': 'No Coding Plan detected',
   'notify.task.done': 'Task completed',
   'notify.task.failed': 'Task failed',
   'notify.task.interrupted': 'Task interrupted',
@@ -1831,6 +1969,8 @@ const _en = {
   'notify.channel.offPeak.desc': 'Off-peak task completion and failure alerts',
   'notify.channel.automations.name': 'Automation results',
   'notify.channel.automations.desc': 'Results of scheduled automation runs',
+  'notify.channel.quota.name': 'Quota watch',
+  'notify.channel.quota.desc': 'Coding plan quota monitoring and low-quota alerts',
   // Foreground-service notice (see the zh table note).
   'keepalive.channel.name': 'Background connection',
   'keepalive.notify.title': 'ZLinker is keeping the connection alive',
@@ -1884,6 +2024,39 @@ const _en = {
   'op.take.remaining.hours': '\$0 hr',
   'op.take.remaining.minutes': '\$0 min',
   'op.take.remaining.lessThanMinute': 'Less than 1 min',
+
+  // ---- Quota watch notices (see the zh table note) ----
+  'op.watch.window.fiveHour': '5-hour window',
+  'op.watch.window.week': 'Weekly quota',
+  'op.watch.mainLine': '\$0 resets in \$1',
+  'op.watch.coupon.fiveHour': '5-hour',
+  'op.watch.coupon.week': 'weekly',
+  'op.watch.couponLine': '\$1 \$0 reset(s) · expires in \$2',
+  'op.watch.couponLineAbs': '\$1 \$0 reset(s) · expires \$2',
+  'op.watch.couponNone': 'No \$0 resets · window rolls over naturally',
+  'op.watch.expiringLine': '\$0 reset expires in \$1',
+  'op.watch.detail.window': '\$0 \$1 · resets in \$2',
+  'op.watch.detail.coupons': '\$0 5-hour · \$1 weekly resets',
+  'op.watch.detail.couponsFiveHour': '\$0 5-hour resets',
+  'op.watch.duration.days': '\$0 d \$1 hr',
+  'op.watch.duration.daysOnly': '\$0 d',
+  'op.watch.alert.title': '\$0 almost used up (\$1% left)',
+  'op.watch.alert.titleGeneric': 'Quota almost used up (\$0% left)',
+  'op.watch.alert.noResetBody': 'No resets available · window rolls over in \$0',
+  'op.watch.alert.degradeBody': 'A reset is available · tap to choose a reset type',
+  'op.watch.action.resetNow': 'Reset now',
+  'op.watch.action.reset': 'Reset',
+  'op.watch.action.choose': 'Choose reset type',
+  'op.watch.expiry.body': '\$0% remaining · unused reset will lapse',
+  'op.watch.reset.doneTitle': 'Reset · \$0',
+  'op.watch.reset.target.fiveHour': '5-hour quota',
+  'op.watch.reset.target.week': 'Weekly quota',
+  'op.watch.reset.doneBody': 'New window started, 100% remaining',
+  'op.watch.reset.failTitle': 'Reset failed',
+  'op.watch.reset.failBody': 'Connection lost or desktop refused · tap to retry in app',
+  'op.watch.fail.title': 'Couldn\'t refresh quota · updated \$0',
+  'op.watch.fail.body': 'Desktop offline or disconnected · retrying every \$0',
+  'op.watch.stale.line': 'Data as of \$0',
 
   // ---- Automations functional alignment (official desktop dictionary) ----
   'auto.preset': 'Frequency',

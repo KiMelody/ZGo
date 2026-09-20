@@ -6,6 +6,7 @@ import '../notifications/keepalive_controller.dart';
 import '../protocol/connection_params.dart';
 import '../state/device_session.dart';
 import '../state/device_store.dart';
+import '../state/quota_watch.dart';
 import '../state/scheduled_store.dart';
 import '../widgets/home_widget_bridge.dart';
 import 'qr_scan_page.dart';
@@ -27,6 +28,10 @@ class DevicesPage extends StatefulWidget {
   final DeviceSessionHub hub;
   final ScheduledStore scheduled;
   final KeepAliveController keepalive;
+
+  /// Quota-watch controller handed to the settings section (null on hosts
+  /// without the feature).
+  final QuotaWatchController? quotaWatch;
   const DevicesPage({
     super.key,
     required this.store,
@@ -35,6 +40,7 @@ class DevicesPage extends StatefulWidget {
     required this.hub,
     required this.scheduled,
     required this.keepalive,
+    this.quotaWatch,
   });
 
   @override
@@ -397,6 +403,7 @@ class _DevicesPageState extends State<DevicesPage>
                 theme: widget.theme,
                 ui: widget.ui,
                 keepalive: widget.keepalive,
+                quotaWatch: widget.quotaWatch,
               ),
             )),
           ),

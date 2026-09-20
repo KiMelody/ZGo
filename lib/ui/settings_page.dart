@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../notifications/keepalive_controller.dart';
 import '../state/device_store.dart';
+import '../state/quota_watch.dart';
 import '../update/app_channel.dart';
 import '../update/update_service.dart';
 import 'about_page.dart';
@@ -21,12 +22,17 @@ class SettingsPage extends StatefulWidget {
   final ThemeController theme;
   final UiSettings ui;
   final KeepAliveController keepalive;
+
+  /// Quota-watch controller (Android only): read for the N7 status hint
+  /// under the master switch; null on hosts without the feature.
+  final QuotaWatchController? quotaWatch;
   const SettingsPage({
     super.key,
     required this.store,
     required this.theme,
     required this.ui,
     required this.keepalive,
+    this.quotaWatch,
   });
 
   @override
@@ -57,7 +63,9 @@ class _SettingsPageState extends State<SettingsPage> {
     } else {
       unawaited(widget.keepalive.stop());
     }
-    setState(() => _keepAliveRunning = widget.keepalive.isRunning());
+    setState(() {
+      _keepAliveRunning = widget.keepalive.isRunning();
+    });
   }
 
   /// Channel-aware update entry: store builds open their store listing;
@@ -132,7 +140,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Scaffold(
       appBar: AppBar(title: Text(tr(context, 'settings.title'))),
       body: AnimatedBuilder(
-        animation: Listenable.merge([theme, ui]),
+        animation: Listenable.merge([theme, ui, widget.quotaWatch]),
         builder: (context, _) => ListView(
           padding: const EdgeInsets.symmetric(vertical: 8),
           children: [
@@ -259,6 +267,147 @@ class _SettingsPageState extends State<SettingsPage> {
                   value: ui.keepAliveEnabled,
                   onChanged: _setKeepAlive,
                 ),
+            ],
+            // Quota watch (Android-only persistent monitoring notice, PRD
+            // 09-19): the whole section rides the keep-alive support probe.
+            if (widget.keepalive.supported) ...[
+              _header(context, tr(context, 'settings.quotaWatch.section')),
+              SwitchListTile(
+                secondary: const Icon(Icons.monitor_heart_outlined),
+                title: Text(tr(context, 'settings.quotaWatch')),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(tr(context, 'settings.quotaWatchHint')),
+                    if (ui.quotaWatchEnabled &&
+                        widget.quotaWatch?.snapshot.phase ==
+                            QuotaWatchPhase.noPlan) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        tr(context, 'settings.quotaWatch.noPlan'),
+                        style:
+                            ZType.sub.copyWith(color: ZInk.muted(context)),
+                      ),
+                    ],
+                  ],
+                ),
+                value: ui.quotaWatchEnabled,
+                onChanged: (v) => ui.setQuotaWatchEnabled(v),
+              ),
+              if (ui.quotaWatchEnabled) ...[
+                // Direct resets ride the foreground service (R3); without
+                // it the notice only updates while the app is foregrounded.
+                if (!ui.keepAliveEnabled)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 16),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton(
+                        onPressed: () => _setKeepAlive(true),
+                        child: Text(
+                          tr(context, 'settings.quotaWatch.keepAliveGuide'),
+                        ),
+                      ),
+                    ),
+                  ),
+                ListTile(
+                  dense: true,
+                  title: Text(tr(context, 'settings.quotaWatch.threshold')),
+                  subtitle: Text(trP(context, 'settings.quotaWatch.thresholdHint',
+                      ['${ui.quotaWatchThreshold}'])),
+                  trailing: SizedBox(
+                    width: 150,
+                    child: Slider(
+                      value: ui.quotaWatchThreshold.toDouble(),
+                      min: 5,
+                      max: 50,
+                      divisions: 9,
+                      label: '${ui.quotaWatchThreshold}%',
+                      onChanged: (v) {
+                        HapticFeedback.selectionClick();
+                        ui.setQuotaWatchThreshold(v.round());
+                      },
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    children: [
+                      Text(tr(context, 'settings.quotaWatch.interval')),
+                      const Spacer(),
+                      SegmentedButton<int>(
+                        segments: [
+                          for (final minutes in const [1, 5, 15])
+                            ButtonSegment(
+                              value: minutes,
+                              label: Text(
+                                  trP(context, 'op.minutes', ['$minutes'])),
+                            ),
+                        ],
+                        selected: {ui.quotaWatchIntervalMinutes},
+                        onSelectionChanged: (s) {
+                          HapticFeedback.selectionClick();
+                          ui.setQuotaWatchIntervalMinutes(s.first);
+                        },
+                        showSelectedIcon: false,
+                      ),
+                    ],
+                  ),
+                ),
+                SwitchListTile(
+                  secondary: const SizedBox(width: 24),
+                  dense: true,
+                  title: Text(tr(context, 'settings.quotaWatch.expiryReminder')),
+                  subtitle:
+                      Text(tr(context, 'settings.quotaWatch.expiryReminderHint')),
+                  value: ui.quotaWatchExpiryReminderEnabled,
+                  onChanged: (v) => ui.setQuotaWatchExpiryReminderEnabled(v),
+                ),
+                // Per-type N4 leads (2026-09-20): meaningless while the
+                // reminder is off, so they ride its switch.
+                if (ui.quotaWatchExpiryReminderEnabled) ...[
+                  ListTile(
+                    dense: true,
+                    title: Text(tr(context, 'settings.quotaWatch.expiryLead5h')),
+                    trailing: SizedBox(
+                      width: 150,
+                      child: Slider(
+                        value: ui.quotaWatchExpiryLeadFiveHourMinutes.toDouble(),
+                        min: 5,
+                        max: 60,
+                        divisions: 11,
+                        label: trP(context, 'op.minutes',
+                            ['${ui.quotaWatchExpiryLeadFiveHourMinutes}']),
+                        onChanged: (v) {
+                          HapticFeedback.selectionClick();
+                          ui.setQuotaWatchExpiryLeadFiveHourMinutes(v.round());
+                        },
+                      ),
+                    ),
+                  ),
+                  ListTile(
+                    dense: true,
+                    title:
+                        Text(tr(context, 'settings.quotaWatch.expiryLeadWeek')),
+                    trailing: SizedBox(
+                      width: 150,
+                      child: Slider(
+                        value: ui.quotaWatchExpiryLeadWeeklyHours.toDouble(),
+                        min: 5,
+                        max: 10,
+                        divisions: 5,
+                        label: trP(context, 'op.hours',
+                            ['${ui.quotaWatchExpiryLeadWeeklyHours}']),
+                        onChanged: (v) {
+                          HapticFeedback.selectionClick();
+                          ui.setQuotaWatchExpiryLeadWeeklyHours(v.round());
+                        },
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ],
             _header(context, tr(context, 'settings.data')),
             ListTile(

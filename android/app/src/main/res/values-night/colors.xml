@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Quota-watch notice (dark system theme overrides). -->
+    <color name="quota_accent">#4099FF</color>
+    <color name="quota_warn">#FF8A30</color>
+    <color name="quota_text_primary">#E8E9ED</color>
+    <color name="quota_text_secondary">#B9BCC4</color>
+    <color name="quota_text_muted">#8A8D96</color>
+    <color name="quota_ring_track">#2A2C33</color>
+</resources>

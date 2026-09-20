@@ -172,6 +172,39 @@ void main() {
     expect(calls, 1);
   });
 
+  test('a stalled RPC times out, frees the slot, and is re-fetched (09-21)',
+      () async {
+    var stall = false;
+    var calls = 0;
+    final poller = EntitlementPoller(
+      fetch: () {
+        calls++;
+        // A bridge rebuild mid-RPC never answers — the raw future hangs.
+        if (stall) return Completer<Map<String, dynamic>>().future;
+        return Future.value(okPayload());
+      },
+      timeout: const Duration(milliseconds: 20),
+    );
+    addTearDown(poller.dispose);
+
+    stall = false;
+    final ok = await poller.refresh();
+    expect(ok.phase, EntitlementPhase.ok);
+
+    // The timeout must settle the dead fetch as an error view (payload
+    // retained) and — crucially — release the in-flight slot.
+    stall = true;
+    final stalled = await poller.refresh(force: true);
+    expect(stalled.phase, EntitlementPhase.error);
+    expect(stalled.data, same(ok.data));
+
+    // The next refresh starts a NEW fetch instead of sharing the dead one.
+    stall = false;
+    final recovered = await poller.refresh(force: true);
+    expect(recovered.phase, EntitlementPhase.ok);
+    expect(calls, 3);
+  });
+
   test('exhausted ignores a topped-out monthly MCP TIME_LIMIT (bug 09-15)', () {
     // Live-probed 3.11.2 snapshot: the monthly built-in MCP quota
     // (search-prime 100/101) is used up and the top-level `remaining`

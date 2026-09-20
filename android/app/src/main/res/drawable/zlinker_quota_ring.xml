@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ring progress for the quota-watch notice: track layer + a level-driven
+     arc (ring shape with useLevel, rotated so the arc starts at 12
+     o'clock). The progress layer is tinted per state from
+     QuotaWatchNotifier via setProgressTintList (accent / warn). -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@android:id/background">
+        <shape
+            android:shape="ring"
+            android:useLevel="false"
+            android:innerRadiusRatio="2.5"
+            android:thicknessRatio="10">
+            <solid android:color="@color/quota_ring_track" />
+        </shape>
+    </item>
+    <item android:id="@android:id/progress">
+        <rotate
+            android:fromDegrees="270"
+            android:toDegrees="270"
+            android:pivotX="50%"
+            android:pivotY="50%">
+            <shape
+                android:shape="ring"
+                android:useLevel="true"
+                android:innerRadiusRatio="2.5"
+                android:thicknessRatio="10">
+                <solid android:color="@color/quota_accent" />
+            </shape>
+        </rotate>
+    </item>
+</layer-list>
