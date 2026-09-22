@@ -8,6 +8,7 @@ import '../protocol/channel_client.dart'
     show Channels, isChannelLevelError, isChannelMissingError;
 import '../protocol/connection_params.dart';
 import '../protocol/conversation.dart';
+import '../protocol/method_probe.dart';
 import '../protocol/model_selection.dart' show parseModelSelectionCatalog;
 import '../protocol/off_peak.dart';
 import '../protocol/relay_client.dart';
@@ -380,8 +381,6 @@ class DeviceSession extends ChangeNotifier
   TaskDirectory get taskDirectory => TaskDirectory(
         relayTasks: relayTasks,
         sessions: sessions,
-        activeWorkspaceKey:
-            activeWorkspace == null ? null : workspaceKeyOf(activeWorkspace!),
       );
 
   /// True while a workspace bridge + sessions-index open is in flight.
@@ -445,18 +444,7 @@ class DeviceSession extends ChangeNotifier
       sw.reset();
       final bootstrap = await client.bootstrap();
       _log('[session] bootstrap in ${sw.elapsedMilliseconds}ms');
-      final list = bootstrap['workspaces'];
-      _workspaces = [
-        if (list is List)
-          for (final w in list)
-            if (w is Map) w.cast<String, dynamic>(),
-      ];
-      final tasks = bootstrap['tasks'];
-      _relayTasks = [
-        if (tasks is List)
-          for (final t in tasks)
-            if (t is Map) t.cast<String, dynamic>(),
-      ];
+      _applyRelayOverview(bootstrap);
       _retryAttempts = 0;
       // Auto-open a workspace so the native list works immediately: the
       // last-used one when known, else the first. (The web mobile flow
@@ -702,6 +690,24 @@ class DeviceSession extends ChangeNotifier
         return;
       }
       _sessionsSub = sub;
+      sub.state.subscribedWorkspaceKey = key;
+      // Deleted-task tombstones for the live-index filter (Addendum 2):
+      // probed once per open; any failure (old desktop without the method,
+      // channel gone) degrades to an empty set and must never block
+      // opening the workspace.
+      try {
+        final deleted = await probeListDeletedTaskIds(
+          (method, args) => callChannel(Channels.zcodeTask, method, args),
+          scope: scope,
+        );
+        // Same early-exit chain as above: the open may have been
+        // superseded while the probe was in flight — whoever replaced the
+        // bridge already disposed this sub, so plain return.
+        if (_disposed || _bridge != bridge) return;
+        if (deleted != null) sub.state.deletedTaskIds = Set.of(deleted);
+      } catch (_) {
+        sub.state.deletedTaskIds = const {};
+      }
       sub.state.addListener(_onSessionsChanged);
       _error = null;
       onWorkspaceOpened?.call(key);
@@ -826,19 +832,7 @@ class DeviceSession extends ChangeNotifier
       return;
     }
     try {
-      final bootstrap = await client.bootstrap();
-      final list = bootstrap['workspaces'];
-      _workspaces = [
-        if (list is List)
-          for (final w in list)
-            if (w is Map) w.cast<String, dynamic>(),
-      ];
-      final tasks = bootstrap['tasks'];
-      _relayTasks = [
-        if (tasks is List)
-          for (final t in tasks)
-            if (t is Map) t.cast<String, dynamic>(),
-      ];
+      _applyRelayOverview(await client.bootstrap());
     } catch (e) {
       _log('[session] reload bootstrap failed: $e');
       _softReloadFails += 1;
@@ -858,6 +852,62 @@ class DeviceSession extends ChangeNotifier
       // Nothing to open (no workspace on the desktop) — just repaint.
       notifyListeners();
     }
+  }
+
+  /// Applies a bootstrap frame's `workspaces` / `tasks` lists to the relay
+  /// overview state (rows cast to `Map<String, dynamic>`). Shared by
+  /// [connect], [reloadTasks] and [refreshTaskOverview]. Push frames
+  /// (`workspace-list-updated`) keep their own lenient parse — a missing
+  /// field there keeps the previous list, a bootstrap frame always carries
+  /// both.
+  void _applyRelayOverview(Map<String, dynamic> bootstrap) {
+    final list = bootstrap['workspaces'];
+    _workspaces = [
+      if (list is List)
+        for (final w in list)
+          if (w is Map) w.cast<String, dynamic>(),
+    ];
+    final tasks = bootstrap['tasks'];
+    _relayTasks = [
+      if (tasks is List)
+        for (final t in tasks)
+          if (t is Map) t.cast<String, dynamic>(),
+    ];
+  }
+
+  /// In-flight dedup for [refreshTaskOverview].
+  Future<void>? _overviewRefresh;
+
+  /// Best-effort refresh of the relay task overview: one `client.bootstrap()`
+  /// → `_workspaces`/`_relayTasks` → notify. Purpose-built for the task
+  /// list page's 30s cadence (Addendum 3): a NON-active workspace's new
+  /// chats only surface through this overview — the desktop's
+  /// `workspace-list-updated` push stalls while its renderer is
+  /// backgrounded, and connect's bootstrap reads the same stale cache.
+  ///
+  /// Deliberately NOT [reloadTasks]: that one re-opens the active workspace
+  /// (interrupting the live sessions-index subscription) and escalates into
+  /// a forced rebuild after repeated failures. This refresh is silent by
+  /// design — a failure keeps the old values, counts toward nothing,
+  /// rebuilds nothing, and the next cadence tick naturally retries.
+  /// Overlapping calls share one in-flight bootstrap.
+  Future<void> refreshTaskOverview() {
+    final client = _client;
+    if (client == null || _disposed) return Future.value();
+    return _overviewRefresh ??= () async {
+      try {
+        final bootstrap = await client.bootstrap();
+        // The link may have been suspended/replaced while the RPC was in
+        // flight — a late answer must not resurrect state suspend cleared.
+        if (_disposed || _client != client) return;
+        _applyRelayOverview(bootstrap);
+        notifyListeners();
+      } catch (e) {
+        _log('[session] overview refresh failed (kept old values): $e');
+      } finally {
+        _overviewRefresh = null;
+      }
+    }();
   }
 
   Future<void> stopTask(String sessionId) async {
