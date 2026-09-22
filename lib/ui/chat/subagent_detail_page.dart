@@ -6,6 +6,7 @@ import '../../state/device_session.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
 import 'diff_view.dart';
+import 'jump_to_bottom_button.dart';
 import 'markdown_view.dart';
 import 'tool_row_semantics.dart';
 
@@ -55,17 +56,82 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
   bool _loadingOlder = false;
   Timer? _readyTimeout;
 
+  // Scroll trio mirroring the chat page (task 09-23 R1): stick detection on
+  // the controller listener, initial landing on the newest row, and
+  // smooth follow while new rows stream in.
+  final ScrollController _scrollController = ScrollController();
+  bool _stickToBottom = true;
+  bool _positionedAtBottom = false;
+  int _lastRowCount = 0;
+
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     _subscribe();
   }
 
   @override
   void dispose() {
     _readyTimeout?.cancel();
+    _handle?.state.removeListener(_followNewRows);
     _handle?.close();
+    _scrollController.dispose();
     super.dispose();
+  }
+
+  void _onScroll() {
+    final stick = _isStuckToBottom();
+    // Only a flip of the pinned state rebuilds (it toggles the
+    // jump-to-bottom button); steady scrolling stays free.
+    if (stick == _stickToBottom) return;
+    if (mounted) setState(() => _stickToBottom = stick);
+  }
+
+  /// Live pinned-to-bottom check (40px slack, chat-page threshold).
+  /// Post-frame callers must use this instead of the cached
+  /// [_stickToBottom]: prepending older rows grows only maxScrollExtent
+  /// (pixels unchanged → no controller notification), which would leave
+  /// the cache stale.
+  bool _isStuckToBottom() {
+    if (!_scrollController.hasClients) return false;
+    final position = _scrollController.position;
+    return position.pixels >= position.maxScrollExtent - 40;
+  }
+
+  /// Streaming follow (R1c): smooth-scroll to the new bottom while the
+  /// reader is pinned to it; scrolled-up readers keep their position and use
+  /// the jump button to come back. Prepending older history ([_loadOlder])
+  /// must never fire this. Like the chat page's follow pass, the pinned
+  /// check runs on the posted frame — a delta landing mid-drag must not
+  /// yank the viewport.
+  void _followNewRows() {
+    if (!_positionedAtBottom || _loadingOlder) return;
+    final state = _handle?.state;
+    if (state == null) return;
+    final grew = state.rows.length > _lastRowCount;
+    _lastRowCount = state.rows.length;
+    if (!grew) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // The cached (pre-delta) pinned state decides — NOT a live
+      // recomputation: an appended row grows maxScrollExtent before the
+      // follow pass moves pixels, so a live check would read "scrolled
+      // away" and kill the follow. Stale-cache risk after prepending is
+      // covered by the recompute in [_loadOlder].
+      if (!mounted || _loadingOlder || !_stickToBottom) return;
+      _animateToBottom();
+    });
+  }
+
+  /// Scrolls to the newest row (200ms easeOut) — shared by the follow pass
+  /// and the jump-to-bottom button's tap.
+  void _animateToBottom() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+    );
   }
 
   Future<void> _subscribe() async {
@@ -74,6 +140,7 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
     // fresh forced snapshot) goes out instead of reusing the dead handle.
     final stale = _handle;
     _handle = null;
+    stale?.state.removeListener(_followNewRows);
     await stale?.close();
     if (mounted) setState(() => _error = null);
     _readyTimeout = Timer(const Duration(seconds: 15), () {
@@ -98,6 +165,7 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
         _handle = handle;
         _error = null;
       });
+      handle.state.addListener(_followNewRows);
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     }
@@ -150,6 +218,16 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
         state
           ..hasMore = hasMore
           ..prependOlderRows(older);
+        // Prepending keeps pixels (only maxScrollExtent grows → no scroll
+        // notification), so the pinned cache is stale: recompute once the
+        // taller list has laid out, else the jump button stays hidden.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_scrollController.hasClients) return;
+          final stick = _isStuckToBottom();
+          if (stick != _stickToBottom) {
+            setState(() => _stickToBottom = stick);
+          }
+        });
       } else if (state.rows.isNotEmpty) {
         state.hasMore = hasMore ?? false;
         if (mounted) _toast(tr(context, 'chat.noOlder'));
@@ -247,38 +325,71 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
             )
           : handle == null || !handle.state.ready
           ? const Center(child: CircularProgressIndicator())
-          : AnimatedBuilder(
-              animation: handle.state,
-              builder: (context, _) {
-                final state = handle.state;
-                final itemCount =
-                    state.rows.length + (state.canLoadOlder ? 1 : 0);
-                return ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                  itemCount: itemCount,
-                  itemBuilder: (context, index) {
-                    if (state.canLoadOlder && index == 0) {
-                      return Center(
-                        child: TextButton.icon(
-                          onPressed: _loadingOlder ? null : _loadOlder,
-                          icon: _loadingOlder
-                              ? const SizedBox(
-                                  width: 12,
-                                  height: 12,
-                                  child: CircularProgressIndicator(
-                                      strokeWidth: 1.5),
-                                )
-                              : const Icon(Icons.expand_less, size: 16),
-                          label: Text(tr(context, 'chat.loadOlder')),
-                        ),
+          : Stack(
+              children: [
+                RepaintBoundary(
+                  child: AnimatedBuilder(
+                    animation: handle.state,
+                    builder: (context, _) {
+                      final state = handle.state;
+                      final itemCount =
+                          state.rows.length + (state.canLoadOlder ? 1 : 0);
+                      if (!_positionedAtBottom) {
+                        // R1b: land on the newest content on the first frame
+                        // the list is actually mounted — the state listener
+                        // only fires on LATER updates and would miss the
+                        // initial snapshot.
+                        _positionedAtBottom = true;
+                        _lastRowCount = state.rows.length;
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (!mounted || !_scrollController.hasClients) {
+                            return;
+                          }
+                          _scrollController.jumpTo(
+                            _scrollController.position.maxScrollExtent,
+                          );
+                        });
+                      }
+                      return ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                        itemCount: itemCount,
+                        itemBuilder: (context, index) {
+                          if (state.canLoadOlder && index == 0) {
+                            return Center(
+                              child: TextButton.icon(
+                                onPressed: _loadingOlder ? null : _loadOlder,
+                                icon: _loadingOlder
+                                    ? const SizedBox(
+                                        width: 12,
+                                        height: 12,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 1.5),
+                                      )
+                                    : const Icon(Icons.expand_less, size: 16),
+                                label: Text(tr(context, 'chat.loadOlder')),
+                              ),
+                            );
+                          }
+                          final row = state
+                              .rows[index - (state.canLoadOlder ? 1 : 0)];
+                          return SubagentTimelineRow(row: row);
+                        },
                       );
-                    }
-                    final row =
-                        state.rows[index - (state.canLoadOlder ? 1 : 0)];
-                    return SubagentTimelineRow(row: row);
-                  },
-                );
-              },
+                    },
+                  ),
+                ),
+                // Jump-to-newest control, bottom-right; the stick detection
+                // in [_onScroll] drives its visibility.
+                Positioned(
+                  right: 16,
+                  bottom: 16,
+                  child: JumpToBottomButton(
+                    visible: !_stickToBottom,
+                    onPressed: _animateToBottom,
+                  ),
+                ),
+              ],
             ),
     );
   }
@@ -377,10 +488,11 @@ class _ReasoningStrip extends StatelessWidget {
   }
 }
 
-/// Compact tool row: status icon + the official per-tool summary (from
-/// [toolRowSemantics] — the old second name·preview summary is converged,
-/// Q6a; density comes from the compact type + truncation), with the diff
-/// rendered inline when the row is a file edit.
+/// Compact tool row (chat page `_ToolCallTile` collapse pattern, task 09-23
+/// R2): collapsed shows only the status icon + the official per-tool summary
+/// (from [toolRowSemantics] — the old second name·preview summary is
+/// converged, Q6a) + diff +/- counts; the diff renders inside the expansion,
+/// so a file edit no longer floods the timeline.
 class _ToolSummary extends StatelessWidget {
   final Map<String, dynamic> row;
 
@@ -400,31 +512,61 @@ class _ToolSummary extends StatelessWidget {
       _ => ZInk.faint(context),
     };
     final diff = extractDiff(row);
+    final title = Expanded(
+      child: Text(
+        summary.title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: ZType.sub.copyWith(
+          color: ZInk.muted(context),
+          fontFamily: 'monospace',
+        ),
+      ),
+    );
+    final counts = [
+      if (summary.additions > 0)
+        Padding(
+          padding: const EdgeInsets.only(left: 8),
+          child: Text(
+            '+${summary.additions}',
+            style: ZType.caption.copyWith(color: ZColors.success),
+          ),
+        ),
+      if (summary.deletions > 0)
+        Padding(
+          padding: const EdgeInsets.only(left: 4),
+          child: Text(
+            '-${summary.deletions}',
+            style: ZType.caption.copyWith(color: ZColors.danger),
+          ),
+        ),
+    ];
+    final leading = Icon(summary.icon, size: 13, color: color);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(summary.icon, size: 13, color: color),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  summary.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: ZType.sub.copyWith(
-                    color: ZInk.muted(context),
-                    fontFamily: 'monospace',
+      child: diff == null
+          // No diff → nothing to expand: static summary row (title fills the
+          // remaining width, so the Expanded must sit in THIS row).
+          ? Row(children: [leading, const SizedBox(width: 6), title, ...counts])
+          : ListTileTheme.merge(
+              // Keep the collapsed row on the same compact grid as the
+              // plain (no-diff) rows.
+              horizontalTitleGap: 6,
+              minLeadingWidth: 13,
+              child: ExpansionTile(
+                dense: true,
+                minTileHeight: ZTile.headHeight,
+                tilePadding: EdgeInsets.zero,
+                leading: leading,
+                title: Row(children: [title, ...counts]),
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: DiffView(diff: diff),
                   ),
-                ),
+                ],
               ),
-            ],
-          ),
-          if (diff != null) DiffView(diff: diff),
-        ],
-      ),
+            ),
     );
   }
 }

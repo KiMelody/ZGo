@@ -32,6 +32,10 @@ class _FakeSubagentGateway extends FakeDeviceSession {
   final List<(String, int?, int)> ranges = [];
   final List<(String, String)> cancelled = [];
 
+  /// The child-session state handed to the page — tests push delta frames
+  /// onto it to simulate streamed rows.
+  ConversationState? lastState;
+
   @override
   ConversationTransport get conversationCommands =>
       _FakeChildCommands(this);
@@ -40,6 +44,7 @@ class _FakeSubagentGateway extends FakeDeviceSession {
   Future<ChatHandle> subscribe(String sessionId) async {
     subscribed.add(sessionId);
     final state = ConversationState();
+    lastState = state;
     state.applyFrame({
       'toSeq': 1,
       'payload': {
@@ -123,6 +128,32 @@ const _childRows = [
   {'rowId': 4, 'kind': 'assistantText', 'text': '已完成 **加固**'},
 ];
 
+/// Streams one appended row onto the child state (live delta shape).
+void _appendRow(_FakeSubagentGateway gateway, Map<String, dynamic> row) {
+  final state = gateway.lastState!;
+  state.applyFrame({
+    'toSeq': state.seq + 1,
+    'payload': {
+      'kind': 'deltas',
+      'deltas': [
+        {'op': 'row.appended', 'row': row},
+      ],
+    },
+  }, onGap: () => fail('unexpected gap'));
+}
+
+/// The jump-to-bottom button stays mounted (cross-fade); its visibility is
+/// the animated opacity.
+double jumpButtonOpacity(WidgetTester tester) {
+  final opacity = tester.widget<AnimatedOpacity>(
+    find.ancestor(
+      of: find.byTooltip('回到底部'),
+      matching: find.byType(AnimatedOpacity),
+    ),
+  );
+  return opacity.opacity;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -148,16 +179,23 @@ void main() {
     expect(find.text('实现加固'), findsOneWidget); // app bar title
     expect(find.text('调研 Flutter 国内镜像可用性'), findsOneWidget); // task prompt
     expect(find.textContaining('已完成'), findsOneWidget); // assistant markdown
-    // toolCall compact summary + inline diff
+    // toolCall compact summary; the diff is collapsed until the row expands
+    // (R2, same pattern as the chat page's _ToolCallTile)
     expect(find.textContaining('已写入'), findsOneWidget);
-    expect(find.textContaining('-a'), findsWidgets);
-    expect(find.textContaining('+b'), findsWidgets);
+    expect(find.textContaining('-a'), findsNothing);
+    expect(find.textContaining('+b'), findsNothing);
     // reasoning is collapsed by default, expands on tap
     expect(find.textContaining('先查 pub 官方文档'), findsNothing);
-    await tester.tap(find.byType(ExpansionTile));
+    await tester.tap(find.byType(ExpansionTile).first);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 200));
     expect(find.textContaining('先查 pub 官方文档'), findsOneWidget);
+    // expanding the tool row reveals its diff
+    await tester.tap(find.textContaining('已写入'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.textContaining('-a'), findsWidgets);
+    expect(find.textContaining('+b'), findsWidgets);
     // read-only boundary: no composer anywhere on the page
     expect(find.byType(TextField), findsNothing);
   });
@@ -239,5 +277,150 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(gateway.cancelled, [('s1', 'agent_1')]);
+  });
+
+  testWidgets('opens pinned to the newest row and follows streamed rows '
+      'only while the reader stays at the bottom', (tester) async {
+    // Rows tall enough to overflow the viewport, so stick/jump are real
+    // scroll moves rather than no-ops on a flat list.
+    final gateway = _FakeSubagentGateway(
+      rows: [
+        for (var i = 1; i <= 12; i++)
+          {'rowId': i, 'kind': 'assistantText', 'text': '第 $i 段输出' * 20},
+      ],
+    );
+    addTearDown(() => gateway.dispose());
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final controller =
+        tester.widget<ListView>(find.byType(ListView)).controller!;
+    // R1b: opens at the newest content, not at the top.
+    expect(
+      controller.position.pixels,
+      moreOrLessEquals(controller.position.maxScrollExtent),
+    );
+    expect(jumpButtonOpacity(tester), 0);
+
+    // R1c: a streamed row while pinned → smooth follow to the new bottom.
+    _appendRow(gateway, {
+      'rowId': 13,
+      'kind': 'assistantText',
+      'text': '最新的一段输出' * 20,
+    });
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(
+      controller.position.pixels,
+      moreOrLessEquals(controller.position.maxScrollExtent),
+    );
+
+    // Reader scrolls up: follow stops and the jump button fades in.
+    await tester.drag(find.byType(ListView), const Offset(0, 240));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      controller.position.pixels,
+      lessThan(controller.position.maxScrollExtent - 40),
+    );
+    expect(jumpButtonOpacity(tester), 1);
+
+    // Another streamed row while reading history: no follow.
+    _appendRow(gateway, {
+      'rowId': 14,
+      'kind': 'assistantText',
+      'text': '更新的一段输出' * 20,
+    });
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(
+      controller.position.pixels,
+      lessThan(controller.position.maxScrollExtent - 40),
+    );
+
+    // The jump button returns to the newest row and fades out.
+    await tester.tap(find.byTooltip('回到底部'));
+    await tester.pumpAndSettle();
+    expect(
+      controller.position.pixels,
+      moreOrLessEquals(controller.position.maxScrollExtent),
+    );
+    expect(jumpButtonOpacity(tester), 0);
+  });
+
+  testWidgets('prepending older history unsticks the pinned state '
+      '(no stale jump-button / follow yank)', (tester) async {
+    // Check-finding regression shape: a tail window that does not fill the
+    // viewport (max = 0, stick = true, load-older visible). Prepending
+    // only grows maxScrollExtent — pixels stays 0, so no scroll
+    // notification fires — the pinned cache must be recomputed, not
+    // trusted: the jump button has to appear, and a streamed row must not
+    // yank the reader (now far from the bottom) down.
+    final gateway = _FakeSubagentGateway(
+      rows: const [
+        {'rowId': 61, 'kind': 'assistantText', 'text': '尾部短输出'},
+        {'rowId': 62, 'kind': 'assistantText', 'text': '最新短输出'},
+      ],
+      totalCount: 62,
+      rangeResult: {
+        'hasMore': false,
+        'atLogEpoch': 'e1',
+        'rows': {
+          'window': [
+            for (var i = 1; i <= 60; i++)
+              {'rowId': i, 'kind': 'assistantText', 'text': '第 $i 段历史输出' * 20},
+          ],
+          'firstRowId': 1,
+        },
+      },
+    );
+    addTearDown(() => gateway.dispose());
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // Flat list: pinned at the bottom, button hidden.
+    expect(jumpButtonOpacity(tester), 0);
+
+    await tester.tap(find.text('加载更早消息'));
+    await tester.pumpAndSettle();
+
+    final controller =
+        tester.widget<ListView>(find.byType(ListView)).controller!;
+    // Viewport unchanged (pixels 0) but now far from the bottom.
+    expect(controller.position.pixels, 0);
+    expect(
+      controller.position.pixels,
+      lessThan(controller.position.maxScrollExtent - 40),
+    );
+    // Recomputed stick: the jump button fades in despite no scroll event.
+    expect(jumpButtonOpacity(tester), 1);
+
+    // A streamed row must not follow: the stale "pinned" state would have
+    // yanked the reader from the top of the history to the bottom.
+    _appendRow(gateway, {
+      'rowId': 63,
+      'kind': 'assistantText',
+      'text': '流式新输出' * 20,
+    });
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(controller.position.pixels, 0);
   });
 }
