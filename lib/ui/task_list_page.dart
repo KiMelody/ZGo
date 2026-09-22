@@ -43,6 +43,12 @@ class TaskListPage extends StatefulWidget {
   @visibleForTesting
   final String? initialPaneTitle;
 
+  /// Task-overview refresh cadence while this page is up (Addendum 3: a
+  /// non-active workspace's new chats only arrive via the relay overview —
+  /// the desktop push stalls in the background). Tests inject a short one.
+  @visibleForTesting
+  final Duration overviewInterval;
+
   const TaskListPage({
     super.key,
     required this.store,
@@ -52,13 +58,19 @@ class TaskListPage extends StatefulWidget {
     this.sessionOverride,
     this.initialPaneSessionId,
     this.initialPaneTitle,
+    this.overviewInterval = const Duration(seconds: 30),
   });
 
   @override
   State<TaskListPage> createState() => _TaskListPageState();
 }
 
-class _TaskListPageState extends State<TaskListPage> {
+class _TaskListPageState extends State<TaskListPage>
+    with WidgetsBindingObserver {
+  /// Periodic [DeviceSession.refreshTaskOverview] timer; armed while the
+  /// page is up, dropped on app pause and dispose (quota-watch cadence
+  /// pattern from main.dart).
+  Timer? _overviewTimer;
   /// Per-workspace expand overrides, both directions (official web model):
   /// absent = default target state — only the ACTIVE workspace (the one
   /// owning the device's live session) is expanded; every other card starts
@@ -95,6 +107,40 @@ class _TaskListPageState extends State<TaskListPage> {
     _paneSessionId = widget.initialPaneSessionId;
     _paneTitle = widget.initialPaneTitle;
     _loadOrganizePrefs();
+    WidgetsBinding.instance.addObserver(this);
+    _startOverviewCadence(refreshNow: true);
+  }
+
+  /// App lifecycle (quota-watch pattern): doze stalls the RPCs anyway, so
+  /// pausing drops the cadence and a resume refreshes at once instead of
+  /// waiting out the next periodic tick.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _startOverviewCadence(refreshNow: true);
+    } else if (state == AppLifecycleState.paused) {
+      _overviewTimer?.cancel();
+      _overviewTimer = null;
+    }
+  }
+
+  /// (Re)arms the periodic task-overview refresh; [refreshNow] also pulls
+  /// once immediately (page entry, app resume). The refresh is best-effort
+  /// and silent (DeviceSession.refreshTaskOverview) — no spinner, no error
+  /// UI: the relay overview usually updates via push anyway.
+  void _startOverviewCadence({bool refreshNow = false}) {
+    _overviewTimer?.cancel();
+    _overviewTimer = Timer.periodic(widget.overviewInterval, (_) {
+      unawaited(_session?.refreshTaskOverview());
+    });
+    if (refreshNow) unawaited(_session?.refreshTaskOverview());
+  }
+
+  @override
+  void dispose() {
+    _overviewTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   Future<void> _loadOrganizePrefs() async {

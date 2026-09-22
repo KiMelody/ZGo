@@ -50,3 +50,32 @@ class MethodProbe {
         m.contains('cannot read propert');
   }
 }
+
+/// Deleted-task tombstone ids of one workspace (`zcode-task` channel).
+/// Desktop parity: the desktop's own task list filters deleted tasks via
+/// `listDeletedTaskIds` — `{workspacePath, workspaceIdentity}` in, a
+/// task_id string array out (desktop bundle). The live sessions-index
+/// still lists those tasks, so its rows must be filtered by this set (PRD
+/// Addendum 2). The method name is probed, never hardcoded as a success
+/// assumption; returns null on ANY miss (unknown method, channel gone,
+/// timeout, unusable answer) — callers degrade to an empty set, the
+/// pre-probe behavior. This probe must never block opening a workspace.
+Future<Set<String>?> probeListDeletedTaskIds(
+  Future<dynamic> Function(String method, List<Object?> args) call, {
+  Map<String, dynamic> scope = const {},
+}) async {
+  try {
+    final res = await MethodProbe(call).run(
+      'listDeletedTaskIds',
+      const ['listDeletedTaskIds'],
+      argsOf: (method) => <Object?>[scope],
+    );
+    if (res is! List) return null;
+    return {
+      for (final id in res)
+        if (id is String && id.isNotEmpty) id,
+    };
+  } catch (_) {
+    return null;
+  }
+}

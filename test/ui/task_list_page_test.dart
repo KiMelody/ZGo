@@ -14,6 +14,24 @@ import '../helpers/fake_device_session.dart';
 
 export '../helpers/fake_device_session.dart' show FakeDeviceSession;
 
+/// Counts refreshTaskOverview pulls: the cadence driver is the thing under
+/// test, and the base fake never connects, so the real method would no-op
+/// invisibly.
+class _CountingSession extends FakeDeviceSession {
+  _CountingSession({
+    required super.deviceId,
+    required super.params,
+    super.workspaces,
+  });
+
+  int overviewRefreshes = 0;
+
+  @override
+  Future<void> refreshTaskOverview() async {
+    overviewRefreshes += 1;
+  }
+}
+
 Future<(DeviceStore, Device)> setupDevice() async {
   SharedPreferences.setMockInitialValues({});
   final store = DeviceStore();
@@ -1316,6 +1334,76 @@ void main() {
       // Identical-map judgment: the active workspace is NOT re-opened.
       expect(session.openWorkspaceCalls, isEmpty);
       expect(find.byType(ChatPage), findsOneWidget);
+    });
+  });
+
+  group('task overview refresh cadence (Addendum 3)', () {
+    /// Cadence page on a counting session; every caller ends its test by
+    /// pumping a replacement widget so the periodic timer is disposed
+    /// (flutter_test fails on pending timers otherwise).
+    Future<_CountingSession> setupCadence(
+      WidgetTester tester, {
+      Duration interval = const Duration(milliseconds: 100),
+    }) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final session = _CountingSession(
+        deviceId: device.id,
+        params: device.params!,
+        workspaces: [
+          {'workspacePath': '/repo/app'},
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+        overviewInterval: interval,
+      )));
+      await tester.pump();
+      return session;
+    }
+
+    testWidgets('pulls once on page entry', (tester) async {
+      final session = await setupCadence(tester);
+      expect(session.overviewRefreshes, 1);
+      await tester.pumpWidget(wrap(const SizedBox.shrink()));
+    });
+
+    testWidgets('pulls periodically while visible (injected interval)',
+        (tester) async {
+      final session = await setupCadence(tester);
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(session.overviewRefreshes, 4); // entry + ticks @100/200/300ms
+      await tester.pumpWidget(wrap(const SizedBox.shrink()));
+    });
+
+    testWidgets('paused app stops the cadence; resumed pulls at once',
+        (tester) async {
+      final session = await setupCadence(tester);
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(session.overviewRefreshes, 1,
+          reason: 'paused must stop the periodic ticks');
+
+      tester.binding
+          .handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(session.overviewRefreshes, 2,
+          reason: 'resume must refresh at once, not wait out a tick');
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(session.overviewRefreshes, 3, reason: 'the cadence re-arms');
+      await tester.pumpWidget(wrap(const SizedBox.shrink()));
+    });
+
+    testWidgets('disposing the page cancels the cadence', (tester) async {
+      final session = await setupCadence(tester);
+      await tester.pumpWidget(wrap(const SizedBox.shrink()));
+      final after = session.overviewRefreshes;
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(session.overviewRefreshes, after);
     });
   });
 }

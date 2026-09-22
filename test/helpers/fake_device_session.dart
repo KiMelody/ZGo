@@ -33,6 +33,10 @@ class FakeDeviceSession extends DeviceSession {
     }, onGap: () {});
     _workspaces = workspaces;
     _active = workspaces.isEmpty ? null : workspaces.first;
+    // Mirror _openWorkspaceNow: the seeded index carries the identity of
+    // the workspace it was "subscribed" to (live-only rows attribute here).
+    sessions.subscribedWorkspaceKey =
+        _active == null ? null : workspaceKeyOf(_active!);
   }
 
   late List<Map<String, dynamic>> _workspaces;
