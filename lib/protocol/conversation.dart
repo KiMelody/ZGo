@@ -5,6 +5,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:clock/clock.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
@@ -229,31 +230,54 @@ class ConversationTransport {
     return res;
   }
 
-  /// Sends one command envelope; on timeout (likely a relay drop mid-flight)
-  /// waits for bridge recovery and retries once with a fresh commandId.
+  /// Session-creating commands (no sessionId of their own yet): the
+  /// desktop dedupes them by commandId (`retryAck` answers `duplicate`
+  /// carrying the original result), so a timed-out send can safely replay
+  /// with the SAME commandId. Everything else (sendText...) is not
+  /// idempotent — those keep the fresh-commandId conservative retry.
+  static const _idempotentCommands = {
+    'createSession',
+    'createSelectionSideSession',
+  };
+
+  /// Sends one command envelope; on timeout (likely a relay drop
+  /// mid-flight) waits for bridge recovery and retries. Session-creating
+  /// commands replay with their original commandId (server-side dedupe),
+  /// everything else with a fresh one.
   Future<dynamic> _sendCommandWithRetry(
     Map<String, dynamic> envelope,
     Duration timeout,
   ) async {
+    final sendStart = DateTime.now();
     try {
       return await _channels.call(channel, 'sendConversationCommandV4', [
         {...scope, 'envelope': envelope},
       ], timeout: timeout);
     } on TimeoutException {
-      // Retry only when the relay dropped mid-flight (bridge degraded): the
-      // command then never reached the server. If the bridge is still
-      // healthy, rethrow — a retry would double-deliver (e.g. sendText).
-      if (session.degraded.value == null) rethrow;
+      // Retry only when a relay drop plausibly ate the response: the bridge
+      // is degraded right now, OR it degraded during this command's flight
+      // and already recovered. The second case is the desktop's ~45.3s
+      // pendulum: the response dies with the old bridge while the degraded
+      // flag clears within 1-2s, so by the time a 90s command times out the
+      // flag is always null — the timestamp is what catches it. If the
+      // bridge stayed healthy the whole flight, rethrow (a retry would
+      // double-deliver, e.g. sendText).
+      final degradedAt = session.lastDegradedAt;
+      final degradedInFlight = session.degraded.value != null ||
+          (degradedAt != null && !degradedAt.isBefore(sendStart));
+      if (!degradedInFlight) rethrow;
       _log(
         '[v4] command timed out during drop, waiting for recovery and '
         'retrying',
       );
       await session.waitHealthy(timeout: const Duration(seconds: 45));
-      final fresh = {
-        ...envelope,
-        'commandId': generateUuid(),
-        'issuedAt': DateTime.now().millisecondsSinceEpoch,
-      };
+      final fresh = _idempotentCommands.contains('${envelope['type']}')
+          ? envelope
+          : {
+              ...envelope,
+              'commandId': generateUuid(),
+              'issuedAt': DateTime.now().millisecondsSinceEpoch,
+            };
       return _channels.call(channel, 'sendConversationCommandV4', [
         {...scope, 'envelope': fresh},
       ], timeout: timeout);
@@ -262,7 +286,10 @@ class ConversationTransport {
 
   /// Creates a new session (mirrors the composer's first-send path):
   /// command `createSession` with `{workspaceId, firstInput:{text}}` and a
-  /// null envelope sessionId. Returns the new sessionId on `accepted`.
+  /// null envelope sessionId. Returns the new sessionId on `accepted` —
+  /// or on `duplicate`, the retryAck replay of a command that reached the
+  /// server but lost its response (same commandId retry), which carries
+  /// the original result.
   Future<String> createSession(
     String workspaceId, {
     String? firstText,
@@ -286,7 +313,7 @@ class ConversationTransport {
     }, timeout: timeout);
     final map = res is Map ? res.cast<String, dynamic>() : null;
     final status = map?['status'];
-    if (status != 'accepted') {
+    if (status != 'accepted' && status != 'duplicate') {
       throw StateError(
         'createSession rejected: ${map?['reasonCode'] ?? status} ${map?['message'] ?? ''}',
       );
@@ -1711,6 +1738,27 @@ class SessionsIndexState extends ChangeNotifier {
   final Map<String, SessionEntry> sessions = {};
   bool ready = false;
 
+  /// Workspace key the opener recorded at subscribe time — the identity of
+  /// the workspace whose data this index carries. Live-only rows (not yet
+  /// in the relay overview) fall back to it for attribution; recording the
+  /// identity on the data itself immunizes them against the switch /
+  /// re-subscribe drift window where the page-level active workspace
+  /// disagrees with this index's contents (2026-09-22 device report:
+  /// sessions jumped into foreign groups). In-memory projection state
+  /// only — never serialized.
+  String? subscribedWorkspaceKey;
+
+  /// Deleted-task tombstone ids the opener recorded right after the
+  /// subscription landed (probed via `zcode-task.listDeletedTaskIds`). The
+  /// desktop registry keeps `deleted=1` rows, the relay overview omits
+  /// them, yet the live sessions-index (session-library view) still lists
+  /// those tasks — without this set the live merge resurrects deleted
+  /// tasks (2026-09-23 device report: default 12 → 22 after leaving a
+  /// conversation). Empty on probe failure / older desktops = no
+  /// filtering, the pre-probe behavior. In-memory projection state only —
+  /// never serialized.
+  Set<String> deletedTaskIds = const {};
+
   bool _deactivated = false;
 
   /// Same lazy shutdown as [ConversationState.deactivateState]: UI listening
@@ -1892,6 +1940,7 @@ class ConversationState extends ChangeNotifier {
   }
 
   void _applySnapshot(Map<String, dynamic> snap, int toSeq) {
+    _detectConfigRevert(snap);
     snapshot = snap;
     _usageEvent = null;
     if (_pendingPatch != null) {
@@ -1901,22 +1950,66 @@ class ConversationState extends ChangeNotifier {
     seq = toSeq;
     logEpoch = snap['logEpoch'] as String?;
     final rowsObj = snap['rows'];
+    List<Map<String, dynamic>> snapRows;
+    // The EXPLICIT firstRowId is the paging-cursor authority (it can sit
+    // outside the window — live-probed placeholder, see
+    // live_child_rows_probe); the window head is only the fallback.
+    int? declaredFirstRowId;
     if (rowsObj is Map) {
       final window = rowsObj['window'];
-      rows = window is List
+      snapRows = window is List
           ? window
                 .whereType<Map>()
                 .map((e) => e.cast<String, dynamic>())
                 .toList()
           : [];
-      totalCount = (rowsObj['totalCount'] as num?)?.toInt() ?? rows.length;
-      firstRowId = (rowsObj['firstRowId'] as num?)?.toInt() ??
-          (rows.isNotEmpty ? (rows.first['rowId'] as num?)?.toInt() : null);
+      totalCount = (rowsObj['totalCount'] as num?)?.toInt() ?? snapRows.length;
+      declaredFirstRowId = (rowsObj['firstRowId'] as num?)?.toInt();
     } else {
-      rows = [];
+      snapRows = [];
       totalCount = 0;
-      firstRowId = null;
+      declaredFirstRowId = null;
     }
+    final windowFirstRowId = snapRows.isNotEmpty
+        ? (snapRows.first['rowId'] as num?)?.toInt()
+        : null;
+    // Keep the already-held OLDER rows across EVERY snapshot refresh, not
+    // just same-epoch ones (round 23). The original bridge-crash fix
+    // (2026-09-22) gated the merge on an unchanged log epoch — but the
+    // desktop advances the epoch while streaming (a fresh snapshot every
+    // ~10s during output, device log 09-22 13:54), and each such refresh
+    // then threw away every prepended history page: max collapsed and the
+    // viewport clamped (the "jumping"), and the paging cursor (derived
+    // from the held rows) rewound to the snapshot window head so the next
+    // load re-fetched the SAME page ("the top timestamp never changes",
+    // then the fetches started silently dying to the epoch race =
+    // "stuck loading"). The held rows are immutable log entries — an
+    // epoch drift does not invalidate them; rows overlapping the fresh
+    // window are still dropped in favor of its newer data.
+    if (snapRows.isNotEmpty && windowFirstRowId != null) {
+      final older = rows
+          .where(
+            (r) => ((r['rowId'] as num?)?.toInt() ?? 0) < windowFirstRowId,
+          )
+          .toList();
+      rows = older.isNotEmpty ? [...older, ...snapRows] : snapRows;
+    } else {
+      rows = snapRows;
+    }
+    // The paging-cursor authority is the oldest signal we hold: the oldest
+    // HELD row when history pages were prepended, else the snapshot's
+    // declared firstRowId (which can sit OUTSIDE the window — the
+    // live-probed placeholder that says earlier history exists). Either
+    // way the smaller wins — a larger snapshot-side value must not rewind
+    // what the reader already paged past.
+    var oldestSignal = rows.isNotEmpty
+        ? (rows.first['rowId'] as num?)?.toInt()
+        : null;
+    if (declaredFirstRowId != null &&
+        (oldestSignal == null || declaredFirstRowId < oldestSignal)) {
+      oldestSignal = declaredFirstRowId;
+    }
+    firstRowId = oldestSignal;
   }
 
   void _applyDelta(Map<String, dynamic> delta) {
@@ -1987,8 +2080,55 @@ class ConversationState extends ChangeNotifier {
   /// `state.updated` frame may lag). Merges into snapshot immediately.
   void optimisticPatch(Map<String, dynamic> patch) {
     if (snapshot == null) return;
+    final config = patch['config'];
+    if (config is Map) {
+      _optimisticConfig = (
+        value: Map<String, dynamic>.from(config),
+        at: clock.now(),
+      );
+    }
     snapshot = {...snapshot!, ...patch};
     notifyListeners();
+  }
+
+  /// Optimistic-config trace (design 09-25 D3): what [optimisticPatch]
+  /// last wrote under the `config` key and when — the "switch did not
+  /// take effect" detector's baseline. Null when no optimistic config
+  /// write is pending comparison.
+  ({Map<String, dynamic> value, DateTime at})? _optimisticConfig;
+
+  /// How long an optimistic write stays worth comparing (design D3:
+  /// stale optimism is not worth mentioning).
+  static const Duration _optimisticRevertWindow = Duration(seconds: 60);
+
+  /// One-shot flag raised by [_detectConfigRevert]; the chat page consumes
+  /// it (SnackBar) via [consumeConfigReverted] — read-and-clear.
+  bool _configReverted = false;
+
+  /// Reads and clears the revert flag.
+  bool consumeConfigReverted() {
+    final reverted = _configReverted;
+    _configReverted = false;
+    return reverted;
+  }
+
+  /// Revert detection (design D3), run against each authoritative
+  /// snapshot's `config`: a value differing from a still-fresh (≤60s)
+  /// optimistic write means the switch command was lost in a bridge swing
+  /// and this snapshot silently rolled the UI back to the desktop's old
+  /// setting — raise the one-shot flag. Same value = the switch survived
+  /// (trace clears, no flag). Snapshots without `config` are not a
+  /// verdict; the `state.updated` merge path never runs this (an
+  /// incremental patch is the confirmation, not a rollback).
+  void _detectConfigRevert(Map<String, dynamic> snap) {
+    final trace = _optimisticConfig;
+    if (trace == null) return;
+    final incoming = snap['config'];
+    if (incoming is! Map) return;
+    _optimisticConfig = null; // one config-bearing snapshot = one verdict
+    if (mapEquals(incoming, trace.value)) return;
+    if (clock.now().difference(trace.at) > _optimisticRevertWindow) return;
+    _configReverted = true;
   }
 
   /// Optimistic row edit (e.g. feedback) — mutates the row in place and
@@ -2292,12 +2432,16 @@ class ConversationState extends ChangeNotifier {
   /// broke the second「加载更早」page, so the response value is ignored
   /// here; callers derive the request cursor from the held rows too.
   /// No fresh rows → no cursor write: the response carries no new evidence.
-  void prependOlderRows(List<Map<String, dynamic>> older) {
+  /// Prepends older rows (deduped by rowId). Returns how many rows were
+  /// actually inserted — 0 means the whole page was already held (a re-fire
+  /// raced the prepend window), which the caller must NOT treat as a
+  /// content shift (anchoring a no-op prepend jumps the view out and back).
+  int prependOlderRows(List<Map<String, dynamic>> older) {
     final existing = rows.map((r) => (r['rowId'] as num?)?.toInt()).toSet();
     final fresh = older
         .where((r) => !existing.contains((r['rowId'] as num?)?.toInt()))
         .toList();
-    if (fresh.isEmpty) return;
+    if (fresh.isEmpty) return 0;
     int? firstFresh;
     for (final r in fresh) {
       final id = (r['rowId'] as num?)?.toInt();
@@ -2308,6 +2452,7 @@ class ConversationState extends ChangeNotifier {
     rows = [...fresh, ...rows];
     if (firstFresh != null) firstRowId = firstFresh;
     notifyListeners();
+    return fresh.length;
   }
 
   List<Map<String, dynamic>> get backgroundWorks {

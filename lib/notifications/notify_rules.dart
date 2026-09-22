@@ -45,8 +45,23 @@ List<TaskCompletionEvent> taskCompletionEvents({
   final nowPhases = {for (final s in tasks) s.sessionId: s.phase};
   final byId = {for (final s in tasks) s.sessionId: s};
   previousPhases.forEach((sessionId, wasPhase) {
-    if (!runningPhases.contains(wasPhase)) return;
     final now = nowPhases[sessionId];
+    // Correction edge: an error notice already fired (sometimes spuriously
+    // — a bridge crash-loop transient, or a trailing model-only helper turn
+    // failing after the main turn completed), and the true completedSuccess
+    // then lands WITHOUT a running gap. The running→terminal edge below
+    // can't see it (error is terminal, not running), so without this edge
+    // the baseline stays error and the REAL completion is never notified.
+    if (wasPhase == 'error' && now == 'completedSuccess') {
+      final entry = byId[sessionId]!;
+      events.add(TaskCompletionEvent(
+        sessionId: sessionId,
+        title: entry.title.isEmpty ? sessionId : entry.title,
+        phase: now!,
+      ));
+      return;
+    }
+    if (!runningPhases.contains(wasPhase)) return;
     if (now == null || !terminalTaskPhases.contains(now)) return;
     final entry = byId[sessionId]!;
     events.add(TaskCompletionEvent(

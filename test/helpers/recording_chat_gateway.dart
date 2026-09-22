@@ -359,6 +359,14 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   @override
   List<Map<String, dynamic>> mentionSkillsSync() => mentionSkillsResult;
 
+  /// Programmed [ChatGateway.taskDisplayStatus] answers keyed by sessionId
+  /// (shell-session error card tests); unlisted ids = mirror miss → null.
+  final Map<String, String> taskDisplayStatuses = {};
+
+  @override
+  String? taskDisplayStatus(String sessionId) =>
+      taskDisplayStatuses[sessionId];
+
   @override
   dynamic noSuchMethod(Invocation invocation) {
     if (strict) {

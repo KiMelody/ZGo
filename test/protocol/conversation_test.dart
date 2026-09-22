@@ -1,6 +1,9 @@
 // Ported verbatim from the reference implementation; newer style lints
 // are suppressed so the file stays diffable against it.
 // ignore_for_file: use_null_aware_elements, prefer_initializing_formals
+import 'dart:async';
+
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -45,6 +48,70 @@ void main() {
       expect(state.firstRowId, 1);
       expect(state.totalCount, 2);
       expect(state.ready, isTrue);
+    });
+
+    test('bridge-crash resubscribe snapshot keeps the prepended history '
+        'page across log epochs', () {
+      // The desktop bridge crash-loop re-subscribes every ~10s and re-sends
+      // the full snapshot; replacing rows wholesale dropped every loaded
+      // older page and clamped the viewport to the (collapsed) bottom
+      // (2026-09-22 device report). Round 23 removed the same-epoch gate:
+      // a STREAMING desktop advances the log epoch on every ~10s snapshot
+      // too, and each such refresh then threw the older pages away — the
+      // viewport clamped ("jumping"), the paging cursor rewound to the
+      // window head so the next load re-fetched the same page ("the top
+      // timestamp never changes"), and the fetch race then died silently
+      // to the epoch check ("stuck loading"). The held rows are immutable
+      // log entries; an epoch drift does not invalidate them.
+      Map<String, dynamic> snapFrame(
+        String epoch,
+        List<int> rowIds,
+        int toSeq,
+      ) =>
+          {
+            'payload': {
+              'kind': 'snapshot',
+              'snapshot': {
+                'logEpoch': epoch,
+                'rows': {
+                  'window': [
+                    for (final id in rowIds)
+                      {'rowId': id, 'kind': 'user', 'text': 'r$id'},
+                  ],
+                  'totalCount': rowIds.length,
+                  // No explicit firstRowId: the merged head then becomes the
+                  // cursor (an explicit declaration would still win).
+                },
+              },
+            },
+            'toSeq': toSeq,
+          };
+
+      state.applyFrame(snapFrame('epoch-1', [50, 51], 1), onGap: () {});
+      state.prependOlderRows([
+        {'rowId': 40, 'kind': 'user', 'text': 'r40'},
+        {'rowId': 41, 'kind': 'user', 'text': 'r41'},
+      ]);
+      // Resubscribe: fresh tail window (50..52), same epoch.
+      state.applyFrame(snapFrame('epoch-1', [50, 51, 52], 5), onGap: () {});
+
+      expect(
+        [for (final r in state.rows) r['rowId']],
+        [40, 41, 50, 51, 52],
+        reason: 'held older rows survive the resubscribe',
+      );
+      expect(state.firstRowId, 40);
+
+      // An epoch move (streaming log advance / rewrite) keeps them too:
+      // every row OLDER than the fresh window head survives — both the
+      // prepended pages and the previous window's rows (now history) —
+      // and the cursor must not rewind past what the reader already
+      // paged through.
+      state.applyFrame(snapFrame('epoch-2', [60, 61], 9), onGap: () {});
+      expect([for (final r in state.rows) r['rowId']],
+          [40, 41, 50, 51, 52, 60, 61]);
+      expect(state.firstRowId, 40,
+          reason: 'cursor stays at the oldest held row');
     });
 
     test('row.appended adds to end', () {
@@ -306,6 +373,24 @@ void main() {
       expect(state.rows[1]['text'], 'existing');
     });
 
+    test('prependOlderRows reports zero inserted for a full duplicate page',
+        () {
+      _injectSnapshot(state, rows: [
+        {'rowId': 2, 'kind': 'assistant', 'text': 'existing'},
+      ]);
+
+      final inserted = state.prependOlderRows([
+        {'rowId': 2, 'kind': 'user', 'text': 'dup'},
+      ]);
+
+      // The caller anchors off this count: a no-op prepend must read as
+      // "nothing shifted" or the UI pre-jumps a full page out and the
+      // landing drags it back (09-22 round 14 device log).
+      expect(inserted, 0);
+      expect(state.rows, hasLength(1));
+      expect(state.rows[0]['text'], 'existing');
+    });
+
     test('computed properties from snapshot', () {
       _injectSnapshot(state, snapshot: {
         'revision': 5,
@@ -371,6 +456,84 @@ void main() {
 
       expect(state.isRunning, isFalse);
       expect(state.canStop, isFalse);
+    });
+  });
+
+  group('optimistic config trace & revert detection (design 09-25 D3)', () {
+    late ConversationState state;
+
+    setUp(() {
+      state = ConversationState();
+    });
+
+    Map<String, dynamic> config(String model) => {
+      'provider': 'builtin',
+      'model': model,
+      'thought': 'enabled',
+    };
+
+    test('optimistic patch confirmed by a same-value snapshot raises no flag',
+        () {
+      _injectSnapshot(state, snapshot: {'config': config('A')});
+      state.optimisticPatch({'config': config('B')});
+      expect(state.currentModel, 'B');
+
+      _injectSnapshot(state, snapshot: {'config': config('B')});
+      expect(state.consumeConfigReverted(), isFalse,
+          reason: 'the authoritative snapshot agrees with the optimism');
+      expect(state.currentModel, 'B');
+    });
+
+    test('authoritative snapshot with a different value within 60s sets the '
+        'one-shot flag; the state.updated merge path never does', () {
+      _injectSnapshot(state, snapshot: {'config': config('A')});
+      state.optimisticPatch({'config': config('B')});
+
+      // Incremental confirmation (the normal accepted path): merging a
+      // patch — even with a different config — must not count as a revert.
+      state.applyFrame({
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {'op': 'state.updated', 'patch': {'config': config('A')}},
+          ],
+        },
+        'fromSeq': 5,
+        'toSeq': 6,
+      }, onGap: () => fail('unexpected gap'));
+      expect(state.consumeConfigReverted(), isFalse);
+
+      // Whole-snapshot replacement with the desktop's old config: the
+      // switch command was lost — one flag, consumed on read.
+      _injectSnapshot(state, seq: 7, snapshot: {'config': config('A')});
+      expect(state.consumeConfigReverted(), isTrue);
+      expect(state.consumeConfigReverted(), isFalse,
+          reason: 'one-shot: consumed on read');
+    });
+
+    test('a differing snapshot past the 60s window raises no flag', () {
+      var now = DateTime(2026, 9, 25, 12);
+      withClock(Clock(() => now), () {
+        _injectSnapshot(state, snapshot: {'config': config('A')});
+        state.optimisticPatch({'config': config('B')});
+
+        now = now.add(const Duration(seconds: 61));
+        _injectSnapshot(state, snapshot: {'config': config('A')});
+        expect(state.consumeConfigReverted(), isFalse,
+            reason: 'stale optimism is not worth mentioning');
+      });
+    });
+
+    test('a second optimistic patch re-bases the trace on the newest value',
+        () {
+      _injectSnapshot(state, snapshot: {'config': config('A')});
+      state.optimisticPatch({'config': config('B')});
+      state.optimisticPatch({'config': config('C')});
+
+      // A snapshot with B differs from the LATEST optimistic value (C) —
+      // the verdict must be computed against the new trace.
+      _injectSnapshot(state, snapshot: {'config': config('B')});
+      expect(state.consumeConfigReverted(), isTrue);
     });
   });
 
@@ -1206,6 +1369,176 @@ void main() {
       await sub.dispose();
     });
   });
+
+  group('command timeout vs pendulum degradation', () {
+    // The desktop 45.3s pendulum: bridge-degraded kills in-flight RPCs and
+    // the bridge recovers within 1-2s — by the time a long-flying command
+    // times out, `degraded` is null again. These tests drive that window
+    // with real timers: the first send parks, degrades + recovers
+    // mid-flight, and the timeout fires against an already-recovered bridge.
+    late _RetryChannels channels;
+    late _FakeBridgeSession session;
+    late ConversationTransport transport;
+
+    setUp(() {
+      channels = _RetryChannels();
+      session = _FakeBridgeSession(channels.client);
+      transport = ConversationTransport(
+        session: session,
+        scope: {'workspacePath': '/repo'},
+      );
+    });
+
+    /// Deadline-bounded wait for [test] to hold (the parked channel drives
+    /// everything else deterministically).
+    Future<void> pumpUntil(
+      bool Function() test, {
+      Duration timeout = const Duration(seconds: 5),
+    }) async {
+      final deadline = DateTime.now().add(timeout);
+      while (!test()) {
+        if (DateTime.now().isAfter(deadline)) {
+          fail('pumpUntil: condition not met within $timeout');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+    }
+
+    /// Answers the [at]-th parked command once it appears. Register before
+    /// awaiting the command future: the retry only parks after the first
+    /// call's timeout fires.
+    Future<void> answerWhenParked(int at, Object? payload) async {
+      await pumpUntil(() => channels.envelopes.length > at);
+      channels.answer(at, payload);
+    }
+
+    test('degraded mid-flight, recovered at catch: createSession retries '
+        'with the same commandId and succeeds', () async {
+      final done = transport.createSession(
+        'ws1',
+        firstText: 'hi',
+        timeout: const Duration(milliseconds: 80),
+      );
+      await pumpUntil(() => channels.envelopes.isNotEmpty);
+      // Pendulum: degrade, then recover long before the 80ms timeout fires.
+      session.markDegraded('rpc-transport-fault');
+      session.degraded.value = null;
+
+      final answering = answerWhenParked(
+        1,
+        {
+          'status': 'accepted',
+          'result': {'sessionId': 's-new'},
+        },
+      );
+      expect(await done, 's-new');
+      await answering;
+      expect(channels.envelopes, hasLength(2));
+      // Session creation is idempotent server-side (retryAck dedupes by
+      // commandId): the replay keeps the original commandId so a timed-out
+      // command that did reach the server cannot create a second session.
+      expect(channels.envelopes[1]['commandId'],
+          channels.envelopes[0]['commandId']);
+      expect('${channels.envelopes[1]['type']}', 'createSession');
+    });
+
+    test('no degradation during flight: timeout rethrows, no retry',
+        () async {
+      final done = transport.createSession(
+        'ws1',
+        firstText: 'hi',
+        timeout: const Duration(milliseconds: 80),
+      );
+      await pumpUntil(() => channels.envelopes.isNotEmpty);
+      await expectLater(done, throwsA(isA<TimeoutException>()));
+      expect(channels.envelopes, hasLength(1));
+    });
+
+    test('retry answered duplicate: createSession takes sessionId from the '
+        'carried original result', () async {
+      final done = transport.createSession(
+        'ws1',
+        firstText: 'hi',
+        timeout: const Duration(milliseconds: 80),
+      );
+      await pumpUntil(() => channels.envelopes.isNotEmpty);
+      session.markDegraded('rpc-transport-fault');
+      session.degraded.value = null;
+
+      final answering = answerWhenParked(
+        1,
+        {
+          'status': 'duplicate',
+          'result': {'sessionId': 's-orig'},
+        },
+      );
+      expect(await done, 's-orig');
+      await answering;
+      expect(channels.envelopes[1]['commandId'],
+          channels.envelopes[0]['commandId']);
+    });
+
+    test('createSelectionSideSession retries with the same commandId too',
+        () async {
+      final done = transport.createSelectionSideSession(
+        'parent-1',
+        timeout: const Duration(milliseconds: 80),
+      );
+      await pumpUntil(() => channels.envelopes.isNotEmpty);
+      session.markDegraded('rpc-transport-fault');
+      session.degraded.value = null;
+
+      final answering = answerWhenParked(
+        1,
+        {
+          'status': 'accepted',
+          'result': {'sessionId': 's-side'},
+        },
+      );
+      expect(await done, 's-side');
+      await answering;
+      expect(channels.envelopes[1]['commandId'],
+          channels.envelopes[0]['commandId']);
+    });
+
+    test('sendText regression: pendulum retry keeps the fresh-commandId '
+        'semantics', () async {
+      final done = transport.sendCommand(
+        's1',
+        'sendText',
+        {'text': 'hi'},
+        timeout: const Duration(milliseconds: 80),
+      );
+      await pumpUntil(() => channels.envelopes.isNotEmpty);
+      session.markDegraded('rpc-transport-fault');
+      session.degraded.value = null;
+
+      final answering = answerWhenParked(1, const {'status': 'accepted'});
+      await done;
+      await answering;
+      expect(channels.envelopes, hasLength(2));
+      // Not an idempotent session-creating command: the replay still carries
+      // a fresh commandId (the conservative double-delivery guard).
+      expect(channels.envelopes[1]['commandId'],
+          isNot(channels.envelopes[0]['commandId']));
+      expect('${channels.envelopes[1]['type']}', 'sendText');
+    });
+
+    test('sendText with a degradation predating the send: timeout rethrows, '
+        'no retry', () async {
+      session.lastDegradedAt =
+          DateTime.now().subtract(const Duration(hours: 1));
+      final done = transport.sendCommand(
+        's1',
+        'sendText',
+        {'text': 'hi'},
+        timeout: const Duration(milliseconds: 80),
+      );
+      await pumpUntil(() => channels.envelopes.isNotEmpty);
+      await expectLater(done, throwsA(isA<TimeoutException>()));
+      expect(channels.envelopes, hasLength(1));
+    });
+  });
 }
 
 /// Channel client with test-driven responses: handshake (and unsubscribe)
@@ -1264,6 +1597,53 @@ class _ManualChannels {
   }
 
   int count(String method) => sent.where((m) => m == method).length;
+}
+
+/// Parked-command channel for retry-timing tests: handshake answers
+/// immediately; every `sendConversationCommandV4` parks (envelope recorded)
+/// until [answer] completes the [at]-th parked call.
+class _RetryChannels {
+  /// Envelope of every parked `sendConversationCommandV4`, in call order.
+  final List<Map> envelopes = [];
+  final _parkedIds = <int>[];
+  late final ChannelClient client;
+
+  _RetryChannels() {
+    late final ChannelClient c;
+    c = ChannelClient(sendBody: (body) {
+      final reader = ValueReader(body);
+      final header = decodeValue(reader) as List;
+      final method = '${header[3]}';
+      final id = header[1] as int;
+      switch (method) {
+        case 'helloConversationV4':
+          _reply(c, id, {'connectionId': 'conn-test'});
+        case 'initializeConversationV4':
+          _reply(c, id, const {'status': 'accepted'});
+        case 'sendConversationCommandV4':
+          final arg = decodeValue(reader);
+          final request = (arg is List ? arg : <Object?>[arg]).single as Map;
+          envelopes.add((request['envelope'] ?? const {}) as Map);
+          _parkedIds.add(id);
+      }
+    });
+    final init = ValueWriter();
+    encodeValue(init, [ChannelClient.resInitialize, 0]);
+    c.handleMessage(init.toBytes());
+    client = c;
+  }
+
+  void answer(int at, Object? payload) {
+    final id = _parkedIds.removeAt(at);
+    _reply(client, id, payload);
+  }
+
+  void _reply(ChannelClient c, int id, Object? payload) {
+    final w = ValueWriter();
+    encodeValue(w, [ChannelClient.resPromiseSuccess, id]);
+    encodeValue(w, payload);
+    c.handleMessage(w.toBytes());
+  }
 }
 
 /// Builds a [ConversationTransport] over a hand-rolled bridge whose channel
@@ -1326,6 +1706,15 @@ class _FakeBridgeSession implements BridgeSession {
 
   @override
   final ValueNotifier<String?> degraded = ValueNotifier(null);
+
+  @override
+  DateTime? lastDegradedAt;
+
+  @override
+  void markDegraded(String reason) {
+    lastDegradedAt = DateTime.now();
+    degraded.value = reason;
+  }
 
   @override
   Future<void> waitHealthy({

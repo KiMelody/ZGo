@@ -166,6 +166,33 @@ void main() {
           isEmpty);
     });
 
+    test('error → completedSuccess corrects the earlier failed notice', () {
+      const sessions = [
+        (sessionId: 's1', title: 't', phase: 'completedSuccess',
+            parentSessionId: null)
+      ];
+      // The real completion follows a (possibly spurious) error without a
+      // running gap — the correction edge must still notify it.
+      final events = taskCompletionEvents(
+          previousPhases: {'s1': 'error'}, sessions: sessions);
+      expect(events, hasLength(1));
+      expect(events.single.failed, isFalse);
+      // Other terminal→terminal combinations stay silent.
+      expect(
+          taskCompletionEvents(
+              previousPhases: {'s1': 'error'},
+              sessions: [
+                (sessionId: 's1', title: 't', phase: 'error',
+                    parentSessionId: null)
+              ]),
+          isEmpty);
+      expect(
+          taskCompletionEvents(
+              previousPhases: {'s1': 'completedInterrupted'},
+              sessions: sessions),
+          isEmpty);
+    });
+
     test('prewarming counts as running; empty title falls back to id', () {
       final events = taskCompletionEvents(
         previousPhases: {'s1': 'prewarming'},
@@ -342,6 +369,7 @@ void main() {
           // Zero window: the confirm timer fires on the next event-loop
           // turn, so tests mutate state then pumpEventQueue.
           taskConfirmWindow: Duration.zero,
+          errorConfirmWindow: Duration.zero,
           // These tests drive single edges off a stable baseline; the
           // regression guard needs real elapsed time to expire, so it has
           // its own group below with a 200ms window.
@@ -601,6 +629,97 @@ void main() {
         'rb2': 'completedSuccess',
         's1': 'running',
       });
+    });
+  });
+
+  group('error soft-terminal confirm window', () {
+    late RecordingService service;
+    late UiSettings ui;
+    late NotificationHub hub;
+    late FakeNotifiableSession session;
+
+    /// Test-scale windows: the completed edge keeps a SHORT window (the
+    /// production 3s), the error edge a LONGER one (the production 10s) —
+    /// the waits below only discriminate because short < wait < long.
+    const shortWindow = Duration(milliseconds: 50);
+    const longWindow = Duration(milliseconds: 250);
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      service = RecordingService();
+      ui = UiSettings();
+      await ui.load();
+      hub = NotificationHub(
+          service: service,
+          ui: ui,
+          deviceLabelOf: (id) => 'my-device',
+          taskConfirmWindow: shortWindow,
+          errorConfirmWindow: longWindow,
+          regressionHysteresis: Duration.zero);
+      session = FakeNotifiableSession('d1');
+      hub.syncWith([session]);
+    });
+
+    tearDown(() => hub.dispose());
+
+    test('the error window defaults to 10s, the completed one to 3s', () {
+      final defaults = NotificationHub(
+          service: service, ui: ui, deviceLabelOf: (id) => 'my-device');
+      expect(defaults.errorConfirmWindow, const Duration(seconds: 10));
+      expect(defaults.taskConfirmWindow, const Duration(seconds: 3));
+      defaults.dispose();
+    });
+
+    test('error corrected to completedSuccess inside the long window '
+        'never notifies the failure', () async {
+      session.setEntries([('s1', 't', 'running')]);
+      session.setEntries([('s1', 't', 'error')]);
+      // The short window elapses with the phase STILL error — the exact
+      // production shape (the trailing helper's error persists), where the
+      // old single window fired the false "任务失败".
+      await Future<void>.delayed(shortWindow * 2);
+      expect(service.shown, isEmpty, reason: 'error waits the long window');
+
+      // The real completion lands inside the error window: the correction
+      // edge replaces the pending error timer with a completed one.
+      session.setEntries([('s1', 't', 'completedSuccess')]);
+      await Future<void>.delayed(shortWindow * 3);
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$3, '任务完成');
+    });
+
+    test('a persistent error notifies after the long window, and a later '
+        'correction still lands', () async {
+      session.setEntries([('s1', 't', 'running')]);
+      session.setEntries([('s1', 't', 'error')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty, reason: 'inside the error window');
+
+      // A real failure holds past the long window: notified, only delayed.
+      await Future<void>.delayed(longWindow * 2);
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$3, '任务失败');
+
+      // The >window flip keeps today's behavior: failure fired AND the
+      // correction edge still notifies the real completion.
+      session.setEntries([('s1', 't', 'completedSuccess')]);
+      await Future<void>.delayed(shortWindow * 3);
+      expect(service.shown, hasLength(2));
+      expect(service.shown[1].$3, '任务完成');
+    });
+
+    test('completedSuccess keeps the short window, not the error one',
+        () async {
+      session.setEntries([('s1', 't', 'running')]);
+      session.setEntries([('s1', 't', 'completedSuccess')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty, reason: 'inside the short window');
+
+      // Shorter than the error window: had the completed edge borrowed it,
+      // nothing would be shown yet.
+      await Future<void>.delayed(shortWindow * 3);
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$3, '任务完成');
     });
   });
 

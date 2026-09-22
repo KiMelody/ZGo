@@ -27,6 +27,21 @@ class RpcFrameTransport {
   int _seq = 0;
   int _messageSeq = 0;
 
+  /// Highest server bridge generation seen on an incoming frame. The
+  /// desktop rebuilds its bridge instance under load (crash loop,
+  /// 2026-09-21 真机实锤); routing keeps our bridgeSessionId but the new
+  /// instance forgets everything established on the old one —
+  /// subscriptions, handshakes. Incoming frames carry the server's
+  /// generation, so a bump past the baseline is the deterministic "the
+  /// bridge under you changed" signal.
+  int? _seenServerGeneration;
+
+  /// Fires once per server-side rebuild ([_seenServerGeneration] bump).
+  /// The first frame after attach only sets the baseline (a fresh
+  /// transport after a client reopen would otherwise misread the server's
+  /// already-higher counter as a rebuild).
+  final void Function()? onServerBridgeRebuilt;
+
   final _messageController = StreamController<Uint8List>.broadcast();
   Stream<Uint8List> get messages => _messageController.stream;
 
@@ -38,6 +53,7 @@ class RpcFrameTransport {
     required this.sendPayload,
     this.bridgeGeneration,
     this.recoveryId,
+    this.onServerBridgeRebuilt,
     this.onLog,
   }) {
     _assemblyCleanupTimer =
@@ -101,6 +117,19 @@ class RpcFrameTransport {
     if (type == 'rpc-frame-ack') return true;
     if (type != 'rpc-frame') return false;
     if (payload['bridgeSessionId'] != bridgeSessionId) return false;
+
+    final serverGeneration = (payload['bridgeGeneration'] as num?)?.toInt();
+    if (serverGeneration != null) {
+      final seen = _seenServerGeneration;
+      if (seen == null) {
+        _seenServerGeneration = serverGeneration;
+      } else if (serverGeneration > seen) {
+        _seenServerGeneration = serverGeneration;
+        onLog?.call(
+            '[rpc] server bridge rebuilt (generation $seen -> $serverGeneration)');
+        onServerBridgeRebuilt?.call();
+      }
+    }
 
     final messageSeq = (payload['messageSeq'] as num?)?.toInt();
     final fragmentIndex = (payload['fragmentIndex'] as num?)?.toInt();

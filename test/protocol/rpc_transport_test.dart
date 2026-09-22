@@ -227,4 +227,47 @@ void main() {
     expect(t.recoveryId, 'rec-99');
     t.dispose();
   });
+
+  test('server bridge generation bump fires onServerBridgeRebuilt (09-21)',
+      () async {
+    var rebuilt = 0;
+    final t = RpcFrameTransport(
+      bridgeSessionId: 'bridge-1',
+      sendPayload: (_) {},
+      onServerBridgeRebuilt: () => rebuilt++,
+    );
+    void frame(int? generation, int messageSeq) =>
+        t.acceptPayload({
+          'zcode_type': 'rpc-frame',
+          'bridgeSessionId': 'bridge-1',
+          if (generation != null) 'bridgeGeneration': generation,
+          'messageSeq': messageSeq,
+          'fragmentIndex': 0,
+          'fragmentCount': 1,
+          'messageBytes': 1,
+          'dataBase64': base64.encode(Uint8List.fromList([1])),
+        });
+
+    // The first frame sets the baseline: the server's counter already
+    // sits above the client's, which must not read as a rebuild (a fresh
+    // transport after a client-side reopen would otherwise false-fire).
+    frame(7, 1);
+    frame(7, 2);
+    expect(rebuilt, 0);
+
+    // The desktop rebuilt its bridge instance — bump fires once.
+    frame(8, 3);
+    expect(rebuilt, 1);
+    // Same generation repeats / an out-of-order lower one: no re-fire.
+    frame(8, 4);
+    frame(7, 5);
+    expect(rebuilt, 1);
+    // A later rebuild fires again.
+    frame(9, 6);
+    expect(rebuilt, 2);
+    // Frames without a generation (older servers) never fire.
+    frame(null, 7);
+    expect(rebuilt, 2);
+    await t.dispose();
+  });
 }

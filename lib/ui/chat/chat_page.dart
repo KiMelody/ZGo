@@ -562,6 +562,7 @@ class _ChatPageState extends State<ChatPage> {
       // mobile-view-state: the desktop shows 「手机正在操作此任务」 from it.
       widget.gateway.sendViewState(taskId: sessionId);
       handle.state.addListener(_scrollToBottom);
+      handle.state.addListener(_onConfigMaybeReverted);
       // Terminal-hysteresis memory rides the parent conversation (subagent
       // rows + backgroundWorks).
       _feed.observe(handle.state);
@@ -626,6 +627,18 @@ class _ChatPageState extends State<ChatPage> {
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
     }
+  }
+
+  /// Config-revert notice (design 09-25 D3): an authoritative snapshot
+  /// overrode a still-fresh optimistic model/thought switch (the command
+  /// was lost in a bridge swing) — surface it instead of silently
+  /// snapping the sheet back. The state flag is consume-on-read; the
+  /// `state.updated` confirmation path never sets it.
+  void _onConfigMaybeReverted() {
+    final state = _handle?.state;
+    if (state == null || !state.consumeConfigReverted()) return;
+    if (!mounted) return;
+    _toast(tr(context, 'chat.sheet.switchReverted'));
   }
 
   Future<void> _run(String errorPrefix, Future<dynamic> Function() run) async {
@@ -886,9 +899,12 @@ class _ChatPageState extends State<ChatPage> {
     return sessionId;
   }
 
-  /// Builds the createSession `config` payload from the draft selection.
-  Map<String, dynamic>? _buildDraftConfig() {
-    if (_draftConfig.isEmpty) return null;
+  /// Builds the createSession `config` payload: the draft picks plus an
+  /// always-legal thought. Never null — a configless createSession makes
+  /// the desktop use the runtime's current selection, which carries no
+  /// thought level on a cold runtime and then fails model creation
+  /// ("Reasoning level is required", 09-25 verification).
+  Map<String, dynamic> _buildDraftConfig() {
     final config = <String, dynamic>{};
     final modelValue = _draftConfig['model'];
     if (modelValue != null && modelValue.isNotEmpty) {
@@ -898,13 +914,15 @@ class _ChatPageState extends State<ChatPage> {
         config['model'] = modelValue.substring(idx + 1);
       }
     }
-    if (_draftConfig['thought'] != null) {
-      config['thought'] = _draftConfig['thought'];
-    }
+    // A shipped config always carries a legal thought: cold runtimes (no
+    // foreground desktop window) have no current level to merge, and a
+    // missing `config.thought` then fails model creation outright
+    // ("Reasoning level is required", 09-25 verification).
+    config['thought'] = _effectiveDraftThought(_draftConfig, _prep);
     if (_draftConfig['mode'] != null) {
       config['mode'] = _draftConfig['mode'];
     }
-    return config.isEmpty ? null : config;
+    return config;
   }
 
   Future<String?> _askHeldQueueDisposition() {
@@ -2125,11 +2143,13 @@ class _ChatPageState extends State<ChatPage> {
           final groups = _groupRows(state.rows);
           final itemCount = groups.length + (state.canLoadOlder ? 1 : 0);
           if (groups.isEmpty && !state.canLoadOlder) {
-            return Center(
-              child: Text(
-                tr(context, 'chat.empty'),
-                style: TextStyle(color: ZInk.faint(context)),
-              ),
+            // Empty conversation — or the shell-session start-failure card
+            // (design 09-25 D1/D2). The gate reads the task displayStatus
+            // mirror, which refreshes on the gateway's notifier, not on
+            // [state] — hence the double-listen (Listenable.merge).
+            return AnimatedBuilder(
+              animation: Listenable.merge([state, widget.gateway]),
+              builder: (context, _) => _emptyOrStartFailed(context, state),
             );
           }
           return _contentCol(
@@ -2226,6 +2246,61 @@ class _ChatPageState extends State<ChatPage> {
             ),
           );
         },
+      ),
+    );
+  }
+
+  /// The zero-rows view: the plain empty hint, or — when the task mirror
+  /// says the session's turn died server-side (displayStatus "error";
+  /// design 09-25 D1/D2) — a start-failed card in the established
+  /// phase-pill error vocabulary instead of a misleading "empty" chat.
+  /// Gate = error + zero rows + a real (non-draft) session; this branch
+  /// only runs after `state.ready`, i.e. an established subscription. A
+  /// mirror miss (null) renders nothing — prefer no card over a wrong
+  /// card. A session that gains rows mid-error drops back to the normal
+  /// list (the existing task-failure presentation's domain).
+  Widget _emptyOrStartFailed(BuildContext context, ConversationState state) {
+    final sessionId = _sessionId;
+    final startFailed = sessionId != null &&
+        state.rows.isEmpty &&
+        widget.gateway.taskDisplayStatus(sessionId) == 'error';
+    if (!startFailed) {
+      return Center(
+        child: Text(
+          tr(context, 'chat.empty'),
+          style: TextStyle(color: ZInk.faint(context)),
+        ),
+      );
+    }
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(ZSpacing.card),
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 320),
+          padding: const EdgeInsets.all(ZSpacing.card),
+          decoration: BoxDecoration(
+            color: ZColors.danger.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(ZRadius.tile),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.error_outline, size: 20, color: ZColors.danger),
+              const SizedBox(height: 8),
+              Text(
+                tr(context, 'chat.session.startFailedTitle'),
+                textAlign: TextAlign.center,
+                style: ZType.heading.copyWith(color: ZColors.danger),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                tr(context, 'chat.session.startFailedBody'),
+                textAlign: TextAlign.center,
+                style: ZType.sub.copyWith(color: ZInk.muted(context)),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -7119,6 +7194,25 @@ class _QuestionItem extends StatelessWidget {
 
 /// ---------------------------------------------------------------- sheets
 
+/// Effective thought level for a draft session — the value createSession's
+/// `config.thought` ships AND the config sheet's draft-state display (both
+/// consumers must agree, no "displays unselected / sends max" divergence):
+/// the explicit draft pick wins, then prepareWorkspace's `thought_level`
+/// currentValue, then 'max'. The desktop only merges its current level on a
+/// warm runtime; without a legal thought a cold runtime fails model
+/// creation ("Reasoning level is required", 09-25 verification) — the official
+/// web facade always carries thought (desktop bundle).
+String _effectiveDraftThought(
+  Map<String, String>? draftConfig,
+  WorkspacePrep? prep,
+) {
+  final explicit = draftConfig?['thought'];
+  if (explicit != null && explicit.isNotEmpty) return explicit;
+  final current = prep?.option('thought_level')?.currentValue;
+  if (current != null && '$current'.isNotEmpty) return '$current';
+  return 'max';
+}
+
 class _ModelModeSheet extends StatelessWidget {
   final ChatGateway gateway;
   final ConversationState? state;
@@ -7187,7 +7281,10 @@ class _ModelModeSheet extends StatelessWidget {
     final followup = '${config['followupMode'] ?? 'queue'}';
 
     // Current selection: prefer the LIVE session config (updates after a
-    // switch), fall back to prepareWorkspace's currentValue / draft.
+    // switch), fall back to prepareWorkspace's currentValue / draft. The
+    // draft branch walks the same chain the payload ships
+    // ([_effectiveDraftThought]) so the sheet never shows "unselected"
+    // while createSession carries a defaulted level.
     final liveModelValue =
         '${config['provider'] ?? ''}/${config['model'] ?? ''}';
     final currentModelValue =
@@ -7195,7 +7292,7 @@ class _ModelModeSheet extends StatelessWidget {
         ? (draftConfig?['model'] ?? '${modelOption?.currentValue ?? ''}')
         : liveModelValue;
     final currentThoughtValue = _isDraft
-        ? (draftConfig?['thought'] ?? '${thoughtOption?.currentValue ?? ''}')
+        ? _effectiveDraftThought(draftConfig, prep)
         : (state?.currentThought.isNotEmpty == true
               ? state!.currentThought
               : '${thoughtOption?.currentValue ?? ''}');
