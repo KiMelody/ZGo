@@ -83,7 +83,7 @@ class RemoteClient {
         // Mark bridges degraded immediately so in-flight commands gate on
         // recovery instead of timing out on the now-dead socket/bridge.
         for (final s in _activeBridges) {
-          if (s.degraded.value == null) s.degraded.value = 'reconnecting';
+          if (s.degraded.value == null) s.markDegraded('reconnecting');
         }
       }
       return;
@@ -130,7 +130,7 @@ class RemoteClient {
       session.degraded.value = null;
       return true;
     }
-    session.degraded.value = 'recovering';
+    session.markDegraded('recovering');
     // 1) cheap path: workspace-reconnect-request
     try {
       final res = await reconnectWorkspace(
@@ -154,7 +154,7 @@ class RemoteClient {
       return true;
     } catch (e) {
       _log('[bridge] reopen failed: $e');
-      session.degraded.value = 'reopen-failed: $e';
+      session.markDegraded('reopen-failed: $e');
       return false;
     }
   }
@@ -284,7 +284,7 @@ class RemoteClient {
     var found = false;
     for (final session in _activeBridges) {
       if (session.bridge['bridgeSessionId'] == bridgeSessionId) {
-        session.degraded.value = reason ?? 'unknown';
+        session.markDegraded(reason ?? 'unknown');
         found = true;
       }
     }
@@ -349,12 +349,18 @@ class RemoteClient {
     Map<String, dynamic> bridge,
   ) {
     session._transport.dispose();
+    // Server-side bridge rebuild: routing (bridgeSessionId) survives but
+    // the new instance forgets our subscriptions/handshakes. Ride the same
+    // `recovered` wave the relay-reconnect path uses — every listener that
+    // re-establishes state (handshake reset, queue drain, resubscribe)
+    // then runs without new plumbing.
     final transport = RpcFrameTransport(
       bridgeSessionId:
           (bridge['bridgeSessionId'] as String?) ?? requestedBridgeSessionId,
       bridgeGeneration: (bridge['bridgeGeneration'] as num?)?.toInt(),
       recoveryId: bridge['recoveryId'] as String?,
       sendPayload: relay.sendPayload,
+      onServerBridgeRebuilt: () => session.recovered.value += 1,
       onLog: onLog,
     );
     // Over the workspace bridge each rpc-frame message IS one ChannelClient
@@ -487,6 +493,23 @@ class BridgeSession {
 
   /// Non-null while the bridge is degraded (rpc-transport-fault etc.).
   final ValueNotifier<String?> degraded = ValueNotifier(null);
+
+  /// When the most recent degradation happened. Never cleared on recovery:
+  /// the command timeout gate asks "did a degradation happen during this
+  /// command's flight", and the desktop's ~45.3s pendulum recovers the
+  /// bridge within 1-2s — by the time a 90s command times out the live
+  /// [degraded] flag is always null again, so the timestamp is what catches
+  /// the mid-flight loss.
+  DateTime? lastDegradedAt;
+
+  /// Marks the bridge degraded and stamps [lastDegradedAt]. The single
+  /// entry point for every degraded transition (bridge-degraded push,
+  /// relay reconnect, recovery attempts) so the stamp cannot drift from
+  /// the flag.
+  void markDegraded(String reason) {
+    lastDegradedAt = DateTime.now();
+    degraded.value = reason;
+  }
 
   /// Bumped when the bridge recovers/reopens — subscriptions must
   /// resubscribe (server-side subscription state died with the old bridge).

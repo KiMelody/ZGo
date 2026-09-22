@@ -102,6 +102,42 @@ WorkspacePrep barePrep() => WorkspacePrep.fromMap(const {
   'slashCommands': <Map<String, dynamic>>[],
 });
 
+/// prepareWorkspace with a thought option but NO currentValue — the cold
+/// fallback scenario (nothing to inherit, createSession must ship 'max').
+WorkspacePrep prepWithoutThoughtCurrent() => WorkspacePrep.fromMap(const {
+  'configOptions': [
+    {
+      'id': 'model',
+      'name': '模型',
+      'currentValue': 'builtin/glm-5.2',
+      'options': [
+        {'value': 'builtin/glm-5.2', 'name': 'GLM-5.2'},
+      ],
+    },
+    {
+      'id': 'thought_level',
+      'name': '思考等级',
+      'options': [
+        {'value': 'max', 'name': '最高'},
+        {'value': 'low', 'name': '低'},
+      ],
+    },
+  ],
+  'slashCommands': <Map<String, dynamic>>[],
+});
+
+/// FakeChatGateway with an injected prepareWorkspace answer (the shared
+/// default keeps recording createSession — the payload assertions below
+/// ride [FakeChatGateway.calls]).
+class _PrepGateway extends FakeChatGateway {
+  _PrepGateway(this.prep);
+
+  final WorkspacePrep prep;
+
+  @override
+  Future<WorkspacePrep> prepareWorkspace() async => prep;
+}
+
 Widget wrap(Widget child) => MaterialApp(
   theme: buildDarkTheme(),
   darkTheme: buildDarkTheme(),
@@ -1212,9 +1248,8 @@ void main() {
     expect(tf.controller!.text, '看一下 @lib/ui/chat/chat_page.dart ');
   });
 
-  testWidgets('draft mode: first send issues createSession with firstText', (
-    tester,
-  ) async {
+  testWidgets('draft mode: first send issues createSession with firstText '
+      'and the prep-currentValue thought', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(wrap(ChatPage(gateway: gateway, title: '新任务')));
     await tester.pumpAndSettle();
@@ -1234,6 +1269,66 @@ void main() {
         .single;
     expect(call.$2[0], 'ws-1');
     expect(call.$2[1], '开始分析');
+    // No explicit draft pick → the config still carries a legal thought
+    // (prep's thought_level currentValue; cold runtimes fail model
+    // creation without it).
+    expect(call.$2[2], {'thought': 'enabled'});
+  });
+
+  testWidgets('draft with no thought source ships the max fallback and the '
+      'sheet preselects it', (tester) async {
+    final gateway = _PrepGateway(prepWithoutThoughtCurrent());
+    await tester.pumpWidget(wrap(ChatPage(gateway: gateway, title: '新任务')));
+    await tester.pumpAndSettle();
+
+    // Sheet display walks the same chain the payload ships: prep has a
+    // thought option but no currentValue → the 'max' chip is preselected.
+    await tester.tap(find.text('glm-5.2')); // composer model chip
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<ChoiceChip>(find.widgetWithText(ChoiceChip, '最高')).selected,
+      isTrue,
+    );
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '开始分析');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    final call = gateway.calls
+        .where((c) => c.$1 == 'createSession')
+        .toList()
+        .single;
+    expect(call.$2[2], {'thought': 'max'});
+  });
+
+  testWidgets('draft explicit thought pick ships as selected', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(wrap(ChatPage(gateway: gateway, title: '新任务')));
+    await tester.pumpAndSettle();
+
+    // Pick a thought in the draft sheet (prep options: 开启/关闭).
+    await tester.tap(find.text('glm-5.2')); // composer model chip
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('关闭'));
+    await tester.pumpAndSettle();
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '开始分析');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    final call = gateway.calls
+        .where((c) => c.$1 == 'createSession')
+        .toList()
+        .single;
+    expect(call.$2[2], {'thought': 'off'});
   });
 
   testWidgets('existing session: send goes through sendText', (tester) async {
@@ -3610,6 +3705,102 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.widget<Opacity>(veil).opacity, 1.0,
         reason: 'the measured landing must lift the veil');
+  });
+
+  testWidgets('shell session: error displayStatus + zero rows shows the '
+      'start-failed card', (tester) async {
+    final gateway = FakeChatGateway()..taskDisplayStatuses['s1'] = 'error';
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    // A shell session: the subscription lands with zero rows.
+    gateway.feedSnapshot([]);
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('会话未能启动'), findsOneWidget);
+    expect(find.text('会话未能启动，请重试或检查模型/思考档配置。'),
+        findsOneWidget);
+  });
+
+  testWidgets('shell session: error displayStatus with rows keeps the normal '
+      'list — no card', (tester) async {
+    final gateway = FakeChatGateway()..taskDisplayStatuses['s1'] = 'error';
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
+    ]);
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('会话未能启动'), findsNothing);
+    expect(find.text('帮我修复登录'), findsOneWidget);
+  });
+
+  testWidgets('shell session: mirror miss renders the plain empty hint and a '
+      'late displayStatus error flip raises the card live', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([]);
+    await tester.pump();
+    await tester.pump();
+
+    // Relay overview not arrived (mirror miss → null): plain empty hint.
+    expect(find.text('暂无消息'), findsOneWidget);
+    expect(find.text('会话未能启动'), findsNothing);
+
+    // The mirror refresh rides the gateway's notifier, not the state's —
+    // the double-listen must re-evaluate the gate without a state change.
+    gateway.taskDisplayStatuses['s1'] = 'error';
+    gateway.notifyListeners();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('会话未能启动'), findsOneWidget);
+  });
+
+  testWidgets('config revert: an authoritative snapshot overriding a fresh '
+      'optimistic switch surfaces the switchReverted snack', (tester) async {
+    final gateway = FakeChatGateway()
+      ..snapshotExtra = {
+        'config': {
+          'provider': 'builtin',
+          'model': 'builtin/glm-5.2',
+          'thought': 'enabled',
+        },
+      };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
+    ]);
+    await tester.pump();
+    await tester.pump();
+
+    // The sheet switch landed optimistically (accepted/timeout path).
+    gateway.state.optimisticPatch({
+      'config': {
+        'provider': 'builtin',
+        'model': 'builtin/glm-5.2-air',
+        'thought': 'enabled',
+      },
+    });
+    await tester.pump();
+
+    // The command was lost in a bridge swing; the resubscribe snapshot
+    // replays the desktop's old config → one-shot revert flag → snack.
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
+    ]);
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('模型/思考切换未生效，已恢复为桌面当前设置'), findsOneWidget);
   });
 }
 

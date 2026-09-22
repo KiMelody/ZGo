@@ -245,6 +245,15 @@ abstract interface class ChatGateway
   /// this without awaiting a fresh RPC).
   List<Map<String, dynamic>> mentionSkillsSync();
 
+  /// Relay-overview display status (`idle|running|completed|error`) of one
+  /// task, read from the relay task mirror keyed by taskId. The shell-
+  /// session error card's only signal (design 09-25 D1): a session that
+  /// fails its first turn pushes `displayStatus:"error"` while its
+  /// snapshot `control.phase` is unreliable. Null when the mirror doesn't
+  /// hold the session (not yet bootstrapped / other-workspace lag) —
+  /// callers must treat null as "don't render", never as an error.
+  String? taskDisplayStatus(String sessionId);
+
   /// Entitlement/quota snapshot (usage-stats.getEntitlementSnapshot) via
   /// the session-wide [EntitlementPoller]: cached within the staleness
   /// window, [force] bypasses it. Never throws — failures arrive as an
@@ -1423,6 +1432,16 @@ class DeviceSession extends ChangeNotifier
           if (s.description != null) 'description': s.description,
         },
     ];
+  }
+
+  @override
+  String? taskDisplayStatus(String sessionId) {
+    for (final task in _relayTasks) {
+      if ('${task['taskId']}' == sessionId) {
+        return task['displayStatus'] as String?;
+      }
+    }
+    return null;
   }
 
   /// Session-wide entitlement poller — the usage page and the chat quota

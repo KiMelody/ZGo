@@ -44,6 +44,7 @@ class NotificationHub {
     required this.ui,
     required this.deviceLabelOf,
     this.taskConfirmWindow = const Duration(seconds: 3),
+    this.errorConfirmWindow = const Duration(seconds: 10),
     this.regressionHysteresis = const Duration(seconds: 15),
     this.phaseSnapshots = const PhaseSnapshotStore(),
   });
@@ -54,6 +55,19 @@ class NotificationHub {
   /// A completion notice waits this long and re-checks the live phase
   /// before firing (see [_scheduleTaskNotice]).
   final Duration taskConfirmWindow;
+
+  /// The confirm window for an `error` edge, treated as a SOFT terminal: a
+  /// trailing model-only helper turn (title generation etc.) can fail after
+  /// the main turn completed and persist `error` on the session, which
+  /// [taskConfirmWindow] is too short to see through (the false "任务失败"
+  /// of the 2026-09-22 report). The behavior derivation: error edge → hold
+  /// this window → if completedSuccess lands inside it, the correction edge
+  /// in [taskCompletionEvents] fires first and the same-key remove-cancel
+  /// replaces the error timer with a completed one — only the completion
+  /// shows; if the error persists past the window, the failure notifies,
+  /// merely delayed. No cancel-notice logic is needed beyond what already
+  /// exists.
+  final Duration errorConfirmWindow;
 
   /// A task the baseline already saw finish only reverts to running once the
   /// running report has persisted this long (see [_effectivePhases]).
@@ -255,22 +269,28 @@ class NotificationHub {
     }
   }
 
-  /// Delays a completion notice by [taskConfirmWindow] and re-checks the
-  /// live phase before showing. Sending a message briefly flips the
-  /// session running→terminal→running again (model-only helper turns
-  /// like title generation), which used to fire a bogus "已完成" the
+  /// Delays a completion notice by a phase-dependent confirm window and
+  /// re-checks the live phase before showing. Sending a message briefly
+  /// flips the session running→terminal→running again (model-only helper
+  /// turns like title generation), which used to fire a bogus "已完成" the
   /// moment a turn STARTED. A blip reverts inside the window and is
-  /// dropped; a real terminal phase (including a fast error) persists
-  /// and notifies — only delayed.
+  /// dropped; a real terminal phase (including a fast error) persists and
+  /// notifies — only delayed. An `error` edge waits the longer
+  /// [errorConfirmWindow] instead: a trailing helper turn can fail after
+  /// the main turn completed and persist `error`, so the short window
+  /// produced a false "任务失败" before the real completion landed (see
+  /// the field doc for the full derivation).
   void _scheduleTaskNotice(
     NotifiableSession session,
     TaskCompletionEvent e,
   ) {
     final key = '${session.deviceId}:${e.sessionId}';
-    debugPrint(
-        '[notify] task edge $key → ${e.phase} "${e.title}", confirming');
+    final window =
+        e.phase == 'error' ? errorConfirmWindow : taskConfirmWindow;
+    debugPrint('[notify] task edge $key → ${e.phase} "${e.title}", '
+        'confirming in ${window.inSeconds}s');
     _pendingTasks.remove(key)?.cancel();
-    _pendingTasks[key] = Timer(taskConfirmWindow, () {
+    _pendingTasks[key] = Timer(window, () {
       _pendingTasks.remove(key);
       if (_disposed) return;
       // The merged view, not just the subscribed index: a task of another
