@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -2149,16 +2150,26 @@ void main() {
 
     final controller =
         tester.widget<ListView>(find.byType(ListView)).controller!;
-    Future<void> tapLoadOlder() async {
+    // Trigger via the pull gesture rather than a button tap: the tap's
+    // gesture-arena routing is unreliable in this fixture's frame schedule
+    // (armed → prepend post-frame → landing), while the pull drives the
+    // same _loadOlder entry the tap's onPressed would.
+    Future<void> loadOlderViaPull() async {
       controller.jumpTo(0);
       await tester.pump();
-      await tester.tap(find.text('加载更早消息'));
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byType(ListView)),
+      );
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 50));
+      await gesture.moveBy(const Offset(0, 300));
+      await tester.pump();
+      await gesture.up();
+      await tester.pump();
+      await tester.pumpAndSettle();
     }
 
-    await tapLoadOlder();
-    await tapLoadOlder();
+    await loadOlderViaPull();
+    await loadOlderViaPull();
 
     // Cursors: the oldest HELD row (100), then the prepended window head
     // (40) — strictly older pages, placeholder firstRowId never used.
@@ -2170,6 +2181,10 @@ void main() {
 
     // hasMore=false collapsed the affordance.
     expect(find.text('加载更早消息'), findsNothing);
+    // The last page's row landed in the list (the compensation anchors the
+    // view wherever the reader was, so check at the top where it's built).
+    controller.jumpTo(0);
+    await tester.pump();
     expect(find.text('最早'), findsOneWidget);
   });
 
@@ -2901,6 +2916,701 @@ void main() {
 
     await _releaseStalledPage(tester, gateway);
   });
+
+  // ------------------- history prefetch / pull gesture (09-21) -------------
+
+  /// Uniform one-line user turns: one row per group, no time dividers
+  /// (rows carry no timestamps) → identical heights, so the anchor
+  /// arithmetic (offset shifted by exactly Δmax) is exact in assertions.
+  List<Map<String, dynamic>> historyRows(int from, int to) => [
+    for (var i = from; i <= to; i++)
+      {'rowId': i, 'kind': 'userInput', 'text': '历史消息 $i'},
+  ];
+
+  /// A `rowsRange` answer body `_loadOlder` parses (window + hasMore + the
+  /// epoch the live subscription matches).
+  Map<String, dynamic> olderPage(int from, int to, {required bool hasMore}) => {
+    'atLogEpoch': 'e1',
+    'hasMore': hasMore,
+    'rows': {'window': historyRows(from, to)},
+  };
+
+  /// A prepended page whose OLDEST row is a ~60-line message (row height
+  /// far beyond the test viewport): the row-height variance the SliverList
+  /// extent estimate cannot capture — the guardrail fixture for the
+  /// measured-delta anchor compensation.
+  Map<String, dynamic> tallHeadPage(int from, int to, {required bool hasMore}) => {
+    'atLogEpoch': 'e1',
+    'hasMore': hasMore,
+    'rows': {
+      'window': [
+        {
+          'rowId': from,
+          'kind': 'userInput',
+          'text': List.generate(60, (i) => '长消息行 $i').join('\n'),
+        },
+        ...historyRows(from + 1, to),
+      ],
+    },
+  };
+
+  /// Long-history page: held window rows 100..111 with older pages queued
+  /// on the gateway — entry 0 always goes to the open auto-load. The
+  /// snapshot is fed BEFORE mounting: the open auto-load reads
+  /// `canLoadOlder` inside the subscribe continuation, which runs before a
+  /// post-mount feed would land.
+  Future<FakeChatGateway> pumpHistory(
+    WidgetTester tester, {
+    required List<Object?> pages,
+  }) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    gateway.rowsRangeResults.addAll(pages);
+    gateway.feedSnapshot(
+      historyRows(100, 111),
+      firstRowId: 1,
+      totalCount: 111,
+    );
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pumpAndSettle();
+    return gateway;
+  }
+
+  ScrollController historyController(WidgetTester tester) =>
+      tester.widget<ListView>(find.byType(ListView)).controller!;
+
+  int rowsRangeCalls(FakeChatGateway gateway) =>
+      gateway.calls.where((c) => c.$1 == 'rowsRange').length;
+
+  /// Drag depth landing mid-window (past the max(64, 2×viewport) prefetch
+  /// threshold, still in range so the anchor offset stays positive).
+  double inWindowDrag(ScrollController controller) =>
+      controller.offset -
+      math.max(64.0, controller.position.viewportDimension * 2) / 2;
+
+  /// Message texts currently built inside the list viewport — the
+  /// "what the reader sees" set for the anchor assertions. User bubbles
+  /// render as [SelectableText] (assistant markdown as [Text]), so match
+  /// both. The compensation jump approximates the exact offset within
+  /// SliverList's trailing-extent estimate, so anchoring is asserted
+  /// semantically: the visible set must survive the load (a teleport to
+  /// the page top or bottom would show none of the old messages).
+  Set<String> visibleMessages(WidgetTester tester) => {
+    for (final w in tester.widgetList<SelectableText>(
+      find.descendant(
+        of: find.byType(ListView),
+        matching: find.byType(SelectableText),
+      ),
+    ))
+      w.data,
+    for (final w in tester.widgetList<Text>(
+      find.descendant(of: find.byType(ListView), matching: find.byType(Text)),
+    ))
+      w.data,
+  }.whereType<String>().toSet();
+
+  /// The topmost visible history message: (text, screen Y of its top) —
+  /// the reading anchor for pixel-level displacement assertions.
+  (String, double) topmostHistoryMessage(WidgetTester tester) {
+    final entries = <(String, double)>[];
+    for (final w in tester.widgetList<SelectableText>(
+      find.descendant(
+        of: find.byType(ListView),
+        matching: find.byType(SelectableText),
+      ),
+    )) {
+      final data = w.data ?? '';
+      if (!data.startsWith('历史消息')) continue;
+      final box = tester.renderObject(find.byWidget(w)) as RenderBox;
+      entries.add((data, box.localToGlobal(Offset.zero).dy));
+    }
+    entries.sort((a, b) => a.$2.compareTo(b.$2));
+    return entries.first;
+  }
+
+  testWidgets('history: dragging toward the top prefetches the older page '
+      '(official web parity)', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    // The prefetch fetch is held open so the pre-load viewport (laid out
+    // mid-window) is stable to capture before the compensation lands.
+    final held = Completer<dynamic>();
+    final transport = _SequencedRowsTransport()
+      ..queue.add(
+        Completer<dynamic>()..complete(olderPage(60, 99, hasMore: true)),
+      )
+      ..queue.add(held);
+    final gateway = _SequencedRowsGateway(transport);
+    gateway.feedSnapshot(historyRows(100, 111), firstRowId: 1, totalCount: 111);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pumpAndSettle();
+    final controller = historyController(tester);
+    // Exactly one call despite the open animation sweeping the window —
+    // programmatic positioning parks the trigger.
+    expect(transport.calls.length, 1, reason: 'open auto-load consumed page 1');
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
+    );
+    await tester.pump();
+    await gesture.moveBy(Offset(0, inWindowDrag(controller)));
+    await tester.pump(); // laid out mid-window; the fetch is still held
+    final visibleBefore = visibleMessages(tester);
+    expect(visibleBefore, isNotEmpty);
+    // Release before the load lands: the anchor compensation defers while a
+    // finger is down (a jumpTo under an active drag kills the gesture), and
+    // the bounce+landing then run inside the settle below.
+    await gesture.up();
+    await tester.pump();
+    held.complete(olderPage(20, 59, hasMore: false));
+    await tester.pumpAndSettle();
+
+    expect(transport.calls.length, 2, reason: 'prefetch fired once');
+    expect(transport.calls[1], 60, reason: 'cursor = oldest held row');
+    // Anchored (semantic): the reader's messages survive the load, and the
+    // view moved off the page top without teleporting to an edge (see
+    // [visibleMessages] for why this is not an exact-pixel assertion).
+    expect(visibleMessages(tester).intersection(visibleBefore), isNotEmpty);
+    expect(controller.offset, greaterThan(0.0));
+  });
+
+  testWidgets('history: reading mid-list does not prefetch', (tester) async {
+    final gateway = await pumpHistory(
+      tester,
+      pages: [olderPage(60, 99, hasMore: true), olderPage(20, 59, hasMore: false)],
+    );
+    final controller = historyController(tester);
+    final threshold = math.max(64.0, controller.position.viewportDimension * 2);
+    // Well outside the window: depth from the bottom stays below
+    // maxScrollExtent - threshold even after a short upward drag.
+    controller.jumpTo(
+      controller.position.maxScrollExtent - threshold - 500,
+    );
+    await tester.pumpAndSettle();
+    expect(rowsRangeCalls(gateway), 1);
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
+    );
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, 100));
+    await tester.pump();
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(rowsRangeCalls(gateway), 1, reason: 'still outside the window');
+  });
+
+  testWidgets('history: an upward fling prefetches during the coast',
+      (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    gateway.rowsRangeResults.addAll([
+      olderPage(60, 99, hasMore: true),
+      olderPage(20, 59, hasMore: false),
+    ]);
+    // Tall history (140 rows after the open auto-load): maxScrollExtent sits
+    // far above the window edge, so the fling's drag phase stays outside the
+    // prefetch window and only the ballistic coast crosses into it.
+    gateway.feedSnapshot(historyRows(100, 199), firstRowId: 1, totalCount: 199);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pumpAndSettle();
+    final controller = historyController(tester);
+    final threshold = math.max(64.0, controller.position.viewportDimension * 2);
+    // Park just above the window; the jump itself must not prefetch.
+    controller.jumpTo(threshold + 400);
+    await tester.pumpAndSettle();
+    expect(rowsRangeCalls(gateway), 1);
+
+    // Fling upward: the ~282px applied drag keeps every drag frame above the
+    // window edge; the release hands over to a ballistic coast (frames with
+    // dragDetails == null, not parked) — its crossing into the window is
+    // what must trigger the prefetch. AC: 快速上翻 approaching the top loads
+    // once without needing to touch the top.
+    await tester.fling(
+      find.byType(ListView),
+      const Offset(0, 300),
+      2000,
+      warnIfMissed: false,
+    );
+    await tester.pumpAndSettle();
+    expect(rowsRangeCalls(gateway), 2, reason: 'coast frames prefetch');
+  });
+
+  testWidgets('history: the prefetch trigger parks while a load is in flight',
+      (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final held = Completer<dynamic>();
+    final transport = _SequencedRowsTransport()
+      ..queue.add(held) // open auto-load: held in flight
+      ..queue.add(
+        Completer<dynamic>()..complete(olderPage(20, 59, hasMore: true)),
+      );
+    final gateway = _SequencedRowsGateway(transport);
+    // Feed before mounting so the open auto-load engages (see pumpHistory).
+    // 30 held rows: taller than the viewport, so the window arithmetic has
+    // a real mid-window to drag into while the open load is still pending.
+    gateway.feedSnapshot(historyRows(100, 129), firstRowId: 1, totalCount: 129);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    // Finite pumps: the held load keeps the top button's spinner animating,
+    // pumpAndSettle would time out on it. 400ms: the open follow's 200ms
+    // ease must finish first — arming waits out any programmatic scroll
+    // (see _armLoadOlder), so the auto-load's request only leaves after
+    // the view has settled at the bottom.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(transport.calls.length, 1, reason: 'open auto-load in flight');
+
+    final controller = historyController(tester);
+    // Drag into the window: the in-flight load keeps the trigger parked.
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
+    );
+    await tester.pump();
+    await gesture.moveBy(Offset(0, inWindowDrag(controller)));
+    await tester.pump();
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(transport.calls.length, 1, reason: '_loadingOlder blocks the retrigger');
+
+    // The load completes (still hasMore — keep the trigger armed); the
+    // prepend's anchor compensation lands with a FRESH measure (round 18:
+    // the anchor is measured at the prepend, not armed pre-fetch — whatever
+    // the reader drifted to during the round trip IS the anchored position),
+    // so the viewport is pinned at the drag's resting offset: the reading
+    // position survives, and the re-entry gate releases once the chain
+    // settles. The pin leaves the viewport FAR from the window (a full page
+    // of older rows now sits above it), so the re-fire must first bring the
+    // offset back into the window — a programmatic jump does not count as
+    // user-driven (by design), then a small in-window drag prefetches.
+    held.complete(olderPage(60, 99, hasMore: true));
+    await tester.pumpAndSettle();
+
+    // Park back INSIDE the window (a programmatic jump does not count as
+    // user-driven — by design), then a small in-window drag prefetches.
+    controller.jumpTo(600);
+    await tester.pumpAndSettle();
+    final gesture2 = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
+    );
+    await tester.pump();
+    await gesture2.moveBy(const Offset(0, 50)); // inside the window
+    await tester.pump();
+    await gesture2.up();
+    await tester.pumpAndSettle();
+    expect(transport.calls.length, 2);
+  });
+
+  testWidgets('history: no elasticity and no prefetch once all history is '
+      'loaded', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot(historyRows(1, 40)); // no firstRowId → nothing older
+    await tester.pumpAndSettle();
+    final controller = historyController(tester);
+    controller.jumpTo(0);
+    await tester.pumpAndSettle();
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
+    );
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, 300));
+    await tester.pump();
+    expect(controller.offset, 0.0,
+        reason: 'platform clamp: no rubber-band without older history');
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(rowsRangeCalls(gateway), 0);
+  });
+
+  testWidgets('history: pulling past the threshold loads and lands reading '
+      'the fresh page at the top', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    // The release-frame load is held open so the button's spinner is stable
+    // to assert — an instant answer flips _loadingOlder back before a
+    // frame renders it.
+    final held = Completer<dynamic>();
+    final transport = _SequencedRowsTransport()
+      ..queue.add(
+        Completer<dynamic>()..complete(olderPage(60, 99, hasMore: true)),
+      )
+      ..queue.add(held);
+    final gateway = _SequencedRowsGateway(transport);
+    gateway.feedSnapshot(historyRows(100, 111), firstRowId: 1, totalCount: 111);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pumpAndSettle();
+
+    final controller = historyController(tester);
+    controller.jumpTo(0);
+    await tester.pumpAndSettle();
+    final visibleBefore = visibleMessages(tester);
+    expect(visibleBefore, isNotEmpty);
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
+    );
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, 300));
+    await tester.pump();
+    expect(controller.offset, lessThan(-64.0),
+        reason: 'content follows the finger past the threshold');
+    await gesture.up();
+    // The first pump after up() only starts the ballistic activity (its
+    // first tick runs at t=0, no movement); a second, time-advancing pump
+    // produces the first real spring tick — the release frame.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 16));
+    // Release-frame load: the top button flips to its spinner at once.
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    held.complete(olderPage(20, 59, hasMore: false));
+    await tester.pumpAndSettle();
+
+    expect(transport.calls.length, 2);
+    expect(transport.calls[1], 60, reason: 'cursor = oldest held row');
+    // Anchored from the tail (round 23 reinstated): the reader keeps their
+    // position — the pre-load messages stay on screen and the offset moves
+    // by exactly the prepended height, so reading continues UP INTO the
+    // fresh page's newest end. (Round 22 briefly showed the fresh page's
+    // HEAD at offset 0; the reader reported the discontinuity — "不是按照
+    // 历史的尾部进入".)
+    expect(visibleMessages(tester).intersection(visibleBefore), isNotEmpty);
+    expect(controller.offset, greaterThan(0.0));
+  });
+
+  testWidgets('history: shallow pull springs back without loading',
+      (tester) async {
+    final gateway = await pumpHistory(
+      tester,
+      pages: [olderPage(60, 99, hasMore: true), olderPage(20, 59, hasMore: false)],
+    );
+    final controller = historyController(tester);
+    controller.jumpTo(0);
+    await tester.pumpAndSettle();
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
+    );
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, 50)); // one step: no damping yet
+    await tester.pump();
+    expect(controller.offset, lessThan(0.0));
+    expect(controller.offset, greaterThan(-64.0), reason: 'below the threshold');
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(controller.offset, 0.0, reason: 'springs back without loading');
+    expect(rowsRangeCalls(gateway), 1);
+  });
+
+  testWidgets('history: nested scrollables do not trigger the prefetch',
+      (tester) async {
+    // A collapsed long bubble clips behind its own scrollable inside the
+    // list subtree; dragging it must not fire the history trigger (the
+    // notification bubbles through _onListScroll, which routes by position
+    // identity — same pattern as _onListMetrics).
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    gateway.rowsRangeResults.addAll([
+      olderPage(60, 99, hasMore: true),
+      olderPage(20, 59, hasMore: false),
+    ]);
+    final longText = List.filled(30, '一行长文本内容').join('\n');
+    gateway.feedSnapshot(
+      [
+        ...historyRows(100, 111),
+        {'rowId': 112, 'kind': 'userInput', 'text': longText, 'state': 'done'},
+      ],
+      firstRowId: 1,
+      totalCount: 113,
+    );
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pumpAndSettle();
+    // Baseline: only the open auto-load fired.
+    expect(rowsRangeCalls(gateway), 1);
+
+    final clip = find.ancestor(
+      of: find.textContaining('一行长文本内容'),
+      matching: find.byType(SingleChildScrollView),
+    );
+    expect(clip, findsOneWidget);
+    // Nested pixels sit at 0 — squarely inside the prefetch window — so an
+    // unrouted notification would fire the fetch (P1 from the 09-21 check).
+    await tester.drag(clip, const Offset(0, -40));
+    await tester.pump();
+    expect(rowsRangeCalls(gateway), 1, reason: 'nested drag is not the list');
+  });
+
+  testWidgets('history: page-boundary turn regroup keeps the anchor '
+      '(rowId fallback)', (tester) async {
+    // Real-device bug shape (09-21 round 2): rowsRange pages cut turns
+    // arbitrarily. Page 1 OPENS with an assistant row (unstable data-head
+    // group); page 2 CLOSES with one. When page 2 prepends, both merge into
+    // the group above — the old head group's key ('turn-59') vanishes — and
+    // the compensation used to lose the anchor and crawl to the list end
+    // ("yanked to the bottom"). The rowId fallback must land the reader
+    // back on the regrouped content instead.
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    Map<String, dynamic> assistant(int id, String text) => {
+      'rowId': id,
+      'kind': 'assistantText',
+      'text': text,
+      'state': 'done',
+    };
+    final gateway = FakeChatGateway();
+    gateway.rowsRangeResults.addAll([
+      {
+        'atLogEpoch': 'e1',
+        'hasMore': true,
+        'rows': {
+          'window': [assistant(59, '页1首段'), ...historyRows(60, 98)],
+        },
+      },
+      {
+        'atLogEpoch': 'e1',
+        'hasMore': false,
+        'rows': {
+          'window': [...historyRows(20, 57), assistant(58, '页2尾段')],
+        },
+      },
+    ]);
+    gateway.feedSnapshot(historyRows(100, 111), firstRowId: 1, totalCount: 111);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pumpAndSettle();
+    final controller = historyController(tester);
+    expect(rowsRangeCalls(gateway), 1, reason: 'open auto-load took page 1');
+
+    // Reader reads near the top: the first visible group is the unstable
+    // data-head group 'turn-59' — exactly the anchor the regroup will
+    // orphan. Fire the load by a small in-window drag (the prefetch path):
+    // R22 split the semantics — AT the very head (offset < 1) a load means
+    // "read the fresh page" and never anchors, but from mid-window it is a
+    // reading-position anchor and the full chain (rowId fallback included)
+    // must run. A tap on the button is unusable here: it only exists at
+    // offset 0.
+    controller.jumpTo(0);
+    await tester.pumpAndSettle();
+    // Markdown bubbles render as Text.rich (data == null), so the
+    // visible-messages helper skips them — assert on the widget directly.
+    expect(find.textContaining('页1首段'), findsOneWidget);
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
+    );
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, -50)); // into the window, not the head
+    await tester.pump();
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(rowsRangeCalls(gateway), 2);
+    // Not yanked: the viewport stays far off the list end…
+    expect(
+      controller.offset,
+      lessThan(controller.position.maxScrollExtent - 844),
+      reason: 'regrouped anchor must not strand the view at the bottom',
+    );
+    // …and the reader is still ON the anchor content: '页1首段' (row 59,
+    // regrouped into 57..59 by the page-boundary merge) must sit at the
+    // viewport top again — the rowId fallback lands the merged group a few
+    // lines deep, well inside the first screenful. Bare existence in the
+    // built window is NOT enough (the estimate crawl can park mid-list and
+    // still have it mounted near the window edge).
+    final seg1Top =
+        tester.renderObject(find.textContaining('页1首段')) as RenderBox;
+    final seg1Dy = seg1Top.localToGlobal(Offset.zero).dy;
+    expect(seg1Dy, inInclusiveRange(-50, 400), reason: 'dy=$seg1Dy');
+  });
+
+  testWidgets('history: the load-older button lands reading the fresh page '
+      'at the top (round 22)', (tester) async {
+    final gateway = await pumpHistory(
+      tester,
+      pages: [
+        olderPage(60, 99, hasMore: true),
+        olderPage(20, 59, hasMore: true),
+        olderPage(1, 19, hasMore: false),
+      ],
+    );
+    final controller = historyController(tester);
+    // Reach the top by a jump (programmatic): it must not prefetch, the
+    // button is row 0 and visible there.
+    controller.jumpTo(0);
+    await tester.pumpAndSettle();
+    expect(rowsRangeCalls(gateway), 1);
+    final visibleBefore = visibleMessages(tester);
+
+    await tester.tap(find.text('加载更早消息'));
+    await tester.pumpAndSettle();
+
+    expect(rowsRangeCalls(gateway), 2);
+    final buttonLoad =
+        gateway.calls.where((c) => c.$1 == 'rowsRange').toList().last;
+    expect(buttonLoad.$2[1], 60);
+    // Anchored from the tail (round 23 reinstated — same semantics as the
+    // pull gesture and the prefetch): the reading position at the top
+    // survives; reading continues up into the fresh page's newest end.
+    expect(visibleMessages(tester).intersection(visibleBefore), isNotEmpty);
+    expect(controller.offset, greaterThan(0.0));
+  });
+
+  testWidgets('history: anchor compensation is immune to extent-estimate '
+      'error (tall prepended rows)', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    // The second page is held in flight so the mid-window viewport is
+    // stable to measure before the prepend lands.
+    final held = Completer<dynamic>();
+    final transport = _SequencedRowsTransport()
+      ..queue.add(
+        Completer<dynamic>()..complete(olderPage(60, 99, hasMore: true)),
+      )
+      ..queue.add(held);
+    final gateway = _SequencedRowsGateway(transport);
+    gateway.feedSnapshot(historyRows(100, 111), firstRowId: 1, totalCount: 111);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pumpAndSettle();
+    final controller = historyController(tester);
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
+    );
+    await tester.pump();
+    await gesture.moveBy(Offset(0, inWindowDrag(controller)));
+    await tester.pump(); // laid out mid-window; the fetch is still held
+    final (anchorText, anchorTopBefore) = topmostHistoryMessage(tester);
+    // Release before the load lands (the compensation defers under a finger
+    // — see the prefetch test above).
+    await gesture.up();
+    await tester.pump();
+    // The prepended page leads with a 60-line row: the SliverList extent
+    // past the built window misses the real prepended height by a wide
+    // margin. The old Δmax anchor arithmetic jumped by exactly that error
+    // (device bug 2026-09-21); the measured group delta must land within
+    // float noise of the reading position.
+    held.complete(tallHeadPage(20, 59, hasMore: false));
+    await tester.pumpAndSettle();
+
+    final anchorTopAfter = tester.getTopLeft(find.text(anchorText)).dy;
+    expect((anchorTopAfter - anchorTopBefore).abs(), lessThan(8.0),
+        reason: 'reading anchor stays put through the load');
+    expect(controller.offset,
+        lessThanOrEqualTo(controller.position.maxScrollExtent + 0.5),
+        reason: 'no overshoot into the unpainted region');
+  });
+
+  testWidgets('history: open auto-load with a tall page lands pinned on the '
+      'true bottom (no overshoot)', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    gateway.rowsRangeResults.addAll([tallHeadPage(20, 59, hasMore: false)]);
+    // Fed before mounting so the open auto-load engages (see pumpHistory):
+    // the stick prepend path must re-land on the REAL newest end instead of
+    // riding an extent estimate that a tall row can skew.
+    gateway.feedSnapshot(historyRows(100, 111), firstRowId: 1, totalCount: 111);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pumpAndSettle();
+
+    final controller = historyController(tester);
+    // Pinned at the TRUE bottom: offset == max means the content end (last
+    // group + bottom padding) fills the viewport exactly — no blank tail
+    // past the end (the overshoot bug), no undershoot (the estimate bug).
+    expect(controller.offset, closeTo(controller.position.maxScrollExtent, 0.5));
+    final listBox = tester.renderObject(find.byType(ListView)) as RenderBox;
+    final viewportTop = listBox.localToGlobal(Offset.zero).dy;
+    final viewportBottom = viewportTop + listBox.size.height;
+    // The newest message text is on screen, just above the viewport bottom
+    // (its group bottom plus the list padding IS the content end).
+    final lastBottom = tester.getBottomRight(find.text('历史消息 111')).dy;
+    expect(lastBottom, lessThanOrEqualTo(viewportBottom));
+    expect(lastBottom, greaterThanOrEqualTo(viewportTop));
+  });
+
+  testWidgets('history: the prepend veil hides the guess frame and lifts on '
+      'landing (never a frozen blank list)', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final held = Completer<dynamic>();
+    final transport = _SequencedRowsTransport()..queue.add(held);
+    final gateway = _SequencedRowsGateway(transport);
+    gateway.feedSnapshot(historyRows(100, 129), firstRowId: 1, totalCount: 129);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pumpAndSettle();
+
+    // Fire the load with a user-driven drag inside the prefetch window
+    // (programmatic jumps don't arm it by design).
+    final controller = historyController(tester);
+    controller.jumpTo(600);
+    await tester.pumpAndSettle();
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(ListView)),
+    );
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, 50));
+    await tester.pump();
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(transport.calls.length, 1);
+
+    // Round 21: between the prepend's first frame and the measured landing
+    // the list paints TRANSPARENT (the landing offset is a guess until the
+    // prepend's layout runs — showing the guess was the load-point jump),
+    // then the landing lifts the veil. A veil that never lifts is a frozen
+    // blank list, so both ends are pinned here.
+    held.complete(olderPage(60, 99, hasMore: true));
+    await tester.pump(); // arrival microtask resumes; prepend post-frames
+    await tester.pump(); // prepend applies: veil setState lands
+    await tester.pump(); // veiled frame renders; post-frame chain lands
+    final veil = find
+        .ancestor(of: find.byType(ListView), matching: find.byType(Opacity))
+        .first;
+    expect(tester.widget<Opacity>(veil).opacity, 0.0,
+        reason: 'the prepend frame must paint behind the veil');
+    await tester.pumpAndSettle();
+    expect(tester.widget<Opacity>(veil).opacity, 1.0,
+        reason: 'the measured landing must lift the veil');
+  });
 }
 
 /// Unmounts the page, then unblocks a [_StalledGateway] subscribe: the
@@ -2959,4 +3669,35 @@ class _StalledGateway extends FakeChatGateway {
       );
     }
   }
+}
+
+/// Transport whose `rowsRange` answers come from a queue of completers —
+/// the in-flight-load test holds a call open across further triggers.
+class _SequencedRowsTransport implements ConversationTransport {
+  final List<Completer<dynamic>> queue = [];
+
+  /// Recorded `beforeRowId` cursors, one per call.
+  final List<int?> calls = [];
+
+  @override
+  Future<dynamic> rowsRange(
+    String sessionId, {
+    int? beforeRowId,
+    int limit = 60,
+  }) async {
+    calls.add(beforeRowId);
+    return queue.removeAt(0).future;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
+}
+
+class _SequencedRowsGateway extends FakeChatGateway {
+  _SequencedRowsGateway(this.transport);
+
+  final _SequencedRowsTransport transport;
+
+  @override
+  ConversationTransport get conversationCommands => transport;
 }
