@@ -833,10 +833,26 @@ class _TaskListPageState extends State<TaskListPage>
   /// first menu open fires the probe fire-and-forget and answers "unknown"
   /// (tappable; the page itself degrades to its channel-unavailable view),
   /// the cached verdict shapes every later open. Never blocks the menu.
+  /// Since 3.14 the desktop serves the `provider-settings` channel — a
+  /// known ≥3.14 version always enables the entry, and an unknown version
+  /// stays enabled (the page's runtime probe sorts it out).
+  bool get _providersSupported {
+    final session = _session;
+    if (session == null) return false;
+    if (session.params.atLeast(3, 14, 0)) return true;
+    if (!session.params.hasKnownVersion) return true;
+    return session.modelProviderAvailable != false;
+  }
+
   Widget _providersMenuItem() {
     final session = _session;
-    unawaited(session?.probeModelProvider());
-    if (session?.modelProviderAvailable != false) {
+    // The probe answers the disabled-entry verdict for known pre-3.14
+    // links (and primes the verdict an unknown version's route decision
+    // consumes); a known ≥3.14 link would only log a doomed call.
+    if (session != null && !session.params.atLeast(3, 14, 0)) {
+      unawaited(session.probeModelProvider());
+    }
+    if (_providersSupported) {
       return Text(tr(context, 'tasks.menu.providers'));
     }
     return Column(
@@ -886,7 +902,7 @@ class _TaskListPageState extends State<TaskListPage>
         ),
         PopupMenuItem(
           value: 'providers',
-          enabled: _session?.modelProviderAvailable != false,
+          enabled: _providersSupported,
           child: _providersMenuItem(),
         ),
         PopupMenuItem(

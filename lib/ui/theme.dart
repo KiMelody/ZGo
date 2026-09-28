@@ -590,6 +590,23 @@ ThemeData _base(ColorScheme scheme, Color background, Color card,
       shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(ZRadius.field)),
     ),
+    // Provider-settings page switches (enable provider / disable model):
+    // active track rides the brand sky accent, inactive track stays on the
+    // hairline border tone; thumbs neutral in both states.
+    switchTheme: SwitchThemeData(
+      trackColor: WidgetStateProperty.resolveWith((states) => states
+              .contains(WidgetState.selected)
+          ? ZColors.sky500
+          : border),
+      thumbColor: WidgetStateProperty.resolveWith((states) => states
+              .contains(WidgetState.selected)
+          ? ZColors.neutral50
+          : foreground.withValues(alpha: 0.7)),
+      trackOutlineColor: WidgetStateProperty.resolveWith((states) =>
+          states.contains(WidgetState.selected)
+              ? Colors.transparent
+              : border),
+    ),
   );
 }
 

@@ -85,6 +85,12 @@ class RemoteConnectionParams {
     return triple;
   }
 
+  /// Whether [appVersion] parsed into a comparable numeric triple — false
+  /// when the parameter is absent or malformed. Version-gated callers use
+  /// this to tell "known old" (safe to use legacy wire shapes) from
+  /// "unknown" (fall back to runtime channel probing).
+  bool get hasKnownVersion => _versionTriple != null;
+
   /// Whether the desktop's `app_version` is at least [major].[minor].[patch]
   /// — the first-level gate for 3.12.3 wire shapes (quota `accountAccess`,
   /// automation `scheduleRule`, off-peak positional args). Unknown, absent

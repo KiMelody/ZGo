@@ -48,10 +48,15 @@ void main() {
     // providers configured".
     expect(find.textContaining('加载失败'), findsNothing);
 
-    // Retry re-issues the channel call and stays in the error state.
+    // Retry re-issues the channel call and stays in the error state. The
+    // version-less link first runs the shell's routing probes (legacy
+    // capability + new-channel getView, both dead here), so the log holds
+    // those two plus the legacy page's initial getAll and this retry.
     await tester.tap(find.text('重试'));
     await tester.pumpAndSettle();
-    expect(session.channelCalls, hasLength(2));
+    expect(session.channelCalls, hasLength(4));
+    expect(session.channelCalls.last.$1, 'model-provider');
+    expect(session.channelCalls.last.$2, 'getAll');
     expect(find.text('桌面端通道不可用'), findsOneWidget);
   });
 

@@ -188,4 +188,9 @@ class Channels {
   /// `model-provider` channel as the chat model sheet's fallback catalog
   /// source — the CRUD family (save/delete) has no counterpart here.
   static const modelSelection = 'model-selection';
+
+  /// Desktop ≥3.14 provider settings (getView CRUD + onDidChange). The full
+  /// management replacement for the removed `model-provider` channel —
+  /// templates, personal provider CRUD, model management and live refresh.
+  static const providerSettings = 'provider-settings';
 }

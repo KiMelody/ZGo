@@ -3,12 +3,19 @@ import 'package:flutter/material.dart';
 import '../protocol/channel_client.dart';
 import '../protocol/id.dart';
 import '../state/device_session.dart';
+import 'provider_settings_page.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 import 'widgets/dropdown_field.dart';
 
-/// Model provider management of one device (model-provider channel:
-/// getAll/save/delete), restyled with the ZLinker tokens.
+/// Model settings entry: routes on the desktop version (PRD 09-28
+/// providers-revival). ≥3.14 serves the provider-settings channel — the
+/// revived management page; older desktops keep the legacy `model-provider`
+/// page verbatim (≤3.12.2) or its "channel unavailable" fallback
+/// (3.12.3–3.13). The runtime new-channel probe only fires when the link
+/// carries no usable `app_version` AND the legacy channel probe has landed
+/// with a "gone" verdict — a version-less link to a 3.14 desktop still
+/// reaches the new page.
 class ModelProvidersPage extends StatefulWidget {
   final DeviceSession session;
   const ModelProvidersPage({super.key, required this.session});
@@ -18,6 +25,79 @@ class ModelProvidersPage extends StatefulWidget {
 }
 
 class _ModelProvidersPageState extends State<ModelProvidersPage> {
+  /// null = still deciding (unknown version, probing the new channel).
+  bool? _useNewChannel;
+
+  @override
+  void initState() {
+    super.initState();
+    _decide();
+  }
+
+  Future<void> _decide() async {
+    final session = widget.session;
+    if (mounted) setState(() => _useNewChannel = null);
+    if (session.params.atLeast(3, 14, 0)) {
+      if (mounted) setState(() => _useNewChannel = true);
+      return;
+    }
+    // Known pre-3.14 version: the new channel cannot exist — legacy page
+    // (which carries its own unavailable fallback) with zero added calls.
+    if (session.params.hasKnownVersion) {
+      if (mounted) setState(() => _useNewChannel = false);
+      return;
+    }
+    // Unknown version: the cached legacy-channel verdict is trusted only
+    // once it has actually landed. An absent verdict means the probe never
+    // ran (or is still in flight) — await it once (in-flight dedup makes
+    // the wait free) before deciding, instead of silently assuming legacy.
+    if (session.modelProviderAvailable == null) {
+      await session.probeModelProvider();
+      if (!mounted) return;
+    }
+    if (session.modelProviderAvailable != false) {
+      if (mounted) setState(() => _useNewChannel = false);
+      return;
+    }
+    bool available = false;
+    try {
+      await session.callChannel(Channels.providerSettings, 'getView');
+      available = true;
+    } catch (_) {
+      available = false;
+    }
+    if (mounted) setState(() => _useNewChannel = available);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final route = _useNewChannel;
+    if (route == null) {
+      return Scaffold(
+        appBar: AppBar(title: Text(tr(context, 'providers.title'))),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+    return route
+        ? ProviderSettingsPage(session: widget.session)
+        : _LegacyModelProvidersPage(session: widget.session);
+  }
+}
+
+/// Legacy `model-provider` management of one device (getAll/save/delete),
+/// restyled with the ZLinker tokens. Frozen regression baseline
+/// (≤3.12.2): the wire shapes and the form below must not change — the
+/// 3.14 provider-settings path lives in provider_settings_page.dart.
+class _LegacyModelProvidersPage extends StatefulWidget {
+  final DeviceSession session;
+  const _LegacyModelProvidersPage({required this.session});
+
+  @override
+  State<_LegacyModelProvidersPage> createState() =>
+      _LegacyModelProvidersPageState();
+}
+
+class _LegacyModelProvidersPageState extends State<_LegacyModelProvidersPage> {
   List<Map<String, dynamic>> _providers = const [];
   bool _loading = true;
   String? _error;
