@@ -14,6 +14,7 @@ import '../../protocol/channel_client.dart' show isChannelLevelError;
 import '../../protocol/conversation.dart';
 import '../../state/device_session.dart';
 import '../../state/entitlement_poller.dart';
+import '../../state/new_task_defaults.dart';
 import '../../state/quota_reset.dart';
 import '../phase_pill.dart';
 import '../quota_reset_dialog.dart';
@@ -304,6 +305,25 @@ class _ChatPageState extends State<ChatPage> {
     super.initState();
     _sessionId = widget.sessionId;
     _pinned = widget.initialPinned;
+    if (_sessionId == null) {
+      // Draft mode: seed the model/mode/thought picks with the global
+      // new-task defaults (UiSettings; empty = follow desktop, not seeded).
+      // Read WITHOUT registering a dependency — dependOnInheritedWidgetOf
+      // ExactType is illegal in initState, getInheritedWidgetOfExactType
+      // is the dependency-free lookup.
+      final ui = context
+          .getInheritedWidgetOfExactType<UiSettingsProvider>()
+          ?.settings;
+      if (ui != null) {
+        if (ui.newTaskMode.isNotEmpty) _draftConfig['mode'] = ui.newTaskMode;
+        if (ui.newTaskModel.isNotEmpty) {
+          _draftConfig['model'] = ui.newTaskModel;
+        }
+        if (ui.newTaskThought.isNotEmpty) {
+          _draftConfig['thought'] = ui.newTaskThought;
+        }
+      }
+    }
     final initial = widget.initialComposerText;
     if (initial != null && initial.isNotEmpty) {
       _inputController.text = initial;
@@ -899,31 +919,13 @@ class _ChatPageState extends State<ChatPage> {
     return sessionId;
   }
 
-  /// Builds the createSession `config` payload: the draft picks plus an
-  /// always-legal thought. Never null — a configless createSession makes
-  /// the desktop use the runtime's current selection, which carries no
-  /// thought level on a cold runtime and then fails model creation
-  /// ("Reasoning level is required", 09-25 verification).
-  Map<String, dynamic> _buildDraftConfig() {
-    final config = <String, dynamic>{};
-    final modelValue = _draftConfig['model'];
-    if (modelValue != null && modelValue.isNotEmpty) {
-      final idx = modelValue.lastIndexOf('/');
-      if (idx > 0) {
-        config['provider'] = modelValue.substring(0, idx);
-        config['model'] = modelValue.substring(idx + 1);
-      }
-    }
-    // A shipped config always carries a legal thought: cold runtimes (no
-    // foreground desktop window) have no current level to merge, and a
-    // missing `config.thought` then fails model creation outright
-    // ("Reasoning level is required", 09-25 verification).
-    config['thought'] = _effectiveDraftThought(_draftConfig, _prep);
-    if (_draftConfig['mode'] != null) {
-      config['mode'] = _draftConfig['mode'];
-    }
-    return config;
-  }
+  /// Builds the createSession `config` payload: the draft picks (seeded
+  /// from the global new-task defaults in initState, overridden by sheet
+  /// picks) validated against the live prepareWorkspace options, plus an
+  /// always-legal thought. Shared with the scheduled-send fire path so
+  /// both ship identical payloads.
+  Map<String, dynamic> _buildDraftConfig() =>
+      sanitizeNewTaskConfig(_draftConfig, _prep);
 
   Future<String?> _askHeldQueueDisposition() {
     return showDialog<String>(
@@ -7194,25 +7196,6 @@ class _QuestionItem extends StatelessWidget {
 
 /// ---------------------------------------------------------------- sheets
 
-/// Effective thought level for a draft session — the value createSession's
-/// `config.thought` ships AND the config sheet's draft-state display (both
-/// consumers must agree, no "displays unselected / sends max" divergence):
-/// the explicit draft pick wins, then prepareWorkspace's `thought_level`
-/// currentValue, then 'max'. The desktop only merges its current level on a
-/// warm runtime; without a legal thought a cold runtime fails model
-/// creation ("Reasoning level is required", 09-25 verification) — the official
-/// web facade always carries thought (desktop bundle).
-String _effectiveDraftThought(
-  Map<String, String>? draftConfig,
-  WorkspacePrep? prep,
-) {
-  final explicit = draftConfig?['thought'];
-  if (explicit != null && explicit.isNotEmpty) return explicit;
-  final current = prep?.option('thought_level')?.currentValue;
-  if (current != null && '$current'.isNotEmpty) return '$current';
-  return 'max';
-}
-
 class _ModelModeSheet extends StatelessWidget {
   final ChatGateway gateway;
   final ConversationState? state;
@@ -7283,7 +7266,7 @@ class _ModelModeSheet extends StatelessWidget {
     // Current selection: prefer the LIVE session config (updates after a
     // switch), fall back to prepareWorkspace's currentValue / draft. The
     // draft branch walks the same chain the payload ships
-    // ([_effectiveDraftThought]) so the sheet never shows "unselected"
+    // ([effectiveNewTaskThought]) so the sheet never shows "unselected"
     // while createSession carries a defaulted level.
     final liveModelValue =
         '${config['provider'] ?? ''}/${config['model'] ?? ''}';
@@ -7292,7 +7275,7 @@ class _ModelModeSheet extends StatelessWidget {
         ? (draftConfig?['model'] ?? '${modelOption?.currentValue ?? ''}')
         : liveModelValue;
     final currentThoughtValue = _isDraft
-        ? _effectiveDraftThought(draftConfig, prep)
+        ? effectiveNewTaskThought(draftConfig, prep)
         : (state?.currentThought.isNotEmpty == true
               ? state!.currentThought
               : '${thoughtOption?.currentValue ?? ''}');
@@ -7508,18 +7491,19 @@ class _ModelModeSheet extends StatelessWidget {
                         ? ZColors.sky500
                         : ZInk.ghost(context),
                   ),
+                  // Desktop's config-options payload carries English-only
+                  // names ("Full access" for yolo); local labels are the
+                  // display source, same table the no-prep fallback uses.
                   title: Text(
-                    v.name,
+                    tr(context, 'chat.mode.${v.value}'),
                     style: ZType.body.copyWith(color: ZInk.solid(context)),
                   ),
-                  subtitle: v.description != null
-                      ? Text(
-                          v.description!,
-                          style: ZType.caption.copyWith(
-                            color: ZInk.faint(context),
-                          ),
-                        )
-                      : null,
+                  subtitle: Text(
+                    tr(context, 'chat.mode.${v.value}.desc'),
+                    style: ZType.caption.copyWith(
+                      color: ZInk.faint(context),
+                    ),
+                  ),
                   onTap: () {
                     if (_isDraft) {
                       onDraftChange?.call('mode', v.value);

@@ -52,6 +52,7 @@ class _ZLinkerAppState extends State<ZLinkerApp>
     store: _scheduled,
     devices: _store,
     hub: _hub,
+    ui: _ui,
   );
   late final NotificationHub _notifyHub = NotificationHub(
     service: _notifications,
