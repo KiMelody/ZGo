@@ -4,6 +4,7 @@ import '../state/device_session.dart';
 import '../state/device_store.dart';
 import '../state/scheduled_store.dart';
 import 'automations_page.dart';
+import 'model_option_field.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 import 'widgets/device_name.dart';
@@ -50,7 +51,11 @@ class _ScheduledPageState extends State<ScheduledPage> {
     final created = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
-      builder: (c) => _AddSheet(devices: devices, store: widget.store),
+      builder: (c) => _AddSheet(
+        devices: devices,
+        store: widget.store,
+        hub: widget.hub,
+      ),
     );
     if (created == true && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -261,7 +266,12 @@ class _ScheduledPageState extends State<ScheduledPage> {
 class _AddSheet extends StatefulWidget {
   final List<Device> devices;
   final ScheduledStore store;
-  const _AddSheet({required this.devices, required this.store});
+  final DeviceSessionHub hub;
+  const _AddSheet({
+    required this.devices,
+    required this.store,
+    required this.hub,
+  });
 
   @override
   State<_AddSheet> createState() => _AddSheetState();
@@ -272,6 +282,11 @@ class _AddSheetState extends State<_AddSheet> {
   final _textController = TextEditingController();
   DateTime _fireAt =
       DateTime.now().add(const Duration(minutes: 10));
+
+  /// Per-message new-task overrides; null = follow the global defaults.
+  String? _mode;
+  String? _model;
+  String? _thought;
 
   @override
   void initState() {
@@ -320,6 +335,9 @@ class _AddSheetState extends State<_AddSheet> {
       deviceLabel: device.label,
       text: text,
       fireAt: _fireAt.millisecondsSinceEpoch,
+      mode: _mode,
+      model: _model,
+      thought: _thought,
     );
     if (mounted) Navigator.pop(context, true);
   }
@@ -359,6 +377,54 @@ class _AddSheetState extends State<_AddSheet> {
             maxLines: 3,
             decoration: InputDecoration(
                 labelText: tr(context, 'sched.message')),
+          ),
+          const SizedBox(height: 10),
+          // Per-message new-task overrides (PRD 09-28): all optional,
+          // empty = follow the global defaults at fire time. Keyed per
+          // device so the option lists reload when the target changes;
+          // no connected session degrades to the shared field's
+          // unavailable view (same as the automations form).
+          ModelOptionField(
+            key: ValueKey('sched-model-$_deviceId'),
+            loadOptions:
+                widget.hub.sessionOf(_deviceId)?.prepareWorkspace,
+            optionId: 'model',
+            labelText: tr(context, 'auto.model'),
+            noneLabel: tr(context, 'sched.followDefault'),
+            value: _model,
+            onChanged: (v) => setState(() => _model = v),
+          ),
+          const SizedBox(height: 10),
+          ModelOptionField(
+            key: ValueKey('sched-thought-$_deviceId'),
+            loadOptions:
+                widget.hub.sessionOf(_deviceId)?.prepareWorkspace,
+            optionId: 'thought_level',
+            labelText: tr(context, 'auto.thoughtLevel'),
+            noneLabel: tr(context, 'sched.followDefault'),
+            value: _thought,
+            onChanged: (v) => setState(() => _thought = v),
+          ),
+          const SizedBox(height: 10),
+          DropdownField<String>(
+            value: _mode,
+            hint: tr(context, 'sched.followDefault'),
+            decoration:
+                InputDecoration(labelText: tr(context, 'sched.mode')),
+            items: [
+              // Explicit null row = clear back to "follow default" after
+              // picking a tier; the hint covers the never-set case.
+              DropdownMenuItem(
+                value: null,
+                child: Text(tr(context, 'sched.followDefault')),
+              ),
+              for (final mode in const ['build', 'edit', 'plan', 'yolo'])
+                DropdownMenuItem(
+                  value: mode,
+                  child: Text(tr(context, 'chat.mode.$mode')),
+                ),
+            ],
+            onChanged: (v) => setState(() => _mode = v),
           ),
           const SizedBox(height: 10),
           InkWell(

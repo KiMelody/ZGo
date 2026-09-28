@@ -19,6 +19,9 @@ class UiSettings extends ChangeNotifier {
       'zlinker_quota_watch_expiry_lead_5h_min';
   static const _quotaWatchExpiryLeadWeekKey =
       'zlinker_quota_watch_expiry_lead_week_h';
+  static const _newTaskModeKey = 'zlinker_new_task_mode';
+  static const _newTaskModelKey = 'zlinker_new_task_model';
+  static const _newTaskThoughtKey = 'zlinker_new_task_thought';
 
   String locale = 'zh-CN';
   bool nativeListEnabled = true;
@@ -40,6 +43,14 @@ class UiSettings extends ChangeNotifier {
   int quotaWatchExpiryLeadFiveHourMinutes = 60;
   int quotaWatchExpiryLeadWeeklyHours = 6;
 
+  /// New-task defaults (mode / model / thought): applied to new
+  /// conversations and local scheduled sends. Empty = follow the desktop's
+  /// current runtime selection; invalid values are silently dropped at
+  /// assembly time (sanitizeNewTaskConfig).
+  String newTaskMode = '';
+  String newTaskModel = '';
+  String newTaskThought = '';
+
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
     locale = prefs.getString(_localeKey) ?? 'zh-CN';
@@ -58,6 +69,9 @@ class UiSettings extends ChangeNotifier {
         (prefs.getInt(_quotaWatchExpiryLead5hKey) ?? 60).clamp(5, 60);
     quotaWatchExpiryLeadWeeklyHours =
         (prefs.getInt(_quotaWatchExpiryLeadWeekKey) ?? 6).clamp(5, 10);
+    newTaskMode = prefs.getString(_newTaskModeKey) ?? '';
+    newTaskModel = prefs.getString(_newTaskModelKey) ?? '';
+    newTaskThought = prefs.getString(_newTaskThoughtKey) ?? '';
     notifyListeners();
   }
 
@@ -154,6 +168,27 @@ class UiSettings extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(
         _quotaWatchExpiryLeadWeekKey, quotaWatchExpiryLeadWeeklyHours);
+  }
+
+  Future<void> setNewTaskMode(String value) async {
+    newTaskMode = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_newTaskModeKey, value);
+  }
+
+  Future<void> setNewTaskModel(String value) async {
+    newTaskModel = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_newTaskModelKey, value);
+  }
+
+  Future<void> setNewTaskThought(String value) async {
+    newTaskThought = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_newTaskThoughtKey, value);
   }
 }
 
@@ -760,6 +795,12 @@ const _zh = {
   'tasks.menu.usage': '使用统计',
   'tasks.menu.providers': '模型设置',
   'tasks.menu.providersUnsupported': '当前桌面端版本不支持',
+  'tasks.menu.defaults': '新任务默认',
+  'ntd.title': '新任务默认',
+  'ntd.mode': '默认协作模式',
+  'ntd.model': '默认模型',
+  'ntd.thought': '默认思考等级',
+  'ntd.followDesktop': '跟随桌面',
   'usageRpc.title': '用量',
   'usageRpc.appUsage': '应用用量',
   'usageRpc.rangeAll': '全部',
@@ -811,9 +852,12 @@ const _zh = {
   'providers.add': '添加',
   'providers.addTitle': '添加模型供应商',
   'providers.name': '名称',
+  'providers.nameHint': '我的供应商',
   'providers.apiFormat': 'API 格式',
+  'providers.baseUrl': 'Base URL',
   'providers.apiKey': 'API Key（可选）',
   'providers.models': '模型 ID（逗号分隔）',
+  'providers.modelsHint': 'GLM-5.2, GLM-5-Turbo',
   'providers.modelsCount': '\$0 个模型',
   'providers.disabled': '停用: \$0',
   'providers.loadFailed': '加载失败: \$0',
@@ -842,6 +886,8 @@ const _zh = {
   'sched.sent': '已发送',
   'sched.failed': '失败',
   'sched.hint': '到点时需保持 App 在前台，且开启「原生任务列表」',
+  'sched.mode': '协作模式',
+  'sched.followDefault': '跟随默认',
   'tasks.menu.automations': '自动化',
   'auto.title': '自动化',
   'auto.subtitle': '创建定时任务，或排队在闲时算力空闲时后台执行。',
@@ -1127,7 +1173,7 @@ const _zh = {
   'auto.weekdayPick': '选择星期',
   'auto.monthDay': '几号',
   'auto.custom.title': '自定义重复',
-  'auto.custom.everyN': '每 \$0 \$1',
+  'auto.custom.every': '每',
   'auto.custom.ends': '结束',
   'auto.custom.never': '永不结束',
   'auto.custom.until': '指定日期',
@@ -1683,6 +1729,12 @@ const _en = {
   'tasks.menu.usage': 'Usage stats',
   'tasks.menu.providers': 'Model settings',
   'tasks.menu.providersUnsupported': 'Not supported by this desktop version',
+  'tasks.menu.defaults': 'New-task defaults',
+  'ntd.title': 'New-task defaults',
+  'ntd.mode': 'Default collaboration mode',
+  'ntd.model': 'Default model',
+  'ntd.thought': 'Default thought level',
+  'ntd.followDesktop': 'Follow desktop',
   'usageRpc.title': 'Usage',
   'usageRpc.appUsage': 'App usage',
   'usageRpc.rangeAll': 'All',
@@ -1735,9 +1787,12 @@ const _en = {
   'providers.add': 'Add',
   'providers.addTitle': 'Add model provider',
   'providers.name': 'Name',
+  'providers.nameHint': 'My Provider',
   'providers.apiFormat': 'API format',
+  'providers.baseUrl': 'Base URL',
   'providers.apiKey': 'API Key (optional)',
   'providers.models': 'Model IDs (comma-separated)',
+  'providers.modelsHint': 'GLM-5.2, GLM-5-Turbo',
   'providers.modelsCount': '\$0 models',
   'providers.disabled': 'Disabled: \$0',
   'providers.loadFailed': 'Load failed: \$0',
@@ -1767,6 +1822,8 @@ const _en = {
   'sched.failed': 'Failed',
   'sched.hint':
       'Keep the app in the foreground at fire time, with the native task list enabled',
+  'sched.mode': 'Collaboration mode',
+  'sched.followDefault': 'Follow default',
   'tasks.menu.automations': 'Automations',
   'auto.title': 'Automations',
   'auto.subtitle':
@@ -2080,7 +2137,7 @@ const _en = {
   'auto.weekdayPick': 'Pick weekdays',
   'auto.monthDay': 'Day of month',
   'auto.custom.title': 'Custom repeat',
-  'auto.custom.everyN': 'Every \$0 \$1',
+  'auto.custom.every': 'Every',
   'auto.custom.ends': 'Ends',
   'auto.custom.never': 'Never ends',
   'auto.custom.until': 'On date',

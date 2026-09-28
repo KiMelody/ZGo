@@ -448,7 +448,7 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
             controller: _nameController,
             decoration: InputDecoration(
                 labelText: tr(context, 'providers.name'),
-                hintText: 'My Provider'),
+                hintText: tr(context, 'providers.nameHint')),
           ),
           const SizedBox(height: 10),
           DropdownField<String>(
@@ -465,7 +465,7 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
           TextField(
             controller: _baseUrlController,
             decoration: InputDecoration(
-              labelText: 'Base URL',
+              labelText: tr(context, 'providers.baseUrl'),
               hintText: 'https://api.example.com/api/anthropic',
               suffixIcon: IconButton(
                 icon: const Icon(Icons.auto_awesome, size: 18),
@@ -508,7 +508,7 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
             maxLines: 2,
             decoration: InputDecoration(
               labelText: tr(context, 'providers.models'),
-              hintText: 'GLM-5.2, GLM-5-Turbo',
+              hintText: tr(context, 'providers.modelsHint'),
               suffixIcon: _fetchingModels
                   ? const Padding(
                       padding: EdgeInsets.all(12),

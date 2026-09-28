@@ -14,6 +14,7 @@ import 'chat/chat_page.dart';
 import 'desktop_settings_page.dart';
 import 'device_usage_page.dart';
 import 'model_providers_page.dart';
+import 'new_task_defaults_page.dart';
 import 'off_peak_page.dart';
 import 'phase_pill.dart';
 import 'remote_page.dart';
@@ -887,6 +888,16 @@ class _TaskListPageState extends State<TaskListPage>
           value: 'providers',
           enabled: _session?.modelProviderAvailable != false,
           child: _providersMenuItem(),
+        ),
+        PopupMenuItem(
+          value: 'defaults',
+          child: Row(
+            children: [
+              const Icon(Icons.tune, size: 18),
+              const SizedBox(width: 8),
+              Text(tr(context, 'tasks.menu.defaults')),
+            ],
+          ),
         ),
         PopupMenuItem(
           value: 'archive',
@@ -2240,6 +2251,11 @@ class _TaskListPageState extends State<TaskListPage>
         if (session == null) return;
         Navigator.of(context).push(zRoute(
           (_) => DesktopSettingsPage(session: session),
+        ));
+      case 'defaults':
+        if (session == null) return;
+        Navigator.of(context).push(zRoute(
+          (_) => NewTaskDefaultsPage(session: session),
         ));
       case 'usage':
         if (session == null) return;

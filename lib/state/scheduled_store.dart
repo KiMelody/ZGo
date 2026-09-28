@@ -6,7 +6,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'device_session.dart';
 import 'device_store.dart';
+import 'new_task_defaults.dart';
+import '../protocol/conversation.dart';
 import '../protocol/id.dart';
+import '../ui/ui_settings.dart';
 
 /// One scheduled "send a message to a device" item. Minimal automation
 /// built on the app-side timer plus createSession/sendText.
@@ -24,6 +27,13 @@ class ScheduledMessage {
   final int attempts;
   final String? lastError;
 
+  /// Per-message new-task config overrides (PRD 09-28): null = follow the
+  /// global UiSettings defaults; the fire path merges both through
+  /// sanitizeNewTaskConfig before createTaskWithMessage.
+  final String? mode;
+  final String? model;
+  final String? thought;
+
   const ScheduledMessage({
     required this.id,
     required this.deviceId,
@@ -33,6 +43,9 @@ class ScheduledMessage {
     this.sent = false,
     this.attempts = 0,
     this.lastError,
+    this.mode,
+    this.model,
+    this.thought,
   });
 
   ScheduledMessage copyWith({
@@ -50,6 +63,9 @@ class ScheduledMessage {
         sent: sent ?? this.sent,
         attempts: attempts ?? this.attempts,
         lastError: clearError ? null : (lastError ?? this.lastError),
+        mode: mode,
+        model: model,
+        thought: thought,
       );
 
   Map<String, dynamic> toJson() => {
@@ -61,6 +77,9 @@ class ScheduledMessage {
         if (sent) 'sent': sent,
         if (attempts > 0) 'attempts': attempts,
         if (lastError != null) 'lastError': lastError,
+        if (mode != null) 'mode': mode,
+        if (model != null) 'model': model,
+        if (thought != null) 'thought': thought,
       };
 
   factory ScheduledMessage.fromJson(Map<String, dynamic> j) =>
@@ -73,6 +92,9 @@ class ScheduledMessage {
         sent: j['sent'] == true,
         attempts: j['attempts'] as int? ?? 0,
         lastError: j['lastError'] as String?,
+        mode: j['mode'] as String?,
+        model: j['model'] as String?,
+        thought: j['thought'] as String?,
       );
 }
 
@@ -114,6 +136,9 @@ class ScheduledStore extends ChangeNotifier {
     required String deviceLabel,
     required String text,
     required int fireAt,
+    String? mode,
+    String? model,
+    String? thought,
   }) async {
     final m = ScheduledMessage(
       id: generateUuid(),
@@ -121,6 +146,9 @@ class ScheduledStore extends ChangeNotifier {
       deviceLabel: deviceLabel,
       text: text,
       fireAt: fireAt,
+      mode: mode,
+      model: model,
+      thought: thought,
     );
     _items.add(m);
     _items.sort((a, b) => a.fireAt.compareTo(b.fireAt));
@@ -168,6 +196,11 @@ class MessageScheduler {
   final ScheduledStore store;
   final DeviceStore devices;
   final DeviceSessionHub hub;
+
+  /// Global new-task defaults (mode/model/thought); null = no defaults,
+  /// per-message overrides alone drive the config. Read at fire time so
+  /// settings changes apply without a restart.
+  final UiSettings? ui;
   static const maxAttempts = 3;
   static const tickInterval = Duration(seconds: 15);
 
@@ -179,6 +212,7 @@ class MessageScheduler {
     required this.store,
     required this.devices,
     required this.hub,
+    this.ui,
   });
 
   void start() {
@@ -199,6 +233,11 @@ class MessageScheduler {
       _sending = false;
     }
   }
+
+  /// Test seam: runs one timer tick inline (the periodic timer fires this
+  /// every [tickInterval], too slow for tests).
+  @visibleForTesting
+  Future<void> debugTickForTest() => _tick();
 
   Future<void> _trySend(ScheduledMessage m) async {
     final device =
@@ -228,7 +267,33 @@ class MessageScheduler {
       if (session.status != DeviceStatus.connected) {
         throw TimeoutException('device not connected in time');
       }
-      await session.createTaskWithMessage(m.text);
+      // New-task config: per-message overrides merged over the global
+      // defaults, validated against the live prepareWorkspace options.
+      // prep failure must not kill the unattended send (PRD A7): sanitize
+      // then drops the model, keeps only four-tier modes, thought → 'max'.
+      WorkspacePrep? prep;
+      try {
+        prep = await session.prepareWorkspace();
+      } catch (_) {
+        prep = null;
+      }
+      final u = ui;
+      final config = sanitizeNewTaskConfig(
+        mergeNewTaskConfig(
+          {
+            if (m.mode != null) 'mode': m.mode!,
+            if (m.model != null) 'model': m.model!,
+            if (m.thought != null) 'thought': m.thought!,
+          },
+          {
+            'mode': u?.newTaskMode ?? '',
+            'model': u?.newTaskModel ?? '',
+            'thought': u?.newTaskThought ?? '',
+          },
+        ),
+        prep,
+      );
+      await session.createTaskWithMessage(m.text, config: config);
       store.markSent(m.id);
       debugPrint('[scheduler] delivered ${m.id}');
     } catch (e) {

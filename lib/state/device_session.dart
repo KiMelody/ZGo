@@ -1129,16 +1129,21 @@ class DeviceSession extends ChangeNotifier
   }
 
   /// Minimal automation primitive: creates a new task (session) on the
-  /// active workspace with [text] as the first message. Returns the new
+  /// active workspace with [text] as the first message. [config] rides
+  /// createSession's `config` payload (new-task defaults / scheduled-send
+  /// overrides, assembled by sanitizeNewTaskConfig). Returns the new
   /// sessionId.
-  Future<String> createTaskWithMessage(String text) async {
+  Future<String> createTaskWithMessage(
+    String text, {
+    Map<String, dynamic>? config,
+  }) async {
     final conv = _conversation;
     if (conv == null) throw StateError('not connected');
     final workspaceId = chatWorkspaceId;
     if (workspaceId == null || workspaceId.isEmpty) {
       throw StateError('no workspace');
     }
-    return conv.createSession(workspaceId, firstText: text);
+    return conv.createSession(workspaceId, firstText: text, config: config);
   }
 
   // ------------------------------------------------------------ ChatGateway
