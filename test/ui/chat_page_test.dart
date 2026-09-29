@@ -1425,6 +1425,60 @@ void main() {
     expect(find.text('让我想想'), findsNothing);
   });
 
+  testWidgets('short viewport: composer collapse toggle lives in the suffix',
+      (tester) async {
+    // Real-device landscape surface (853×384 + cutout insets): the tool row
+    // starts collapsed and the ⇅ toggle is the TextField suffixIcon — no
+    // dedicated toolbar row stealing scarce input height.
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(853, 384);
+    tester.view.padding = const FakeViewPadding(left: 45, top: 40);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    // finite pumps: the page keeps a connecting spinner alive on this
+    // surface, pumpAndSettle would time out on it.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // Collapsed: no tool icons in the row, toggle inside the input's
+    // InputDecorator.
+    expect(find.byIcon(Icons.add_circle_outline), findsNothing);
+    final toggle = find.byIcon(Icons.unfold_more);
+    expect(toggle, findsOneWidget);
+    expect(
+      find.ancestor(of: toggle, matching: find.byType(InputDecorator)),
+      findsOneWidget,
+    );
+
+    // Tap to expand: tools appear, suffix flips to the collapse icon.
+    await tester.tap(toggle);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byIcon(Icons.add_circle_outline), findsOneWidget);
+    expect(find.byIcon(Icons.unfold_less), findsOneWidget);
+    expect(find.byIcon(Icons.unfold_more), findsNothing);
+
+    // Tap again to collapse.
+    await tester.tap(find.byIcon(Icons.unfold_less));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byIcon(Icons.add_circle_outline), findsNothing);
+    expect(find.byIcon(Icons.unfold_more), findsOneWidget);
+
+    // Portrait (short=false): no suffix toggle, the tool row stays put —
+    // zero-change lock for tall viewports.
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.padding = const FakeViewPadding();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byIcon(Icons.unfold_more), findsNothing);
+    expect(find.byIcon(Icons.unfold_less), findsNothing);
+    expect(find.byIcon(Icons.add_circle_outline), findsOneWidget);
+  });
+
   testWidgets('timeline markers render as centered capsules', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(

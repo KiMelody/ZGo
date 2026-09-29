@@ -361,6 +361,172 @@ void main() {
     expect(find.text('项目'), findsOneWidget);
   });
 
+  testWidgets(
+      'dual-pane landscape consumes cutout insets once (853×384, left 45/top 40)',
+      (tester) async {
+    // Real-device landscape surface (25019PNF3C @600dpi): MIUI top status
+    // strip ~40 + punch-hole left inset ~45. Regression lock for the
+    // dual-pane SafeArea: sidebar header clears the status strip, the tree
+    // is not pushed right by the raw inset, and the embedded composer moves
+    // with the pane instead of eating the inset a second time.
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(853, 384);
+    addTearDown(tester.view.reset);
+
+    Future<void> pumpPane({required bool cutout}) async {
+      // Unmount the previous phase first: pumping a same-type root updates
+      // the Element in place and the pane would keep the previously opened
+      // session (its breadcrumb title duplicates the tree row).
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      tester.view.padding = cutout
+          ? const FakeViewPadding(left: 45, top: 40)
+          : const FakeViewPadding();
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 's1',
+            'title': '修复登录',
+            'phase': 'completedSuccess',
+            'lastActivityAt': DateTime.now().millisecondsSinceEpoch,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/app'},
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    Future<void> openSession() async {
+      await tester.tap(find.text('修复登录'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    // Cutout surface: the sidebar header starts below the status strip.
+    await pumpPane(cutout: true);
+    expect(
+      tester.getRect(find.byIcon(Icons.arrow_back)).top,
+      greaterThanOrEqualTo(40),
+    );
+    final treeInset = tester.getTopLeft(find.text('app')).dx;
+    final navInset = tester.getTopLeft(find.text('搜索')).dx;
+
+    await openSession();
+    final fieldInset = tester.getTopLeft(find.byType(TextField).first).dx;
+    final titleInset = tester.getTopLeft(find.text('任务会话')).dx;
+
+    // Control surface: same size, zero insets.
+    await pumpPane(cutout: false);
+    final treeControl = tester.getTopLeft(find.text('app')).dx;
+    final navControl = tester.getTopLeft(find.text('搜索')).dx;
+    await openSession();
+    final fieldControl = tester.getTopLeft(find.byType(TextField).first).dx;
+    final titleControl = tester.getTopLeft(find.text('任务会话')).dx;
+
+    // Tree-vs-nav offset back to the inset-free geometry: the tree must not
+    // be pushed right by the raw horizontal inset.
+    expect(treeInset - navInset, closeTo(treeControl - navControl, 2));
+    // Composer offset vs the pane (title) identical on both surfaces, and
+    // its absolute shift equals the pane's: the inset is consumed once for
+    // the whole pane, never by the composer alone.
+    expect(fieldInset - titleInset, closeTo(fieldControl - titleControl, 2));
+    expect(fieldInset - fieldControl, closeTo(titleInset - titleControl, 2));
+  });
+
+  testWidgets(
+      'dual-pane immersive cutout: color blocks reach the screen edge '
+      '(853×384, §7.1)', (tester) async {
+    // Same real-device landscape surface as above, but locking the
+    // immersive form: SafeArea lives inside each column, so the sidebar
+    // color block and the divider extend behind the cutout / status strip
+    // (no scaffold-background color seam) while each column consumes only
+    // its own screen-edge inset (left/right explicitly interleaved false).
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(853, 384);
+    addTearDown(tester.view.reset);
+
+    // Unique by construction: the only darkSidebar ColoredBox, and the
+    // rounded chat card measured as the DecoratedBox inside the only
+    // fromLTRB(0, 8, 8, 8) margin (getRect on the Padding itself would
+    // include its own padding — the card's visual edge is the child).
+    Finder sidebarBlock() => find.byWidgetPredicate(
+        (w) => w is ColoredBox && w.color == ZColors.darkSidebar);
+    Finder card() => find
+        .descendant(
+          of: find.byWidgetPredicate((w) =>
+              w is Padding &&
+              w.padding == const EdgeInsets.fromLTRB(0, 8, 8, 8)),
+          matching: find.byType(DecoratedBox),
+        )
+        .first;
+
+    Future<void> pumpPane(FakeViewPadding padding) async {
+      // Unmount the previous phase first (same reason as above: in-place
+      // root updates would keep the previous pane state around).
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      tester.view.padding = padding;
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        workspaces: [
+          {'workspacePath': '/repo/app'},
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(tester.takeException(), isNull);
+    }
+
+    // Control: zero insets — card hugs the right edge (8px margin), block
+    // at x=0.
+    await pumpPane(const FakeViewPadding());
+    expect(tester.getRect(sidebarBlock()).left, 0);
+    final controlCard = tester.getRect(card());
+    expect(controlCard.right, 853 - 8);
+
+    // Measured device form (left 45 / top 40): the sidebar block extends to
+    // the screen edge behind the punch hole, the header clears the status
+    // strip, and the card still hugs the right edge — a zero right inset
+    // must not be inflated by the sidebar column's SafeArea.
+    await pumpPane(const FakeViewPadding(left: 45, top: 40));
+    expect(tester.getRect(sidebarBlock()).left, 0);
+    expect(
+      tester.getRect(find.byIcon(Icons.arrow_back)).top,
+      greaterThanOrEqualTo(40),
+    );
+    expect(tester.getRect(card()).right, 853 - 8);
+
+    // Flipped form (right 45): the right pane consumes the right inset on
+    // its own — card pulled in by exactly 45 — while its left edge (and the
+    // sidebar block) stay untouched by the left column.
+    await pumpPane(const FakeViewPadding(right: 45, top: 40));
+    expect(tester.getRect(sidebarBlock()).left, 0);
+    final flippedCard = tester.getRect(card());
+    expect(flippedCard.right, 853 - 45 - 8);
+    expect(flippedCard.left, controlCard.left);
+  });
+
   testWidgets('single column below 768: official mobile header, no sidebar',
       (tester) async {
     usePhone(tester);
@@ -1405,5 +1571,49 @@ void main() {
       await tester.pump(const Duration(milliseconds: 250));
       expect(session.overviewRefreshes, after);
     });
+  });
+
+  testWidgets('tidy panel opens scrollable on landscape without overflow',
+      (tester) async {
+    // Landscape phone surface (767 wide keeps the single-pane layout under
+    // the 768 dual-pane breakpoint; 390 tall is the P0 height budget).
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(767, 390);
+    addTearDown(tester.view.reset);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('整理任务').first);
+    await tester.pumpAndSettle();
+
+    // No RenderFlex overflow on the 390px-tall landscape surface, and the
+    // sheet body rides the capped scrollable skeleton.
+    expect(tester.takeException(), isNull);
+    expect(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.byType(SingleChildScrollView),
+      ),
+      findsOneWidget,
+    );
+    // The radio rows stay reachable through the scroll.
+    await tester.scrollUntilVisible(
+      find.text('排序方式'),
+      200,
+      scrollable: find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.byType(Scrollable),
+      ),
+    );
   });
 }

@@ -56,6 +56,21 @@ void main() {
     expect(lightDanger, ZColors.dangerLight);
   });
 
+  testWidgets('status foreground tones stay readable in light mode',
+      (tester) async {
+    final (darkSuccess, lightSuccess) =
+        await capture(tester, ZInk.successTone);
+    expect(darkSuccess, ZColors.success);
+    expect(lightSuccess, ZColors.pillSuccessFgLight);
+
+    final (darkWarning, lightWarning) =
+        await capture(tester, ZInk.warningTone);
+    expect(darkWarning, ZColors.warning);
+    // Official --color-warning literal from the theme-zai-light bundle —
+    // the same value official light uses for --color-usage-chart-5.
+    expect(lightWarning, ZColors.usageOrangeLight);
+  });
+
   testWidgets('usage accents deepen in light mode (official direct lifts)',
       (tester) async {
     final (darkBlue, lightBlue) = await capture(tester, ZInk.usageBlue);

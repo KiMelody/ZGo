@@ -166,54 +166,61 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
                     ),
                   ),
                 )
-              : RefreshIndicator(
-                  onRefresh: _load,
-                  child: ListView(
-                    padding: const EdgeInsets.all(ZSpacing.screen),
-                    children: [
-                      if (_view!.accountProviders.isNotEmpty) ...[
-                        _sectionLabel(context, 'providers.sectionZhipu'),
-                        Card(
-                          clipBehavior: Clip.antiAlias,
-                          child: Column(
-                            children: [
-                              for (final (i, p)
-                                  in _view!.accountProviders.indexed) ...[
-                                if (i > 0)
-                                  Divider(
-                                      height: 1,
-                                      indent: ZListRow.padding.horizontal,
-                                      color: ZInk.hairline(context)),
-                                _providerRow(context, p),
-                              ],
-                            ],
-                          ),
-                        ),
-                      ],
-                      _sectionLabel(context, 'providers.sectionCustom'),
-                      Card(
-                        clipBehavior: Clip.antiAlias,
-                        child: _view!.customProviders.isEmpty
-                            ? Padding(
-                                padding: ZListRow.padding,
-                                child: Text(tr(context, 'providers.empty'),
-                                    style: ZType.sub
-                                        .copyWith(color: ZInk.faint(context))),
-                              )
-                            : ReorderableListView.builder(
-                                shrinkWrap: true,
-                                buildDefaultDragHandles: false,
-                                physics: const NeverScrollableScrollPhysics(),
-                                onReorderItem: _reorderProviders,
-                                itemCount: _view!.customProviders.length,
-                                itemBuilder: (context, index) =>
-                                    _providerTile(
-                                        context,
-                                        _view!.customProviders[index],
-                                        index),
+              : Center(
+                  child: ConstrainedBox(
+                    constraints:
+                        const BoxConstraints(maxWidth: zContentMaxWidth),
+                    child: RefreshIndicator(
+                      onRefresh: _load,
+                      child: ListView(
+                        padding:
+                            zScreenPadding(context, bottom: ZSpacing.screen),
+                        children: [
+                          if (_view!.accountProviders.isNotEmpty) ...[
+                            _sectionLabel(context, 'providers.sectionZhipu'),
+                            Card(
+                              clipBehavior: Clip.antiAlias,
+                              child: Column(
+                                children: [
+                                  for (final (i, p)
+                                      in _view!.accountProviders.indexed) ...[
+                                    if (i > 0)
+                                      Divider(
+                                          height: 1,
+                                          indent: ZListRow.padding.horizontal,
+                                          color: ZInk.hairline(context)),
+                                    _providerRow(context, p),
+                                  ],
+                                ],
                               ),
+                            ),
+                          ],
+                          _sectionLabel(context, 'providers.sectionCustom'),
+                          Card(
+                            clipBehavior: Clip.antiAlias,
+                            child: _view!.customProviders.isEmpty
+                                ? Padding(
+                                    padding: ZListRow.padding,
+                                    child: Text(tr(context, 'providers.empty'),
+                                        style: ZType.sub
+                                            .copyWith(color: ZInk.faint(context))),
+                                  )
+                                : ReorderableListView.builder(
+                                    shrinkWrap: true,
+                                    buildDefaultDragHandles: false,
+                                    physics: const NeverScrollableScrollPhysics(),
+                                    onReorderItem: _reorderProviders,
+                                    itemCount: _view!.customProviders.length,
+                                    itemBuilder: (context, index) =>
+                                        _providerTile(
+                                            context,
+                                            _view!.customProviders[index],
+                                            index),
+                                  ),
+                          ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
                 ),
     );
@@ -437,42 +444,49 @@ class _AddProviderPageState extends State<_AddProviderPage> {
                     ],
                   ),
                 )
-              : ListView(
-                  padding: const EdgeInsets.all(ZSpacing.screen),
-                  children: [
-                    if (zhipu.isNotEmpty) ...[
-                      _label(context, 'providers.sectionZhipu'),
-                      _templateCard(zhipu),
-                    ],
-                    _label(context, 'providers.sectionOther'),
-                    _templateCard(others),
-                    Card(
-                      clipBehavior: Clip.antiAlias,
-                      child: InkWell(
-                        onTap: _createCustom,
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(
-                              minHeight: ZListRow.singleLineHeight),
-                          child: Padding(
-                            padding: ZListRow.padding,
-                            child: Row(
-                              children: [
-                                Icon(Icons.add,
-                                    size: 18, color: ZColors.sky500),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                      tr(context, 'providers.addCustom'),
-                                      style: ZType.body.copyWith(
-                                          color: ZColors.sky500)),
+              : Center(
+                  child: ConstrainedBox(
+                    constraints:
+                        const BoxConstraints(maxWidth: zContentMaxWidth),
+                    child: ListView(
+                      padding:
+                          zScreenPadding(context, bottom: ZSpacing.screen),
+                      children: [
+                        if (zhipu.isNotEmpty) ...[
+                          _label(context, 'providers.sectionZhipu'),
+                          _templateCard(zhipu),
+                        ],
+                        _label(context, 'providers.sectionOther'),
+                        _templateCard(others),
+                        Card(
+                          clipBehavior: Clip.antiAlias,
+                          child: InkWell(
+                            onTap: _createCustom,
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(
+                                  minHeight: ZListRow.singleLineHeight),
+                              child: Padding(
+                                padding: ZListRow.padding,
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.add,
+                                        size: 18, color: ZColors.sky500),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                          tr(context, 'providers.addCustom'),
+                                          style: ZType.body.copyWith(
+                                              color: ZColors.sky500)),
+                                    ),
+                                  ],
                                 ),
-                              ],
+                              ),
                             ),
                           ),
                         ),
-                      ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
     );
   }
@@ -982,19 +996,26 @@ class _ProviderDetailPageState extends State<_ProviderDetailPage> {
                       textAlign: TextAlign.center,
                       style:
                           ZType.body.copyWith(color: ZInk.faint(context))))
-              : RefreshIndicator(
-                  onRefresh: _load,
-                  child: ListView(
-                    padding: const EdgeInsets.all(ZSpacing.screen),
-                    children: [
-                      if (entry.isAccount)
-                        _accountCard(context, entry)
-                      else ...[
-                        _personalFormCard(context, entry),
-                        const SizedBox(height: ZSpacing.cardGap),
-                      ],
-                      _modelsCard(context, entry),
-                    ],
+              : Center(
+                  child: ConstrainedBox(
+                    constraints:
+                        const BoxConstraints(maxWidth: zContentMaxWidth),
+                    child: RefreshIndicator(
+                      onRefresh: _load,
+                      child: ListView(
+                        padding:
+                            zScreenPadding(context, bottom: ZSpacing.screen),
+                        children: [
+                          if (entry.isAccount)
+                            _accountCard(context, entry)
+                          else ...[
+                            _personalFormCard(context, entry),
+                            const SizedBox(height: ZSpacing.cardGap),
+                          ],
+                          _modelsCard(context, entry),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
     );
@@ -1031,7 +1052,7 @@ class _ProviderDetailPageState extends State<_ProviderDetailPage> {
                   : 'providers.notEntitled'),
               style: ZType.caption.copyWith(
                   color: entry.entitled
-                      ? ZColors.success
+                      ? ZInk.successTone(context)
                       : ZInk.muted(context)),
             ),
           ],
@@ -1110,8 +1131,8 @@ class _ProviderDetailPageState extends State<_ProviderDetailPage> {
               Padding(
                 padding: const EdgeInsets.only(top: 4),
                 child: Text(issue.message,
-                    style:
-                        ZType.caption.copyWith(color: ZColors.warning)),
+                    style: ZType.caption
+                        .copyWith(color: ZInk.warningTone(context))),
               ),
             const SizedBox(height: ZSpacing.card),
             SizedBox(
@@ -1264,7 +1285,7 @@ class _ProviderDetailPageState extends State<_ProviderDetailPage> {
                 if (model.issues.isNotEmpty)
                   Text(model.issues.first.message,
                       style: ZType.caption
-                          .copyWith(color: ZColors.warning)),
+                          .copyWith(color: ZInk.warningTone(context))),
               ],
             ),
           ),
@@ -1314,38 +1335,44 @@ class _ApiFormatField extends StatelessWidget {
   Future<void> _pick(BuildContext context) async {
     await showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       showDragHandle: true,
-      builder: (sheetCtx) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: Text(tr(sheetCtx, 'providers.apiFormat'),
-                  style: ZType.heading),
-            ),
-            for (final (id, key) in _apiFormats)
-              ListTile(
-                dense: true,
-                leading: Icon(
-                  value == id
-                      ? Icons.radio_button_checked
-                      : Icons.radio_button_off,
-                  size: 18,
-                  color: value == id
-                      ? ZColors.sky500
-                      : ZInk.ghost(sheetCtx),
-                ),
-                title: Text(tr(sheetCtx, key),
-                    style: ZType.body
-                        .copyWith(color: ZInk.solid(sheetCtx))),
-                onTap: () {
-                  Navigator.pop(sheetCtx);
-                  onChanged(id);
-                },
+      builder: (sheetCtx) => ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.85,
+        ),
+        child: SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                child: Text(tr(sheetCtx, 'providers.apiFormat'),
+                    style: ZType.heading),
               ),
-          ],
+              for (final (id, key) in _apiFormats)
+                ListTile(
+                  dense: true,
+                  leading: Icon(
+                    value == id
+                        ? Icons.radio_button_checked
+                        : Icons.radio_button_off,
+                    size: 18,
+                    color: value == id
+                        ? ZColors.sky500
+                        : ZInk.ghost(sheetCtx),
+                  ),
+                  title: Text(tr(sheetCtx, key),
+                      style: ZType.body
+                          .copyWith(color: ZInk.solid(sheetCtx))),
+                  onTap: () {
+                    Navigator.pop(sheetCtx);
+                    onChanged(id);
+                  },
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -1487,35 +1514,41 @@ class _ModelDialogState extends State<_ModelDialog> {
     }
     final picked = await showModalBottomSheet<String>(
       context: context,
+      isScrollControlled: true,
       showDragHandle: true,
-      builder: (sheetCtx) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: Text(tr(sheetCtx, 'providers.fetchFromEndpoint'),
-                  style: ZType.heading),
-            ),
-            for (final id in ids)
-              ListTile(
-                dense: true,
-                leading: Icon(
-                  _id.text.trim() == id
-                      ? Icons.radio_button_checked
-                      : Icons.radio_button_off,
-                  size: 18,
-                  color: _id.text.trim() == id
-                      ? ZColors.sky500
-                      : ZInk.ghost(sheetCtx),
-                ),
-                title: Text(id,
-                    style: ZType.body
-                        .copyWith(color: ZInk.solid(sheetCtx))),
-                onTap: () => Navigator.pop(sheetCtx, id),
+      builder: (sheetCtx) => ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.85,
+        ),
+        child: SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                child: Text(tr(sheetCtx, 'providers.fetchFromEndpoint'),
+                    style: ZType.heading),
               ),
-          ],
+              for (final id in ids)
+                ListTile(
+                  dense: true,
+                  leading: Icon(
+                    _id.text.trim() == id
+                        ? Icons.radio_button_checked
+                        : Icons.radio_button_off,
+                    size: 18,
+                    color: _id.text.trim() == id
+                        ? ZColors.sky500
+                        : ZInk.ghost(sheetCtx),
+                  ),
+                  title: Text(id,
+                      style: ZType.body
+                          .copyWith(color: ZInk.solid(sheetCtx))),
+                  onTap: () => Navigator.pop(sheetCtx, id),
+                ),
+            ],
+          ),
         ),
       ),
     );

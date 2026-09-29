@@ -20,6 +20,7 @@ import '../phase_pill.dart';
 import '../quota_reset_dialog.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
+import '../widgets/sheet_scaffold.dart';
 import 'diff_view.dart';
 import 'markdown_view.dart';
 import 'goal_panel.dart';
@@ -2287,12 +2288,12 @@ class _ChatPageState extends State<ChatPage> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.error_outline, size: 20, color: ZColors.danger),
+              Icon(Icons.error_outline, size: 20, color: ZInk.dangerTone(context)),
               const SizedBox(height: 8),
               Text(
                 tr(context, 'chat.session.startFailedTitle'),
                 textAlign: TextAlign.center,
-                style: ZType.heading.copyWith(color: ZColors.danger),
+                style: ZType.heading.copyWith(color: ZInk.dangerTone(context)),
               ),
               const SizedBox(height: 4),
               Text(
@@ -2346,6 +2347,11 @@ class _ChatPageState extends State<ChatPage> {
   @override
   Widget build(BuildContext context) {
     final state = _state;
+    // Short viewport (landscape phones, folding half-open): the second
+    // header row drops its secondary workspace chip to keep the breadcrumb
+    // title readable without stealing message height (portrait phones are
+    // ~844 tall and never trigger).
+    final short = MediaQuery.heightOf(context) < 480;
     // This build deliberately does NOT read the IME inset: the keyboard
     // animation delivers a fresh inset every frame (~300ms), and a dependency
     // here rebuilt the whole page per frame — app bar, row regrouping,
@@ -2375,310 +2381,315 @@ class _ChatPageState extends State<ChatPage> {
             ),
         ],
       ),
-      body: Column(
-        children: [
-          // Official second header row: task title + workspace chip + 更多.
-          _contentCol(
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 4, 4),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      widget.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: ZType.heading.copyWith(color: ZInk.solid(context)),
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: Column(
+          children: [
+            // Official second header row: task title + workspace chip + 更多.
+            _contentCol(
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 4, 4),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        widget.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ZType.heading.copyWith(color: ZInk.solid(context)),
+                      ),
                     ),
-                  ),
-                  if (widget.workspaceLabel != null &&
-                      widget.workspaceLabel!.isNotEmpty) ...[
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: ZInk.tile(context),
-                        borderRadius: BorderRadius.circular(ZRadius.field),
-                        border: Border.all(color: ZInk.hairline(context)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.folder_outlined,
-                            size: 13,
-                            color: ZInk.muted(context),
-                          ),
-                          const SizedBox(width: 4),
-                          ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 96),
-                            child: Text(
-                              widget.workspaceLabel!,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: ZType.sub.copyWith(
-                                color: ZInk.muted(context),
+                    if (!short &&
+                        widget.workspaceLabel != null &&
+                        widget.workspaceLabel!.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: ZInk.tile(context),
+                          borderRadius: BorderRadius.circular(ZRadius.field),
+                          border: Border.all(color: ZInk.hairline(context)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.folder_outlined,
+                              size: 13,
+                              color: ZInk.muted(context),
+                            ),
+                            const SizedBox(width: 4),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 96),
+                              child: Text(
+                                widget.workspaceLabel!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: ZType.sub.copyWith(
+                                  color: ZInk.muted(context),
+                                ),
                               ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
+                      ),
+                    ],
+                    PopupMenuButton<String>(
+                      tooltip: tr(context, 'chat.more'),
+                      onSelected: _onMoreMenu,
+                      itemBuilder: _moreMenuItems,
+                      position: PopupMenuPosition.under,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 6,
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              tr(context, 'chat.more'),
+                              style: ZType.body.copyWith(
+                                color: ZColors.sky500,
+                              ),
+                            ),
+                            const Icon(
+                              Icons.keyboard_arrow_down,
+                              size: 16,
+                              color: ZColors.sky500,
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ],
-                  PopupMenuButton<String>(
-                    tooltip: tr(context, 'chat.more'),
-                    onSelected: _onMoreMenu,
-                    itemBuilder: _moreMenuItems,
-                    position: PopupMenuPosition.under,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 6,
+                ),
+              ),
+            ),
+            if (_error != null)
+              Material(
+                color: ZColors.danger.withValues(alpha: 0.15),
+                child: ListTile(
+                  dense: true,
+                  title: Text(
+                    trP(context, 'chat.subscribe.failed', ['$_error']),
+                    style: ZType.sub,
+                  ),
+                  trailing: TextButton(
+                    onPressed: _subscribe,
+                    child: Text(tr(context, 'tasks.retry')),
+                  ),
+                ),
+              ),
+            if (_showQuotaWarning)
+              // Warning-only banner (PRD: the「使用重置券」action moved to
+              // the usage sheet; switch model / view usage remain).
+              Material(
+                color: ZColors.danger.withValues(alpha: 0.15),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 6),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        tr(context, 'chat.quota.exhaustedTitle'),
+                        style: ZType.sub.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: ZInk.dangerTone(context),
+                        ),
                       ),
-                      child: Row(
+                      const SizedBox(height: 2),
+                      Text(
+                        tr(context, 'chat.quota.exhaustedBody'),
+                        style: ZType.caption.copyWith(color: ZInk.muted(context)),
+                      ),
+                      Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text(
-                            tr(context, 'chat.more'),
-                            style: ZType.body.copyWith(
-                              color: ZColors.sky500,
-                            ),
-                          ),
-                          const Icon(
-                            Icons.keyboard_arrow_down,
-                            size: 16,
-                            color: ZColors.sky500,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (_error != null)
-            Material(
-              color: ZColors.danger.withValues(alpha: 0.15),
-              child: ListTile(
-                dense: true,
-                title: Text(
-                  trP(context, 'chat.subscribe.failed', ['$_error']),
-                  style: ZType.sub,
-                ),
-                trailing: TextButton(
-                  onPressed: _subscribe,
-                  child: Text(tr(context, 'tasks.retry')),
-                ),
-              ),
-            ),
-          if (_showQuotaWarning)
-            // Warning-only banner (PRD: the「使用重置券」action moved to
-            // the usage sheet; switch model / view usage remain).
-            Material(
-              color: ZColors.danger.withValues(alpha: 0.15),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 6),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      tr(context, 'chat.quota.exhaustedTitle'),
-                      style: ZType.sub.copyWith(
-                        fontWeight: FontWeight.w600,
-                        color: ZColors.danger,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      tr(context, 'chat.quota.exhaustedBody'),
-                      style: ZType.caption.copyWith(color: ZInk.muted(context)),
-                    ),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        TextButton(
-                          style: TextButton.styleFrom(
-                            visualDensity: VisualDensity.compact,
-                            padding:
-                                const EdgeInsets.symmetric(horizontal: 8),
-                          ),
-                          onPressed: _showModelSheet,
-                          child: Text(
-                            tr(context, 'chat.quota.switchModel'),
-                            style: ZType.sub,
-                          ),
-                        ),
-                        if (widget.onOpenUsage != null)
                           TextButton(
                             style: TextButton.styleFrom(
                               visualDensity: VisualDensity.compact,
                               padding:
                                   const EdgeInsets.symmetric(horizontal: 8),
                             ),
-                            onPressed: widget.onOpenUsage,
+                            onPressed: _showModelSheet,
                             child: Text(
-                              tr(context, 'chat.quota.viewUsage'),
+                              tr(context, 'chat.quota.switchModel'),
                               style: ZType.sub,
                             ),
                           ),
-                      ],
-                    ),
-                  ],
+                          if (widget.onOpenUsage != null)
+                            TextButton(
+                              style: TextButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 8),
+                              ),
+                              onPressed: widget.onOpenUsage,
+                              child: Text(
+                                tr(context, 'chat.quota.viewUsage'),
+                                style: ZType.sub,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-          Expanded(
-            child: Stack(
-              children: [
-                Positioned.fill(child: _messageList(context, state)),
-                // Jump-to-newest control: floating in the message area it
-                // covers the list only — the takeover cover, sheets and menus
-                // are page-level layers painted above it.
-                Positioned.fill(
-                  bottom: 8,
-                  child: Align(
-                    alignment: Alignment.bottomCenter,
-                    child: JumpToBottomButton(
-                      visible: !_stickToBottom,
-                      onPressed: _animateToBottom,
+            Expanded(
+              child: Stack(
+                children: [
+                  Positioned.fill(child: _messageList(context, state)),
+                  // Jump-to-newest control: floating in the message area it
+                  // covers the list only — the takeover cover, sheets and menus
+                  // are page-level layers painted above it.
+                  Positioned.fill(
+                    bottom: 8,
+                    child: Align(
+                      alignment: Alignment.bottomCenter,
+                      child: JumpToBottomButton(
+                        visible: !_stickToBottom,
+                        onPressed: _animateToBottom,
+                      ),
                     ),
                   ),
-                ),
-                // Status strip while the IME is up: floats over the list
-                // bottom instead of being a Column flex child. The loose
-                // Flexible it used before (09-18 R2) split the remaining
-                // height with the Expanded list 1:1 and RenderFlex never
-                // redistributes what a loose child leaves unused — the free
-                // space pooled at the Column tail, leaving a blank band the
-                // height of the strip's unused share between the composer
-                // and the keyboard (2026-09-20 真机报告). Anchored to the
-                // bottom it shrink-wraps to min(intrinsic, stack height),
-                // so the strip still scrolls when the banners overflow and
-                // the composer stays pinned above the IME.
-                // The Positioned.fill is unconditional — the slot inside
-                // consults _KeyboardScope; a conditional here would flip the
-                // Stack's child count on every keyboard toggle.
-                Positioned.fill(
-                  child: _StatusStripSlot(
-                    floating: true,
-                    state: state,
-                    buildStrip: _statusStrip,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          AnimatedBuilder(
-            animation: widget.gateway,
-            builder: (context, _) => _GatewayBanner(gateway: widget.gateway),
-          ),
-          // Status strip (goal/works/queue/interactions), no-keyboard
-          // variant: a plain intrinsic-height child so it never splits
-          // leftover space with the message list's Expanded (a permanent
-          // Flexible would shrink the strip below its intrinsic height on
-          // short viewports — visual change; see internal-task
-          // R2). While the IME is up the strip renders inside the Stack
-          // above; this slot must stay occupied (constant type, constant
-          // Column position) — letting the child disappear would shift every
-          // later Column child, force the composer's Element to remount on
-          // the first IME inset frame, drop the TextField focus and cancel
-          // the keyboard right after it started showing (2026-09-20 真机
-          // IME_ANIMATION_CANCEL 回归).
-          _StatusStripSlot(
-            floating: false,
-            state: state,
-            buildStrip: _statusStrip,
-          ),
-          if (_showSlash)
-            _SlashCommandBar(
-              query: _inputController.text,
-              items: _slashItems,
-              onSelect: (item) {
-                if (item.name == 'compact') {
-                  _inputController.text = '/compact';
-                  _send();
-                } else {
-                  _inputController.text = item.insert;
-                  _inputController.selection = TextSelection.collapsed(
-                    offset: _inputController.text.length,
-                  );
-                  setState(() => _showSlash = false);
-                }
-              },
-            ),
-          if (_progress != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-              child: Row(
-                children: [
-                  const SizedBox(
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(strokeWidth: 1.5),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    _progress!,
-                    style: ZType.caption.copyWith(color: ZInk.muted(context)),
+                  // Status strip while the IME is up: floats over the list
+                  // bottom instead of being a Column flex child. The loose
+                  // Flexible it used before (09-18 R2) split the remaining
+                  // height with the Expanded list 1:1 and RenderFlex never
+                  // redistributes what a loose child leaves unused — the free
+                  // space pooled at the Column tail, leaving a blank band the
+                  // height of the strip's unused share between the composer
+                  // and the keyboard (2026-09-20 真机报告). Anchored to the
+                  // bottom it shrink-wraps to min(intrinsic, stack height),
+                  // so the strip still scrolls when the banners overflow and
+                  // the composer stays pinned above the IME.
+                  // The Positioned.fill is unconditional — the slot inside
+                  // consults _KeyboardScope; a conditional here would flip the
+                  // Stack's child count on every keyboard toggle.
+                  Positioned.fill(
+                    child: _StatusStripSlot(
+                      floating: true,
+                      state: state,
+                      buildStrip: _statusStrip,
+                    ),
                   ),
                 ],
               ),
             ),
-          if (_pendingFiles.isNotEmpty)
-            _PendingFilesBar(
-              files: _pendingFiles,
-              uploadProgress: _uploadProgress,
-              onRemove: (i) => setState(() => _pendingFiles.removeAt(i)),
+            AnimatedBuilder(
+              animation: widget.gateway,
+              builder: (context, _) => _GatewayBanner(gateway: widget.gateway),
             ),
-          // Locally-queued replayable messages (3.12.3): sits directly
-          // above the composer like the official pendingCommands cards.
-          // Null queue (pre-3.12.3 desktop / not connected) renders nothing.
-          AnimatedBuilder(
-            animation: widget.gateway,
-            builder: (context, _) {
-              final replayable = widget.gateway.replayableQueue;
-              if (replayable == null) return const SizedBox.shrink();
-              return AnimatedBuilder(
-                animation: replayable,
-                builder: (context, _) => _ReplayableQueueBar(queue: replayable),
-              );
-            },
-          ),
-          AnimatedBuilder(
-            animation: (state == null)
-              ? widget.gateway
-              : Listenable.merge([state, widget.gateway]),
-            builder: (context, _) {
-              return _contentCol(
-                _InputBar(
-                  controller: _inputController,
-                  sending: _sending,
-                  hasAttachments: _pendingFiles.isNotEmpty,
-                  isDraft: _sessionId == null,
-                  state: state,
-                  prep: _prep,
-                  draftConfig: _draftConfig,
-                  gateway: widget.gateway,
-                  sessionId: _sessionId,
-                  feed: state == null ? null : _feed,
-                  subagentConfirmWindow: widget.turnFooterConfirmWindow,
-                  onSend: _send,
-                  onAttach: _pickFiles,
-                  onSkills: _openSkillsPicker,
-                  onModelSheet: _showModelSheet,
-                  onUsage: _showUsageSheet,
-                  onSubagents: _showSubagentSheet,
+            // Status strip (goal/works/queue/interactions), no-keyboard
+            // variant: a plain intrinsic-height child so it never splits
+            // leftover space with the message list's Expanded (a permanent
+            // Flexible would shrink the strip below its intrinsic height on
+            // short viewports — visual change; see internal-task
+            // R2). While the IME is up the strip renders inside the Stack
+            // above; this slot must stay occupied (constant type, constant
+            // Column position) — letting the child disappear would shift every
+            // later Column child, force the composer's Element to remount on
+            // the first IME inset frame, drop the TextField focus and cancel
+            // the keyboard right after it started showing (2026-09-20 真机
+            // IME_ANIMATION_CANCEL 回归).
+            _StatusStripSlot(
+              floating: false,
+              state: state,
+              buildStrip: _statusStrip,
+            ),
+            if (_showSlash)
+              _SlashCommandBar(
+                query: _inputController.text,
+                items: _slashItems,
+                onSelect: (item) {
+                  if (item.name == 'compact') {
+                    _inputController.text = '/compact';
+                    _send();
+                  } else {
+                    _inputController.text = item.insert;
+                    _inputController.selection = TextSelection.collapsed(
+                      offset: _inputController.text.length,
+                    );
+                    setState(() => _showSlash = false);
+                  }
+                },
+              ),
+            if (_progress != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                child: Row(
+                  children: [
+                    const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(strokeWidth: 1.5),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _progress!,
+                      style: ZType.caption.copyWith(color: ZInk.muted(context)),
+                    ),
+                  ],
                 ),
-                maxWidth: _kComposerColumnWidth,
-              );
-            },
-          ),
-        ],
+              ),
+            if (_pendingFiles.isNotEmpty)
+              _PendingFilesBar(
+                files: _pendingFiles,
+                uploadProgress: _uploadProgress,
+                onRemove: (i) => setState(() => _pendingFiles.removeAt(i)),
+              ),
+            // Locally-queued replayable messages (3.12.3): sits directly
+            // above the composer like the official pendingCommands cards.
+            // Null queue (pre-3.12.3 desktop / not connected) renders nothing.
+            AnimatedBuilder(
+              animation: widget.gateway,
+              builder: (context, _) {
+                final replayable = widget.gateway.replayableQueue;
+                if (replayable == null) return const SizedBox.shrink();
+                return AnimatedBuilder(
+                  animation: replayable,
+                  builder: (context, _) => _ReplayableQueueBar(queue: replayable),
+                );
+              },
+            ),
+            AnimatedBuilder(
+              animation: (state == null)
+                ? widget.gateway
+                : Listenable.merge([state, widget.gateway]),
+              builder: (context, _) {
+                return _contentCol(
+                  _InputBar(
+                    controller: _inputController,
+                    sending: _sending,
+                    hasAttachments: _pendingFiles.isNotEmpty,
+                    isDraft: _sessionId == null,
+                    state: state,
+                    prep: _prep,
+                    draftConfig: _draftConfig,
+                    gateway: widget.gateway,
+                    sessionId: _sessionId,
+                    feed: state == null ? null : _feed,
+                    subagentConfirmWindow: widget.turnFooterConfirmWindow,
+                    onSend: _send,
+                    onAttach: _pickFiles,
+                    onSkills: _openSkillsPicker,
+                    onModelSheet: _showModelSheet,
+                    onUsage: _showUsageSheet,
+                    onSubagents: _showSubagentSheet,
+                  ),
+                  maxWidth: _kComposerColumnWidth,
+                );
+              },
+            ),
+          ],
+        ),
       ),
     );
     return _KeyboardProbe(
@@ -2704,10 +2715,10 @@ class _ChatPageState extends State<ChatPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(
+                Icon(
                   Icons.phonelink_erase_outlined,
                   size: 44,
-                  color: ZColors.danger,
+                  color: ZInk.dangerTone(context),
                 ),
                 const SizedBox(height: 16),
                 Text(
@@ -3487,7 +3498,9 @@ class _RowWidget extends StatelessWidget {
     showModalBottomSheet(
       context: context,
       showDragHandle: true,
-      builder: (context) => SafeArea(
+      isScrollControlled: true,
+      builder: (context) => zSheetScaffold(
+        context,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -4226,9 +4239,9 @@ class _ToolCallTileState extends State<_ToolCallTile> {
     // stays here because it is theme-dependent.
     final color = switch (status) {
       'running' || 'inputStreaming' || 'pendingApproval' => ZColors.sky400,
-      'success' => ZColors.success,
-      'error' => ZColors.danger,
-      'cancelled' => ZColors.warning,
+      'success' => ZInk.successTone(context),
+      'error' => ZInk.dangerTone(context),
+      'cancelled' => ZInk.warningTone(context),
       _ => ZInk.faint(context),
     };
 
@@ -4267,7 +4280,7 @@ class _ToolCallTileState extends State<_ToolCallTile> {
             padding: const EdgeInsets.only(left: 8),
             child: Text(
               '+${summary.additions}',
-              style: ZType.caption.copyWith(color: ZColors.success),
+              style: ZType.caption.copyWith(color: ZInk.successTone(context)),
             ),
           ),
         if (summary.deletions > 0)
@@ -4275,7 +4288,7 @@ class _ToolCallTileState extends State<_ToolCallTile> {
             padding: const EdgeInsets.only(left: 4),
             child: Text(
               '-${summary.deletions}',
-              style: ZType.caption.copyWith(color: ZColors.danger),
+              style: ZType.caption.copyWith(color: ZInk.dangerTone(context)),
             ),
           ),
         if (canOpen)
@@ -4708,12 +4721,12 @@ class _FileChangesBar extends StatelessWidget {
                   if (adds > 0)
                     TextSpan(
                       text: '  +$adds',
-                      style: const TextStyle(color: ZColors.success),
+                      style: TextStyle(color: ZInk.successTone(context)),
                     ),
                   if (dels > 0)
                     TextSpan(
                       text: '  -$dels',
-                      style: const TextStyle(color: ZColors.danger),
+                      style: TextStyle(color: ZInk.dangerTone(context)),
                     ),
                 ],
               ),
@@ -4785,7 +4798,8 @@ class _FileChangesBar extends StatelessWidget {
                         padding: const EdgeInsets.only(bottom: 8),
                         child: Text(
                           tr(dialogCtx, 'chat.rewind.cannotApply'),
-                          style: ZType.body.copyWith(color: ZColors.danger),
+                          style: ZType.body.copyWith(
+                              color: ZInk.dangerTone(dialogCtx)),
                         ),
                       ),
                     for (final f in files.take(12))
@@ -4889,12 +4903,12 @@ class _TimelineMarkerWidget extends StatelessWidget {
           '${marker['fromModel'] ?? ''}',
           '${marker['toModel'] ?? ''}',
         ]),
-        ZColors.warning,
+        ZInk.warningTone(context),
       ),
       'goalSet' => (
         Icons.flag_outlined,
         trP(context, 'chat.marker.goalSet', ['${marker['objective'] ?? ''}']),
-        ZColors.success,
+        ZInk.successTone(context),
       ),
       'goalVerify' => (
         Icons.fact_check_outlined,
@@ -4902,7 +4916,7 @@ class _TimelineMarkerWidget extends StatelessWidget {
           '${marker['iteration'] ?? '?'}',
           '${marker['outcome'] ?? ''}',
         ]),
-        ZColors.success,
+        ZInk.successTone(context),
       ),
       'retryNotice' => (
         Icons.refresh,
@@ -4910,7 +4924,7 @@ class _TimelineMarkerWidget extends StatelessWidget {
           '${marker['attempt'] ?? '?'}',
           '${marker['reasonCode'] ?? ''}',
         ]),
-        ZColors.warning,
+        ZInk.warningTone(context),
       ),
       'checkpointRestored' => (
         Icons.restore,
@@ -5083,7 +5097,8 @@ class _GoalBanner extends StatelessWidget {
       ),
       child: Row(
         children: [
-          const Icon(Icons.flag_outlined, size: 14, color: ZColors.success),
+          Icon(Icons.flag_outlined,
+              size: 14, color: ZInk.successTone(context)),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -5096,7 +5111,8 @@ class _GoalBanner extends StatelessWidget {
           if (status.isNotEmpty)
             Text(
               status,
-              style: ZType.caption.copyWith(color: ZColors.success),
+              style:
+                  ZType.caption.copyWith(color: ZInk.successTone(context)),
             ),
         ],
       ),
@@ -5633,17 +5649,17 @@ class _SubagentSheetState extends State<_SubagentSheet> {
     final (icon, color, wordKey) = switch (status) {
       'success' => (
           Icons.check,
-          ZColors.success,
+          ZInk.successTone(context),
           'chat.subagent.status.success',
         ),
       'error' || 'failed' || 'denied' => (
           Icons.close,
-          ZColors.danger,
+          ZInk.dangerTone(context),
           'chat.subagent.status.failed',
         ),
       _ => (
           Icons.block,
-          ZColors.warning,
+          ZInk.warningTone(context),
           'chat.subagentSheet.status.stopped',
         ),
     };
@@ -5731,7 +5747,7 @@ class _SheetActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = danger ? ZColors.danger : ZInk.soft(context);
+    final color = danger ? ZInk.dangerTone(context) : ZInk.soft(context);
     return OutlinedButton(
       style: OutlinedButton.styleFrom(
         visualDensity: VisualDensity.compact,
@@ -6241,7 +6257,7 @@ class _ReplayableQueueBar extends StatelessWidget {
                               color:
                                   items[i].state ==
                                       ReplayableQueueItemState.failed
-                                  ? ZColors.danger
+                                  ? ZInk.dangerTone(context)
                                   : ZInk.muted(context),
                             ),
                           ),
@@ -6472,10 +6488,10 @@ class _InteractionCardState extends State<_InteractionCard> {
         children: [
           Row(
             children: [
-              const Icon(
+              Icon(
                 Icons.privacy_tip_outlined,
                 size: 14,
-                color: ZColors.warning,
+                color: ZInk.warningTone(context),
               ),
               const SizedBox(width: 6),
               Expanded(
@@ -6613,7 +6629,11 @@ class _InteractionCardState extends State<_InteractionCard> {
 }
 
 /// trustState values carried by the workspaceHookReview interaction items
-/// (3.12.3 wire enum) with a badge color each.
+/// (3.12.3 wire enum) with a badge color each. The colors below are base
+/// (dark) references only — [_trustBadge] resolves every state through its
+/// ZInk tone slot at the use site so the label stays readable in light mode;
+/// the key set here must stay complete — the badge label lookup relies on
+/// [containsKey].
 const _hookTrustStates = <String, Color>{
   'not_applicable': ZColors.neutral500,
   'pending_trust': ZColors.warning,
@@ -6690,10 +6710,10 @@ class _HookReviewCardState extends State<_HookReviewCard> {
         children: [
           Row(
             children: [
-              const Icon(
+              Icon(
                 Icons.fact_check_outlined,
                 size: 14,
-                color: ZColors.warning,
+                color: ZInk.warningTone(context),
               ),
               const SizedBox(width: 6),
               Expanded(
@@ -6832,7 +6852,13 @@ class _HookReviewItem extends StatelessWidget {
 
   Widget _trustBadge(BuildContext context, String trustState) {
     if (trustState.isEmpty) return const SizedBox.shrink();
-    final color = _hookTrustStates[trustState] ?? ZColors.neutral500;
+    final color = switch (trustState) {
+      'blocked_untrusted' || 'blocked_policy' || 'revoked' =>
+        ZInk.dangerTone(context),
+      'pending_trust' || 'stale_digest' => ZInk.warningTone(context),
+      'trusted_persistent' => ZInk.successTone(context),
+      _ => _hookTrustStates[trustState] ?? ZColors.neutral500,
+    };
     // Known enums render their localized label; unknown ones fall back to
     // the raw wire value instead of a broken tr key.
     final label = _hookTrustStates.containsKey(trustState)
@@ -8169,29 +8195,36 @@ class _JsonSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     const encoder = JsonEncoder.withIndent('  ');
     return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-            horizontal: ZSpacing.screen, vertical: 20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              title,
-              style: ZType.heading,
-            ),
-            const SizedBox(height: 12),
-            Flexible(
-              child: SingleChildScrollView(
-                child: SelectableText(
-                  data == null
-                      ? tr(context, 'chat.json.empty')
-                      : encoder.convert(data),
-                  style: ZType.caption.copyWith(fontFamily: 'monospace'),
+      // Height cap so the sheet never grows past a readable strip even when
+      // opened scroll-controlled (mirrors _UsageSheet's 0.85 idiom, tighter).
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+              horizontal: ZSpacing.screen, vertical: 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: ZType.heading,
+              ),
+              const SizedBox(height: 12),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    data == null
+                        ? tr(context, 'chat.json.empty')
+                        : encoder.convert(data),
+                    style: ZType.caption.copyWith(fontFamily: 'monospace'),
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -8351,10 +8384,10 @@ class _SkillsPickerSheet extends StatelessWidget {
                     for (final s in list)
                       ListTile(
                         dense: true,
-                        leading: const Icon(
+                        leading: Icon(
                           Icons.auto_awesome_outlined,
                           size: 18,
-                          color: ZColors.warning,
+                          color: ZInk.warningTone(context),
                         ),
                         title: Text(
                           '\$${s.name}',
@@ -8463,6 +8496,10 @@ class _InputBarState extends State<_InputBar> {
     if (mounted) setState(() {});
   }
 
+  /// Short-viewport toggle: the tool row starts collapsed (landscape phones
+  /// / folding half-open) and the expand button reveals it temporarily.
+  bool _toolsExpanded = false;
+
   bool get _hasInput =>
       widget.controller.text.trim().isNotEmpty || widget.hasAttachments;
 
@@ -8564,7 +8601,18 @@ class _InputBarState extends State<_InputBar> {
     final queued = state?.queueItems.isNotEmpty ?? false;
     // Official composer: icon-only buttons below sm (640), icon+label above.
     final wide = MediaQuery.sizeOf(context).width >= 640;
+    // Short viewport (landscape phones, folding half-open; portrait phones
+    // are ~844 tall and never trigger): collapse the tool row into an
+    // expand toggle so the input line keeps the scarce vertical room.
+    final short = MediaQuery.heightOf(context) < 480;
+    final toolsVisible = !short || _toolsExpanded;
+    // Horizontal insets are consumed once by the body-level SafeArea above
+    // (aligned message flow and composer); this one only keeps its bottom
+    // gesture-bar duty.
     return SafeArea(
+      left: false,
+      right: false,
+      top: false,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
         child: Container(
@@ -8596,41 +8644,69 @@ class _InputBarState extends State<_InputBar> {
                     horizontal: 10,
                     vertical: 8,
                   ),
+                  // Short viewports: the collapse toggle lives here instead
+                  // of a dedicated toolbar row stealing scarce input height
+                  // (sole entry when collapsed, collapse entry when shown).
+                  suffixIcon: short
+                      ? IconButton(
+                          icon: Icon(
+                            _toolsExpanded
+                                ? Icons.unfold_less
+                                : Icons.unfold_more,
+                            size: 20,
+                            color: ZInk.muted(context),
+                          ),
+                          tooltip: tr(
+                            context,
+                            _toolsExpanded
+                                ? 'chat.input.toolsCollapse'
+                                : 'chat.input.toolsExpand',
+                          ),
+                          onPressed: () => setState(
+                            () => _toolsExpanded = !_toolsExpanded,
+                          ),
+                        )
+                      : null,
                 ),
                 textInputAction: TextInputAction.newline,
               ),
               Row(
                 children: [
-                  IconButton(
-                    icon: Icon(
-                      Icons.add_circle_outline,
-                      size: 20,
-                      color: ZInk.muted(context),
+                  // Short viewports keep the tools collapsed (toggle moved
+                  // into the TextField suffixIcon), so the whole left cluster
+                  // is gated on visibility; the send cluster stays put.
+                  if (toolsVisible) ...[
+                    IconButton(
+                      icon: Icon(
+                        Icons.add_circle_outline,
+                        size: 20,
+                        color: ZInk.muted(context),
+                      ),
+                      tooltip: tr(context, 'chat.input.attach'),
+                      onPressed: sending ? null : onAttach,
                     ),
-                    tooltip: tr(context, 'chat.input.attach'),
-                    onPressed: sending ? null : onAttach,
-                  ),
-                  _ControlChip(
-                    label: tr(context, 'chat.mode.$_modeValue'),
-                    icon: Icons.tune,
-                    onTap: () => _pickMode(context),
-                    showLabel: wide,
-                  ),
-                  // Subagent management entry (official composer count
-                  // button parity, subagents-only by design). Sits right of
-                  // the mode chip; its appearance never shifts the other
-                  // controls (Spacer keeps the right cluster in place).
-                  if (state != null && feed != null && onSubagents != null)
-                    _SubagentPill(
-                      state: state!,
-                      feed: feed!,
-                      confirmWindow: widget.subagentConfirmWindow,
-                      onTap: onSubagents!,
+                    _ControlChip(
+                      label: tr(context, 'chat.mode.$_modeValue'),
+                      icon: Icons.tune,
+                      onTap: () => _pickMode(context),
+                      showLabel: wide,
                     ),
+                    // Subagent management entry (official composer count
+                    // button parity, subagents-only by design). Sits right of
+                    // the mode chip; its appearance never shifts the other
+                    // controls (Spacer keeps the right cluster in place).
+                    if (state != null && feed != null && onSubagents != null)
+                      _SubagentPill(
+                        state: state!,
+                        feed: feed!,
+                        confirmWindow: widget.subagentConfirmWindow,
+                        onTap: onSubagents!,
+                      ),
+                  ],
                   const Spacer(),
-                  if (_usageRatio != null)
+                  if (toolsVisible && _usageRatio != null)
                     _UsageRing(ratio: _usageRatio!, onTap: onUsage),
-                  if (_modelPickerVisible)
+                  if (toolsVisible && _modelPickerVisible)
                     _ControlChip(
                       label: _modelLabel.isEmpty
                           ? tr(context, 'chat.composer.modelPlaceholder')
@@ -8639,7 +8715,7 @@ class _InputBarState extends State<_InputBar> {
                       onTap: onModelSheet,
                       showLabel: wide,
                     ),
-                  if (_thoughtPickerVisible)
+                  if (toolsVisible && _thoughtPickerVisible)
                     _ControlChip(
                       label: _thoughtLabel.isEmpty
                           ? tr(context, 'chat.composer.thoughtPlaceholder')
@@ -9113,7 +9189,7 @@ class _StopButton extends StatelessWidget {
                 borderRadius: BorderRadius.circular(ZRadius.mini),
               ),
               child: Center(
-                child: Icon(Icons.stop, color: ZColors.danger, size: 20),
+                child: Icon(Icons.stop, color: ZInk.dangerTone(context), size: 20),
               ),
             ),
           ),

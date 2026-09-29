@@ -268,7 +268,12 @@ class _OffPeakPageState extends State<OffPeakPage>
           }
           final view =
               _tabs.index == 0 ? _settingsView(context) : _historyView(context);
-          return RefreshIndicator(onRefresh: _load, child: view);
+          return Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: zContentMaxWidth),
+              child: RefreshIndicator(onRefresh: _load, child: view),
+            ),
+          );
         },
       ),
     );
@@ -278,7 +283,7 @@ class _OffPeakPageState extends State<OffPeakPage>
   Widget _settingsView(BuildContext context) {
     final active = _tasks.where((t) => !t.terminal).toList();
     return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
+      padding: zScreenPadding(context, bottom: 96),
       children: [
         if ((_status?.entitled ?? true) && active.isEmpty && !_bannerDismissed)
           _newTaskBanner(context),
@@ -287,7 +292,7 @@ class _OffPeakPageState extends State<OffPeakPage>
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Text(trP(context, 'op.loadFailed', [_error!]),
-                style: ZType.sub.copyWith(color: ZColors.danger)),
+                style: ZType.sub.copyWith(color: ZInk.dangerTone(context))),
           ),
         if (active.isNotEmpty)
           for (final t in active) ...[
@@ -313,7 +318,7 @@ class _OffPeakPageState extends State<OffPeakPage>
   Widget _historyView(BuildContext context) {
     final history = _tasks.where((t) => t.terminal).toList();
     return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
+      padding: zScreenPadding(context, bottom: 96),
       children: [
         if (history.isNotEmpty)
           for (final t in history) ...[
@@ -391,8 +396,8 @@ class _OffPeakPageState extends State<OffPeakPage>
             children: [
               Row(
                 children: [
-                  const Icon(Icons.lock_outline,
-                      size: 18, color: ZColors.danger),
+                  Icon(Icons.lock_outline,
+                      size: 18, color: ZInk.dangerTone(context)),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(text,
@@ -450,8 +455,8 @@ class _OffPeakPageState extends State<OffPeakPage>
           tr(context, 'op.take.unavailable'));
     }
     if (status.supported != true) {
-      return _takeNumberCard(context, Icons.lock_outline, ZColors.danger,
-          tr(context, 'op.take.planOnly'));
+      return _takeNumberCard(context, Icons.lock_outline,
+          ZInk.dangerTone(context), tr(context, 'op.take.planOnly'));
     }
     if (status.canTakeNumber != true) {
       final remainingMs = (status.nextTakeAtMs ?? 0) -
@@ -459,7 +464,7 @@ class _OffPeakPageState extends State<OffPeakPage>
       return _takeNumberCardSpans(
         context,
         Icons.pending_outlined,
-        ZColors.warning,
+        ZInk.warningTone(context),
         _emphasizedSubstitution(
             'op.take.limitReached', formatTakeRemaining(context, remainingMs)),
       );
@@ -467,7 +472,7 @@ class _OffPeakPageState extends State<OffPeakPage>
     return _takeNumberCardSpans(
         context,
         Icons.check_circle_outline,
-        ZColors.success,
+        ZInk.successTone(context),
         _emphasizedHead(tr(context, 'op.take.available')));
   }
 
@@ -638,8 +643,8 @@ class _OffPeakPageState extends State<OffPeakPage>
                         task.error!,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style:
-                            ZType.caption.copyWith(color: ZColors.danger),
+                        style: ZType.caption
+                            .copyWith(color: ZInk.dangerTone(context)),
                       ),
                     ),
                   if (canViewResult)
@@ -827,10 +832,11 @@ class _OffPeakPageState extends State<OffPeakPage>
 
   (String, Color) _statusVisual(OffPeakTask task) => switch (task.status) {
         'queued' => (tr(context, 'op.status.queued'), ZColors.sky500),
-        'running' => (tr(context, 'op.status.running'), ZColors.success),
+        'running' => (tr(context, 'op.status.running'), ZInk.successTone(context)),
         'paused' => (tr(context, 'op.status.paused'), ZColors.neutral500),
-        'completed' => (tr(context, 'op.status.completed'), ZColors.success),
-        'failed' => (tr(context, 'op.status.failed'), ZColors.danger),
+        'completed' =>
+          (tr(context, 'op.status.completed'), ZInk.successTone(context)),
+        'failed' => (tr(context, 'op.status.failed'), ZInk.dangerTone(context)),
         'cancelled' => (tr(context, 'op.status.cancelled'), ZColors.neutral500),
         _ => (task.status, ZColors.neutral400),
       };
@@ -1262,7 +1268,7 @@ class _OffPeakSheetState extends State<OffPeakSheet> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Icon(Icons.warning_amber_outlined,
-                        size: 14, color: ZColors.warning),
+                        size: 14, color: ZInk.warningTone(context)),
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(tr(context, 'op.peakWarning'),

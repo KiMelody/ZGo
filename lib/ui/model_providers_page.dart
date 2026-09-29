@@ -7,6 +7,7 @@ import 'provider_settings_page.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 import 'widgets/dropdown_field.dart';
+import 'widgets/sheet_scaffold.dart';
 
 /// Model settings entry: routes on the desktop version (PRD 09-28
 /// providers-revival). ≥3.14 serves the provider-settings channel — the
@@ -275,7 +276,10 @@ class _LegacyModelProvidersPageState extends State<_LegacyModelProvidersPage> {
     final added = await showModalBottomSheet<Map<String, dynamic>>(
       context: context,
       isScrollControlled: true,
-      builder: (context) => _AddProviderSheet(session: widget.session),
+      builder: (context) => zSheetScaffold(
+        context,
+        child: _AddProviderSheet(session: widget.session),
+      ),
     );
     if (added == null) return;
     try {
@@ -311,76 +315,83 @@ class _LegacyModelProvidersPageState extends State<_LegacyModelProvidersPage> {
                   : Center(
                       child: Text(
                           trP(context, 'providers.loadFailed', [_error!])))
-              : RefreshIndicator(
-                  onRefresh: _load,
-                  child: ListView.separated(
-                    padding: const EdgeInsets.all(16),
-                    itemCount: _providers.length,
-                    separatorBuilder: (context, index) => const SizedBox(height: 8),
-                    itemBuilder: (context, index) {
-                      final p = _providers[index];
-                      final enabled = p['enabled'] == true;
-                      final endpoints = p['endpoints'];
-                      final baseUrl = endpoints is Map
-                          ? '${endpoints['baseURL'] ?? ''}'
-                          : '';
-                      final models =
-                          p['models'] is List ? p['models'] as List : [];
-                      final disabledReason =
-                          p['systemDisabledReason'] as String?;
-                      return Card(
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 10),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      '${p['name'] ?? p['id']}',
-                                      style: ZType.bodyStrong,
+              : Center(
+                  child: ConstrainedBox(
+                    constraints:
+                        const BoxConstraints(maxWidth: zContentMaxWidth),
+                    child: RefreshIndicator(
+                      onRefresh: _load,
+                      child: ListView.separated(
+                        padding: zScreenPadding(context, bottom: 16),
+                        itemCount: _providers.length,
+                        separatorBuilder: (context, index) =>
+                            const SizedBox(height: 8),
+                        itemBuilder: (context, index) {
+                          final p = _providers[index];
+                          final enabled = p['enabled'] == true;
+                          final endpoints = p['endpoints'];
+                          final baseUrl = endpoints is Map
+                              ? '${endpoints['baseURL'] ?? ''}'
+                              : '';
+                          final models =
+                              p['models'] is List ? p['models'] as List : [];
+                          final disabledReason =
+                              p['systemDisabledReason'] as String?;
+                          return Card(
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 10),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          '${p['name'] ?? p['id']}',
+                                          style: ZType.bodyStrong,
+                                        ),
+                                        const SizedBox(height: 3),
+                                        Text(
+                                          [
+                                            '${p['apiFormat'] ?? ''}',
+                                            if (models.isNotEmpty)
+                                              trP(context, 'providers.modelsCount',
+                                                  ['${models.length}']),
+                                            baseUrl,
+                                            if (!enabled &&
+                                                disabledReason != null)
+                                              trP(context, 'providers.disabled',
+                                                  [disabledReason]),
+                                          ]
+                                              .where((s) => s.isNotEmpty)
+                                              .join(' · '),
+                                          style: ZType.caption.copyWith(
+                                              color: ZInk.faint(context),
+                                          ),
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ],
                                     ),
-                                    const SizedBox(height: 3),
-                                    Text(
-                                      [
-                                        '${p['apiFormat'] ?? ''}',
-                                        if (models.isNotEmpty)
-                                          trP(context, 'providers.modelsCount',
-                                              ['${models.length}']),
-                                        baseUrl,
-                                        if (!enabled &&
-                                            disabledReason != null)
-                                          trP(context, 'providers.disabled',
-                                              [disabledReason]),
-                                      ]
-                                          .where((s) => s.isNotEmpty)
-                                          .join(' · '),
-                                      style: ZType.caption.copyWith(
-                                          color: ZInk.faint(context),
-                                      ),
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ],
-                                ),
+                                  ),
+                                  Switch(
+                                    value: enabled,
+                                    onChanged: (v) => _toggle(p, v),
+                                  ),
+                                  IconButton(
+                                    icon: Icon(Icons.delete_outline,
+                                        size: 18, color: ZInk.faint(context)),
+                                    onPressed: () => _delete(p),
+                                  ),
+                                ],
                               ),
-                              Switch(
-                                value: enabled,
-                                onChanged: (v) => _toggle(p, v),
-                              ),
-                              IconButton(
-                                icon: Icon(Icons.delete_outline,
-                                    size: 18, color: ZInk.faint(context)),
-                                onPressed: () => _delete(p),
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
+                            ),
+                          );
+                        },
+                      ),
+                    ),
                   ),
                 ),
     );
@@ -514,8 +525,8 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: EdgeInsets.fromLTRB(ZSpacing.screen, 20, ZSpacing.screen,
-          20 + MediaQuery.of(context).viewInsets.bottom),
+      padding: const EdgeInsets.fromLTRB(ZSpacing.screen, 20, ZSpacing.screen,
+          20),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
