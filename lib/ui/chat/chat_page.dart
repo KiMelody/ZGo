@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
     show RenderRepaintBoundary, ScrollCacheExtent;
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../protocol/channel_client.dart' show isChannelLevelError;
 import '../../protocol/conversation.dart';
@@ -22,6 +23,8 @@ import '../theme.dart';
 import '../ui_settings.dart';
 import '../widgets/sheet_scaffold.dart';
 import 'diff_view.dart';
+import 'file_preview_page.dart';
+import 'image_viewer_page.dart';
 import 'markdown_view.dart';
 import 'goal_panel.dart';
 import 'jump_to_bottom_button.dart';
@@ -98,6 +101,198 @@ class _PendingFile {
   _PendingFile(this.fileName, this.mime, this.bytes);
 }
 
+/// Workspace-file preview plumbing for one chat page (design
+/// 09-29-file-preview §4.4/§5): the markdown image resolver with a
+/// session-scoped LRU (re-rendered rows must not re-fetch), the extension
+/// dispatch into the preview surfaces, the markdown link split (http(s) →
+/// system browser, scheme-less local path → dispatch) and the read
+/// callbacks the HTML preview page assembles with. Paths resolve against
+/// the chat's active workspace ([ChatGateway.workspacePath]); without one
+/// the resolver returns null and the dispatch stays inert.
+class _ChatPreview {
+  _ChatPreview(this._gateway);
+
+  final ChatGateway _gateway;
+
+  /// Insertion-ordered LRU (re-inserted on hit); null results are cached
+  /// too — a missing file stays a placeholder without hammering the
+  /// desktop on every re-render.
+  final Map<String, Uint8List?> _imageCache = {};
+  static const _imageCacheCap = 32;
+
+  /// In-flight fetches: simultaneously-mounted widgets for one path (a
+  /// markdown answer with the same image twice) share a single RPC.
+  final Map<String, Future<Uint8List?>> _pending = {};
+
+  /// Per-extension dispatch caps (design §4.4): raster images open the
+  /// fullscreen viewer, html/htm the dual-view preview page; everything
+  /// else (svg/md/txt…, PRD non-goals) stays inert.
+  static const _imageExts = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'};
+
+  /// Whether [path] opens a preview surface at all — entry points gate
+  /// their tap affordances on this so nothing renders as a dead link.
+  static bool dispatchable(String path) {
+    final ext = _extOf(path);
+    return _imageExts.contains(ext) || ext == 'html' || ext == 'htm';
+  }
+
+  /// Fallback mimes for data URLs when the desktop ships no mediaType.
+  static const _mimeByExt = {
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'gif': 'image/gif',
+    'webp': 'image/webp',
+    'bmp': 'image/bmp',
+    'ico': 'image/x-icon',
+    'woff': 'font/woff',
+    'woff2': 'font/woff2',
+    'ttf': 'font/ttf',
+    'otf': 'font/otf',
+  };
+
+  /// Guard value aligned with the assembler's per-file cap (html_assembly).
+  static const _maxTextBytes = 2 * 1024 * 1024;
+
+  String? get _workspace {
+    final ws = _gateway.workspacePath;
+    return (ws == null || ws.isEmpty) ? null : ws;
+  }
+
+  static String _baseName(String path) =>
+      path.split(RegExp(r'[\\/]')).last;
+
+  /// The desktop resolves relative paths against ITS OWN process CWD, not
+  /// the workspace (live-certified, spec §1.2) — scheme-less relative
+  /// references from markdown must be joined onto the workspace before they
+  /// reach the wire.
+  static String _absolute(String ws, String path) {
+    final p = path.replaceAll('\\', '/');
+    if (p.startsWith('/') ||
+        p.startsWith('//') ||
+        RegExp(r'^[A-Za-z]:/').hasMatch(p)) {
+      return p;
+    }
+    final base = ws.replaceAll('\\', '/');
+    return base.endsWith('/') ? '$base$p' : '$base/$p';
+  }
+
+  static String _extOf(String path) {
+    final i = path.lastIndexOf('.');
+    return i < 0 ? '' : path.substring(i + 1).toLowerCase();
+  }
+
+  /// Markdown image resolver (design §4.3). Null on any failure — the
+  /// markdown side renders the placeholder row.
+  Future<Uint8List?> resolveImage(String path) async {
+    final ws = _workspace;
+    if (ws == null) return null;
+    final abs = _absolute(ws, path);
+    if (_imageCache.containsKey(abs)) return _imageCache[abs];
+    final future = _pending.putIfAbsent(abs, () => _fetchImage(ws, abs));
+    try {
+      return await future;
+    } finally {
+      _pending.remove(abs);
+    }
+  }
+
+  Future<Uint8List?> _fetchImage(String ws, String path) async {
+    try {
+      final res = await _gateway.fileReadMedia(ws, path);
+      return _remember(path, res.bytes);
+    } catch (_) {
+      return _remember(path, null);
+    }
+  }
+
+  Uint8List? _remember(String path, Uint8List? bytes) {
+    _imageCache.remove(path);
+    _imageCache[path] = bytes;
+    while (_imageCache.length > _imageCacheCap) {
+      _imageCache.remove(_imageCache.keys.first);
+    }
+    return bytes;
+  }
+
+  /// Entry dispatch (design §4.4): images → fullscreen viewer (bytes
+  /// fetched through the cache), html/htm → the preview page, other
+  /// extensions → no-op.
+  Future<void> open(BuildContext context, String path) async {
+    final ws = _workspace;
+    if (ws == null) return;
+    final ext = _extOf(path);
+    if (_imageExts.contains(ext)) {
+      final bytes = await resolveImage(path);
+      if (!context.mounted) return;
+      if (bytes == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              trP(context, 'chat.img.loadFailed', [_baseName(path)]),
+            ),
+          ),
+        );
+        return;
+      }
+      Navigator.of(context).push(
+        zRoute((_) => ImageViewerPage(bytes: bytes, fileName: path)),
+      );
+    } else if (ext == 'html' || ext == 'htm') {
+      Navigator.of(context).push(
+        zRoute(
+          (_) => FilePreviewPage(
+            path: _absolute(ws, path),
+            readText: (p) => _readText(ws, p),
+            readMediaDataUrl: (p) => _readMediaDataUrl(ws, p),
+          ),
+        ),
+      );
+    }
+  }
+
+  /// Markdown link split (design §4.4): http(s) → system browser
+  /// (externalApplication), scheme-less local path → [open]; other schemes
+  /// (data:, file:, mailto:…) stay inert. Windows drive paths (`C:\…`)
+  /// parse as a single-letter scheme, hence the length check.
+  void openLink(BuildContext context, String href) {
+    final normalized = href.replaceAll('\\', '/');
+    final uri = Uri.tryParse(normalized);
+    if (uri == null) return;
+    if (uri.scheme == 'http' || uri.scheme == 'https') {
+      launchUrl(uri, mode: LaunchMode.externalApplication);
+    } else if (uri.scheme.isEmpty || uri.scheme.length == 1) {
+      open(context, normalized);
+    }
+  }
+
+  Future<String?> _readText(String ws, String path) async {
+    try {
+      final res = await _gateway.fileReadText(
+        ws,
+        _absolute(ws, path),
+        offset: 0,
+        length: _maxTextBytes,
+      );
+      return res.text;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<String?> _readMediaDataUrl(String ws, String path) async {
+    try {
+      final abs = _absolute(ws, path);
+      final res = await _gateway.fileReadMedia(ws, abs);
+      final mime = res.mediaType ?? _mimeByExt[_extOf(abs)];
+      return 'data:${mime ?? 'application/octet-stream'};base64,'
+          '${base64Encode(res.bytes)}';
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
 /// A measured reading anchor for the history prepend compensation (R3): the
 /// turn group identified by [key] sat [dy] px from the viewport edge it is
 /// anchored against (top for reading, bottom for the pinned state — unused
@@ -128,6 +323,10 @@ class _ChatPageState extends State<ChatPage> {
   ChatHandle? _handle;
   final _inputController = TextEditingController();
   final _scrollController = ScrollController();
+
+  /// Workspace file-preview plumbing (markdown images, entry dispatch) —
+  /// one per page so the image cache spans the whole session view.
+  late final _preview = _ChatPreview(widget.gateway);
 
   /// Marks the message list subtree for the history anchor-compensation
   /// measurements (see [_measureAnchor] / [_compensateAnchor]).
@@ -2229,6 +2428,7 @@ class _ChatPageState extends State<ChatPage> {
                                 onAction: _run,
                                 state: state,
                                 feed: _feed,
+                                preview: _preview,
                                 confirmWindow: widget.turnFooterConfirmWindow,
                               ),
                             ],
@@ -3234,6 +3434,10 @@ class _TurnGroupWidget extends StatefulWidget {
   final ConversationState state;
   final SubagentFeed feed;
 
+  /// Workspace file-preview plumbing (markdown images, tappable file
+  /// entries) — shared across all turn groups of the page.
+  final _ChatPreview preview;
+
   /// Terminal-footer confirm window (see [_TurnGroupWidgetState]).
   final Duration confirmWindow;
 
@@ -3245,6 +3449,7 @@ class _TurnGroupWidget extends StatefulWidget {
     required this.onAction,
     required this.state,
     required this.feed,
+    required this.preview,
     required this.confirmWindow,
   });
 
@@ -3364,6 +3569,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
           sessionId: sessionId,
           onAction: onAction,
           state: widget.state,
+          preview: widget.preview,
           feed: widget.feed,
         ),
       );
@@ -3404,6 +3610,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
             sessionId: sessionId,
             onAction: onAction,
             state: widget.state,
+            preview: widget.preview,
             feed: widget.feed,
             turnFeedbackLocked: _feedbackLocked,
           ),
@@ -3419,6 +3626,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
             sessionId: sessionId,
             onAction: onAction,
             state: widget.state,
+            preview: widget.preview,
             feed: widget.feed,
           ),
         );
@@ -3432,6 +3640,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
             sessionId: sessionId,
             onAction: onAction,
             state: widget.state,
+            preview: widget.preview,
             feed: widget.feed,
           ),
         );
@@ -3470,6 +3679,9 @@ class _RowWidget extends StatelessWidget {
   /// Shared child-session subscription pool (Agent tile expansion).
   final SubagentFeed? feed;
 
+  /// Workspace file-preview plumbing (markdown images, tappable entries).
+  final _ChatPreview preview;
+
   /// Whether the turn's feedback row stays hidden (running turn or terminal
   /// confirm window — see [_TurnGroupWidgetState._feedbackLocked]).
   final bool turnFeedbackLocked;
@@ -3481,6 +3693,7 @@ class _RowWidget extends StatelessWidget {
     required this.sessionId,
     required this.onAction,
     required this.state,
+    required this.preview,
     this.showFeedback = true,
     this.feed,
     this.turnFeedbackLocked = false,
@@ -3620,13 +3833,26 @@ class _RowWidget extends StatelessWidget {
     try {
       final changes = await gateway.conversationCommands.fileChanges(sessionId, target: _target);
       if (!context.mounted) return;
+      // Defensive parse → tappable file rows (design §4.4); anything not
+      // file-row-shaped falls back to the raw JSON sheet (never worse than
+      // before).
+      final entries = parseFileChanges(changes);
+      // Embedded/dual-pane contract: sheets stay on the local navigator
+      // (chat-conventions §6 — root-navigator sheets render off-pane).
       showModalBottomSheet(
         context: context,
         showDragHandle: true,
-        builder: (context) => _JsonSheet(
-          title: tr(context, 'chat.action.fileChanges'),
-          data: changes,
-        ),
+        useRootNavigator: false,
+        builder: (context) => entries == null
+            ? _JsonSheet(
+                title: tr(context, 'chat.action.fileChanges'),
+                data: changes,
+              )
+            : _FileChangesSheet(
+                title: tr(context, 'chat.action.fileChanges'),
+                entries: entries,
+                preview: preview,
+              ),
       );
     } catch (e) {
       debugPrint('[chat] fileChanges: $e');
@@ -3657,6 +3883,7 @@ class _RowWidget extends StatelessWidget {
         gateway: gateway,
         sessionId: sessionId,
         state: state,
+        preview: preview,
         showFeedback: showFeedback,
         turnFeedbackLocked: turnFeedbackLocked,
       ),
@@ -3666,6 +3893,7 @@ class _RowWidget extends StatelessWidget {
       ),
       'toolCall' => _ToolCallTile(
         row: row,
+        preview: preview,
         gateway: gateway,
         sessionId: sessionId,
         // Agent rows drill into the subagent's child-session detail page.
@@ -3985,9 +4213,15 @@ class _AttachmentViewState extends State<_AttachmentView> {
       // Gallery rhythm: consecutive image attachments in one bubble need a
       // clear seam (user feedback: 6px read as "glued together").
       padding: const EdgeInsets.only(bottom: 12),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(ZRadius.field),
-        child: Image.memory(_imageBytes!, width: 220, fit: BoxFit.cover),
+      child: InkWell(
+        onTap: () => Navigator.of(context).push(
+          zRoute((_) =>
+              ImageViewerPage(bytes: _imageBytes!, fileName: fileName)),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(ZRadius.field),
+          child: Image.memory(_imageBytes!, width: 220, fit: BoxFit.cover),
+        ),
       ),
     );
   }
@@ -4002,6 +4236,9 @@ class _AssistantBubble extends StatelessWidget {
   final ConversationState state;
   final bool showFeedback;
 
+  /// Workspace file-preview plumbing (markdown images + link dispatch).
+  final _ChatPreview preview;
+
   /// Whether the turn's feedback row stays hidden; while the turn runs or
   /// the confirm window holds, the copy/like/dislike/fork row is replaced
   /// by the in-progress spinner (a blip back to running must not flash the
@@ -4013,6 +4250,7 @@ class _AssistantBubble extends StatelessWidget {
     required this.gateway,
     required this.sessionId,
     required this.state,
+    required this.preview,
     this.showFeedback = true,
     this.turnFeedbackLocked = false,
   });
@@ -4039,7 +4277,11 @@ class _AssistantBubble extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          ZLinkerMarkdown(text),
+          ZLinkerMarkdown(
+            text,
+            imageResolver: preview.resolveImage,
+            onLinkTap: (href) => preview.openLink(context, href),
+          ),
           if (showFeedback)
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -4206,8 +4448,12 @@ class _ToolCallTile extends StatefulWidget {
   /// transcript in the expansion (see [_AgentChildTimeline]).
   final SubagentFeed? feed;
 
+  /// Workspace file-preview plumbing (tappable file names).
+  final _ChatPreview preview;
+
   const _ToolCallTile({
     required this.row,
+    required this.preview,
     this.gateway,
     this.sessionId,
     this.subagent,
@@ -4261,19 +4507,13 @@ class _ToolCallTileState extends State<_ToolCallTile> {
 
     // Official tool row: bold-ish first line (已写入 <file> / 终端 · cmd /
     // 探索 · N 文件) with +/- counts right-aligned; second line = directory
-    // path (write/edit) or the tool name.
+    // path (write/edit) or the tool name. Previewable file names render as
+    // a tappable span that dispatches into the preview surfaces (§4.4).
+    final filePath = diff?.filePath ?? toolFilePath(inputText);
     final title = Row(
       children: [
         Expanded(
-          child: Text(
-            summary.title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: ZType.body.copyWith(
-              fontWeight: FontWeight.w500,
-              color: ZInk.solid(context),
-            ),
-          ),
+          child: _titleText(context, summary, filePath),
         ),
         if (summary.additions > 0)
           Padding(
@@ -4373,9 +4613,19 @@ class _ToolCallTileState extends State<_ToolCallTile> {
                       agentPrompt,
                     )
                   else if (diff == null && inputText.isNotEmpty)
-                    _kv(context, tr(context, 'chat.tool.input'), inputText),
+                    _kv(
+                      context,
+                      tr(context, 'chat.tool.input'),
+                      inputText,
+                      openPath: toolFilePath(inputText),
+                    ),
                   if (diff == null && outputText.isNotEmpty)
-                    _kv(context, tr(context, 'chat.tool.output'), outputText),
+                    _kv(
+                      context,
+                      tr(context, 'chat.tool.output'),
+                      outputText,
+                      openPath: toolFilePath(outputText),
+                    ),
                   if (error is Map)
                     _kv(
                       context,
@@ -4393,13 +4643,33 @@ class _ToolCallTileState extends State<_ToolCallTile> {
                     if (image is Map && image['base64'] is String)
                       Padding(
                         padding: ZTile.body,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(ZRadius.field),
-                          child: Image.memory(
-                            base64Decode(image['base64'] as String),
-                            fit: BoxFit.contain,
-                            errorBuilder: (context, error, stackTrace) =>
-                                const SizedBox.shrink(),
+                        child: InkWell(
+                          onTap: () => Navigator.of(context).push(
+                            zRoute(
+                              (_) => ImageViewerPage(
+                                bytes: base64Decode(
+                                    image['base64'] as String),
+                              ),
+                            ),
+                          ),
+                          child: ClipRRect(
+                            borderRadius:
+                                BorderRadius.circular(ZRadius.field),
+                            // Same floor/cap as markdown images: a decode
+                            // -pending or tiny intrinsic image still owns a
+                            // real tap box; big screenshots stay tile-sized.
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(
+                                  minHeight: 48, maxHeight: 320),
+                              child: Image.memory(
+                                base64Decode(image['base64'] as String),
+                                fit: BoxFit.contain,
+                                width: double.infinity,
+                                errorBuilder:
+                                    (context, error, stackTrace) =>
+                                        const SizedBox.shrink(),
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -4424,13 +4694,67 @@ class _ToolCallTileState extends State<_ToolCallTile> {
     );
   }
 
-  Widget _kv(BuildContext context, String label, String value) {
+  /// The summary first line: plain text, or — when the row's file is
+  /// previewable (raster image / html, the PRD's dispatch set) — the file
+  /// name segment wrapped in a tappable span dispatching into the preview
+  /// surfaces (design §4.4 工具行入口). Non-previewable rows keep the
+  /// plain title (no dead links).
+  Widget _titleText(
+    BuildContext context,
+    ToolRowSemantics summary,
+    String? filePath,
+  ) {
+    final style = ZType.body.copyWith(
+      fontWeight: FontWeight.w500,
+      color: ZInk.solid(context),
+    );
+    final title = summary.title;
+    if (filePath == null || !_ChatPreview.dispatchable(filePath)) {
+      return Text(title,
+          maxLines: 1, overflow: TextOverflow.ellipsis, style: style);
+    }
+    final base = filePath.split(RegExp(r'[\\/]')).last;
+    final i = title.indexOf(base);
+    if (i < 0) {
+      return Text(title,
+          maxLines: 1, overflow: TextOverflow.ellipsis, style: style);
+    }
+    return Text.rich(
+      TextSpan(
+        style: style,
+        children: [
+          TextSpan(text: title.substring(0, i)),
+          WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: InkWell(
+              onTap: () => widget.preview.open(context, filePath),
+              child: Text(
+                base,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: style.copyWith(color: ZColors.sky500),
+              ),
+            ),
+          ),
+          TextSpan(text: title.substring(i + base.length)),
+        ],
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    );
+  }
+
+  Widget _kv(BuildContext context, String label, String value,
+      {String? openPath}) {
     // Pretty-print JSON input when possible (official shows structured view)
     var display = value;
     try {
       final decoded = jsonDecode(value);
       display = const JsonEncoder.withIndent('  ').convert(decoded);
     } catch (_) {}
+    final tappable = openPath != null && _ChatPreview.dispatchable(openPath);
+    final openBase =
+        tappable ? openPath.split(RegExp(r'[\\/]')).last : null;
     return Padding(
       padding: ZTile.body,
       child: Column(
@@ -4440,6 +4764,44 @@ class _ToolCallTileState extends State<_ToolCallTile> {
             label,
             style: ZType.caption.copyWith(color: ZInk.faint(context)),
           ),
+          if (tappable)
+            // Expansion-entry variant of the §4.4 dispatch: the input kv's
+            // path, rendered as an explicit open affordance above the raw
+            // JSON (kept selectable below).
+            InkWell(
+              onTap: () => widget.preview.open(context, openPath),
+              // Vertical padding lifts the 12px affordance to a ≥28px hit
+              // area (dense-micro exception tier, design-tokens §6).
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                    children: [
+                    Tooltip(
+                      message: tr(context, 'chat.preview.openFile'),
+                      child: Icon(
+                        Icons.open_in_new,
+                        size: 12,
+                        color: ZColors.sky500,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        openBase!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ZType.caption.copyWith(
+                          fontFamily: 'monospace',
+                          color: ZColors.sky500,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 1),
+                  ],
+                ),
+              ),
+            ),
           const SizedBox(height: 2),
           Container(
             width: double.infinity,
@@ -6060,6 +6422,9 @@ class _ToolGroupCard extends StatefulWidget {
   final ConversationState state;
   final SubagentFeed? feed;
 
+  /// Workspace file-preview plumbing (tappable file entries).
+  final _ChatPreview preview;
+
   const _ToolGroupCard({
     super.key,
     required this.rows,
@@ -6067,6 +6432,7 @@ class _ToolGroupCard extends StatefulWidget {
     required this.sessionId,
     required this.onAction,
     required this.state,
+    required this.preview,
     this.feed,
   });
 
@@ -6157,6 +6523,7 @@ class _ToolGroupCardState extends State<_ToolGroupCard> {
                       sessionId: widget.sessionId,
                       onAction: widget.onAction,
                       state: widget.state,
+                      preview: widget.preview,
                       feed: widget.feed,
                     ),
                 ],
@@ -8220,6 +8587,156 @@ class _JsonSheet extends StatelessWidget {
                         ? tr(context, 'chat.json.empty')
                         : encoder.convert(data),
                     style: ZType.caption.copyWith(fontFamily: 'monospace'),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One parsed file-changes entry: the workspace path plus optional
+/// added/removed line counts (absent when the payload only named files).
+typedef FileChangeEntry = ({String path, int? added, int? removed});
+
+/// Defensive parse of the `conversationFileChangesV4` payload into tappable
+/// file rows (design §4.4 变更文件列表): a `files`/`changes`/`entries` list
+/// (or a bare list) of maps — path from `path`/`file`/`filePath`, counts
+/// from `additions`/`added` and `deletions`/`removed` — or plain path
+/// strings. Null when the payload is not file-row-shaped (an empty list,
+/// missing paths, foreign entry types): the caller falls back to the raw
+/// [_JsonSheet], which is never worse than the previous behavior.
+List<FileChangeEntry>? parseFileChanges(Object? data) {
+  List? list;
+  if (data is List) {
+    list = data;
+  } else if (data is Map) {
+    for (final key in const ['files', 'changes', 'entries']) {
+      if (data[key] is List) {
+        list = data[key] as List;
+        break;
+      }
+    }
+  }
+  if (list == null || list.isEmpty) return null;
+  final rows = <FileChangeEntry>[];
+  for (final entry in list) {
+    if (entry is String && entry.isNotEmpty) {
+      rows.add((path: entry, added: null, removed: null));
+      continue;
+    }
+    if (entry is! Map) return null;
+    String path = '';
+    for (final key in const ['path', 'file', 'filePath']) {
+      final v = entry[key];
+      if (v is String && v.isNotEmpty) {
+        path = v;
+        break;
+      }
+    }
+    if (path.isEmpty) return null;
+    int? count(Object? v) => v is num ? v.toInt() : null;
+    rows.add((
+      path: path,
+      added: count(entry['additions'] ?? entry['added']),
+      removed: count(entry['deletions'] ?? entry['removed']),
+    ));
+  }
+  return rows;
+}
+
+/// File-changes sheet (design §4.4): the file rows parsed by
+/// [parseFileChanges] as tappable entries — basename + directory, +/- line
+/// counts, tap dispatches into the preview surfaces. Tapping pushes the
+/// preview over the sheet, so browsing several files keeps the list open.
+class _FileChangesSheet extends StatelessWidget {
+  final String title;
+  final List<FileChangeEntry> entries;
+  final _ChatPreview preview;
+
+  const _FileChangesSheet({
+    required this.title,
+    required this.entries,
+    required this.preview,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+              horizontal: ZSpacing.screen, vertical: 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: ZType.heading,
+              ),
+              const SizedBox(height: 12),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final entry in entries)
+                        InkWell(
+                          onTap: () => preview.open(context, entry.path),
+                          borderRadius:
+                              BorderRadius.circular(ZRadius.field),
+                          child: Padding(
+                            // 13+13 padding + 18px line ≈ 44: zTouch floor
+                            // for sheet rows (mention_sheet ListTile parity).
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 13),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.insert_drive_file_outlined,
+                                  size: 16,
+                                  color: ZInk.muted(context),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    entry.path,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: ZType.sub
+                                        .copyWith(color: ZInk.solid(context)),
+                                  ),
+                                ),
+                                if (entry.added != null && entry.added! > 0)
+                                  Padding(
+                                    padding: const EdgeInsets.only(left: 8),
+                                    child: Text(
+                                      '+${entry.added}',
+                                      style: ZType.caption.copyWith(
+                                          color: ZInk.successTone(context)),
+                                    ),
+                                  ),
+                                if (entry.removed != null && entry.removed! > 0)
+                                  Padding(
+                                    padding: const EdgeInsets.only(left: 4),
+                                    child: Text(
+                                      '-${entry.removed}',
+                                      style: ZType.caption.copyWith(
+                                          color: ZInk.dangerTone(context)),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
               ),
