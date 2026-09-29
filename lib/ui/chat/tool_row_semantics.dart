@@ -93,7 +93,7 @@ ToolRowSemantics toolRowSemantics(
   if (toolName.contains('write') ||
       toolName.contains('edit') ||
       toolName.contains('notebook')) {
-    final file = _filePath(inputText) ?? diff?.filePath ?? toolNameRaw;
+    final file = toolFilePath(inputText) ?? diff?.filePath ?? toolNameRaw;
     // title shows the basename; subtitle the directory (official style)
     final segs = file.split(RegExp(r'[\\/]'));
     final base = segs.last;
@@ -250,7 +250,7 @@ ToolRowSemantics toolRowSemantics(
       toolName.contains('explore') ||
       toolName.contains('search')) {
     final count = _fileCount(inputText) ?? _fileCountFromText(inputText);
-    final file = _filePath(inputText);
+    final file = toolFilePath(inputText);
     if (count != null) {
       return ToolRowSemantics(
         icon: icon,
@@ -286,7 +286,11 @@ ToolRowSemantics toolRowSemantics(
   );
 }
 
-String? _filePath(String inputText) {
+/// The row's workspace file path from the input JSON (`filePath`/`file_path`
+/// /`path`/`file`/`notebookPath`), or a regex fallback for streaming input.
+/// Shared with the chat tile's tappable file names (design
+/// 09-29-file-preview §4.4); null when nothing path-shaped is present.
+String? toolFilePath(String inputText) {
   try {
     final decoded = jsonDecode(inputText);
     if (decoded is Map) {

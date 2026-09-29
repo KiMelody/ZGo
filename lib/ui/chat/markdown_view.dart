@@ -5,6 +5,7 @@ import 'package:markdown/markdown.dart' as md;
 
 import '../theme.dart';
 import '../ui_settings.dart';
+import 'image_viewer_page.dart';
 
 /// Markdown renderer matching the official web client look: selectable
 /// body text, inline code on a pill background, fenced code blocks with a
@@ -18,11 +19,23 @@ class ZLinkerMarkdown extends StatelessWidget {
   /// surfaces (reasoning strips, sub-agent detail) pass [ZType.sub].
   final TextStyle bodyStyle;
 
+  /// Workspace image resolver for `![alt](path)` references (design
+  /// 09-29-file-preview §4.3). Null keeps the previous inert behavior —
+  /// reasoning strips and other existing call sites pass nothing. Null
+  /// results render the placeholder row (layout never collapses).
+  final Future<Uint8List?> Function(String path)? imageResolver;
+
+  /// Link taps (`[text](href)`). Null keeps links inert (existing call
+  /// sites); the chat body dispatches local paths / http(s) links.
+  final void Function(String href)? onLinkTap;
+
   const ZLinkerMarkdown(
     this.data, {
     super.key,
     this.selectable = true,
     this.bodyStyle = ZType.body,
+    this.imageResolver,
+    this.onLinkTap,
   });
 
   @override
@@ -70,6 +83,118 @@ class ZLinkerMarkdown extends StatelessWidget {
         'code': _CodeBlockBuilder(codeStyle: code),
       },
       softLineBreak: true,
+      sizedImageBuilder: imageResolver == null
+          ? null
+          : (config) => _MarkdownImage(
+                path: config.uri.toString(),
+                resolver: imageResolver!,
+              ),
+      onTapLink: onLinkTap == null
+          ? null
+          : (text, href, title) {
+              if (href != null && href.isNotEmpty) onLinkTap!(href);
+            },
+    );
+  }
+}
+
+/// Async inline image for a markdown `![alt](path)` reference (design §4.3,
+/// pattern aligned with chat_page's `_AttachmentViewState`): spinner while
+/// the resolver runs, then the decoded image — tap opens the fullscreen
+/// [ImageViewerPage] (bytes already in memory) — or a placeholder row with
+/// the file name + failure copy. svg has no Flutter decoder (PRD non-goal),
+/// so it goes straight to the placeholder without a fetch.
+class _MarkdownImage extends StatefulWidget {
+  final String path;
+  final Future<Uint8List?> Function(String path) resolver;
+
+  const _MarkdownImage({required this.path, required this.resolver});
+
+  @override
+  State<_MarkdownImage> createState() => _MarkdownImageState();
+}
+
+class _MarkdownImageState extends State<_MarkdownImage> {
+  Uint8List? _bytes;
+  bool _failed = false;
+
+  bool get _isSvg => widget.path.toLowerCase().endsWith('.svg');
+
+  String get _baseName => widget.path.split(RegExp(r'[\\/]')).last;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!_isSvg) _load();
+  }
+
+  Future<void> _load() async {
+    final bytes = await widget.resolver(widget.path);
+    if (mounted) {
+      setState(() {
+        _bytes = bytes;
+        _failed = bytes == null;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isSvg || _failed) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.image_not_supported_outlined,
+              size: 16,
+              color: ZInk.faint(context),
+            ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                _isSvg
+                    ? trP(context, 'chat.img.svgUnsupported', [_baseName])
+                    : trP(context, 'chat.img.loadFailed', [_baseName]),
+                style: ZType.caption.copyWith(color: ZInk.faint(context)),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    final bytes = _bytes;
+    if (bytes == null) {
+      return const Padding(
+        padding: EdgeInsets.all(12),
+        child: SizedBox(
+          width: 16,
+          height: 16,
+          child: CircularProgressIndicator(strokeWidth: 1.5),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: InkWell(
+        onTap: () => Navigator.of(context).push(
+          zRoute(
+            (_) => ImageViewerPage(bytes: bytes, fileName: widget.path),
+          ),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(ZRadius.field),
+          child: ConstrainedBox(
+            // Full-width contained block (official markdown image rhythm);
+            // the 48px floor keeps even tiny images a real tap target.
+            constraints: const BoxConstraints(maxHeight: 280, minHeight: 48),
+            child: Image.memory(bytes, fit: BoxFit.contain,
+                width: double.infinity),
+          ),
+        ),
+      ),
     );
   }
 }

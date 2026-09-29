@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zlinker/protocol/conversation.dart';
+import 'package:zlinker/protocol/file_service.dart';
 import 'package:zlinker/state/device_session.dart';
 import 'package:zlinker/state/entitlement_poller.dart';
 import 'package:zlinker/state/quota_reset.dart';
@@ -358,6 +359,32 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
 
   @override
   List<Map<String, dynamic>> mentionSkillsSync() => mentionSkillsResult;
+
+  /// Programmed file-service answers (file-preview tests); defaults are
+  /// inert (file stat / zero bytes / empty text).
+  FileStat fileStatResult = const FileStat(type: 'file', size: 0);
+  MediaPreview fileReadMediaResult = MediaPreview(bytes: Uint8List(0));
+  TextChunk fileReadTextResult = const TextChunk(text: '');
+
+  @override
+  Future<FileStat> fileStat(String workspacePath, String path) async {
+    _accept('fileStat', [workspacePath, path]);
+    return fileStatResult;
+  }
+
+  @override
+  Future<MediaPreview> fileReadMedia(String workspacePath, String path,
+      {int? maxBytes}) async {
+    _accept('fileReadMedia', [workspacePath, path, maxBytes]);
+    return fileReadMediaResult;
+  }
+
+  @override
+  Future<TextChunk> fileReadText(String workspacePath, String path,
+      {int offset = 0, required int length}) async {
+    _accept('fileReadText', [workspacePath, path, offset, length]);
+    return fileReadTextResult;
+  }
 
   /// Programmed [ChatGateway.taskDisplayStatus] answers keyed by sessionId
   /// (shell-session error card tests); unlisted ids = mirror miss → null.

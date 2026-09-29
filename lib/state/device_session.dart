@@ -8,6 +8,7 @@ import '../protocol/channel_client.dart'
     show Channels, isChannelLevelError, isChannelMissingError;
 import '../protocol/connection_params.dart';
 import '../protocol/conversation.dart';
+import '../protocol/file_service.dart';
 import '../protocol/method_probe.dart';
 import '../protocol/model_selection.dart' show parseModelSelectionCatalog;
 import '../protocol/off_peak.dart';
@@ -244,6 +245,17 @@ abstract interface class ChatGateway
   /// Skills synchronously from the last known list (mention picker reads
   /// this without awaiting a fresh RPC).
   List<Map<String, dynamic>> mentionSkillsSync();
+
+  /// Workspace file reads for the preview surfaces (markdown local images,
+  /// HTML preview assembly). Backed by the desktop `file` channel's
+  /// fileService — method names are bundle-derived and probed at runtime,
+  /// never hardcoded (see [FileServicePort]; the args scope shape is pending
+  /// live-probe certification and lives only in the port).
+  Future<FileStat> fileStat(String workspacePath, String path);
+  Future<MediaPreview> fileReadMedia(String workspacePath, String path,
+      {int? maxBytes});
+  Future<TextChunk> fileReadText(String workspacePath, String path,
+      {int offset = 0, required int length});
 
   /// Relay-overview display status (`idle|running|completed|error`) of one
   /// task, read from the relay task mirror keyed by taskId. The shell-
@@ -1193,6 +1205,14 @@ class DeviceSession extends ChangeNotifier
     scope: () => offPeakScope,
   );
 
+  /// Workspace file reads on the `file` channel (the desktop's fileService —
+  /// the markdown-image / HTML-preview data source). Late final like the
+  /// ports above; dispose needs no action. The gateway surface is the three
+  /// file* forwards below — the port itself stays session-internal.
+  late final FileServicePort fileService = FileServicePort(
+    (method, args) => callChannel(Channels.file, method, args),
+  );
+
   @override
   Future<dynamic> renameTask(String sessionId, String title) =>
       taskCommands.rename(sessionId, title);
@@ -1212,6 +1232,20 @@ class DeviceSession extends ChangeNotifier
   @override
   Future<dynamic> deleteTask(String sessionId) =>
       taskCommands.delete(sessionId);
+
+  @override
+  Future<FileStat> fileStat(String workspacePath, String path) =>
+      fileService.stat(workspacePath, path);
+
+  @override
+  Future<MediaPreview> fileReadMedia(String workspacePath, String path,
+          {int? maxBytes}) =>
+      fileService.readMedia(workspacePath, path, maxBytes: maxBytes);
+
+  @override
+  Future<TextChunk> fileReadText(String workspacePath, String path,
+          {int offset = 0, required int length}) =>
+      fileService.readText(workspacePath, path, offset: offset, length: length);
 
   /// Grouped task view of every known workspace (`zcode-task
   /// .listGroupedTaskViewStructure`, desktop 3.12.3 — live-probed
