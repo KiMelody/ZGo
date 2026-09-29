@@ -241,8 +241,8 @@ class DiffView extends StatelessWidget {
                         fontFamily: 'monospace',
                         height: 1.45,
                         color: switch (line.type) {
-                          DiffLineType.added => ZColors.success,
-                          DiffLineType.removed => ZColors.danger,
+                          DiffLineType.added => ZInk.successTone(context),
+                          DiffLineType.removed => ZInk.dangerTone(context),
                           DiffLineType.context => ZInk.soft(context),
                         },
                       ),

@@ -52,35 +52,38 @@ class _QuotaResetDialog extends StatelessWidget {
         ];
         return AlertDialog(
           title: Text(tr(context, 'usage.reset.title')),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (pools == null)
-                Text(
-                  tr(context, 'usage.reset.unavailable'),
-                  style: ZType.sub.copyWith(color: ZInk.muted(context)),
-                )
-              else if (rows.isEmpty)
-                // Defensive: the entry is gated on the same predicate, so a
-                // dialog without a single resettable pool is unreachable.
-                Text(
-                  tr(context, 'usage.reset.none'),
-                  style: ZType.sub.copyWith(color: ZInk.muted(context)),
-                )
-              else
-                for (final (_, nameKey, pool) in rows)
-                  _poolRow(context, nameKey, pool),
-              if (controller.error != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(
-                    trP(context, 'usage.reset.failed',
-                        [controller.error ?? '-']),
-                    style: ZType.caption.copyWith(color: ZColors.danger),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (pools == null)
+                  Text(
+                    tr(context, 'usage.reset.unavailable'),
+                    style: ZType.sub.copyWith(color: ZInk.muted(context)),
+                  )
+                else if (rows.isEmpty)
+                  // Defensive: the entry is gated on the same predicate, so a
+                  // dialog without a single resettable pool is unreachable.
+                  Text(
+                    tr(context, 'usage.reset.none'),
+                    style: ZType.sub.copyWith(color: ZInk.muted(context)),
+                  )
+                else
+                  for (final (_, nameKey, pool) in rows)
+                    _poolRow(context, nameKey, pool),
+                if (controller.error != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      trP(context, 'usage.reset.failed',
+                          [controller.error ?? '-']),
+                      style: ZType.caption
+                          .copyWith(color: ZInk.dangerTone(context)),
+                    ),
                   ),
-                ),
-            ],
+              ],
+            ),
           ),
           actions: [
             TextButton(

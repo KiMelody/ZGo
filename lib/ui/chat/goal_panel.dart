@@ -336,7 +336,8 @@ class _GoalPanelState extends State<GoalPanel> {
   Widget _stepIcon(String status) {
     switch (status) {
       case 'completed':
-        return const Icon(Icons.check_circle, size: 13, color: ZColors.success);
+        return Icon(Icons.check_circle,
+            size: 13, color: ZInk.successTone(context));
       case 'inProgress':
         return const SizedBox(
           width: 13,

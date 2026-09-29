@@ -100,13 +100,20 @@ class _DesktopSettingsPageState extends State<DesktopSettingsPage> {
           : _error != null
               ? Center(
                   child: Text(trP(context, 'deskSet.loadFailed', [_error!])))
-              : ListView(
-                  padding: const EdgeInsets.all(ZSpacing.screen),
-                  children: [
-                    _interactionCard(context),
-                    const SizedBox(height: ZSpacing.cardGap),
-                    _autoArchiveCard(context),
-                  ],
+              : Center(
+                  child: ConstrainedBox(
+                    constraints:
+                        const BoxConstraints(maxWidth: zContentMaxWidth),
+                    child: ListView(
+                      padding:
+                          zScreenPadding(context, bottom: ZSpacing.screen),
+                      children: [
+                        _interactionCard(context),
+                        const SizedBox(height: ZSpacing.cardGap),
+                        _autoArchiveCard(context),
+                      ],
+                    ),
+                  ),
                 ),
     );
   }

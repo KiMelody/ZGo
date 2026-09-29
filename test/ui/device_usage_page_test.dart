@@ -497,4 +497,22 @@ void main() {
     expect(find.text('应用用量加载失败'), findsOneWidget);
     expect(find.text('该时间范围内暂无用量'), findsNothing);
   });
+
+  // PRD landscape AC#3: on a 1280-wide tablet the card list converges on
+  // the shared content-column cap (zContentMaxWidth, same as the chat
+  // message column) instead of stretching edge to edge.
+  testWidgets('wide tablet caps the content column at 848 and centers it',
+      (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.reset);
+    final session = appSession(appUsageAnswer: () async => appUsagePayload());
+    addTearDown(session.dispose);
+    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
+    await tester.pumpAndSettle();
+
+    final rect = tester.getRect(find.byType(Card).first);
+    expect(rect.width, lessThanOrEqualTo(848));
+    expect(rect.center.dx, closeTo(640, 0.5));
+  });
 }

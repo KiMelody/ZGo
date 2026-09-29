@@ -131,12 +131,17 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
           ),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: () async {
-          await _load(force: true);
-          await _loadAppUsage();
-        },
-        child: _buildEntitlementBody(),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: zContentMaxWidth),
+          child: RefreshIndicator(
+            onRefresh: () async {
+              await _load(force: true);
+              await _loadAppUsage();
+            },
+            child: _buildEntitlementBody(),
+          ),
+        ),
       ),
     );
   }
@@ -213,7 +218,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
         await _loadAppUsage();
       },
       child: ListView(
-        padding: const EdgeInsets.all(ZSpacing.screen),
+        padding: zScreenPadding(context, bottom: ZSpacing.screen),
         children: [
           _appUsageCard(context),
           const SizedBox(height: ZSpacing.cardGap),
@@ -660,7 +665,8 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(tr(context, 'usageRpc.appUsageFailed'),
-                        style: ZType.sub.copyWith(color: ZColors.danger)),
+                        style: ZType.sub.copyWith(
+                            color: ZInk.dangerTone(context))),
                     TextButton.icon(
                       icon: const Icon(Icons.refresh, size: 16),
                       onPressed: _loadAppUsage,
@@ -752,8 +758,8 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
                     children: [
                       Expanded(
                         child: Text(tr(context, 'usageRpc.appUsageFailed'),
-                            style: ZType.caption
-                                .copyWith(color: ZColors.danger)),
+                            style: ZType.caption.copyWith(
+                                color: ZInk.dangerTone(context))),
                       ),
                       TextButton.icon(
                         icon: const Icon(Icons.refresh, size: 16),

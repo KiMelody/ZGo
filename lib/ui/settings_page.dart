@@ -141,214 +141,69 @@ class _SettingsPageState extends State<SettingsPage> {
       appBar: AppBar(title: Text(tr(context, 'settings.title'))),
       body: AnimatedBuilder(
         animation: Listenable.merge([theme, ui, widget.quotaWatch]),
-        builder: (context, _) => ListView(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          children: [
-            _header(context, tr(context, 'settings.appearance')),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                children: [
-                  Text(tr(context, 'settings.theme')),
-                  const Spacer(),
-                  SegmentedButton<ThemeMode>(
-                    segments: [
-                      ButtonSegment(
-                        value: ThemeMode.dark,
-                        label: Text(tr(context, 'settings.theme.dark')),
-                      ),
-                      ButtonSegment(
-                        value: ThemeMode.light,
-                        label: Text(tr(context, 'settings.theme.light')),
-                      ),
-                      ButtonSegment(
-                        value: ThemeMode.system,
-                        label: Text(tr(context, 'settings.theme.system')),
-                      ),
-                    ],
-                    selected: {theme.mode},
-                    onSelectionChanged: (s) {
-                      HapticFeedback.selectionClick();
-                      theme.setMode(s.first);
-                    },
-                    showSelectedIcon: false,
-                  ),
-                ],
-              ),
-            ),
-            _header(context, tr(context, 'settings.general')),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                children: [
-                  Text(tr(context, 'settings.language')),
-                  const Spacer(),
-                  SegmentedButton<String>(
-                    segments: [
-                      ButtonSegment(
-                        value: 'zh-CN',
-                        label: Text(tr(context, 'settings.language.zh')),
-                      ),
-                      ButtonSegment(
-                        value: 'en-US',
-                        label: Text(tr(context, 'settings.language.en')),
-                      ),
-                    ],
-                    selected: {ui.locale},
-                    onSelectionChanged: (s) {
-                      HapticFeedback.selectionClick();
-                      ui.setLocale(s.first);
-                    },
-                    showSelectedIcon: false,
-                  ),
-                ],
-              ),
-            ),
-            SwitchListTile(
-              secondary: const Icon(Icons.list_alt_outlined),
-              title: Text(tr(context, 'settings.nativeList')),
-              subtitle: Text(tr(context, 'settings.nativeListHint')),
-              value: ui.nativeListEnabled,
-              onChanged: (v) => ui.setNativeListEnabled(v),
-            ),
-            _header(context, tr(context, 'settings.notifications')),
-            SwitchListTile(
-              secondary: const Icon(Icons.notifications_outlined),
-              title: Text(tr(context, 'settings.notifications')),
-              subtitle: Text(tr(context, 'settings.notificationsHint')),
-              value: ui.notificationsEnabled,
-              onChanged: (v) => ui.setNotificationsEnabled(v),
-            ),
-            if (ui.notificationsEnabled) ...[
-              SwitchListTile(
-                secondary: const SizedBox(width: 24),
-                dense: true,
-                title: Text(tr(context, 'settings.notify.tasks')),
-                value: ui.notifyTasksEnabled,
-                onChanged: (v) => ui.setNotifyTasksEnabled(v),
-              ),
-              SwitchListTile(
-                secondary: const SizedBox(width: 24),
-                dense: true,
-                title: Text(tr(context, 'settings.notify.offPeak')),
-                value: ui.notifyOffPeakEnabled,
-                onChanged: (v) => ui.setNotifyOffPeakEnabled(v),
-              ),
-              SwitchListTile(
-                secondary: const SizedBox(width: 24),
-                dense: true,
-                title: Text(tr(context, 'settings.notify.auto')),
-                value: ui.notifyAutoEnabled,
-                onChanged: (v) => ui.setNotifyAutoEnabled(v),
-              ),
-              // Android-only foreground service (see KeepAliveService.kt):
-              // iOS/ohos hosts have no equivalent, so the row is hidden.
-              if (widget.keepalive.supported)
-                SwitchListTile(
-                  secondary: const SizedBox(width: 24),
-                  dense: true,
-                  title: Text(tr(context, 'settings.keepAlive')),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(tr(context, 'settings.keepAliveHint')),
-                      if (ui.keepAliveEnabled) ...[
-                        const SizedBox(height: 4),
-                        _keepAliveStatus(context),
-                        const SizedBox(height: 4),
-                        Text(
-                          tr(context, 'settings.keepAlive.oemHint'),
-                          style:
-                              ZType.sub.copyWith(color: ZInk.muted(context)),
-                        ),
-                      ],
-                    ],
-                  ),
-                  value: ui.keepAliveEnabled,
-                  onChanged: _setKeepAlive,
-                ),
-            ],
-            // Quota watch (Android-only persistent monitoring notice, PRD
-            // 09-19): the whole section rides the keep-alive support probe.
-            if (widget.keepalive.supported) ...[
-              _header(context, tr(context, 'settings.quotaWatch.section')),
-              SwitchListTile(
-                secondary: const Icon(Icons.monitor_heart_outlined),
-                title: Text(tr(context, 'settings.quotaWatch')),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(tr(context, 'settings.quotaWatchHint')),
-                    if (ui.quotaWatchEnabled &&
-                        widget.quotaWatch?.snapshot.phase ==
-                            QuotaWatchPhase.noPlan) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        tr(context, 'settings.quotaWatch.noPlan'),
-                        style:
-                            ZType.sub.copyWith(color: ZInk.muted(context)),
-                      ),
-                    ],
-                  ],
-                ),
-                value: ui.quotaWatchEnabled,
-                onChanged: (v) => ui.setQuotaWatchEnabled(v),
-              ),
-              if (ui.quotaWatchEnabled) ...[
-                // Direct resets ride the foreground service (R3); without
-                // it the notice only updates while the app is foregrounded.
-                if (!ui.keepAliveEnabled)
-                  Padding(
-                    padding: const EdgeInsets.only(left: 16),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: TextButton(
-                        onPressed: () => _setKeepAlive(true),
-                        child: Text(
-                          tr(context, 'settings.quotaWatch.keepAliveGuide'),
-                        ),
-                      ),
-                    ),
-                  ),
-                ListTile(
-                  dense: true,
-                  title: Text(tr(context, 'settings.quotaWatch.threshold')),
-                  subtitle: Text(trP(context, 'settings.quotaWatch.thresholdHint',
-                      ['${ui.quotaWatchThreshold}'])),
-                  trailing: SizedBox(
-                    width: 150,
-                    child: Slider(
-                      value: ui.quotaWatchThreshold.toDouble(),
-                      min: 5,
-                      max: 50,
-                      divisions: 9,
-                      label: '${ui.quotaWatchThreshold}%',
-                      onChanged: (v) {
-                        HapticFeedback.selectionClick();
-                        ui.setQuotaWatchThreshold(v.round());
-                      },
-                    ),
-                  ),
-                ),
+        builder: (context, _) => Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: zContentMaxWidth),
+            child: ListView(
+              // The 16px content edge lives on the section rows below; the
+              // body frame only adds the landscape safe-area inset.
+              padding:
+                  zScreenPadding(context, top: 8, bottom: 8, horizontal: 0),
+              children: [
+                _header(context, tr(context, 'settings.appearance')),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: Row(
                     children: [
-                      Text(tr(context, 'settings.quotaWatch.interval')),
+                      Text(tr(context, 'settings.theme')),
                       const Spacer(),
-                      SegmentedButton<int>(
+                      SegmentedButton<ThemeMode>(
                         segments: [
-                          for (final minutes in const [1, 5, 15])
-                            ButtonSegment(
-                              value: minutes,
-                              label: Text(
-                                  trP(context, 'op.minutes', ['$minutes'])),
-                            ),
+                          ButtonSegment(
+                            value: ThemeMode.dark,
+                            label: Text(tr(context, 'settings.theme.dark')),
+                          ),
+                          ButtonSegment(
+                            value: ThemeMode.light,
+                            label: Text(tr(context, 'settings.theme.light')),
+                          ),
+                          ButtonSegment(
+                            value: ThemeMode.system,
+                            label: Text(tr(context, 'settings.theme.system')),
+                          ),
                         ],
-                        selected: {ui.quotaWatchIntervalMinutes},
+                        selected: {theme.mode},
                         onSelectionChanged: (s) {
                           HapticFeedback.selectionClick();
-                          ui.setQuotaWatchIntervalMinutes(s.first);
+                          theme.setMode(s.first);
+                        },
+                        showSelectedIcon: false,
+                      ),
+                    ],
+                  ),
+                ),
+                _header(context, tr(context, 'settings.general')),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    children: [
+                      Text(tr(context, 'settings.language')),
+                      const Spacer(),
+                      SegmentedButton<String>(
+                        segments: [
+                          ButtonSegment(
+                            value: 'zh-CN',
+                            label: Text(tr(context, 'settings.language.zh')),
+                          ),
+                          ButtonSegment(
+                            value: 'en-US',
+                            label: Text(tr(context, 'settings.language.en')),
+                          ),
+                        ],
+                        selected: {ui.locale},
+                        onSelectionChanged: (s) {
+                          HapticFeedback.selectionClick();
+                          ui.setLocale(s.first);
                         },
                         showSelectedIcon: false,
                       ),
@@ -356,90 +211,243 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                 ),
                 SwitchListTile(
-                  secondary: const SizedBox(width: 24),
-                  dense: true,
-                  title: Text(tr(context, 'settings.quotaWatch.expiryReminder')),
-                  subtitle:
-                      Text(tr(context, 'settings.quotaWatch.expiryReminderHint')),
-                  value: ui.quotaWatchExpiryReminderEnabled,
-                  onChanged: (v) => ui.setQuotaWatchExpiryReminderEnabled(v),
+                  secondary: const Icon(Icons.list_alt_outlined),
+                  title: Text(tr(context, 'settings.nativeList')),
+                  subtitle: Text(tr(context, 'settings.nativeListHint')),
+                  value: ui.nativeListEnabled,
+                  onChanged: (v) => ui.setNativeListEnabled(v),
                 ),
-                // Per-type N4 leads (2026-09-20): meaningless while the
-                // reminder is off, so they ride its switch.
-                if (ui.quotaWatchExpiryReminderEnabled) ...[
-                  ListTile(
+                _header(context, tr(context, 'settings.notifications')),
+                SwitchListTile(
+                  secondary: const Icon(Icons.notifications_outlined),
+                  title: Text(tr(context, 'settings.notifications')),
+                  subtitle: Text(tr(context, 'settings.notificationsHint')),
+                  value: ui.notificationsEnabled,
+                  onChanged: (v) => ui.setNotificationsEnabled(v),
+                ),
+                if (ui.notificationsEnabled) ...[
+                  SwitchListTile(
+                    secondary: const SizedBox(width: 24),
                     dense: true,
-                    title: Text(tr(context, 'settings.quotaWatch.expiryLead5h')),
-                    trailing: SizedBox(
-                      width: 150,
-                      child: Slider(
-                        value: ui.quotaWatchExpiryLeadFiveHourMinutes.toDouble(),
-                        min: 5,
-                        max: 60,
-                        divisions: 11,
-                        label: trP(context, 'op.minutes',
-                            ['${ui.quotaWatchExpiryLeadFiveHourMinutes}']),
-                        onChanged: (v) {
-                          HapticFeedback.selectionClick();
-                          ui.setQuotaWatchExpiryLeadFiveHourMinutes(v.round());
-                        },
-                      ),
-                    ),
+                    title: Text(tr(context, 'settings.notify.tasks')),
+                    value: ui.notifyTasksEnabled,
+                    onChanged: (v) => ui.setNotifyTasksEnabled(v),
                   ),
-                  ListTile(
+                  SwitchListTile(
+                    secondary: const SizedBox(width: 24),
                     dense: true,
-                    title:
-                        Text(tr(context, 'settings.quotaWatch.expiryLeadWeek')),
-                    trailing: SizedBox(
-                      width: 150,
-                      child: Slider(
-                        value: ui.quotaWatchExpiryLeadWeeklyHours.toDouble(),
-                        min: 5,
-                        max: 10,
-                        divisions: 5,
-                        label: trP(context, 'op.hours',
-                            ['${ui.quotaWatchExpiryLeadWeeklyHours}']),
-                        onChanged: (v) {
-                          HapticFeedback.selectionClick();
-                          ui.setQuotaWatchExpiryLeadWeeklyHours(v.round());
-                        },
-                      ),
-                    ),
+                    title: Text(tr(context, 'settings.notify.offPeak')),
+                    value: ui.notifyOffPeakEnabled,
+                    onChanged: (v) => ui.setNotifyOffPeakEnabled(v),
                   ),
+                  SwitchListTile(
+                    secondary: const SizedBox(width: 24),
+                    dense: true,
+                    title: Text(tr(context, 'settings.notify.auto')),
+                    value: ui.notifyAutoEnabled,
+                    onChanged: (v) => ui.setNotifyAutoEnabled(v),
+                  ),
+                  // Android-only foreground service (see KeepAliveService.kt):
+                  // iOS/ohos hosts have no equivalent, so the row is hidden.
+                  if (widget.keepalive.supported)
+                    SwitchListTile(
+                      secondary: const SizedBox(width: 24),
+                      dense: true,
+                      title: Text(tr(context, 'settings.keepAlive')),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(tr(context, 'settings.keepAliveHint')),
+                          if (ui.keepAliveEnabled) ...[
+                            const SizedBox(height: 4),
+                            _keepAliveStatus(context),
+                            const SizedBox(height: 4),
+                            Text(
+                              tr(context, 'settings.keepAlive.oemHint'),
+                              style:
+                                  ZType.sub.copyWith(color: ZInk.muted(context)),
+                            ),
+                          ],
+                        ],
+                      ),
+                      value: ui.keepAliveEnabled,
+                      onChanged: _setKeepAlive,
+                    ),
                 ],
+                // Quota watch (Android-only persistent monitoring notice, PRD
+                // 09-19): the whole section rides the keep-alive support probe.
+                if (widget.keepalive.supported) ...[
+                  _header(context, tr(context, 'settings.quotaWatch.section')),
+                  SwitchListTile(
+                    secondary: const Icon(Icons.monitor_heart_outlined),
+                    title: Text(tr(context, 'settings.quotaWatch')),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(tr(context, 'settings.quotaWatchHint')),
+                        if (ui.quotaWatchEnabled &&
+                            widget.quotaWatch?.snapshot.phase ==
+                                QuotaWatchPhase.noPlan) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            tr(context, 'settings.quotaWatch.noPlan'),
+                            style:
+                                ZType.sub.copyWith(color: ZInk.muted(context)),
+                          ),
+                        ],
+                      ],
+                    ),
+                    value: ui.quotaWatchEnabled,
+                    onChanged: (v) => ui.setQuotaWatchEnabled(v),
+                  ),
+                  if (ui.quotaWatchEnabled) ...[
+                    // Direct resets ride the foreground service (R3); without
+                    // it the notice only updates while the app is foregrounded.
+                    if (!ui.keepAliveEnabled)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 16),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton(
+                            onPressed: () => _setKeepAlive(true),
+                            child: Text(
+                              tr(context, 'settings.quotaWatch.keepAliveGuide'),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ListTile(
+                      dense: true,
+                      title: Text(tr(context, 'settings.quotaWatch.threshold')),
+                      subtitle: Text(trP(context, 'settings.quotaWatch.thresholdHint',
+                          ['${ui.quotaWatchThreshold}'])),
+                      trailing: SizedBox(
+                        width: 150,
+                        child: Slider(
+                          value: ui.quotaWatchThreshold.toDouble(),
+                          min: 5,
+                          max: 50,
+                          divisions: 9,
+                          label: '${ui.quotaWatchThreshold}%',
+                          onChanged: (v) {
+                            HapticFeedback.selectionClick();
+                            ui.setQuotaWatchThreshold(v.round());
+                          },
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Row(
+                        children: [
+                          Text(tr(context, 'settings.quotaWatch.interval')),
+                          const Spacer(),
+                          SegmentedButton<int>(
+                            segments: [
+                              for (final minutes in const [1, 5, 15])
+                                ButtonSegment(
+                                  value: minutes,
+                                  label: Text(
+                                      trP(context, 'op.minutes', ['$minutes'])),
+                                ),
+                            ],
+                            selected: {ui.quotaWatchIntervalMinutes},
+                            onSelectionChanged: (s) {
+                              HapticFeedback.selectionClick();
+                              ui.setQuotaWatchIntervalMinutes(s.first);
+                            },
+                            showSelectedIcon: false,
+                          ),
+                        ],
+                      ),
+                    ),
+                    SwitchListTile(
+                      secondary: const SizedBox(width: 24),
+                      dense: true,
+                      title: Text(tr(context, 'settings.quotaWatch.expiryReminder')),
+                      subtitle:
+                          Text(tr(context, 'settings.quotaWatch.expiryReminderHint')),
+                      value: ui.quotaWatchExpiryReminderEnabled,
+                      onChanged: (v) => ui.setQuotaWatchExpiryReminderEnabled(v),
+                    ),
+                    // Per-type N4 leads (2026-09-20): meaningless while the
+                    // reminder is off, so they ride its switch.
+                    if (ui.quotaWatchExpiryReminderEnabled) ...[
+                      ListTile(
+                        dense: true,
+                        title: Text(tr(context, 'settings.quotaWatch.expiryLead5h')),
+                        trailing: SizedBox(
+                          width: 150,
+                          child: Slider(
+                            value: ui.quotaWatchExpiryLeadFiveHourMinutes.toDouble(),
+                            min: 5,
+                            max: 60,
+                            divisions: 11,
+                            label: trP(context, 'op.minutes',
+                                ['${ui.quotaWatchExpiryLeadFiveHourMinutes}']),
+                            onChanged: (v) {
+                              HapticFeedback.selectionClick();
+                              ui.setQuotaWatchExpiryLeadFiveHourMinutes(v.round());
+                            },
+                          ),
+                        ),
+                      ),
+                      ListTile(
+                        dense: true,
+                        title:
+                            Text(tr(context, 'settings.quotaWatch.expiryLeadWeek')),
+                        trailing: SizedBox(
+                          width: 150,
+                          child: Slider(
+                            value: ui.quotaWatchExpiryLeadWeeklyHours.toDouble(),
+                            min: 5,
+                            max: 10,
+                            divisions: 5,
+                            label: trP(context, 'op.hours',
+                                ['${ui.quotaWatchExpiryLeadWeeklyHours}']),
+                            onChanged: (v) {
+                              HapticFeedback.selectionClick();
+                              ui.setQuotaWatchExpiryLeadWeeklyHours(v.round());
+                            },
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ],
+                _header(context, tr(context, 'settings.data')),
+                ListTile(
+                  leading: const Icon(Icons.bar_chart_outlined),
+                  title: Text(tr(context, 'settings.usageStats')),
+                  subtitle: Text(tr(context, 'settings.usageStatsHint')),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.of(context).push(zRoute(
+                    (_) => UsageStatsPage(store: widget.store, ui: widget.ui),
+                  )),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.system_update_outlined),
+                  title: Text(tr(context, 'settings.checkUpdate')),
+                  trailing: _checking
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.chevron_right),
+                  onTap: _checkForUpdates,
+                ),
+                _header(context, tr(context, 'settings.about')),
+                ListTile(
+                  leading: const Icon(Icons.info_outline),
+                  title: Text(tr(context, 'settings.about')),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.of(context).push(zRoute(
+                    (_) => AboutPage(),
+                  )),
+                ),
               ],
-            ],
-            _header(context, tr(context, 'settings.data')),
-            ListTile(
-              leading: const Icon(Icons.bar_chart_outlined),
-              title: Text(tr(context, 'settings.usageStats')),
-              subtitle: Text(tr(context, 'settings.usageStatsHint')),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.of(context).push(zRoute(
-                (_) => UsageStatsPage(store: widget.store, ui: widget.ui),
-              )),
             ),
-            ListTile(
-              leading: const Icon(Icons.system_update_outlined),
-              title: Text(tr(context, 'settings.checkUpdate')),
-              trailing: _checking
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.chevron_right),
-              onTap: _checkForUpdates,
-            ),
-            _header(context, tr(context, 'settings.about')),
-            ListTile(
-              leading: const Icon(Icons.info_outline),
-              title: Text(tr(context, 'settings.about')),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.of(context).push(zRoute(
-                (_) => AboutPage(),
-              )),
-            ),
-          ],
+          ),
         ),
       ),
     );

@@ -21,6 +21,7 @@ import 'remote_page.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 import 'widgets/device_name.dart';
+import 'widgets/sheet_scaffold.dart';
 import 'widgets/swipe_actions.dart';
 
 /// Native task list of one device (official mobile layout): a connection
@@ -346,6 +347,13 @@ class _TaskListPageState extends State<TaskListPage>
       backgroundColor: isDark
           ? ZColors.darkBackground
           : ZColors.lightBackground,
+      // Immersive cutout handling: SafeArea lives inside each column so the
+      // sidebar color block and the divider extend behind the cutout / status
+      // strip (no Scaffold-background color seam) while content still clears
+      // the insets. left/right are explicitly interleaved false so each column
+      // pads only its own screen edge — the pane stays flush against the
+      // divider even when the far screen edge carries a cutout inset, and
+      // vice versa.
       body: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -353,26 +361,38 @@ class _TaskListPageState extends State<TaskListPage>
             width: kSidebarWidth,
             child: ColoredBox(
               color: isDark ? ZColors.darkSidebar : ZColors.lightSidebar,
-              child: _desktopSidebar(context),
+              child: SafeArea(
+                left: true,
+                top: true,
+                bottom: true,
+                right: false,
+                child: _desktopSidebar(context),
+              ),
             ),
           ),
           Container(width: 1, color: const Color(0xFF333333)),
           Expanded(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(0, 8, 8, 8),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: isDark
-                      ? ZColors.darkBackground
-                      : ZColors.lightBackground,
-                  borderRadius: BorderRadius.circular(ZRadius.tile),
-                  border: Border.all(color: ZInk.hairline(context)),
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(ZRadius.tile),
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(minWidth: 320),
-                    child: _chatPane(context),
+            child: SafeArea(
+              left: false,
+              top: true,
+              bottom: true,
+              right: true,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(0, 8, 8, 8),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? ZColors.darkBackground
+                        : ZColors.lightBackground,
+                    borderRadius: BorderRadius.circular(ZRadius.tile),
+                    border: Border.all(color: ZInk.hairline(context)),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(ZRadius.tile),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(minWidth: 320),
+                      child: _chatPane(context),
+                    ),
                   ),
                 ),
               ),
@@ -488,7 +508,8 @@ class _TaskListPageState extends State<TaskListPage>
               child: session == null || session.workspaces.isEmpty
                   ? _fallback(context, session)
                   : ListView(
-                      padding: const EdgeInsets.fromLTRB(6, 0, 6, 16),
+                      padding: zScreenPadding(context,
+                          top: 0, bottom: 16, horizontal: 6),
                       children: [
                         ..._desktopPinned(context, session),
                         for (final ws in session.workspaces)
@@ -987,7 +1008,7 @@ class _TaskListPageState extends State<TaskListPage>
             // Always scrollable: a short list (one workspace, no tasks) must
             // still accept the pull gesture for the refresh indicator.
             physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 32),
+            padding: zScreenPadding(context, top: 12, bottom: 32, horizontal: 12),
             itemCount: rows.length,
             itemBuilder: (context, i) => rows[i],
           ),
@@ -1002,7 +1023,9 @@ class _TaskListPageState extends State<TaskListPage>
     return showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
-      builder: (sheetCtx) => SafeArea(
+      isScrollControlled: true,
+      builder: (sheetCtx) => zSheetScaffold(
+        sheetCtx,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(
               ZSpacing.screen, 0, ZSpacing.screen, 24),
@@ -1095,7 +1118,9 @@ class _TaskListPageState extends State<TaskListPage>
     return showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
-      builder: (sheetCtx) => SafeArea(
+      isScrollControlled: true,
+      builder: (sheetCtx) => zSheetScaffold(
+        sheetCtx,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1216,6 +1241,8 @@ class _TaskListPageState extends State<TaskListPage>
     ].join(' · ');
     return SwipeActionsRow(
       actions: _swipeActions(session, entry),
+      trayRadius: ZRadius.tile,
+      childRadius: ZRadius.tile,
       child: Card(
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -1755,6 +1782,8 @@ class _TaskListPageState extends State<TaskListPage>
           horizontal: 8, vertical: ZListRow.gap),
       child: SwipeActionsRow(
         actions: _swipeActions(session, entry),
+        trayRadius: ZRadius.field,
+        childRadius: ZRadius.field,
         child: Material(
           color: highlight
               ? Colors.white.withValues(alpha: 0.1)
@@ -1831,10 +1860,15 @@ class _TaskListPageState extends State<TaskListPage>
 
   /// Left-swipe quick actions shared by the task rows: the same three verbs
   /// the long-press sheet offers for a fast pass over the list (归档 /
-  /// 标记未读 / 删除). Delete keeps its confirmation dialog.
+  /// 标记未读 / 删除). Delete keeps its confirmation dialog. Colors are
+  /// FOREGROUND tones on the neutral tray: brand sky for archive (dark
+  /// sky400 / light sky600), the sheet's neutral for read/unread, and the
+  /// destructive tone for delete — same language as the sheet entries.
   List<SwipeAction> _swipeActions(DeviceSession session, SessionEntry entry) {
     final archived = entry.raw['archived'] == true;
     final unread = entry.raw['unreadAt'] != null;
+    final archiveFg =
+        ZInk.isDark(context) ? ZColors.sky400 : ZColors.sky600;
     return [
       SwipeAction(
         icon: archived ? Icons.unarchive_outlined : Icons.archive_outlined,
@@ -1842,7 +1876,7 @@ class _TaskListPageState extends State<TaskListPage>
           context,
           archived ? 'tasks.action.unarchive' : 'tasks.action.archive',
         ),
-        color: ZColors.sky500,
+        fgColor: archiveFg,
         onTap: () => _runOp(() async {
           await session.setTaskArchived(entry.sessionId, !archived);
           await session.reloadTasks();
@@ -1856,7 +1890,7 @@ class _TaskListPageState extends State<TaskListPage>
           context,
           unread ? 'tasks.action.markRead' : 'tasks.action.markUnread',
         ),
-        color: ZColors.neutral600,
+        fgColor: ZInk.soft(context),
         onTap: () => _runOp(() async {
           await session.setTaskUnread(entry.sessionId, !unread);
           await session.reloadTasks();
@@ -1865,7 +1899,7 @@ class _TaskListPageState extends State<TaskListPage>
       SwipeAction(
         icon: Icons.delete_outline,
         label: tr(context, 'tasks.action.delete'),
-        color: ZColors.danger,
+        fgColor: ZInk.dangerTone(context),
         onTap: () => _deleteTaskDialog(session, entry),
       ),
     ];
@@ -1883,7 +1917,7 @@ class _TaskListPageState extends State<TaskListPage>
         tr(context, 'tasks.awaiting'),
         style: ZType.caption.copyWith(
           fontWeight: FontWeight.w500,
-          color: ZColors.warning,
+          color: ZInk.warningTone(context),
         ),
       ),
     );
@@ -2079,13 +2113,13 @@ class _TaskListPageState extends State<TaskListPage>
                 },
               ),
               ListTile(
-                leading: const Icon(
+                leading: Icon(
                   Icons.delete_outline,
-                  color: ZColors.danger,
+                  color: ZInk.dangerTone(sheetCtx),
                 ),
                 title: Text(
                   tr(sheetCtx, 'tasks.action.delete'),
-                  style: const TextStyle(color: ZColors.danger),
+                  style: TextStyle(color: ZInk.dangerTone(sheetCtx)),
                 ),
                 onTap: () {
                   Navigator.of(sheetCtx).pop();
@@ -2451,7 +2485,7 @@ class _ConnectionBanner extends StatelessWidget {
       title = tr(context, 'status.kicked');
       body = tr(context, 'tasks.banner.kicked');
       icon = Icons.phonelink_erase_outlined;
-      color = ZColors.danger;
+      color = ZInk.dangerTone(context);
     } else if (s.status == DeviceStatus.connecting) {
       title = tr(context, 'status.connecting');
       body = tr(context, 'tasks.banner.connecting');
@@ -2461,7 +2495,7 @@ class _ConnectionBanner extends StatelessWidget {
       title = tr(context, 'tasks.fallback.title');
       body = _failureBody(context, s);
       icon = Icons.cloud_off;
-      color = ZColors.danger;
+      color = ZInk.dangerTone(context);
     }
     return Card(
       child: Padding(

@@ -21,10 +21,14 @@ class PhasePill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final running = phase == 'running' || phase == 'prewarming';
+    // Foreground tones go through the ZInk slots so 11px labels stay
+    // readable in light mode (the dark-mode-bright constants are washed
+    // out on light surfaces). The official solid pill pairs below
+    // (pillSuccessBg/Fg, pillRunningBg/Fg) are untouched.
     final (color, icon) = switch (phase) {
       'running' || 'prewarming' => (ZColors.sky400, Icons.autorenew),
-      'completedSuccess' => (ZColors.success, Icons.check),
-      'error' || 'failed' => (ZColors.danger, Icons.error_outline),
+      'completedSuccess' => (ZInk.successTone(context), Icons.check),
+      'error' || 'failed' => (ZInk.dangerTone(context), Icons.error_outline),
       'completedInterrupted' => (
           ZColors.neutral400,
           Icons.remove_circle_outline

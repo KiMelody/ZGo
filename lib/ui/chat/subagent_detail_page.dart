@@ -302,8 +302,8 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
           if (widget.running)
             IconButton(
               tooltip: tr(context, 'chat.agents.stop'),
-              icon: const Icon(Icons.stop_circle_outlined,
-                  color: ZColors.danger),
+              icon: Icon(Icons.stop_circle_outlined,
+                  color: ZInk.dangerTone(context)),
               onPressed: _confirmStop,
             ),
         ],
@@ -506,9 +506,9 @@ class _ToolSummary extends StatelessWidget {
     );
     final color = switch (row['status'] as String? ?? '') {
       'running' || 'inputStreaming' || 'pendingApproval' => ZColors.sky400,
-      'success' => ZColors.success,
-      'error' => ZColors.danger,
-      'cancelled' => ZColors.warning,
+      'success' => ZInk.successTone(context),
+      'error' => ZInk.dangerTone(context),
+      'cancelled' => ZInk.warningTone(context),
       _ => ZInk.faint(context),
     };
     final diff = extractDiff(row);
@@ -529,7 +529,7 @@ class _ToolSummary extends StatelessWidget {
           padding: const EdgeInsets.only(left: 8),
           child: Text(
             '+${summary.additions}',
-            style: ZType.caption.copyWith(color: ZColors.success),
+            style: ZType.caption.copyWith(color: ZInk.successTone(context)),
           ),
         ),
       if (summary.deletions > 0)
@@ -537,7 +537,7 @@ class _ToolSummary extends StatelessWidget {
           padding: const EdgeInsets.only(left: 4),
           child: Text(
             '-${summary.deletions}',
-            style: ZType.caption.copyWith(color: ZColors.danger),
+            style: ZType.caption.copyWith(color: ZInk.dangerTone(context)),
           ),
         ),
     ];
