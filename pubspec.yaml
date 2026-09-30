@@ -93,6 +93,12 @@ flutter:
 
   assets:
     - assets/icon/icon.png
+    # Font license texts served to the in-app licenses page via
+    # LicenseRegistry (lib/main.dart): the build-time NOTICES collector only
+    # scans package roots, never app assets, so the bundled subsets'
+    # OFL-1.1 / Apache-2.0 texts are declared here explicitly.
+    - assets/fonts/OFL-NotoSansSC.txt
+    - assets/fonts/LICENSE-MaterialSymbolsRounded.txt
 
   # Bundled CJK UI font — subset built by tool/font_subset.py.
   fonts:

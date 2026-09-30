@@ -67,12 +67,12 @@ jobs:
       - name: Rename artifact
         run: |
           mv build/app/outputs/flutter-apk/app-release.apk \
-             zlinker-${{ github.ref_name }}.apk
+             ZGo-${{ github.ref_name }}.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: zlinker-${{ github.ref_name }}.apk
+          path: ZGo-${{ github.ref_name }}.apk
 
   ios:
     name: Build iOS (signed)
@@ -133,7 +133,7 @@ jobs:
           ls build/ipa
 
       - name: Rename IPA artifact
-        run: mv build/ipa/*.ipa "zlinker-${{ github.ref_name }}.ipa"
+        run: mv build/ipa/*.ipa "ZGo-${{ github.ref_name }}.ipa"
 
       - name: Upload to TestFlight
         if: startsWith(github.ref, 'refs/tags/')
@@ -153,12 +153,12 @@ jobs:
               "in_house": False,
           }, open("api-key.json", "w"))
           PY
-          fastlane pilot upload --ipa "zlinker-${{ github.ref_name }}.ipa" --api_key_path api-key.json --skip_waiting_for_build_processing
+          fastlane pilot upload --ipa "ZGo-${{ github.ref_name }}.ipa" --api_key_path api-key.json --skip_waiting_for_build_processing
 
       - uses: actions/upload-artifact@v4
         with:
           name: ios-ipa
-          path: zlinker-${{ github.ref_name }}.ipa
+          path: ZGo-${{ github.ref_name }}.ipa
 
   release:
     name: Publish GitHub Release

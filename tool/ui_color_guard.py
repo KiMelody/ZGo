@@ -26,8 +26,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCAN_DIR = REPO_ROOT / "lib" / "ui"
 
-# File allowed to reference the dark constants: the token definitions.
-WHITELIST_FILES = {"theme.dart"}
+# Files allowed to reference the dark constants: the token definitions, and
+# the full-screen image viewer, whose near-black surface is theme-independent
+# by design (a light-mode white viewer would wash the image out — the viewer
+# pins black per design §4.1).
+WHITELIST_FILES = {"theme.dart", "image_viewer_page.dart"}
 
 BANNED_TOKENS = (
     "ZColors.dark",  # darkBackground / darkCard / darkSidebar / darkSecondary
@@ -45,9 +48,7 @@ DARK_HEX_RE = re.compile(r"0xFF[0-2][0-9A-Fa-f]{4}")
 # A line carries its own brightness guard: `isDark ? …`, `… == Brightness.dark`,
 # `ZInk.isDark(...)`, or is the `?` arm of a ternary whose condition sits on an
 # earlier line.
-GUARD_RE = re.compile(
-    r"isDark\b|Brightness\.dark|_dark\(|^\s*\?\s*ZColors\."
-)
+GUARD_RE = re.compile(r"isDark\b|Brightness\.dark|_dark\(|^\s*\?\s*ZColors\.")
 
 
 def code_part(line: str) -> str:
@@ -81,10 +82,14 @@ def main() -> int:
             continue
         bad.extend(violations(path))
     if bad:
-        print("ui_color_guard: hardcoded dark surfaces found:\n" + "\n".join(bad),
-              file=sys.stderr)
-        print("Read them through a ZInk slot (lib/ui/theme.dart) instead.",
-              file=sys.stderr)
+        print(
+            "ui_color_guard: hardcoded dark surfaces found:\n" + "\n".join(bad),
+            file=sys.stderr,
+        )
+        print(
+            "Read them through a ZInk slot (lib/ui/theme.dart) instead.",
+            file=sys.stderr,
+        )
         return 1
     print("ui_color_guard: OK (lib/ui free of hardcoded dark surfaces)")
     return 0
