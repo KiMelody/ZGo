@@ -1,5 +1,5 @@
-/// `/models` endpoint model fetch — ZLinker enhancement beyond the official
-/// remote (the desktop has no fetch-models RPC; notes.md 「/models 端点
+/// `/models` endpoint model fetch — an app-side enhancement beyond what the
+/// remote offers (the desktop has no fetch-models RPC; notes.md 「/models 端点
 /// 拉取定论」). Reads the provider's endpoint directly with dart:io (no
 /// CORS on mobile), reusing the stored API key from the provider-settings
 /// view.

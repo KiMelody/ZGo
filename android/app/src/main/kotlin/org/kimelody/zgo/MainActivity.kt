@@ -1,4 +1,4 @@
-package org.songsong.zlinker
+package org.kimelody.zgo
 
 import android.content.Intent
 import io.flutter.embedding.android.FlutterActivity
@@ -82,8 +82,8 @@ class MainActivity : FlutterActivity() {
     // Internal, not private: QuotaWatchActionReceiver pokes pushRefresh /
     // pushResetFromNotice.
     internal companion object {
-        const val KEEP_ALIVE_CHANNEL = "zlinker/keepalive"
-        const val QUOTA_WATCH_CHANNEL = "zlinker/quota_watch"
+        const val KEEP_ALIVE_CHANNEL = "zgo/keepalive"
+        const val QUOTA_WATCH_CHANNEL = "zgo/quota_watch"
 
         /** One process, one engine/activity — plain statics are the state. */
         var engine: FlutterEngine? = null

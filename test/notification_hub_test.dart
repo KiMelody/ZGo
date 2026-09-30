@@ -5,16 +5,16 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:zlinker/notifications/notification_service.dart';
-import 'package:zlinker/notifications/notify_rules.dart';
-import 'package:zlinker/notifications/phase_snapshot_store.dart';
-import 'package:zlinker/protocol/automation.dart';
-import 'package:zlinker/protocol/conversation.dart';
-import 'package:zlinker/protocol/off_peak.dart';
-import 'package:zlinker/state/device_session.dart';
-import 'package:zlinker/state/notification_hub.dart';
-import 'package:zlinker/state/task_directory.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/notifications/notification_service.dart';
+import 'package:zgo/notifications/notify_rules.dart';
+import 'package:zgo/notifications/phase_snapshot_store.dart';
+import 'package:zgo/protocol/automation.dart';
+import 'package:zgo/protocol/conversation.dart';
+import 'package:zgo/protocol/off_peak.dart';
+import 'package:zgo/state/device_session.dart';
+import 'package:zgo/state/notification_hub.dart';
+import 'package:zgo/state/task_directory.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 /// Records what the hub would have shown; plugin-backed members no-op.
 class RecordingService implements NotificationService {
@@ -68,7 +68,7 @@ class FakeNotifiableSession extends ChangeNotifier
 
   final SessionsIndexState _state = SessionsIndexState();
 
-  /// Mirrors the real session: [sessions] stays null until the workspace
+  /// Like the real session: [sessions] stays null until the workspace
   /// subscription is up. That window is when the hub adopts the disk
   /// baseline, so tests of the restart path must start with it closed.
   bool sessionsReady = true;
@@ -109,7 +109,7 @@ class FakeNotifiableSession extends ChangeNotifier
     notifyListeners();
   }
 
-  /// Applies a relay task overview and notifies, mirroring
+  /// Applies a relay task overview and notifies, like
   /// `DeviceSession._onWorkspaceListUpdated`.
   void setRelayTasks(List<Map<String, dynamic>> tasks) {
     relayTasks = tasks;

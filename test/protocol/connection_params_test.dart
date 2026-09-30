@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/connection_params.dart';
+import 'package:zgo/protocol/connection_params.dart';
 
 void main() {
   group('uriSchemeIsSecure', () {

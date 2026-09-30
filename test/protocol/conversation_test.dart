@@ -1,5 +1,5 @@
-// Ported verbatim from the reference implementation; newer style lints
-// are suppressed so the file stays diffable against it.
+// Newer style lints are suppressed so these assertions keep their
+// readable, self-contained shape.
 // ignore_for_file: use_null_aware_elements, prefer_initializing_formals
 import 'dart:async';
 
@@ -7,10 +7,10 @@ import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/channel_client.dart';
-import 'package:zlinker/protocol/conversation.dart';
-import 'package:zlinker/protocol/ipc_codec.dart';
-import 'package:zlinker/protocol/remote_client.dart';
+import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/conversation.dart';
+import 'package:zgo/protocol/ipc_codec.dart';
+import 'package:zgo/protocol/remote_client.dart';
 
 void main() {
   group('ConversationState delta application', () {
@@ -833,7 +833,7 @@ void main() {
       state.applyUsageUpdate(usageEvent(used: 50000, hitRate: 0.5));
       state.applyUsageUpdate(usageEvent(used: 0, hitRate: 0.99));
 
-      // official s0t: invalid incoming used never clobbers valid usage.
+      // invalid incoming used never clobbers valid usage.
       final view = state.contextUsage;
       expect(view.used, 50000);
       expect(view.hitRate, 0.5);

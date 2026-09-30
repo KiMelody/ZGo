@@ -1,6 +1,6 @@
 # App Store listing — English (en-US)
 
-> Product name: **ZGo**. Bundle: `org.songsong.zlinker`.
+> Product name: **ZGo**. Bundle: `org.kimelody.zgo`.
 > Copy is written to App Store Connect field limits (character counts noted).
 
 ## App Name (max 30)
@@ -47,7 +47,7 @@ LOCAL NOTIFICATIONS
 Task finished or failed, off-peak result ready, automation fired — pushed straight to your phone. Tap a notification to open the conversation. The web remote can't do this.
 
 MULTI-DEVICE
-Add devices by scanning a QR code, pasting a link or decoding a screenshot. Rename, pin, reorder and export encrypted backups. Every device runs its own live connection.
+Add devices by scanning a QR code, pasting a link or decoding a screenshot. Rename, pin, reorder and export device backups as JSON. Every device runs its own live connection.
 
 WEB FALLBACK, ALWAYS
 If the protocol ever changes, any task still opens in the official web remote. The native path degrades gracefully — the app keeps working.

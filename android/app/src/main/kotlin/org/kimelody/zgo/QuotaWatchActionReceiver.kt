@@ -1,4 +1,4 @@
-package org.songsong.zlinker
+package org.kimelody.zgo
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -22,7 +22,7 @@ class QuotaWatchActionReceiver : BroadcastReceiver() {
     }
 
     companion object {
-        const val ACTION_REFRESH = "org.songsong.zlinker.QUOTA_REFRESH"
-        const val ACTION_RESET = "org.songsong.zlinker.QUOTA_RESET"
+        const val ACTION_REFRESH = "org.kimelody.zgo.QUOTA_REFRESH"
+        const val ACTION_RESET = "org.kimelody.zgo.QUOTA_RESET"
     }
 }

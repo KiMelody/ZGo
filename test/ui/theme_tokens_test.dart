@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/theme.dart';
+import 'package:zgo/ui/theme.dart';
 
-/// The 2026-09-19 ZInk slots: every light/dark pair comes from the official
+/// The 2026-09-19 ZInk slots: every light/dark pair comes from the
 /// theme-zai-* value table (design.md §1/§3, direct lifts). These asserts
 /// pin both branches so a token drift breaks here, not on a device.
 void main() {
@@ -66,8 +66,8 @@ void main() {
     final (darkWarning, lightWarning) =
         await capture(tester, ZInk.warningTone);
     expect(darkWarning, ZColors.warning);
-    // Official --color-warning literal from the theme-zai-light bundle —
-    // the same value official light uses for --color-usage-chart-5.
+    // --color-warning literal from the theme-zai-light bundle —
+    // the same value light mode uses for --color-usage-chart-5.
     expect(lightWarning, ZColors.usageOrangeLight);
   });
 
@@ -102,7 +102,7 @@ void main() {
     final (darkDone, lightDone) =
         await capture(tester, ZInk.pillSuccessBg);
     expect(darkDone, const Color(0xFF46BF72));
-    // Official interaction-confirmation surface (not the usage-chart green
+    // Interaction-confirmation surface (not the usage-chart green
     // the old 0xFF1E8A3E value belonged to).
     expect(lightDone, const Color(0xFFEAF7EE));
 

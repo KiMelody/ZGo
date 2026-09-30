@@ -1,11 +1,11 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:zlinker/protocol/conversation.dart';
-import 'package:zlinker/state/device_session.dart';
-import 'package:zlinker/state/device_store.dart';
-import 'package:zlinker/state/scheduled_store.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/protocol/conversation.dart';
+import 'package:zgo/state/device_session.dart';
+import 'package:zgo/state/device_store.dart';
+import 'package:zgo/state/scheduled_store.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 import '../helpers/fake_device_session.dart';
 

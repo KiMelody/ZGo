@@ -24,7 +24,7 @@ class SwipeAction {
 
 /// Left-swipe quick actions for a list row.
 ///
-/// Mobile rows carry no visible per-row buttons (official layout parity) —
+/// Mobile rows carry no visible per-row buttons —
 /// dragging the row left reveals [actions] instead. A release past the halfway
 /// point (or a fast fling) snaps the tray open with a light haptic pulse;
 /// tapping the row, or any action, closes it. The row keeps its own tap and

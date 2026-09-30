@@ -3,12 +3,12 @@
 // no gateway (the old copy lived as private statics on chat_page's tile
 // state and could only be tested by pumping the whole ChatPage).
 //
-// Parity discipline (ADR-0006): the copy under test is the frozen desktop
+// ADR-0006: the copy under test is the fixed desktop
 // wording from the zh/en tables in ui_settings.dart.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/chat/tool_row_semantics.dart';
+import 'package:zgo/ui/chat/tool_row_semantics.dart';
 
 Map<String, dynamic> toolRow(Map<String, dynamic> extra) => {
   'kind': 'toolCall',

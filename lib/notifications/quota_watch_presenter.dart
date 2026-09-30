@@ -37,7 +37,7 @@ class QuotaWatchPresenter {
         _onOpenUsage = onOpenUsage,
         _onRefresh = onRefresh;
 
-  static const _channel = MethodChannel('zlinker/quota_watch');
+  static const _channel = MethodChannel('zgo/quota_watch');
 
   /// Action id shared by the one-shot reset buttons; NotificationService
   /// routes the tap back through [NotificationService.onAction].
@@ -214,7 +214,7 @@ class QuotaWatchPresenter {
       ];
     } else if (degrade) {
       // N3b: unmappable window but resets exist → deep-link + in-app
-      // dialog (the official confirm flow).
+      // dialog (the app's confirm flow).
       body = _tr('op.watch.alert.degradeBody');
       _pendingResetKind = null;
       _pendingDegrade = true;

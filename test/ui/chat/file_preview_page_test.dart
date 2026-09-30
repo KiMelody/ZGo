@@ -4,8 +4,8 @@ import 'package:flutter/material.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/chat/file_preview_page.dart';
-import 'package:zlinker/ui/theme.dart';
+import 'package:zgo/ui/chat/file_preview_page.dart';
+import 'package:zgo/ui/theme.dart';
 
 Widget wrap(Widget child) => MaterialApp(theme: buildDarkTheme(), home: child);
 

@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/conversation.dart';
-import 'package:zlinker/ui/chat/goal_panel.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/protocol/conversation.dart';
+import 'package:zgo/ui/chat/goal_panel.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 ConversationState _stateWith(Map<String, dynamic> snapshot) {
   final state = ConversationState();

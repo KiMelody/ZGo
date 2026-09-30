@@ -83,8 +83,8 @@ Map<String, dynamic> sanitizeNewTaskConfig(
 /// options, then prepareWorkspace's currentValue, then 'max'. The desktop
 /// only merges its current level on a warm runtime; without a legal thought
 /// a cold runtime fails model creation ("Reasoning level is required",
-/// 09-25 verification) — the official web facade always carries thought
-/// (desktop bundle). Migrated from chat_page's `_effectiveDraftThought`.
+/// 09-25 diagnosis) — the web facade always carries thought.
+/// Migrated from chat_page's `_effectiveDraftThought`.
 String effectiveNewTaskThought(
   Map<String, String>? config,
   WorkspacePrep? prep,

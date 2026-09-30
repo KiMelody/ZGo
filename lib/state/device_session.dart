@@ -22,7 +22,7 @@ import 'quota_reset.dart';
 import 'quota_watch.dart' show QuotaWatchSource;
 import 'task_directory.dart';
 
-/// Mirrors `HC()` in the web client:
+/// Workspace key:
 /// key = workspaceIdentity?.trim() || workspacePath.
 String? workspaceKeyOf(Map<String, dynamic> w) {
   final identity = w['workspaceIdentity'];
@@ -258,10 +258,10 @@ abstract interface class ChatGateway
       {int offset = 0, required int length});
 
   /// Relay-overview display status (`idle|running|completed|error`) of one
-  /// task, read from the relay task mirror keyed by taskId. The shell-
+  /// task, read from the relay task view keyed by taskId. The shell-
   /// session error card's only signal (design 09-25 D1): a session that
   /// fails its first turn pushes `displayStatus:"error"` while its
-  /// snapshot `control.phase` is unreliable. Null when the mirror doesn't
+  /// snapshot `control.phase` is unreliable. Null when that view doesn't
   /// hold the session (not yet bootstrapped / other-workspace lag) —
   /// callers must treat null as "don't render", never as an error.
   String? taskDisplayStatus(String sessionId);
@@ -377,7 +377,7 @@ class DeviceSession extends ChangeNotifier
   /// non-active workspaces (and the archive view) from exactly this list.
   List<Map<String, dynamic>> _relayTasks = [];
 
-  /// Well-known `app-error` reason of the last fatal failure (mirrors the
+  /// Well-known `app-error` reason of the last fatal failure (the
   /// web's `webRemoteControl.failure.*` enum); UI maps it to localized copy.
   String? _failureReason;
 
@@ -641,7 +641,7 @@ class DeviceSession extends ChangeNotifier
   /// Concurrent calls are serialized (last wins) instead of dropped: an
   /// open already in flight used to swallow overlapping retries silently,
   /// which read exactly like the dead "retry" button of the loading bug.
-  /// [taskId] rides the `workspace-bridge-open` payload (web parity: tapping
+  /// [taskId] rides the `workspace-bridge-open` payload (tapping
   /// a task of a non-active workspace opens the bridge straight onto it).
   Future<void> openWorkspace(Map<String, dynamic> workspace, {String? taskId}) {
     final previous = _openChain;
@@ -1127,7 +1127,7 @@ class DeviceSession extends ChangeNotifier
   @override
   Map<String, dynamic> get automationScope => offPeakScope;
 
-  /// mobile-view-state-update for the ACTIVE workspace (web parity: the
+  /// mobile-view-state-update for the ACTIVE workspace (the
   /// phone reports which workspace/task it is looking at; the desktop shows
   /// the「手机正在操作此任务」badge from it). Fire-and-forget; safe to call
   /// on every navigation.
@@ -1249,7 +1249,7 @@ class DeviceSession extends ChangeNotifier
 
   /// Grouped task view of every known workspace (`zcode-task
   /// .listGroupedTaskViewStructure`, desktop 3.12.3 — live-probed
-  /// 2026-09-18, shape fixed in task internal-task).
+  /// 2026-09-18).
   /// Read-only 一期: group titles/colors/ordering only. Null on any miss
   /// (pre-3.12.3 desktops reject the method; no workspace open) — callers
   /// keep the flat list, no version gate (R4 silent degrade).
@@ -1551,9 +1551,9 @@ class DeviceSession extends ChangeNotifier
   }
 
   /// usage-stats channel fetch for [_entitlementPoller]. Pre-3.12.3 the
-  /// bare call is the official wire; 3.12.3+ gates the quota APIs on the
-  /// full official parameter set (accountAccess — live-probed 2026-09-17,
-  /// task internal-task). A failing full call throws into the
+  /// bare call is the legacy wire; 3.12.3+ gates the quota APIs on the
+  /// full parameter set (accountAccess — live-probed 2026-09-17).
+  /// A failing full call throws into the
   /// poller's error phase — no bare retry: on 3.12.3 the bare form answers
   /// not_configured, so a retry would add zero information.
   Future<dynamic> _fetchEntitlement() async {

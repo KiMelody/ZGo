@@ -5,7 +5,7 @@ Downloads the Noto Sans SC variable font, instances it into the three static
 weights the theme uses (400/500/600), subsets each to the app character set and
 writes `assets/fonts/NotoSansSC-{Regular,Medium,SemiBold}.ttf`.
 
-Character set (see internal notes R1):
+Character set:
   * all 6763 GB2312 hanzi (rows 16-87)
   * every CJK / fullwidth / ASCII character used by `lib/**/*.dart`
   * ASCII visible range + fullwidth forms + common CJK punctuation/symbols

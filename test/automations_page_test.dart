@@ -2,14 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:zlinker/protocol/automation.dart';
-import 'package:zlinker/state/device_session.dart';
-import 'package:zlinker/state/device_store.dart';
-import 'package:zlinker/state/scheduled_store.dart';
-import 'package:zlinker/ui/automations_page.dart';
-import 'package:zlinker/ui/scheduled_page.dart';
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/protocol/automation.dart';
+import 'package:zgo/state/device_session.dart';
+import 'package:zgo/state/device_store.dart';
+import 'package:zgo/state/scheduled_store.dart';
+import 'package:zgo/ui/automations_page.dart';
+import 'package:zgo/ui/scheduled_page.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 /// Fake device link: connected host whose automation port answers locally.
 class FakeAutomationHost implements AutomationHost {
@@ -294,7 +294,7 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     await tester.pump(const Duration(seconds: 1));
 
-    // Duplicate response maps to the official already-running copy.
+    // Duplicate response maps to the already-running copy.
     host.respond = (m, a) => <String, dynamic>{'status': 'duplicate'};
     await tester.tap(find.byType(PopupMenuButton<String>));
     await tester.pumpAndSettle();

@@ -3,10 +3,9 @@ import 'dart:async';
 import 'package:clock/clock.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/state/entitlement_poller.dart';
+import 'package:zgo/state/entitlement_poller.dart';
 
-/// Fixtures use only the live-probed snapshot structure
-/// (internal notes).
+/// Fixtures use only the live-probed snapshot structure.
 void main() {
   /// Recorded `not_configured` response (probe 2026-09-13).
   final notConfigured = <String, dynamic>{
@@ -208,7 +207,7 @@ void main() {
   test('exhausted ignores a topped-out monthly MCP TIME_LIMIT (bug 09-15)', () {
     // Live-probed 3.11.2 snapshot: the monthly built-in MCP quota
     // (search-prime 100/101) is used up and the top-level `remaining`
-    // mirror reads 0/100%, while the token window sits at 51%. No banner.
+    // copy reads 0/100%, while the token window sits at 51%. No banner.
     final view = EntitlementView(
       phase: EntitlementPhase.ok,
       data: {
@@ -264,7 +263,7 @@ void main() {
 
   test('top-level remaining at 100% without a token limit is not exhausted',
       () {
-    // `remaining` mirrors TIME_LIMIT (monthly MCP), so it never raises the
+    // `remaining` reflects TIME_LIMIT (monthly MCP), so it never raises the
     // token-class banner on its own.
     final view = EntitlementView(
       phase: EntitlementPhase.ok,

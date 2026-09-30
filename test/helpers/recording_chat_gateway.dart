@@ -1,14 +1,14 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/conversation.dart';
-import 'package:zlinker/protocol/file_service.dart';
-import 'package:zlinker/state/device_session.dart';
-import 'package:zlinker/state/entitlement_poller.dart';
-import 'package:zlinker/state/quota_reset.dart';
+import 'package:zgo/protocol/conversation.dart';
+import 'package:zgo/protocol/file_service.dart';
+import 'package:zgo/state/device_session.dart';
+import 'package:zgo/state/entitlement_poller.dart';
+import 'package:zgo/state/quota_reset.dart';
 
 /// `Symbol("name")` → `name`. noSuchMethod hands out symbols and Flutter
-/// has no mirrors; the toString shape is the stable SDK contract.
+/// has no reflection; the toString shape is the stable SDK contract.
 String _symbolName(Symbol s) =>
     RegExp(r'^Symbol\("(.*)"\)$').firstMatch(s.toString())?.group(1) ?? '$s';
 
@@ -313,7 +313,7 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   @override
   Future<EntitlementView> entitlementSnapshot({bool force = false}) async {
     entitlementCalls++;
-    // Mirrors the real session's entitlementSnapshot: the reset scope
+    // Like the real session's entitlementSnapshot: the reset scope
     // rides the snapshot, injected by the gateway itself (design Q2a).
     quotaResetController.updateScope(entitlementResult.resetScopeProviderId);
     return entitlementResult;
@@ -387,7 +387,7 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   }
 
   /// Programmed [ChatGateway.taskDisplayStatus] answers keyed by sessionId
-  /// (shell-session error card tests); unlisted ids = mirror miss → null.
+  /// (shell-session error card tests); unlisted ids = lookup miss → null.
   final Map<String, String> taskDisplayStatuses = {};
 
   @override

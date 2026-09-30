@@ -4,24 +4,24 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// UI preferences: locale (zh-CN / en-US), the native task-list switch and
 /// the notification switches (master + per channel).
 class UiSettings extends ChangeNotifier {
-  static const _localeKey = 'zlinker_ui_locale';
-  static const _nativeListKey = 'zlinker_native_list';
-  static const _notifyKey = 'zlinker_notify';
-  static const _notifyTasksKey = 'zlinker_notify_tasks';
-  static const _notifyOffPeakKey = 'zlinker_notify_offpeak';
-  static const _notifyAutoKey = 'zlinker_notify_auto';
-  static const _keepAliveKey = 'zlinker_keepalive';
-  static const _quotaWatchKey = 'zlinker_quota_watch';
-  static const _quotaWatchThresholdKey = 'zlinker_quota_watch_threshold';
-  static const _quotaWatchIntervalKey = 'zlinker_quota_watch_interval';
-  static const _quotaWatchExpiryKey = 'zlinker_quota_watch_expiry';
+  static const _localeKey = 'zgo_ui_locale';
+  static const _nativeListKey = 'zgo_native_list';
+  static const _notifyKey = 'zgo_notify';
+  static const _notifyTasksKey = 'zgo_notify_tasks';
+  static const _notifyOffPeakKey = 'zgo_notify_offpeak';
+  static const _notifyAutoKey = 'zgo_notify_auto';
+  static const _keepAliveKey = 'zgo_keepalive';
+  static const _quotaWatchKey = 'zgo_quota_watch';
+  static const _quotaWatchThresholdKey = 'zgo_quota_watch_threshold';
+  static const _quotaWatchIntervalKey = 'zgo_quota_watch_interval';
+  static const _quotaWatchExpiryKey = 'zgo_quota_watch_expiry';
   static const _quotaWatchExpiryLead5hKey =
-      'zlinker_quota_watch_expiry_lead_5h_min';
+      'zgo_quota_watch_expiry_lead_5h_min';
   static const _quotaWatchExpiryLeadWeekKey =
-      'zlinker_quota_watch_expiry_lead_week_h';
-  static const _newTaskModeKey = 'zlinker_new_task_mode';
-  static const _newTaskModelKey = 'zlinker_new_task_model';
-  static const _newTaskThoughtKey = 'zlinker_new_task_thought';
+      'zgo_quota_watch_expiry_lead_week_h';
+  static const _newTaskModeKey = 'zgo_new_task_mode';
+  static const _newTaskModelKey = 'zgo_new_task_model';
+  static const _newTaskThoughtKey = 'zgo_new_task_thought';
 
   String locale = 'zh-CN';
   bool nativeListEnabled = true;
@@ -276,7 +276,7 @@ String relativeTime(BuildContext context, int ms) {
   ).toLocal().toString().substring(0, 10);
 }
 
-/// Official list/sidebar compact relative time: `27分` / `1小时` / `13天`.
+/// List/sidebar compact relative time: `27分` / `1小时` / `13天`.
 String relativeTimeShort(BuildContext context, int ms) {
   final diff = DateTime.now().difference(
     DateTime.fromMillisecondsSinceEpoch(ms),
@@ -406,7 +406,7 @@ const _zh = {
   'phase.draft': '草稿',
   'phase.paused': '已暂停',
   'phase.idle': '待命',
-  // ---- task actions & tags (web taskList/task-item menu parity) ----
+  // ---- task actions & tags (web taskList/task-item menu) ----
   'tasks.awaiting': '等待确认',
   'tasks.renamePlaceholder': '任务名称',
   'tasks.action.pin': '置顶',
@@ -428,7 +428,7 @@ const _zh = {
   'common.close': '关闭',
   'common.retryLater': '稍后重试',
   'common.save': '保存',
-  // ---- webRemoteControl failure states (official copy) ----
+  // ---- webRemoteControl failure states ----
   'remote.failure.session-not-found': '当前 Web 远程控制链接已经失效，请回到桌面端重新开启一次。',
   'remote.failure.session-expired': '这次 Web 远程控制会话已经结束了，需要在桌面端重新生成新的链接。',
   'remote.failure.session-conflict': '这个链接已经被其他页面占用，请关闭旧页面后重新扫码。',
@@ -732,7 +732,7 @@ const _zh = {
   'chat.action.fileChanges': '查看文件变更',
   'chat.action.fileChanges.failed': '获取失败: \$0',
   'chat.diff.truncated': '…（diff 过长已截断）',
-  // ---- task list (official mobile layout) ----
+  // ---- task list (mobile layout) ----
   'tasks.sectionTitle': '当前设备上的工作区和任务',
   'tasks.stats': '\$0 个工作区 · \$1 个任务',
   'tasks.collapseAll': '收起全部工作区',
@@ -1172,7 +1172,7 @@ const _zh = {
   'update.failed': '检查更新失败: \$0',
   'update.storePending': '请通过 App Store 检查更新',
 
-  // ---- Off-peak functional alignment (official desktop dictionary) ----
+  // ---- Off-peak (desktop dictionary) ----
   'op.tab.settings': '设置',
   'op.tab.history': '历史',
   'op.history.empty': '还没有历史记录。',
@@ -1194,7 +1194,7 @@ const _zh = {
   'op.thought.default': '默认（不指定）',
   'op.remaining.min': '\$0 分钟',
   'op.remaining.hoursMin': '\$0 小时 \$1 分钟',
-  // 3.14 take-a-number header (S1–S4, official 3.14 copy except S1).
+  // 3.14 take-a-number header (S1–S4, 3.14 copy except S1).
   'op.take.available': '闲时任务可用 · 取号通道开放',
   'op.take.limitReached': '闲时任务额度已用完，可在 \$0后再次创建。',
   'op.take.planOnly': '闲时任务仅向 Coding Plan 订阅用户开放。',
@@ -1237,7 +1237,7 @@ const _zh = {
   'op.watch.fail.body': '桌面离线或连接中断 · 每 \$0 自动重试',
   'op.watch.stale.line': '数据更新于 \$0',
 
-  // ---- Automations functional alignment (official desktop dictionary) ----
+  // ---- Automations (desktop dictionary) ----
   'auto.preset': '调度方式',
   'auto.freq.hourly': '每小时',
   'auto.freq.daily': '每天',
@@ -1381,7 +1381,7 @@ const _en = {
   'phase.draft': 'Draft',
   'phase.paused': 'Paused',
   'phase.idle': 'Idle',
-  // ---- task actions & tags (web taskList/task-item menu parity) ----
+  // ---- task actions & tags (web taskList/task-item menu) ----
   'tasks.awaiting': 'Awaiting confirmation',
   'tasks.renamePlaceholder': 'Task name',
   'tasks.action.pin': 'Pin',
@@ -1404,7 +1404,7 @@ const _en = {
   'common.close': 'Close',
   'common.retryLater': 'Retry later',
   'common.save': 'Save',
-  // ---- webRemoteControl failure states (official copy) ----
+  // ---- webRemoteControl failure states ----
   'remote.failure.session-not-found':
       'This Web remote control link is no longer valid. Start it again from desktop.',
   'remote.failure.session-expired':
@@ -1458,7 +1458,7 @@ const _en = {
   'chat.compact.failed': 'Compact failed',
   'chat.goal.pauseFailed': 'Pause goal failed',
   'chat.goal.resumeFailed': 'Resume goal failed',
-  // Fallback translations: the official en copy (web
+  // Fallback translations: the en copy (web
   // `zcode.error.providerBusiness.*`) is pending a measurement pass — replacing
   // these values is a table-only change (see gap-matrix.md).
   'chat.bizErr.loginExpired':
@@ -1736,7 +1736,7 @@ const _en = {
   'chat.action.fileChanges': 'View file changes',
   'chat.action.fileChanges.failed': 'Failed to load: \$0',
   'chat.diff.truncated': '… (diff truncated)',
-  // ---- task list (official mobile layout) ----
+  // ---- task list (mobile layout) ----
   'tasks.sectionTitle': 'Workspaces & tasks on this device',
   'tasks.stats': '\$0 workspaces · \$1 tasks',
   'tasks.collapseAll': 'Collapse all workspaces',
@@ -2204,7 +2204,7 @@ const _en = {
   'update.failed': 'Update check failed: \$0',
   'update.storePending': 'Check for updates in the App Store',
 
-  // ---- Off-peak functional alignment (official desktop dictionary) ----
+  // ---- Off-peak (desktop dictionary) ----
   'op.tab.settings': 'Settings',
   'op.tab.history': 'History',
   'op.history.empty': 'No history yet.',
@@ -2232,7 +2232,7 @@ const _en = {
   'op.thought.default': 'Default (unspecified)',
   'op.remaining.min': '\$0 min',
   'op.remaining.hoursMin': '\$0 hr \$1 min',
-  // 3.14 take-a-number header (S1–S4, official 3.14 copy except S1).
+  // 3.14 take-a-number header (S1–S4, 3.14 copy except S1).
   'op.take.available': 'Idle-time tasks available · take-a-number open',
   'op.take.limitReached':
       'Idle-time task quota used up. You can create another task in \$0.',
@@ -2278,7 +2278,7 @@ const _en = {
   'op.watch.fail.body': 'Desktop offline or disconnected · retrying every \$0',
   'op.watch.stale.line': 'Data as of \$0',
 
-  // ---- Automations functional alignment (official desktop dictionary) ----
+  // ---- Automations (desktop dictionary) ----
   'auto.preset': 'Frequency',
   'auto.freq.hourly': 'Hourly',
   'auto.freq.daily': 'Daily',

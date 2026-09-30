@@ -3,7 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/endpoint_models.dart';
+import 'package:zgo/protocol/endpoint_models.dart';
 
 /// `/models` endpoint fetch matrix (design 09-28 增强节): path + headers per
 /// api.type, `{data:[{id}]}` parsing, auth/network/parse error taxonomy and

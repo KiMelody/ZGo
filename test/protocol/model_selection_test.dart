@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/model_selection.dart';
+import 'package:zgo/protocol/model_selection.dart';
 
 /// Live-confirmed 3.14 `model-selection.getView` shape (2026-09-19 probe,
 /// trimmed to the fields the mapping reads).

@@ -2,7 +2,7 @@ import 'channel_client.dart';
 import 'method_probe.dart';
 
 /// Server-side automations (定时任务, the `zcode-cron-scheduler` subsystem
-/// on the desktop). CRUD mirrors the official web remote's automation port.
+/// on the desktop). CRUD follows the remote's automation surface.
 ///
 /// Method-name status (2026-08, confirmed against a live desktop where noted):
 /// - `listAllAutomations` []  → CONFIRMED via the zemote channel explorer
@@ -126,10 +126,10 @@ class AutomationPort {
   Future<AutomationItem> create(
       AutomationInput input, Map<String, dynamic> scope) async {
     final res = await _probe.run('create', _createMethods, argsOf: (_) => [
-          // 官方 web 自 3.12.1 时代就带 workspace scope
-          // （createAutomation({workspacePath, workspaceIdentity?, ...form})，
-          // desktop bundle），两版本都收——实测二分定证缺它报 SQLite
-          // parameter 8 绑定错。scope 前置，表单字段后展开不反被覆盖。
+          // web 端自 3.12.1 时代就带 workspace scope
+          // （createAutomation({workspacePath, workspaceIdentity?, ...form})），
+          // 两版本都收——缺它报 SQLite parameter 8 绑定错。scope 前置，
+          // 表单字段后展开不反被覆盖。
           {...scope, ...input.toWire(newWire: newWire)},
         ]);
     if (res is Map) return AutomationItem(res.cast<String, dynamic>());
@@ -139,7 +139,7 @@ class AutomationPort {
 
   // ---------------------------------------------------------------- update
 
-  /// Full update. Shape probing mirrors the create probing but also tries
+  /// Full update. Shape probing matches the create probing but also tries
   /// the positional `(id, fields)` form for update-family methods. The
   /// resolved method+shape go first on subsequent calls.
   Future<void> update(
@@ -148,8 +148,8 @@ class AutomationPort {
     for (var shape = _updateShape; shape < _updateShapes; shape++) {
       final wire = input.toWire(newWire: newWire);
       final args = switch (shape) {
-        // Official web shape: updateAutomation({scope, automationId, ...form})
-        // (desktop bundle). Shape 1 is the legacy positional fallback —
+        // Preferred update shape: updateAutomation({scope, automationId, ...form})
+        // Shape 1 is the legacy positional fallback —
         // kept scope-less (only pre-3.12.3 desktops reach it; the SQLite
         // parameter error is itself a probe signal there).
         0 => <Object?>[
@@ -172,7 +172,7 @@ class AutomationPort {
   /// Enable/disable (启停开关). New-wire desktops take the dedicated
   /// `setAutomationEnabled` with the workspace scope; older ones only
   /// accept a flag-only update ([update] probing sequence unchanged — the
-  /// scope rides along there too, official web has always sent it).
+  /// scope rides along there too, the web has always sent it).
   Future<void> setEnabled(
       String id, bool enabled, Map<String, dynamic> scope) async {
     if (newWire) {
@@ -195,8 +195,8 @@ class AutomationPort {
         if (method.startsWith('automation')) id else {'automationId': id},
       ];
     });
-    // 2026-09-17 实测第二轮：deleteAutomation 在手机桥上可能假成功
-    // （void ack 但条目不消失，官方 web 的远程工作区桥无此问题）——回读
+    // deleteAutomation 在手机桥上可能假成功
+    // （void ack 但条目不消失，web 端的远程工作区桥无此问题）——回读
     // 验证，残留则抛错让用户感知删除失败，而非静默丢。
     final items = await list();
     if (items.any((item) => item.id == id)) {
@@ -326,7 +326,7 @@ class AutomationInput {
 
   Map<String, dynamic> _triggerWire({required bool newWire}) {
     final optional = _modelWire(newWire: newWire);
-    // 双字段 interval 编码（2026-09-17 实测第二轮）：now 由 cron 编译与
+    // 双字段 interval 编码：now 由 cron 编译与
     // scheduleRule 共享，锚点兜底不会跨分钟边界错位。
     final now = DateTime.now();
     final compiledCron = intervalCronExpr(
@@ -363,7 +363,7 @@ class AutomationInput {
   /// the `modelSelection` object on 3.12.3+ (`mode`/`targetTaskId` stay flat
   /// in both — no removal evidence).
   ///
-  /// 2026-09-17 实测复验定证：modelSelection 一旦发出，providerId/modelId
+  /// modelSelection 一旦发出，providerId/modelId
   /// 必填（zod strict："expected string, received undefined"）——provider 与
   /// model **齐备才发整个对象**；thoughtLevel 仅在该条件下进 options，
   /// 单独存在时无载体直接丢弃（3.12.3 平铺 thoughtLevel 被静默忽略；
@@ -399,7 +399,7 @@ class AutomationInput {
   }
 
   /// Interval trigger as the 3.12.3 `scheduleRule` object. `anchorAt` is
-  /// NOT sent (桌面自动补，缺省=当前时刻——实测第二轮实证)；missing anchors
+  /// NOT sent (桌面自动补，缺省=当前时刻)；missing anchors
   /// fall back to [now] (minute-truncated) so legacy inputs stay valid.
   Map<String, dynamic> _scheduleRuleWire(DateTime now) {
     return {
@@ -412,8 +412,8 @@ class AutomationInput {
     };
   }
 
-  /// Compiles the local cron for an interval trigger (2026-09-17 实测第二轮
-  /// 修订：cronExpr 是 create/update 触发器的必填载体，桌面在无它时报
+  /// Compiles the local cron for an interval trigger
+  /// （cronExpr 是 create/update 触发器的必填载体，桌面在无它时报
   /// 「非法的 cron 表达式：undefined」；有 scheduleRule 时桌面优先用它计算
   /// 调度，此 cron 只是门票与 rule 缺失时的回退，取**合法且最接近的近似**）。
   ///

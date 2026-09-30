@@ -1,4 +1,5 @@
-- Fresh ZGo branding
-- Scheduled automations & off-peak tasks
-- Local push notifications
-- Dual store release
+- Native conversations: streaming markdown, tool diffs, model switching, queues and attachments
+- Official-mobile-layout task list with phase pills and a tablet dual-pane view
+- Scheduled automations and off-peak tasks
+- Local push notifications with tap-to-open conversation
+- Faster, more reliable multi-device connections

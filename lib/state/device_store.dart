@@ -91,7 +91,7 @@ class Device {
 enum ThemeModeHint { dark, light }
 
 class DeviceStore extends ChangeNotifier {
-  static const _key = 'zlinker_devices_v1';
+  static const _key = 'zgo_devices_v1';
   final List<Device> _devices = [];
   bool _loaded = false;
 
@@ -223,7 +223,7 @@ class DeviceStore extends ChangeNotifier {
 
   /// Backup/export envelope.
   String exportJson() => jsonEncode({
-        'app': 'zlinker',
+        'app': 'zgo',
         'format': 'devices',
         'version': 1,
         'exportedAt': DateTime.now().toIso8601String(),

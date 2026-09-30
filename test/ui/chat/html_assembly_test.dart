@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/chat/html_assembly.dart';
+import 'package:zgo/ui/chat/html_assembly.dart';
 
 /// Fake reader recording every fetch, answering from path-keyed tables and
 /// assembling a caller-supplied entry document at app/index.html.

@@ -1,7 +1,6 @@
 /// Parsed wire models of the 3.12.3 task-list additions on the
 /// `zcode-task` channel — `listGroupedTaskViewStructure` and
-/// `getTaskTokenUsage` (live-probed 2026-09-18, shapes and version gate in
-/// task `internal-task/notes.md`).
+/// `getTaskTokenUsage` (live-probed 2026-09-18).
 ///
 /// Read-only 一期: the app renders group titles/colors/ordering and the
 /// per-task token total; write operations (create/rename/recolor/reorder)

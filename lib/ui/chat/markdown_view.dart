@@ -7,11 +7,11 @@ import '../theme.dart';
 import '../ui_settings.dart';
 import 'image_viewer_page.dart';
 
-/// Markdown renderer matching the official web client look: selectable
+/// Markdown renderer matching the web client look: selectable
 /// body text, inline code on a pill background, fenced code blocks with a
 /// language tag, line count, copy button and collapse toggle in a
 /// self-drawn header bar (collapsed by default).
-class ZLinkerMarkdown extends StatelessWidget {
+class AppMarkdown extends StatelessWidget {
   final String data;
   final bool selectable;
 
@@ -29,7 +29,7 @@ class ZLinkerMarkdown extends StatelessWidget {
   /// sites); the chat body dispatches local paths / http(s) links.
   final void Function(String href)? onLinkTap;
 
-  const ZLinkerMarkdown(
+  const AppMarkdown(
     this.data, {
     super.key,
     this.selectable = true,
@@ -187,7 +187,7 @@ class _MarkdownImageState extends State<_MarkdownImage> {
         child: ClipRRect(
           borderRadius: BorderRadius.circular(ZRadius.field),
           child: ConstrainedBox(
-            // Full-width contained block (official markdown image rhythm);
+            // Full-width contained block (markdown image rhythm);
             // the 48px floor keeps even tiny images a real tap target.
             constraints: const BoxConstraints(maxHeight: 280, minHeight: 48),
             child: Image.memory(bytes, fit: BoxFit.contain,

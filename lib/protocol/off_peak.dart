@@ -574,7 +574,7 @@ class OffPeakStatus {
 }
 
 /// Classified off-peak failure (门槛/额度/服务不可用), used to pick the
-/// exact official error copy in the UI.
+/// exact error copy in the UI.
 class OffPeakError implements Exception {
   /// OffPeakError.codingPlanOnly / .quota / .unavailable / .other
   final String kind;
@@ -588,7 +588,7 @@ class OffPeakError implements Exception {
   static const unavailable = 'unavailable';
   static const other = 'other';
 
-  /// Maps a raw RPC failure message onto the official error states.
+  /// Maps a raw RPC failure message onto the known error states.
   /// Feature-absent desktops (every candidate method rejected) count as
   /// 服务暂不可用.
   static String normalize(String raw) {

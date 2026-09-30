@@ -28,7 +28,7 @@ import 'widgets/home_widget_bridge.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   _registerBundledFontLicenses();
-  runApp(const ZLinkerApp());
+  runApp(const ZGoApp());
 }
 
 /// The bundled font subsets live under assets/fonts/ with no package root,
@@ -49,14 +49,14 @@ void _registerBundledFontLicenses() {
   });
 }
 
-class ZLinkerApp extends StatefulWidget {
-  const ZLinkerApp({super.key});
+class ZGoApp extends StatefulWidget {
+  const ZGoApp({super.key});
 
   @override
-  State<ZLinkerApp> createState() => _ZLinkerAppState();
+  State<ZGoApp> createState() => _ZGoAppState();
 }
 
-class _ZLinkerAppState extends State<ZLinkerApp>
+class _ZGoAppState extends State<ZGoApp>
     with WidgetsBindingObserver {
   final DeviceStore _store = DeviceStore();
   final ThemeController _theme = ThemeController();
@@ -100,7 +100,7 @@ class _ZLinkerAppState extends State<ZLinkerApp>
     sessionsOf: () => _hub.activeSessions,
     onEvent: _quotaPresenter.onEvent,
   );
-  static const _quotaWatchChannel = MethodChannel('zlinker/quota_watch');
+  static const _quotaWatchChannel = MethodChannel('zgo/quota_watch');
   StreamSubscription? _widgetClickSub;
   StreamSubscription? _appLinkSub;
   final _appLinks = AppLinks();
@@ -182,7 +182,7 @@ class _ZLinkerAppState extends State<ZLinkerApp>
 
   Future<void> _openFromWidgetUri(Uri? uri) async {
     if (uri == null) return;
-    // zlinker://device/<id>  or  /device/<id>
+    // zgo://device/<id>  or  /device/<id>
     final id = uri.host == 'device'
         ? (uri.pathSegments.isNotEmpty ? uri.pathSegments.first : null)
         : (uri.pathSegments.length >= 2 && uri.pathSegments.first == 'device'

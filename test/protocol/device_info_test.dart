@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/device_info.dart';
+import 'package:zgo/protocol/device_info.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();

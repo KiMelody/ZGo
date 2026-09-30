@@ -1,7 +1,7 @@
 # Store materials
 
 Ready-to-upload listing assets (图片物料 + 文案物料) for **ZGo**
-(`org.songsong.zlinker`) on the App Store and Google Play. Both stores get
+(`org.kimelody.zgo`) on the App Store and Google Play. Both stores get
 bilingual copy (English `en-US` + 简体中文 `zh-Hans`) and matching graphics.
 
 All graphics are generated from the real app art and screenshots by
@@ -19,8 +19,7 @@ docs/store/
 │   └── screenshots/
 │       ├── iphone-6.9/   1320×2868  full-bleed native captures (en+zh)
 │       ├── iphone-6.7/   1290×2796  same set, App Store 6.7" slot
-│       ├── ipad-13/      2064×2752  dual-pane portrait (en+zh)
-│       └── archive-framed/          pre-2.3.3 framed composites (keep, don't upload)
+│       └── ipad-13/      2064×2752  dual-pane portrait (en+zh)
 └── googleplay/
     ├── copy/            en-US.md · zh-Hans.md   (title, short + full description,
     │                                             release notes)
@@ -90,7 +89,6 @@ Source inputs:
 
 - App Store screenshots are unframed full-bleed captures on purpose: Apple
   rejected the previous framed/marketing set under Guideline 2.3.3
-  ("screenshots must show the app in use"). The old composites stay in
-  `archive-framed/` for reference only.
+  ("screenshots must show the app in use").
 - ZGo is an independent community tool, not affiliated with Zhipu AI.
   Keep that disclaimer in the store description (already included in the copy).

@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/channel_client.dart';
-import 'package:zlinker/protocol/connection_params.dart';
-import 'package:zlinker/ui/model_providers_page.dart';
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/connection_params.dart';
+import 'package:zgo/ui/model_providers_page.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 import 'helpers/fake_device_session.dart';
 
@@ -375,7 +375,7 @@ void main() {
         if (method == 'getView') return view;
         if (method == 'addPersonalModel') {
           // Whitelist: contextWindow + three capability booleans (false
-          // written even when off) + inputFormat as the official T0
+          // written even when off) + inputFormat as the T0
           // three-key pick; no reasoning level, no maxOutputTokens (empty
           // field), useRecommendedConfig=false.
           expect(args, [
@@ -457,7 +457,7 @@ void main() {
       channelHandler: (channel, method, args) async {
         if (method == 'getView') return view;
         if (method == 'addPersonalModel') {
-          // Official addPersonalModel(pid, mid, {}, true): the desktop
+          // addPersonalModel(pid, mid, {}, true): the desktop
           // fills in the recommended values.
           expect(args, ['p1', 'm2', {}, true]);
           view['revision'] = '[31,4]';

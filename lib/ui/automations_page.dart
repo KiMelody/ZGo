@@ -9,7 +9,7 @@ import 'theme.dart';
 import 'ui_settings.dart';
 import 'widgets/dropdown_field.dart';
 
-/// One 定时任务模板 idea (official moreIdeas trio): dictionary key plus its
+/// One 定时任务模板 idea (the moreIdeas trio): dictionary key plus its
 /// cron preset. Every display string comes from the table under
 /// `auto.tpl.<key>.*`, so only the key is stored here.
 class _Idea {
@@ -198,9 +198,9 @@ class _AutomationsPaneState extends State<AutomationsPane> {
     }
   }
 
-  /// 20 条上限归类 (A4)：官方二进制的 AutomationCreateLimitError 消息为
+  /// 20 条上限归类 (A4)：AutomationCreateLimitError 消息为
   /// `[code] At most 20 automations may be retained. …`——`code` 是压缩变量名
-  /// 不稳定，取消息文本与类名两个稳定子串（verified-grep 取证 2026-09-17）。
+  /// 不稳定，取消息文本与类名两个稳定子串。
   bool _isCreateLimitError(String message) {
     final m = message.toLowerCase();
     return m.contains('automationcreatelimiterror') ||
@@ -242,7 +242,7 @@ class _AutomationsPaneState extends State<AutomationsPane> {
     await _runOp(() async {
       if (edit == null) {
         // create/update 与 setEnabled 同源：始终带 workspace scope
-        // （官方 web 一直发，实测定证缺它 SQLite 绑定错）。
+        // （web 端一直发，缺它 SQLite 绑定错）。
         await session.automation.create(input, session.automationScope);
         if (mounted) _toast(tr(context, 'auto.created'));
       } else {
@@ -265,7 +265,7 @@ class _AutomationsPaneState extends State<AutomationsPane> {
     }, errorKey: 'auto.error.toggle');
   }
 
-  /// 立即运行: official queued/duplicate/failed toast trio.
+  /// 立即运行: queued/duplicate/failed toast trio.
   Future<void> _runNow(AutomationItem item) async {
     final session = widget.session;
     if (session == null) return;
@@ -460,7 +460,7 @@ Future<void> _pickTemplate() async {
   }, errorKey: 'auto.error.create', limitErrorKey: 'auto.error.limit');
 }
 
-/// Mirrors the task-list fallback view: reason + retry + guidance to the
+/// Same shape as the task-list fallback view: reason + retry + guidance to the
   /// local scheduled-send fallback.
   Widget _unavailable(BuildContext context) {
     return Center(
@@ -515,7 +515,7 @@ Future<void> _pickTemplate() async {
     );
   }
 
-  /// 已运行 n 次 / 已运行 n/max 次 (official count copy).
+  /// 已运行 n 次 / 已运行 n/max 次 (count copy).
   String _runCountLabel(BuildContext context, AutomationItem item) {
     final count = item.runCount ?? 0;
     final max = item.maxRuns;
@@ -694,12 +694,12 @@ Future<void> _pickTemplate() async {
   }
 }
 
-/// Frequency presets mirroring the official schedule control
+/// Frequency presets for the schedule control
 /// (每小时/每天/每工作日/每周/每月/自定义/一次性延迟).
 enum FrequencyPreset { hourly, daily, weekdays, weekly, monthly, customInterval, once }
 
-/// Create/edit form (bottom sheet, official mobile form shape). Field order
-/// follows the official web form: title → prompt → model → frequency rule.
+/// Create/edit form (bottom sheet, mobile form shape). Field order
+/// follows the web form: title → prompt → model → frequency rule.
 class AutomationSheet extends StatefulWidget {
   final AutomationInput? initial;
 
@@ -707,7 +707,7 @@ class AutomationSheet extends StatefulWidget {
   final ({String title, String prompt, String cronExpr})? template;
 
   /// prepareWorkspace loader (the full device session): drives the model /
-  /// thought-level selectors — desktop parity, pick instead of type.
+  /// thought-level selectors — pick instead of type.
   final Future<WorkspacePrep> Function()? loadOptions;
   const AutomationSheet(
       {super.key, this.initial, this.template, this.loadOptions});
@@ -898,7 +898,7 @@ class AutomationSheetState extends State<AutomationSheet> {
     });
   }
 
-  /// Opens the official custom-repeat dialog and applies its result to the
+  /// Opens the custom-repeat dialog and applies its result to the
   /// interval controllers.
   Future<void> _openCustomRepeat() async {
     final result = await showDialog<CustomRepeatResult>(
@@ -1047,7 +1047,7 @@ class AutomationSheetState extends State<AutomationSheet> {
               onChanged: (v) => setState(() => _modelValue = v),
             ),
             const SizedBox(height: 16),
-            // Official frequency presets; interval shapes come from the
+            // Frequency presets; interval shapes come from the
             // custom-repeat dialog under 自定义….
             Text(tr(context, 'auto.preset'),
                 style: ZType.sub.copyWith(
@@ -1190,7 +1190,7 @@ class AutomationSheetState extends State<AutomationSheet> {
                 ),
               ),
             const SizedBox(height: 8),
-            // 运行时间预览（official schedule.preview line）.
+            // 运行时间预览（schedule.preview line）.
             Builder(builder: (context) {
               final previewItem = _previewItem();
               return Align(
@@ -1281,7 +1281,7 @@ class CustomRepeatResult {
   });
 }
 
-/// Official 自定义重复 dialog: every N minutes/hours/days/weeks/months/years
+/// 自定义重复 dialog: every N minutes/hours/days/weeks/months/years
 /// ending never / on a chosen date.
 class CustomRepeatDialog extends StatefulWidget {
   final CustomRepeatResult initial;
@@ -1444,7 +1444,7 @@ class _CustomRepeatDialogState extends State<CustomRepeatDialog> {
   }
 }
 
-/// Humanized trigger summary (official terms): the desktop never shows a
+/// Humanized trigger summary: the desktop never shows a
 /// raw cron expression — common shapes map to 每天/每工作日/每周/每月 + time,
 /// anything else falls back to the expression itself.
 String describeTrigger(BuildContext context, AutomationItem item) {

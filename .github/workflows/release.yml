@@ -33,8 +33,8 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEYSTORE_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_KEY_PASSWORD }}
         run: |
-          echo "$KEYSTORE_BASE64" | base64 -d > android/zlinker-release.jks
-          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=zlinker-release.jks\n' \
+          echo "$KEYSTORE_BASE64" | base64 -d > android/zgo-release.jks
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=zgo-release.jks\n' \
             "$KEYSTORE_PASSWORD" "$KEY_PASSWORD" "$KEY_ALIAS" > android/key.properties
 
       - name: Build APK (github channel)
@@ -53,7 +53,7 @@ jobs:
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-          packageName: org.songsong.zlinker
+          packageName: org.kimelody.zgo
           releaseFiles: build/app/outputs/bundle/release/app-release.aab
           track: internal
           status: completed

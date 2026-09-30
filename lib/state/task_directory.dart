@@ -39,8 +39,8 @@ class TaskDirectory {
   /// ([liveKeyOf]): the live sessions-index is the product of
   /// `listSessions(directory = workspace)`, so membership in it IS the
   /// ground truth of a session's home — it outranks even the
-  /// mirror-row-corrected relay pick key (2026-09-23 emulator acceptance:
-  /// inheriting that key could keep a desktop mirror key, leaving the
+  /// corrected relay pick key (2026-09-23 emulator acceptance:
+  /// inheriting that key could keep a desktop copy's key, leaving the
   /// session viewable in the wrong group but unoperable). Live-only rows
   /// (not yet in the relay overview) key off their own fields first, then
   /// the same subscription identity
@@ -54,7 +54,7 @@ class TaskDirectory {
       if (entry.sessionId.isEmpty) continue;
       final key = relayKeyOf(task);
       final existing = byId[entry.sessionId];
-      // Duplicate relay rows (desktop mirror rows) resolve deterministically
+      // Duplicate relay rows (desktop copies) resolve deterministically
       // — see [_relayRowBeats]; frame order must never decide the group.
       if (existing != null &&
           !_relayRowBeats(entry, key, existing.$1, existing.$2)) {
@@ -106,11 +106,11 @@ class TaskDirectory {
   }
 
   /// Whether a duplicate relay row for one task id displaces the row already
-  /// kept. The desktop registry mirrors every task into remote-enabled
+  /// kept. The desktop registry copies every task into remote-enabled
   /// workspaces — two active rows per id, same-millisecond created, and the
   /// bootstrap frame order varies between snapshots (Addendum 2026-09-23,
   /// device-verified). The greater `updatedAt` wins: the real row keeps
-  /// receiving activity updates while the mirror freezes at registration;
+  /// receiving activity updates while the copy freezes at registration;
   /// a tie falls back to the lexicographically smaller workspace key, so
   /// the result is a pure function of the row set — never of frame order.
   static bool _relayRowBeats(
@@ -146,8 +146,8 @@ class TaskDirectory {
       ];
 
   /// Pinned tasks across the device, most recently active first. Live rows
-  /// win per task id and keep a pinned live task even when archived (page
-  /// parity).
+  /// win per task id and keep a pinned live task even when archived.
+  /// Archived live tasks remain pinned.
   List<(SessionEntry, String?)> pinnedEntries() {
     final byId = <String, (SessionEntry, String?)>{};
     for (final task in relayTasks) {
@@ -180,7 +180,7 @@ class TaskDirectory {
     return list;
   }
 
-  /// Task count for the official summary line: all non-archived relay
+  /// Task count for the summary line: all non-archived relay
   /// tasks, falling back to the live index when no overview has arrived.
   int get totalTaskCount {
     final relay = relayTasks.where((t) => t['archived'] != true).length;

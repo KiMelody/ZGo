@@ -6,14 +6,14 @@ import 'theme.dart';
 /// translucent background in the phase color + small icon + label.
 /// Running phases get a spinner instead of a static icon.
 ///
-/// [solid] matches the official mobile list pills: an opaque surface
+/// [solid] matches the mobile list pills: an opaque surface
 /// ([ZInk.pillSuccessBg] / [ZInk.pillRunningBg], theme-branched) with
 /// contrasting text.
 class PhasePill extends StatelessWidget {
   final String label;
   final String phase;
 
-  /// Official mobile-list style: opaque background, 10px label.
+  /// Mobile-list style: opaque background, 10px label.
   final bool solid;
 
   const PhasePill({super.key, required this.label, required this.phase, this.solid = false});
@@ -23,7 +23,7 @@ class PhasePill extends StatelessWidget {
     final running = phase == 'running' || phase == 'prewarming';
     // Foreground tones go through the ZInk slots so 11px labels stay
     // readable in light mode (the dark-mode-bright constants are washed
-    // out on light surfaces). The official solid pill pairs below
+    // out on light surfaces). The solid pill pairs below
     // (pillSuccessBg/Fg, pillRunningBg/Fg) are untouched.
     final (color, icon) = switch (phase) {
       'running' || 'prewarming' => (ZColors.sky400, Icons.autorenew),

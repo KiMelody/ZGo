@@ -6,7 +6,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/chat/top_bounce_physics.dart';
+import 'package:zgo/ui/chat/top_bounce_physics.dart';
 
 void main() {
   test('applyBoundaryConditions: top free, bottom clamped', () {

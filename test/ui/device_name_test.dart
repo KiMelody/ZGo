@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/state/device_store.dart';
-import 'package:zlinker/ui/ui_settings.dart';
-import 'package:zlinker/ui/widgets/device_name.dart';
+import 'package:zgo/state/device_store.dart';
+import 'package:zgo/ui/ui_settings.dart';
+import 'package:zgo/ui/widgets/device_name.dart';
 
 void main() {
   Widget host(String locale) => UiSettingsProvider(

@@ -28,7 +28,7 @@ class TaskCompletionEvent {
 
 /// [previousPhases] doubles as the de-dupe: a running→terminal transition
 /// fires exactly once, and re-running a task fires again on its next
-/// completion (mirrors the verified zemote notify-state derivation).
+/// completion (notify-state derived from the same signals).
 ///
 /// Rows with a parentSessionId are auxiliary child sessions (subagents,
 /// compact/goal helpers) that ride the same index — they are not

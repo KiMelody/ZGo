@@ -27,7 +27,7 @@ class MentionEntry {
   });
 }
 
-/// Web chat.mention.* parity: category list → searchable results → insert
+/// chat.mention.*: category list → searchable results → insert
 /// the reference into the composer. Categories: 文件 / 技能 / 子智能体 /
 /// 会话 (whiteboards/plugins are desktop-only and omitted).
 Future<MentionEntry?> showMentionSheet(

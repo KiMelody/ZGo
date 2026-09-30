@@ -34,10 +34,10 @@ class NotificationService {
   /// Android channel ids — stable across releases (a changed id would create
   /// a duplicate channel and orphan the user's per-channel silencing).
   static const _channelIds = {
-    NotifyChannel.tasks: 'zlinker_tasks',
-    NotifyChannel.offPeak: 'zlinker_offpeak',
-    NotifyChannel.automations: 'zlinker_automations',
-    NotifyChannel.quota: 'zlinker_quota',
+    NotifyChannel.tasks: 'zgo_tasks',
+    NotifyChannel.offPeak: 'zgo_offpeak',
+    NotifyChannel.automations: 'zgo_automations',
+    NotifyChannel.quota: 'zgo_quota',
   };
 
   /// Table key prefix per channel (`<prefix>.name` / `<prefix>.desc`).

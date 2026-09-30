@@ -1,4 +1,4 @@
-package org.songsong.zlinker
+package org.kimelody.zgo
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -17,20 +17,20 @@ import org.json.JSONObject
 /**
  * Builds and posts the persistent quota-watch notice: a custom RemoteViews
  * (ring percentage + same-row action — the system template can draw
- * neither), fed by the Dart presenter over the `zlinker/quota_watch`
+ * neither), fed by the Dart presenter over the `zgo/quota_watch`
  * channel. It knows no copy: every string arrives pre-localized in the
  * payload, and colors come from the resources so the system light/dark
  * theme is honored.
  *
  * The notice id is independent of KeepAliveService's (id=1). The
- * `zlinker_quota` channel itself is created by the Dart notification
+ * `zgo_quota` channel itself is created by the Dart notification
  * plugin (localized name); a bare fallback here only covers a missing
  * registration. Payload shape (all fields optional unless noted):
  * `ring {progress, warn}` (null → no ring) · `pct` · `title` (required) ·
  * `sub` · `button` · `buttonWarn` · `expanded [line, line]` (big view).
  */
 object QuotaWatchNotifier {
-    const val CHANNEL_ID = "zlinker_quota"
+    const val CHANNEL_ID = "zgo_quota"
     const val NOTIFICATION_ID = 2
 
     fun update(context: Context, data: JSONObject) {
@@ -129,7 +129,7 @@ object QuotaWatchNotifier {
     ): RemoteViews {
         val v = RemoteViews(
             context.packageName,
-            R.layout.zlinker_quota_notification
+            R.layout.zgo_quota_notification
         )
 
         val ring = data.optJSONObject("ring")
@@ -207,8 +207,8 @@ object QuotaWatchNotifier {
             v.setInt(
                 R.id.quota_action,
                 "setBackgroundResource",
-                if (warn) R.drawable.zlinker_quota_pill_warn
-                else R.drawable.zlinker_quota_pill
+                if (warn) R.drawable.zgo_quota_pill_warn
+                else R.drawable.zgo_quota_pill
             )
             v.setOnClickPendingIntent(R.id.quota_action, resetIntent(context))
         }

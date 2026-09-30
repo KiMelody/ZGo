@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/automation.dart';
-import 'package:zlinker/protocol/channel_client.dart';
+import 'package:zgo/protocol/automation.dart';
+import 'package:zgo/protocol/channel_client.dart';
 
 /// Fake automation channel: answers from a method table, records every
 /// call, and can be tuned to reject method names with "no such method".
@@ -215,7 +215,7 @@ void main() {
         },
       );
 
-      // 官方 web 形态 {scope..., ...form}：scope 前置，表单字段后展开
+      // web 形态 {scope..., ...form}：scope 前置，表单字段后展开
       // 覆盖 scope 中的同名键。
       expect(fake.calls.single.$2, [
         {
@@ -247,7 +247,7 @@ void main() {
 
       // Shape 0 probes all methods, then shape 1 does: the accepted call is
       // automationUpdate with positional args. Shape 0 carries the scope
-      // (official shape), shape 1 stays scope-less (legacy fallback).
+      // (primary shape), shape 1 stays scope-less (legacy fallback).
       expect(fake.calls, hasLength(6));
       expect(
           (fake.calls.first.$2.single as Map)['workspacePath'], '/repo');
@@ -308,7 +308,7 @@ void main() {
       expect(fake.calls.first.$2, [
         {'automationId': 'a1'}
       ]);
-      // 实测第二轮：删除后回读 list() 验证条目消失（消失=通过）。
+      // 删除后回读 list() 验证条目消失（消失=通过）。
       expect(fake.calls[1].$1, 'listAllAutomations');
 
       final fake2 = FakeChannel((m, _) {
@@ -450,7 +450,7 @@ void main() {
   });
 
   group('AutomationInput.toWire newWire (3.12.3)', () {
-    // 实测第二轮修订：newWire interval 双字段——cronExpr（本地编译门票）
+    // newWire interval 双字段——cronExpr（本地编译门票）
     // + scheduleRule（桌面实际调度的依据）。
     const unitCrons = {
       'minute': '*/3 * * * *',
@@ -540,7 +540,7 @@ void main() {
     });
 
     test('modelSelection requires BOTH provider and model (zod strict)', () {
-      // 实测复验定证：一旦发出，providerId/modelId 必填——缺一不发整个
+      // 一旦发出，providerId/modelId 必填——缺一不发整个
       // 对象；thoughtLevel 单独存在无载体，随之丢弃（不回退平铺）。
       final none = const AutomationInput(
         title: 't',
@@ -739,7 +739,7 @@ void main() {
           'title': 't',
           'prompt': 'p',
           // 双字段：cronExpr 是必填门票（本地编译），scheduleRule 是桌面
-          // 实际调度的依据（实测第二轮实证）。
+          // 实际调度的依据。
           'cronExpr': '15 8 */3 * *',
           'scheduleRule': {
             'unit': 'daily',

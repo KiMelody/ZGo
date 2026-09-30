@@ -153,7 +153,7 @@ class ProviderModelEntry {
   }
 
   /// `effectiveConfig.properties.<key>` — manual-capability booleans.
-  /// Missing keys read false (official T5 backfill: `?? false`).
+  /// Missing keys read false (`?? false` backfill).
   bool _propsBool(String key) =>
       effectiveConfig['properties'] is Map &&
       (effectiveConfig['properties'] as Map)[key] == true;
@@ -175,7 +175,7 @@ class ProviderModelEntry {
   }
 
   /// `effectiveConfig.optionSpecs.reasoningLevel.values` — the read-only
-  /// reasoning chips source; empty hides the section (official T5).
+  /// reasoning chips source; empty hides the section.
   List<String> get effReasoningLevels {
     final specs = effectiveConfig['optionSpecs'];
     final rl = specs is Map ? specs['reasoningLevel'] : null;

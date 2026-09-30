@@ -3,8 +3,8 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/channel_client.dart';
-import 'package:zlinker/protocol/ipc_codec.dart';
+import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/ipc_codec.dart';
 
 void main() {
   late List<Uint8List> sent;

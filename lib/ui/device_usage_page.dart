@@ -49,7 +49,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
   /// instead of rendering it as「暂无用量」(misleading: failure ≠ no data).
   String? _appError;
 
-  // Official zod enum is `all|7d|30d` — anything else is rejected.
+  // The zod enum is `all|7d|30d` — anything else is rejected.
   static const _appRanges = ['7d', '30d', 'all'];
 
   @override
@@ -328,11 +328,11 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
     );
   }
 
-  /// R1 A2 projection (09-19): the summary card mirrors the most-tense
-  /// limit row ([EntitlementView.primaryLimit]) in the official
+  /// R1 A2 projection (09-19): the summary card shows the most-tense
+  /// limit row ([EntitlementView.primaryLimit]), using the
   /// remainingShort semantics — big number = what's LEFT, label = the
   /// limit type, reset clock = that row's window rollover. The top-level
-  /// `remaining` block is only the mirror fallback ([_remainingMirrorCard]):
+  /// `remaining` block is only a fallback ([_remainingMirrorCard]):
   /// its count/bar are the TIME_LIMIT aggregate and mislead as「0 + 100%」
   /// on plans without a monthly tool quota.
   Widget _remainingCard(Map<String, dynamic> remaining) {
@@ -404,7 +404,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
     );
   }
 
-  /// Pre-R1 mirror rendering (limits empty / no rankable row): the
+  /// Fallback rendering (limits empty / no rankable row): the
   /// top-level `remaining` count + bar, reset time still anchored on the
   /// earliest usable reset opportunity.
   Widget _remainingMirrorCard(Map<String, dynamic> remaining) {
@@ -461,7 +461,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
     );
   }
 
-  /// Primary-limit type label — official sidebar key semantics
+  /// Primary-limit type label — sidebar key semantics
   /// (weekly / fiveHour / toolCalls / tokensLimit / otherLimit).
   String _primaryTypeLabel(Limit limit) {
     switch (limit.raw['type']) {
@@ -488,7 +488,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
 
   /// Reset opportunities, read-only (PRD: the sheet is the single reset
   /// entry): one row per pool the projection credits ([EntitlementView.
-  /// resettablePools] — the official visibility composition over the same
+  /// resettablePools] — the visibility composition over the same
   /// entitlement snapshot the cards above read) — with the count, the
   /// earliest expiry and a 「上次使用重置」 line when the pool has a usage
   /// history. The degraded copy replaces the rows while no usable desktop
@@ -589,7 +589,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
   }
 
   /// 应用用量: dailyModelUsage stacked bars (per-day totals with model
-  /// breakdown), web `settings.usage.tab.appUsage` parity.
+  /// breakdown), web `settings.usage.tab.appUsage`.
   Widget _appUsageCard(BuildContext context) {
     final daily = _appUsage?['dailyModelUsage'];
     final days = daily is List ? daily.whereType<Map>().toList() : <Map>[];

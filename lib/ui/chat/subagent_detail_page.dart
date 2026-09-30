@@ -56,7 +56,7 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
   bool _loadingOlder = false;
   Timer? _readyTimeout;
 
-  // Scroll trio mirroring the chat page (task 09-23 R1): stick detection on
+  // Scroll trio matching the chat page (task 09-23 R1): stick detection on
   // the controller listener, initial landing on the newest row, and
   // smooth follow while new rows stream in.
   final ScrollController _scrollController = ScrollController();
@@ -191,7 +191,7 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
       if (res is Map) {
         hasMore = res['hasMore'] as bool?;
         atLogEpoch = res['atLogEpoch'] as String?;
-        // Web parity: drop the whole result when the epoch moved.
+        // Drop the whole result when the epoch moved.
         if (!state.rangeEnvelopeMatches(atLogEpoch)) {
           if (mounted) _toast(tr(context, 'chat.loadOlder.stale'));
           return;
@@ -411,7 +411,7 @@ class SubagentTimelineRow extends StatelessWidget {
       case 'assistantText':
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 6),
-          child: ZLinkerMarkdown(row['text'] as String? ?? ''),
+          child: AppMarkdown(row['text'] as String? ?? ''),
         );
       case 'reasoning':
         return _ReasoningStrip(
@@ -480,7 +480,7 @@ class _ReasoningStrip extends StatelessWidget {
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            child: ZLinkerMarkdown(text, bodyStyle: ZType.sub),
+            child: AppMarkdown(text, bodyStyle: ZType.sub),
           ),
         ],
       ),
@@ -489,7 +489,7 @@ class _ReasoningStrip extends StatelessWidget {
 }
 
 /// Compact tool row (chat page `_ToolCallTile` collapse pattern, task 09-23
-/// R2): collapsed shows only the status icon + the official per-tool summary
+/// R2): collapsed shows only the status icon + the per-tool summary
 /// (from [toolRowSemantics] — the old second name·preview summary is
 /// converged, Q6a) + diff +/- counts; the diff renders inside the expansion,
 /// so a file edit no longer floods the timeline.

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/chat/diff_view.dart';
+import 'package:zgo/ui/chat/diff_view.dart';
 
 void main() {
   group('extractDiff', () {

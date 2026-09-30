@@ -4,16 +4,16 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/conversation.dart';
-import 'package:zlinker/protocol/remote_client.dart';
-import 'package:zlinker/state/device_session.dart';
-import 'package:zlinker/state/entitlement_poller.dart';
-import 'package:zlinker/state/quota_reset.dart';
-import 'package:zlinker/ui/chat/chat_page.dart';
-import 'package:zlinker/ui/chat/subagent_detail_page.dart';
-import 'package:zlinker/ui/quota_reset_dialog.dart';
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/protocol/conversation.dart';
+import 'package:zgo/protocol/remote_client.dart';
+import 'package:zgo/state/device_session.dart';
+import 'package:zgo/state/entitlement_poller.dart';
+import 'package:zgo/state/quota_reset.dart';
+import 'package:zgo/ui/chat/chat_page.dart';
+import 'package:zgo/ui/chat/subagent_detail_page.dart';
+import 'package:zgo/ui/quota_reset_dialog.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 import '../helpers/recording_chat_gateway.dart';
 
@@ -327,8 +327,8 @@ void main() {
     expect(call.$2[2], 'o1');
   });
 
-  /// Form-style `userInput` interaction (the `questions` payload) with the
-  /// official field names: `label`/`question` question text, `multiSelect`
+  /// Form-style `userInput` interaction (the `questions` payload) using the
+  /// field names: `label`/`question` question text, `multiSelect`
   /// flag and `value`/`label` options.
   Map<String, dynamic> questionsInteraction(
     List<Map<String, dynamic>> questions,
@@ -405,7 +405,7 @@ void main() {
         .toList()
         .single;
     expect(call.$2[1], 'iq');
-    // Official buildBotElicitationContent shape, whole-map assertion.
+    // buildBotElicitationContent shape, whole-map assertion.
     expect(call.$2[3], {
       'answers': {'选择环境': '开发', '附加组件': 'Lint, 测试'},
       'answer_0': 'dev',
@@ -941,7 +941,7 @@ void main() {
     expect(call.$2[3], {
       'answers': {'附加组件': 'Lint, 冒烟脚本'},
       'answer_0': ['lint', '冒烟脚本'],
-      // Single-question form mirrors answer_0 into the flat answer.
+      // Single-question form folds answer_0 into the flat answer.
       'answer': ['lint', '冒烟脚本'],
     });
     expect(call.$2[4], 'accept');
@@ -1175,7 +1175,7 @@ void main() {
     ]);
     await tester.pumpAndSettle();
 
-    // Official parity: rows reorder via the drag handle, no arrow buttons.
+    // Rows reorder via the drag handle, no arrow buttons.
     expect(find.byIcon(Icons.drag_indicator), findsNWidgets(2));
     expect(find.byTooltip('上移'), findsNothing);
     expect(find.byTooltip('下移'), findsNothing);
@@ -1364,7 +1364,7 @@ void main() {
     ]);
     await tester.pumpAndSettle();
 
-    // Official web: stop at the far right, send stays available.
+    // Stop sits at the far right, send stays available.
     expect(find.byIcon(Icons.stop), findsOneWidget);
     expect(find.byIcon(Icons.arrow_upward), findsOneWidget);
 
@@ -1612,7 +1612,7 @@ void main() {
     await tester.tap(find.byTooltip('更多'));
     await tester.pumpAndSettle();
 
-    // Official web order: pin first, then rename / archive / unread,
+    // Menu order: pin first, then rename / archive / unread,
     // then the copy actions.
     String itemText(PopupMenuItem<String> i) {
       final w = i.child;
@@ -1783,7 +1783,7 @@ void main() {
     ]);
     await tester.pumpAndSettle();
 
-    // 启动状态词 + description 标题，subagentType 作副标题（官方
+    // 启动状态词 + description 标题，subagentType 作副标题（
     // chat.toolCall.agent.backgroundLaunch* 文案对等）。
     expect(find.textContaining('已启动 · 调研通知层'), findsOneWidget);
     expect(find.text('Explore'), findsOneWidget);
@@ -2507,7 +2507,7 @@ void main() {
 
   // ---------------------------------------------- plan quota warning
 
-  /// Entitlement snapshot with the top-level `remaining` mirror plus an
+  /// Entitlement snapshot with the top-level `remaining` block plus an
   /// optional token-class quota limit (the only limit kind that drives the
   /// banner — TIME_LIMIT is the monthly MCP quota and must not).
   EntitlementView okQuota(
@@ -2556,7 +2556,7 @@ void main() {
   testWidgets('monthly MCP TIME_LIMIT exhaustion does not raise the banner '
       '(bug 09-15)', (tester) async {
     // Reported symptom: TIME_LIMIT (search-prime 100/101) topped out and
-    // `remaining` mirroring it at 0, token window at 51% → no banner.
+    // `remaining` matching it at 0, token window at 51% → no banner.
     final gateway = FakeChatGateway()
       ..entitlementResult = EntitlementView(
         phase: EntitlementPhase.ok,
@@ -2725,7 +2725,7 @@ void main() {
 
     await tester.tap(find.text('使用重置券'));
     await tester.pumpAndSettle();
-    // Official-shape dialog: pool rows + counts + expiry + cancel/reset.
+    // Dialog shape: pool rows + counts + expiry + cancel/reset.
     expect(
       find.descendant(
         of: find.byType(AlertDialog),
@@ -3803,11 +3803,11 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    // Relay overview not arrived (mirror miss → null): plain empty hint.
+    // Relay overview not arrived (lookup miss → null): plain empty hint.
     expect(find.text('暂无消息'), findsOneWidget);
     expect(find.text('会话未能启动'), findsNothing);
 
-    // The mirror refresh rides the gateway's notifier, not the state's —
+    // The refresh rides the gateway's notifier, not the state's —
     // the double-listen must re-evaluate the gate without a state change.
     gateway.taskDisplayStatuses['s1'] = 'error';
     gateway.notifyListeners();

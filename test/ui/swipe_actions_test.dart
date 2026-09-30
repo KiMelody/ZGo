@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/widgets/swipe_actions.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/widgets/swipe_actions.dart';
 
 const _fg = Color(0xFF0284C7); // ZColors.sky600 — foreground-tone stand-in.
 

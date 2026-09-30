@@ -86,7 +86,7 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
 }
 
 /// Legacy `model-provider` management of one device (getAll/save/delete),
-/// restyled with the ZLinker tokens. Frozen regression baseline
+/// restyled with the app tokens. Frozen regression baseline
 /// (≤3.12.2): the wire shapes and the form below must not change — the
 /// 3.14 provider-settings path lives in provider_settings_page.dart.
 class _LegacyModelProvidersPage extends StatefulWidget {
@@ -109,7 +109,7 @@ class _LegacyModelProvidersPageState extends State<_LegacyModelProvidersPage> {
   /// providers configured".
   bool _channelUnavailable = false;
 
-  /// Web parity: `model-provider.onDidChangeProviderRegistry` pushes
+  /// `model-provider.onDidChangeProviderRegistry` pushes
   /// registry revisions — reload the list whenever the desktop changes it.
   void Function()? _cancelRegistryListener;
 
@@ -168,7 +168,7 @@ class _LegacyModelProvidersPageState extends State<_LegacyModelProvidersPage> {
     }
   }
 
-  /// Mirrors the automations unavailable view: icon + reason + retry, so a
+  /// Same shape as the automations unavailable view: icon + reason + retry, so a
   /// dead desktop channel reads as "channel unavailable" instead of an
   /// empty provider list.
   Widget _channelUnavailableView(BuildContext context) {
@@ -421,7 +421,7 @@ class _AddProviderSheetState extends State<_AddProviderSheet> {
     'gemini',
   ];
 
-  /// Web parity: `model-provider.getEndpointSuggestions` (preset endpoints)
+  /// `model-provider.getEndpointSuggestions` (preset endpoints)
   /// and `getModelsByEndpoint` (fills the model list automatically).
   Future<dynamic> _call(String method, List<Object?> args) =>
       widget.session.callChannel('model-provider', method, args);

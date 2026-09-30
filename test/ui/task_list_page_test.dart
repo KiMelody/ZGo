@@ -2,13 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:zlinker/protocol/channel_client.dart';
-import 'package:zlinker/state/device_session.dart';
-import 'package:zlinker/state/device_store.dart';
-import 'package:zlinker/ui/chat/chat_page.dart';
-import 'package:zlinker/ui/task_list_page.dart';
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/state/device_session.dart';
+import 'package:zgo/state/device_store.dart';
+import 'package:zgo/ui/chat/chat_page.dart';
+import 'package:zgo/ui/task_list_page.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 import '../helpers/fake_device_session.dart';
 
@@ -341,7 +341,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    // Official IDE sidebar chrome — not the mobile card list.
+    // IDE sidebar chrome — not the mobile card list.
     expect(find.text('新建任务'), findsWidgets);
     expect(find.text('搜索'), findsOneWidget);
     expect(find.text('项目'), findsOneWidget);
@@ -612,7 +612,7 @@ void main() {
     expect(find.text('项目'), findsOneWidget);
   });
 
-  // ---- collapse model (official web parity) ----
+  // ---- collapse model (web) ----
 
   Future<(DeviceStore, Device, FakeDeviceSession)> setupTwoWorkspaces(
       WidgetTester tester) async {
@@ -719,7 +719,7 @@ void main() {
 
   testWidgets('tapping a collapsed workspace expands it without switching',
       (tester) async {
-    // Web mobile home parity: the header tap expands/collapses only —
+    // Mobile home: the header tap expands/collapses only —
     // switching workspaces happens when opening a task (bridge-open rides
     // the taskId).
     final (_, _, session) = await setupTwoWorkspaces(tester);
@@ -741,7 +741,7 @@ void main() {
       (tester) async {
     // TaskDirectory merge anchor (CONTEXT.md「Task Directory」): relay 打底、
     // live 按 id 胜出 —— live-ready 不得把索引里没有的 relay 任务挤掉卡片。
-    // 旧卡片实现是 live-ready 整面替换，曾把这样的行藏掉（C2 对齐）。
+    // 旧卡片实现是 live-ready 整面替换，曾把这样的行藏掉（C2）。
     usePhone(tester);
     final (store, device) = await setupDevice();
     final now = DateTime.now().millisecondsSinceEpoch;

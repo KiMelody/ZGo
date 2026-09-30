@@ -31,7 +31,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
 
   @override
   Widget build(BuildContext context) {
-    // Photo surface: theme-independent near-black from the official neutral
+    // Photo surface: theme-independent near-black from the neutral
     // scale (a light-mode white viewer would wash the image out; the design
     // pins black §4.1). Not a ZInk slot on purpose — ZInk branches by theme.
     const surface = ZColors.neutral950;

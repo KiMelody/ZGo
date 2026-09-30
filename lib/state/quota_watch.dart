@@ -55,7 +55,7 @@ class QuotaWatchSnapshot {
   /// render (unavailable / no plan).
   final QuotaWindowKind? bottleneckKind;
 
-  /// Bottleneck remaining percent (0–100, official PF clamp).
+  /// Bottleneck remaining percent (0–100, the same clamp).
   final double? bottleneckRemaining;
 
   /// Bottleneck window's natural rollover (main-line countdown).
@@ -562,12 +562,12 @@ class QuotaWatchController extends ChangeNotifier {
   /// Failed ticks in a row before the backoff cadence kicks in.
   static const backoffAfterFailures = 2;
 
-  /// Foreground re-fetch gate (2026-09-21 风控对标): the official client's
+  /// Foreground re-fetch gate (2026-09-21 风控对标): the client's
   /// access path (page made visible again) re-fetches only past a 60s window
   /// since the last successful pull (`HHe`/`BHe` in its useUsageEntitlement)
   /// — rapid app switching must not hammer the billing endpoint. A failed
   /// poll records nothing, so a resume right after a failure still retries.
-  /// Manual refreshes stay exempt (the official manual path bypasses every
+  /// Manual refreshes stay exempt (the manual path bypasses every
   /// gate too).
   static const foregroundRefetchWindow = Duration(seconds: 60);
 

@@ -2,13 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:zlinker/protocol/channel_client.dart';
-import 'package:zlinker/protocol/off_peak.dart';
-import 'package:zlinker/state/device_session.dart';
-import 'package:zlinker/state/device_store.dart';
-import 'package:zlinker/ui/off_peak_page.dart';
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/off_peak.dart';
+import 'package:zgo/state/device_session.dart';
+import 'package:zgo/state/device_store.dart';
+import 'package:zgo/ui/off_peak_page.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 /// Fake off-peak device link answering from a local table.
 class FakeOffPeakHost implements OffPeakHost {
@@ -429,7 +429,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('取消任务'));
     await tester.pumpAndSettle();
-    // official confirm dialog before cancelling
+    // confirm dialog before cancelling
     await tester.tap(find.text('取消任务').last);
     await tester.pumpAndSettle();
 

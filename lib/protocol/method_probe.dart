@@ -52,9 +52,9 @@ class MethodProbe {
 }
 
 /// Deleted-task tombstone ids of one workspace (`zcode-task` channel).
-/// Desktop parity: the desktop's own task list filters deleted tasks via
+/// The desktop's own task list filters deleted tasks via
 /// `listDeletedTaskIds` — `{workspacePath, workspaceIdentity}` in, a
-/// task_id string array out (desktop bundle). The live sessions-index
+/// task_id string array out. The live sessions-index
 /// still lists those tasks, so its rows must be filtered by this set (PRD
 /// Addendum 2). The method name is probed, never hardcoded as a success
 /// assumption; returns null on ANY miss (unknown method, channel gone,

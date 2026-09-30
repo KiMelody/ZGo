@@ -99,7 +99,7 @@ class ScheduledMessage {
 }
 
 class ScheduledStore extends ChangeNotifier {
-  static const _key = 'zlinker_scheduled_v1';
+  static const _key = 'zgo_scheduled_v1';
   final List<ScheduledMessage> _items = [];
   bool _loaded = false;
 

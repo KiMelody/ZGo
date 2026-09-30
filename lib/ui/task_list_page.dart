@@ -24,7 +24,7 @@ import 'widgets/device_name.dart';
 import 'widgets/sheet_scaffold.dart';
 import 'widgets/swipe_actions.dart';
 
-/// Native task list of one device (official mobile layout): a connection
+/// Native task list of one device (mobile layout): a connection
 /// banner, the "workspaces and tasks" header with stats, and one card per
 /// workspace whose rows are the live sessions. Tapping a task opens the
 /// NATIVE chat page (no WebView suspend); the WebView stays available from
@@ -73,13 +73,13 @@ class _TaskListPageState extends State<TaskListPage>
   /// page is up, dropped on app pause and dispose (quota-watch cadence
   /// pattern from main.dart).
   Timer? _overviewTimer;
-  /// Per-workspace expand overrides, both directions (official web model):
+  /// Per-workspace expand overrides, both directions (web model):
   /// absent = default target state — only the ACTIVE workspace (the one
   /// owning the device's live session) is expanded; every other card starts
   /// collapsed. Overrides survive until 收起全部 clears them.
   final Map<String, bool> _expandOverrides = {};
 
-  /// Official 整理任务 state: grouping (workspace cards / timeline buckets)
+  /// 整理任务 state: grouping (workspace cards / timeline buckets)
   /// and ordering (updated = lastActivityAt, created = createdAt).
   String _groupBy = 'workspace';
   String _sortBy = 'updated';
@@ -98,10 +98,10 @@ class _TaskListPageState extends State<TaskListPage>
   /// lifetime; a miss completes null and the sheet hides the row (R4).
   final Map<String, Future<TaskTokenUsage?>> _tokenUsage = {};
 
-  /// Organize preferences persist across restarts (web parity: the mobile
+  /// Organize preferences persist across restarts (the mobile
   /// home stores them in localStorage
   /// `zcode-web-remote-control-mobile-task-home-preferences`, same default).
-  static const _organizePrefsKey = 'zlinker_task_organize_v1';
+  static const _organizePrefsKey = 'zgo_task_organize_v1';
 
   @override
   void initState() {
@@ -178,10 +178,10 @@ class _TaskListPageState extends State<TaskListPage>
   String? _paneInitialComposerText;
   bool _panePinned = false;
 
-  /// Official breakpoint: Tailwind md — single column below, dual ≥768.
+  /// Layout breakpoint: Tailwind md — single column below, dual ≥768.
   static const double kDualPaneBreakpoint = 768;
 
-  /// Official sidebar width (`--workspace-sidebar-panel-width`).
+  /// Sidebar width (`--workspace-sidebar-panel-width`).
   static const double kSidebarWidth = 264;
 
   DeviceSession? get _session =>
@@ -196,8 +196,8 @@ class _TaskListPageState extends State<TaskListPage>
   bool _isWorkspaceExpanded(String key, {required bool isActive}) =>
       _expandOverrides[key] ?? isActive;
 
-  /// Shared header tap: two-way toggle (official web aria-expanded flips both
-  /// ways). The mobile home EXPANDS ONLY (web parity: switching workspaces
+  /// Shared header tap: two-way toggle (aria-expanded flips both
+  /// ways). The mobile home EXPANDS ONLY (switching workspaces
   /// happens when opening a task — workspace-bridge-open rides the taskId);
   /// the desktop sidebar still switches on tap ([openIfInactive]).
   void _toggleWorkspace(
@@ -217,8 +217,8 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// 收起全部工作区: one-way collapse of every workspace (official web keeps
-  /// the label and icon constant; tapping it again just re-collapses).
+  /// 收起全部工作区: one-way collapse of every workspace (the
+  /// label and icon stay constant; tapping it again just re-collapses).
   void _collapseAllWorkspaces(DeviceSession? session) {
     final workspaces = session?.workspaces ?? const <Map<String, dynamic>>[];
     setState(() {
@@ -228,7 +228,7 @@ class _TaskListPageState extends State<TaskListPage>
     });
   }
 
-  /// Official 整理任务 ordering: 更新时间 = lastActivityAt (device default),
+  /// 整理任务 ordering: 更新时间 = lastActivityAt (device default),
   /// 创建时间 = createdAt.
   List<SessionEntry> _sortedEntries(List<SessionEntry> entries) {
     if (_sortBy == 'created') {
@@ -339,7 +339,7 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// Official desktop layout (≥768): IDE-style sidebar (新建/搜索/项目树)
+  /// Desktop layout (≥768): IDE-style sidebar (新建/搜索/项目树)
   /// + 1px divider + rounded chat pane — not a shrunk mobile card list.
   Widget _buildDualPane(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
@@ -403,7 +403,7 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// Official IDE sidebar: nav actions → projects tree → device footer.
+  /// IDE sidebar: nav actions → projects tree → device footer.
   Widget _desktopSidebar(BuildContext context) {
     return AnimatedBuilder(
       animation: widget.hub,
@@ -977,7 +977,7 @@ class _TaskListPageState extends State<TaskListPage>
       builder: (context, _) {
         final session = _session;
         final banner = _ConnectionBanner(session: session, onWeb: _openRemote);
-        // Lazy rows (official list virtualizes): widgets are cheap config
+        // Lazy rows: widgets are cheap config
         // objects, ListView.builder only inflates what's near the viewport,
         // so collapse toggles never rebuild the whole list's elements.
         final rows = <Widget>[
@@ -1052,7 +1052,7 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// Official section header + collapse / tidy / refresh.
+  /// Section header + collapse / tidy / refresh.
   Widget _headerRow(BuildContext context, DeviceSession? session) {
     final workspaces = session?.workspaces.length ?? 0;
     final tasks = session == null ? 0 : session.taskDirectory.totalTaskCount;
@@ -1078,7 +1078,7 @@ class _TaskListPageState extends State<TaskListPage>
             ],
           ),
         ),
-        // Official header actions: the collapse-all button keeps its label
+        // Header actions: the collapse-all button keeps its label
         // and icon in every state (one-way collapse, like the web).
         IconButton(
           tooltip: tr(context, 'tasks.collapseAll'),
@@ -1112,7 +1112,7 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// Official 整理任务 panel: group (workspace / timeline) + sort
+  /// 整理任务 panel: group (workspace / timeline) + sort
   /// (created / updated), radio-style like the web popover.
   Future<void> _showTidyPanel(BuildContext context) {
     return showModalBottomSheet<void>(
@@ -1197,7 +1197,7 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// Official "已置顶" group above the workspace cards: one card per pinned
+  /// "已置顶" group above the workspace cards: one card per pinned
   /// task (title, workspace · time, phase pill).
   List<Widget> _pinnedGroup(BuildContext context, DeviceSession session) {
     final pinned = session.taskDirectory.pinnedEntries();
@@ -1284,7 +1284,7 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// Official 按时间线 grouping: day buckets (今天 / N 天前 / 上周 / 更早)
+  /// 按时间线 grouping: day buckets (今天 / N 天前 / 上周 / 更早)
   /// with one row per task, each prefixed with its workspace name. Covers
   /// every workspace via the relay task list (web mobile-home semantics).
   /// 3.12.3 task groups render as their own sections (色点 + 标题) above the
@@ -1475,7 +1475,7 @@ class _TaskListPageState extends State<TaskListPage>
     return workspaceTitle(ws);
   }
 
-  /// Official archive view (归档列表): every archived task on the device,
+  /// Archive view (归档列表): every archived task on the device,
   /// from the merged task directory, grouped by workspace. Rows long-press
   /// into the shared action sheet (取消归档 / 删除 live there).
   List<Widget> _archiveView(BuildContext context, DeviceSession session) {
@@ -1529,7 +1529,7 @@ class _TaskListPageState extends State<TaskListPage>
     return widgets;
   }
 
-  /// Official bucket labels (web taskTimeline): today / yesterday /
+  /// Bucket labels (taskTimeline): today / yesterday /
   /// day-count / last week / earlier.
   String _timelineBucketLabel(BuildContext context, int millis, DateTime now) {
     final d = DateTime.fromMillisecondsSinceEpoch(millis);
@@ -1570,7 +1570,7 @@ class _TaskListPageState extends State<TaskListPage>
     final lastActivity = entries.isEmpty
         ? null
         : entries.map((e) => e.lastActivityAt).reduce((a, b) => a > b ? a : b);
-    // Official highlight: the "current" task row (latest running, else the
+    // Highlight: the "current" task row (latest running, else the
     // most recently active) gets a rounded white/10 background.
     final current = _currentEntry(entries);
 
@@ -1683,7 +1683,7 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// The row the official page highlights: the latest running task, falling
+  /// The row the page highlights: the latest running task, falling
   /// back to the most recently active one.
   static SessionEntry? _currentEntry(List<SessionEntry> entries) {
     SessionEntry? current;
@@ -1753,11 +1753,11 @@ class _TaskListPageState extends State<TaskListPage>
   }
 
   /// One task row: title + phase pill + relative time. No per-row overflow
-  /// button (official mobile parity) — a long press opens the action sheet.
-  /// The current (latest running / most recent) row gets the official
+  /// button — a long press opens the action sheet.
+  /// The current (latest running / most recent) row gets the
   /// rounded white/10 highlight. Rows of other workspaces carry [workspace]
   /// so opening them re-points the bridge (web: workspace-bridge-open with
-  /// taskId). Official tags: 「等待确认」(pending interaction) and the
+  /// taskId). Tags: 「等待确认」(pending interaction) and the
   /// unread dot (`unreadAt`).
   Widget _taskRow(
     BuildContext context,
@@ -1905,7 +1905,7 @@ class _TaskListPageState extends State<TaskListPage>
     ];
   }
 
-  /// Official `permissionTag`/`userInputTag`: 「等待确认」amber mini-pill.
+  /// `permissionTag`/`userInputTag`: 「等待确认」amber mini-pill.
   Widget _awaitingTag(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
@@ -1925,7 +1925,7 @@ class _TaskListPageState extends State<TaskListPage>
 
   /// Opens a task row whatever workspace it lives in: tasks of the active
   /// workspace go straight to chat; others re-point the bridge first
-  /// (workspace-bridge-open rides the taskId, web parity). A null
+  /// (workspace-bridge-open rides the taskId). A null
   /// [workspace] means ownership is undeterminable — refuse to open instead
   /// of silently subscribing under the active workspace's scope, where the
   /// server rejects every command (proto.sessionNotFound dead page).
@@ -1991,9 +1991,9 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// Long-press action sheet, official task-item menu parity:
+  /// Long-press action sheet, task-item menu:
   /// 停止/暂停/继续 (phase-gated) + 置顶 / 重命名 / 归档 / 标记未读 / 删除.
-  /// Delete carries the official confirm dialog (records cannot be
+  /// Delete carries the confirm dialog (records cannot be
   /// recovered). Metadata ops run on the zcode-task channel and refresh the
   /// list (the relay also pushes workspace-list-updated).
   Future<void> _taskActions(
@@ -2133,7 +2133,7 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// Official task-rename flow (inline on web; modal here) — placeholder
+  /// Task-rename flow (inline on web; modal here) — placeholder
   /// 「任务名称」.
   Future<void> _renameTaskDialog(
     DeviceSession session,
@@ -2173,7 +2173,7 @@ class _TaskListPageState extends State<TaskListPage>
     });
   }
 
-  /// Official delete confirmation:
+  /// Delete confirmation:
   /// 「删除这个任务？…会从当前工作区移除，现有记录无法恢复。」
   Future<void> _deleteTaskDialog(
     DeviceSession session,
@@ -2423,7 +2423,7 @@ class _TaskListPageState extends State<TaskListPage>
   }
 }
 
-/// Connection status card at the top of the list (official mobile layout).
+/// Connection status card at the top of the list (mobile layout).
 /// Always visible: the healthy link shows the green online state plus the
 /// explanation copy; degraded states add retry + web fallback actions.
 class _ConnectionBanner extends StatelessWidget {
@@ -2432,7 +2432,7 @@ class _ConnectionBanner extends StatelessWidget {
 
   const _ConnectionBanner({required this.session, required this.onWeb});
 
-  /// Official failure-state copy (`webRemoteControl.failure.*`): a
+  /// Failure-state copy (`webRemoteControl.failure.*`): a
   /// well-known app-error/close-code reason maps to the same localized text
   /// the web page shows; unknown reasons fall back to the raw error.
   static String _failureBody(BuildContext context, DeviceSession s) {
@@ -2456,7 +2456,7 @@ class _ConnectionBanner extends StatelessWidget {
     return _degradedCard(context);
   }
 
-  /// Official online state: explanation card only (title + green subtitle
+  /// Online state: explanation card only (title + green subtitle
   /// already live in the mobile AppBar).
   Widget _onlineCard(BuildContext context) {
     return Card(

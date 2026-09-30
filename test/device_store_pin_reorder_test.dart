@@ -3,7 +3,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:zlinker/state/device_store.dart';
+import 'package:zgo/state/device_store.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();

@@ -2,13 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:zlinker/protocol/automation.dart';
-import 'package:zlinker/state/device_session.dart';
-import 'package:zlinker/state/device_store.dart';
-import 'package:zlinker/ui/automations_page.dart';
-import 'package:zlinker/ui/off_peak_page.dart';
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/protocol/automation.dart';
+import 'package:zgo/state/device_session.dart';
+import 'package:zgo/state/device_store.dart';
+import 'package:zgo/ui/automations_page.dart';
+import 'package:zgo/ui/off_peak_page.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 import '../helpers/fake_device_session.dart';
 
@@ -62,7 +62,7 @@ void main() {
     await tester.tap(find.text('新建闲时任务'));
     await tester.pumpAndSettle();
 
-    // Desktop parity: no unspecified choice — the field defaults to the
+    // No unspecified choice — the field defaults to the
     // first available model.
     expect(find.text('GLM-5.2'), findsOneWidget);
 
@@ -112,7 +112,7 @@ void main() {
     await tester.tap(find.text('Moonshot V2'));
     await tester.pumpAndSettle();
 
-    // Advanced: thought level selector (枚举 → 选择器, desktop parity).
+    // Advanced: thought level selector (枚举 → 选择器).
     await tester.tap(find.text('更多选项'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('默认（不指定）'));
@@ -166,7 +166,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // No options loader here; the stored composite resolves to the raw
-    // provider/model string until options load (offline desktop parity).
+    // provider/model string until options load (offline desktop).
     expect(find.text('kimi/moonshot-v2'), findsOneWidget);
     expect(find.text('最高'), findsNothing); // thought stays default
   });

@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/remote_page.dart';
+import 'package:zgo/ui/remote_page.dart';
 
 void main() {
   group('buildDeepLinkJs', () {

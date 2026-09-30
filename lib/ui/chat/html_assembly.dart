@@ -65,7 +65,7 @@ class HtmlAssembler {
   /// skipped or failed).
   final void Function(int processed, int discovered)? onProgress;
 
-  // Guards (design §3 记账): magnitudes aligned with the official
+  // Guards (design §3 记账): magnitudes aligned with the
   // attachmentPreviewMaxBytes scale; correct via live probe if ever needed.
   /// Max resources fetched per assembly.
   static const _maxFiles = 40;
@@ -347,7 +347,7 @@ class HtmlAssembler {
   /// must be kept verbatim: remote (http/https/data/protocol-relative),
   /// same-document fragments, and empty leftovers after query stripping.
   /// `..` may escape upward — content comes from the user's own desktop,
-  /// same trust level as the official desktop opening a browser.
+  /// same trust level as the desktop opening a browser.
   static String? _resolvePath(String ref, String baseDir) {
     var p = ref.trim().replaceAll('\\', '/');
     final hash = p.indexOf('#');

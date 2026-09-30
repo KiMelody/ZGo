@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/chat/mention_sheet.dart';
+import 'package:zgo/ui/chat/mention_sheet.dart';
 
 import '../helpers/recording_chat_gateway.dart';
 
