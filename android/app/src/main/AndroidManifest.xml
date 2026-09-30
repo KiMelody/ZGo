@@ -39,16 +39,16 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-            <!-- Home-widget / deep-link: zlinker://device/<id> -->
+            <!-- Home-widget / deep-link: zgo://device/<id> -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="zlinker" android:host="device"/>
+                <data android:scheme="zgo" android:host="device"/>
             </intent-filter>
         </activity>
         <receiver
-            android:name=".ZLinkerWidgetProvider"
+            android:name=".ZGoWidgetProvider"
             android:exported="true"
             android:label="ZGo">
             <intent-filter>
@@ -56,7 +56,7 @@
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
-                android:resource="@xml/zlinker_widget_info"/>
+                android:resource="@xml/zgo_widget_info"/>
         </receiver>
         <!-- The quota notice's inline buttons (refresh icon, reset pill):
              explicit-intent broadcasts from the notice's own

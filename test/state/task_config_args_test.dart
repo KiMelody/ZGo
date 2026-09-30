@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/state/device_session.dart';
+import 'package:zgo/state/device_session.dart';
 
 void main() {
   group('taskConfigOptionsArgs', () {

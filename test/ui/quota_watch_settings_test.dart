@@ -2,12 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:zlinker/notifications/keepalive_controller.dart';
-import 'package:zlinker/state/device_store.dart';
-import 'package:zlinker/state/quota_watch.dart';
-import 'package:zlinker/ui/settings_page.dart';
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/notifications/keepalive_controller.dart';
+import 'package:zgo/state/device_store.dart';
+import 'package:zgo/state/quota_watch.dart';
+import 'package:zgo/ui/settings_page.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 /// The keep-alive support probe reports Platform.isAndroid, which is false
 /// on the test host — the quota-watch section rides that probe, so the

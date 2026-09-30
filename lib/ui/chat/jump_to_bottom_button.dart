@@ -6,7 +6,7 @@ import '../ui_settings.dart';
 /// Floating「jump to the newest message」control, shown only while the reader
 /// is scrolled away from the bottom. Circular icon-only button on the card
 /// surface (no label, no unread count). Shared by the chat page and the
-/// subagent detail page (task 09-23-subagent-render-parity R1a).
+/// subagent detail page (task 09-23 R1a).
 class JumpToBottomButton extends StatelessWidget {
   final bool visible;
   final VoidCallback onPressed;

@@ -2,14 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:zlinker/main.dart';
-import 'package:zlinker/notifications/keepalive_controller.dart';
-import 'package:zlinker/state/device_session.dart';
-import 'package:zlinker/state/device_store.dart';
-import 'package:zlinker/state/scheduled_store.dart';
-import 'package:zlinker/ui/devices_page.dart';
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/main.dart';
+import 'package:zgo/notifications/keepalive_controller.dart';
+import 'package:zgo/state/device_session.dart';
+import 'package:zgo/state/device_store.dart';
+import 'package:zgo/state/scheduled_store.dart';
+import 'package:zgo/ui/devices_page.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -79,7 +79,7 @@ void main() {
 
   testWidgets('App boots', (WidgetTester tester) async {
     SharedPreferences.setMockInitialValues({});
-    await tester.pumpWidget(const ZLinkerApp());
+    await tester.pumpWidget(const ZGoApp());
     await tester.pumpAndSettle();
     expect(find.text('ZGo'), findsOneWidget);
   });

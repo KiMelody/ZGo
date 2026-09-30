@@ -3,8 +3,8 @@ import 'method_probe.dart';
 /// Task-level metadata commands (置顶 / 重命名 / 归档 / 标记未读 / 删除) for
 /// the task list and the chat page's "更多" menu.
 ///
-/// Method names **confirmed from the web client source** (2026-08-30,
-/// `docs/parity/web-capabilities.md` §4): the desktop's `zcode-task` channel
+/// Method names **confirmed against the web client bundle** (2026-08-30):
+/// the desktop's `zcode-task` channel
 /// exposes `renameTask`, `setTaskPinned`, `archiveTask`/`unarchiveTask`,
 /// `setTaskUnread`, `deleteTask`, `listArchivedTasks` with the arg shape
 /// `{taskId, workspacePath, workspaceIdentity?, title|pinned|unread}`.

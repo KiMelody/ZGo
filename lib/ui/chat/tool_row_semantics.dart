@@ -5,12 +5,12 @@ import 'package:flutter/material.dart';
 import '../ui_settings.dart';
 import 'diff_view.dart';
 
-/// Official-style per-tool row semantics for one `kind=='toolCall'` row:
+/// Per-tool row semantics for one `kind=='toolCall'` row:
 /// first line (已写入 `<file>` / 终端 · cmd / 探索 · N 文件 …), optional
 /// second line (write/edit: directory path), diff +/- counts and the
 /// status icon — the chat tile, the works-bar tails and the subagent
 /// timelines all render this, so it is encoded exactly once here (ADR-0006
-/// parity discipline: the desktop copy is frozen verbatim; converging the
+/// discipline: the desktop copy is fixed; converging the
 /// second subagent summary is not a redesign).
 ///
 /// Pure module: takes a [locale], not a BuildContext, so plain Dart tests
@@ -40,7 +40,7 @@ class ToolRowSemantics {
 }
 
 /// Execute-family tool rows (bash/terminal/exec/...) share one summary
-/// card when consecutive — web executeGroup「终端 · N 个命令」parity.
+/// card when consecutive — web executeGroup「终端 · N 个命令」.
 bool isExecuteTool(Map<String, dynamic> row) {
   if (row['kind'] != 'toolCall') return false;
   final t = '${row['toolName'] ?? ''}'.toLowerCase();
@@ -71,7 +71,7 @@ String? promptOf(String inputText) {
   return null;
 }
 
-/// Official tool summary: first line (已写入 `<file>` / 终端 · cmd /
+/// Tool summary: first line (已写入 `<file>` / 终端 · cmd /
 /// 探索 · N 文件), optional second line (directory path), +/- counts.
 ToolRowSemantics toolRowSemantics(
   Map<String, dynamic> row, {
@@ -94,7 +94,7 @@ ToolRowSemantics toolRowSemantics(
       toolName.contains('edit') ||
       toolName.contains('notebook')) {
     final file = toolFilePath(inputText) ?? diff?.filePath ?? toolNameRaw;
-    // title shows the basename; subtitle the directory (official style)
+    // title shows the basename; subtitle the directory
     final segs = file.split(RegExp(r'[\\/]'));
     final base = segs.last;
     final dir = segs.length > 1
@@ -164,7 +164,7 @@ ToolRowSemantics toolRowSemantics(
     );
   }
   if (toolName == 'agent') {
-    // Web chat.toolCall.agent.backgroundLaunch* parity: 启动中 → 已启动 /
+    // chat.toolCall.agent.backgroundLaunch*: 启动中 → 已启动 /
     // 启动失败. Description and subagent_type come from the input JSON;
     // outputText stays empty because the result lives in the child
     // session (live-probed 2026-09-16).
@@ -197,7 +197,7 @@ ToolRowSemantics toolRowSemantics(
   }
   if (toolName.contains('askuserquestion') ||
       toolName.contains('ask_user_question')) {
-    // Web chat.askQuestion.* parity: asking → asked · N questions →
+    // chat.askQuestion.*: asking → asked · N questions →
     // no-answer / auto-continued. Question count comes from the input
     // JSON's questions array when parseable (no guessed fields beyond
     // that); output text carries the auto-continue notice.

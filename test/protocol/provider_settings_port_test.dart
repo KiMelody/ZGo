@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/provider_settings.dart';
+import 'package:zgo/protocol/provider_settings.dart';
 
 /// Wire shapes and the snapshot-conflict retry contract of the write
 /// surface — the certified shapes from the task's notes.md (2026-09-28

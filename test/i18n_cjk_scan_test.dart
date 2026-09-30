@@ -3,7 +3,7 @@
 // table means a Chinese-only string leaks into the en UI (the table falls back
 // zh -> key, so the leak is silent).
 //
-// The whitelist below is (file, literal) exact and mirrors the "intentional
+// The whitelist below is (file, literal) exact and matches the "intentional
 // design" list in the i18n task PRD. Every entry carries its reason; do not
 // "fix" a whitelisted literal, and do not add an entry without one.
 import 'dart:io';
@@ -33,7 +33,7 @@ class Exemption {
 /// A hardcoded literal the scan rejected.
 typedef CjkHit = ({String file, String literal});
 
-/// Strings that must stay hardcoded. Scoped to desktop-parity matching and to
+/// Strings that must stay hardcoded. Scoped to desktop matching and to
 /// copy already locale-branched by hand.
 const List<Exemption> exemptions = [
   Exemption(

@@ -2,10 +2,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Design tokens extracted verbatim from the official ZCode Web Remote Control
-/// bundle (`theme-zai-dark` / `:root` light). The official page uses a Tailwind
+/// Design tokens from the ZCode Web Remote Control
+/// bundle (`theme-zai-dark` / `:root` light). The page uses a Tailwind
 /// neutral gray scale with a sky-blue brand accent. Values below are the
-/// official oklch scale resolved to sRGB.
+/// oklch scale resolved to sRGB.
 class ZColors {
   ZColors._();
 
@@ -22,10 +22,10 @@ class ZColors {
   static const neutral900 = Color(0xFF171717);
   static const neutral950 = Color(0xFF0A0A0A);
 
-  // Official surfaces.
+  // Surfaces.
   static const darkBackground = Color(0xFF161616);
   static const darkCard = Color(0xFF2B2B2B);
-  /// Official dual-pane left column (--workspace-sidebar-panel-width area).
+  /// Dual-pane left column (--workspace-sidebar-panel-width area).
   static const darkSidebar = Color(0xFF1E1E1E);
   static const darkSecondary = Color(0xFF363636);
   static const lightBackground = Color(0xFFF8F8F8);
@@ -33,7 +33,7 @@ class ZColors {
   static const lightSidebar = Color(0xFFF0F0F0);
   static const lightSecondary = Color(0xFFE6E6E6);
 
-  // Brand sky accent (official --color-brand / --color-accent).
+  // Brand sky accent (--color-brand / --color-accent).
   static const sky400 = Color(0xFF38BDF8);
   static const sky500 = Color(0xFF0EA5E9);
   static const sky600 = Color(0xFF0284C7);
@@ -46,7 +46,7 @@ class ZColors {
   static const success = Color(0xFF34D399); // emerald-400
   static const warning = Color(0xFFFBBF24); // amber-400
 
-  // Official mobile status pills (measured on the official 390px list).
+  // Mobile status pills (measured on the 390px list).
   static const pillSuccessBg = Color(0xFF46BF72); // 已完成 pill surface
   static const pillRunningBg = Color(0xFF001D3D); // 运行中 pill surface
 
@@ -55,7 +55,7 @@ class ZColors {
   // the existing brand/status tokens take different values, so they stay
   // untouched and these are additive. Dark values; read them through the
   // [ZInk.usage*] slots which branch to the light counterparts below
-  // (official light mode deepens/saturates — design.md §3b).
+  // (light mode deepens/saturates — design.md §3b).
   static const usageBlue = Color(0xFF4099FF); // --color-usage-chart-1
   static const usageOrange = Color(0xFFFF8A30); // --color-usage-chart-5
   static const usageGreen = Color(0xFF87D9A4); // confirmation-foreground
@@ -336,7 +336,7 @@ Route<T> zRoute<T>(WidgetBuilder builder) {
 const double zTouchWidth = 44;
 const double zTouchHeight = 48;
 
-/// Theme-aware text colors mirroring the official foreground tokens.
+/// Theme-aware text colors for the foreground tokens.
 class ZInk {
   ZInk._();
 
@@ -374,18 +374,18 @@ class ZInk {
       _dark(c) ? ZColors.neutral200 : ZColors.neutral700;
 
   /// Card / panel surface (composer, slash popup, user bubble) — the
-  /// official `--color-card` pair; collects every former direct
+  /// `--color-card` pair; collects every former direct
   /// `ZColors.darkCard`/`lightCard` reference.
   static Color card(BuildContext c) =>
       _dark(c) ? ZColors.darkCard : ZColors.lightCard;
 
-  /// Progress-bar track, quota-bar strength — the official sidebar quota
+  /// Progress-bar track, quota-bar strength — the sidebar quota
   /// rows draw the track as a semi-transparent overlay (`bg-surface-hover`:
   /// 10% white / 5% black), never an opaque fill.
   static Color barTrack(BuildContext c) =>
       _dark(c) ? const Color(0x1AFFFFFF) : const Color(0x0D0D0D0D);
 
-  /// Context-bar track — the lighter official `bg-surface` strength
+  /// Context-bar track — the lighter `bg-surface` strength
   /// (5% white / 3% black) the chat context capacity bar uses.
   static Color barTrackSoft(BuildContext c) =>
       _dark(c) ? const Color(0x0DFFFFFF) : const Color(0x080D0D0D);
@@ -396,21 +396,21 @@ class ZInk {
       _dark(c) ? ZColors.danger : ZColors.dangerLight;
 
   /// Success tone (`--color-success` foreground family): light reuses the
-  /// official measured confirmation foreground — the bright dark-mode
+  /// measured confirmation foreground — the bright dark-mode
   /// emerald ([ZColors.success]) is unreadable as 11-12px text on light
   /// surfaces (~1.5:1).
   static Color successTone(BuildContext c) =>
       _dark(c) ? ZColors.success : ZColors.pillSuccessFgLight;
 
   /// Warning tone (amber foreground family): light lifts the literal
-  /// official `--color-warning` from the theme-zai-light bundle (bundle
-  /// ) — the same value official light also
+  /// `--color-warning` from the theme-zai-light bundle — the
+  /// same value light mode also
   /// uses for `--color-usage-chart-5`, so [ZColors.usageOrangeLight] is
   /// reused instead of a duplicate constant.
   static Color warningTone(BuildContext c) =>
       _dark(c) ? ZColors.warning : ZColors.usageOrangeLight;
 
-  /// Usage accents (chart-1/5 + confirmation-foreground): official light
+  /// Usage accents (chart-1/5 + confirmation-foreground): light
   /// mode deepens and saturates, so these branch (design.md §3b).
   static Color usageBlue(BuildContext c) =>
       _dark(c) ? ZColors.usageBlue : ZColors.usageBlueLight;
@@ -419,15 +419,15 @@ class ZInk {
   static Color usageGreen(BuildContext c) =>
       _dark(c) ? ZColors.usageGreen : ZColors.usageGreenLight;
 
-  /// Official status-pill surfaces (solid [PhasePill] and the online
+  /// Status-pill surfaces (solid [PhasePill] and the online
   /// marker): dark keeps the measured opaque pairs, light lifts the
-  /// official `--color-accent` / `--color-success` values.
+  /// `--color-accent` / `--color-success` values.
   static Color pillRunningBg(BuildContext c) =>
       _dark(c) ? ZColors.pillRunningBg : ZColors.pillRunningBgLight;
 
   /// Running-pill text: dark keeps the pre-split 87% ink (zero dark
   /// delta), light pairs with the `--color-accent` surface via the
-  /// official ask-foreground.
+  /// ask-foreground.
   static Color pillRunningFg(BuildContext c) => _dark(c)
       ? ZColors.neutral200.withValues(alpha: 0.87)
       : ZColors.pillRunningFgLight;
@@ -436,11 +436,11 @@ class ZInk {
 
   /// Completed-pill text: dark keeps the measured opaque pair with black
   /// text (unchanged), light pairs the confirmation surface with the
-  /// official confirmation-foreground.
+  /// confirmation-foreground.
   static Color pillSuccessFg(BuildContext c) =>
       _dark(c) ? Colors.black : ZColors.pillSuccessFgLight;
 
-  /// Neutral glyph tone (slash popup icons): official foreground family.
+  /// Neutral glyph tone (slash popup icons): foreground family.
   static Color iconNeutral(BuildContext c) =>
       _dark(c) ? ZColors.neutral300 : ZColors.neutral500;
 
@@ -458,7 +458,7 @@ class ZInk {
 abstract final class ZSymbols {
   ZSymbols._();
 
-  /// Command entries (codepoints from the official Material Symbols
+  /// Command entries (codepoints from the Material Symbols
   /// codepoints table).
   static const IconData terminal =
       IconData(0xEB8E, fontFamily: zSymbolsFamily);
@@ -468,9 +468,9 @@ abstract final class ZSymbols {
       IconData(0xE87B, fontFamily: zSymbolsFamily);
 }
 
-/// Light/dark mode, persisted. Defaults to dark like the official page.
+/// Light/dark mode, persisted. Defaults to dark like the page.
 class ThemeController extends ChangeNotifier {
-  static const _key = 'zlinker_theme_mode';
+  static const _key = 'zgo_theme_mode';
   ThemeMode _mode = ThemeMode.dark;
   ThemeMode get mode => _mode;
 
@@ -565,7 +565,7 @@ ThemeData _base(ColorScheme scheme, Color background, Color card,
       iconTheme: IconThemeData(color: foreground),
     ),
     // card/dialog visuals ride the CardTheme/DialogTheme widgets in
-    // ZLinkerApp.builder — the ThemeData param type differs across SDKs
+    // ZGoApp.builder — the ThemeData param type differs across SDKs
     // (CardTheme vs CardThemeData), the widget form does not.
     dividerTheme: DividerThemeData(color: border, thickness: 1, space: 1),
     bottomSheetTheme: BottomSheetThemeData(
@@ -648,7 +648,7 @@ ThemeData _base(ColorScheme scheme, Color background, Color card,
 }
 
 
-/// Card visuals for [ZLinkerApp]'s builder-wrapped CardTheme widget
+/// Card visuals for [ZGoApp]'s builder-wrapped CardTheme widget
 /// (stable across SDKs, unlike ThemeData.cardTheme's param type).
 CardThemeData zCardTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;

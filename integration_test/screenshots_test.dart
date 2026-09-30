@@ -4,7 +4,7 @@
 // Run on a device/simulator via flutter drive (writes PNGs through the
 // test_driver/integration_test.dart onScreenshot callback):
 //
-//   ZLINKER_SHOT_DIR=docs/screenshots flutter drive \
+//   ZGO_SHOT_DIR=docs/screenshots flutter drive \
 //     --driver=test_driver/integration_test.dart \
 //     --target=integration_test/screenshots_test.dart -d <device> \
 //     --dart-define=SHOT_LOCALE=en-US
@@ -22,19 +22,19 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:zlinker/notifications/keepalive_controller.dart';
-import 'package:zlinker/state/device_session.dart';
-import 'package:zlinker/state/device_store.dart';
-import 'package:zlinker/state/scheduled_store.dart';
-import 'package:zlinker/ui/automations_page.dart';
-import 'package:zlinker/ui/chat/chat_page.dart';
-import 'package:zlinker/ui/desktop_settings_page.dart';
-import 'package:zlinker/ui/device_usage_page.dart';
-import 'package:zlinker/ui/model_providers_page.dart';
-import 'package:zlinker/ui/devices_page.dart';
-import 'package:zlinker/ui/task_list_page.dart';
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/notifications/keepalive_controller.dart';
+import 'package:zgo/state/device_session.dart';
+import 'package:zgo/state/device_store.dart';
+import 'package:zgo/state/scheduled_store.dart';
+import 'package:zgo/ui/automations_page.dart';
+import 'package:zgo/ui/chat/chat_page.dart';
+import 'package:zgo/ui/desktop_settings_page.dart';
+import 'package:zgo/ui/device_usage_page.dart';
+import 'package:zgo/ui/model_providers_page.dart';
+import 'package:zgo/ui/devices_page.dart';
+import 'package:zgo/ui/task_list_page.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 import '../test/helpers/fake_device_session.dart';
 
@@ -446,7 +446,7 @@ Future<void> _capturePhone(WidgetTester tester, String name) async {
     report['screenshots'] = shots;
   } else {
     final dir =
-        Directory(Platform.environment['ZLINKER_SHOT_DIR'] ?? 'docs/screenshots');
+        Directory(Platform.environment['ZGO_SHOT_DIR'] ?? 'docs/screenshots');
     await dir.create(recursive: true);
     await File('${dir.path}/$name.png').writeAsBytes(bytes);
   }
@@ -461,7 +461,7 @@ Future<void> _capture(WidgetTester tester, String name) async {
         _captureKey.currentContext!.findRenderObject()! as RenderRepaintBoundary;
     final image = await boundary.toImage(pixelRatio: 2.0);
     final data = await image.toByteData(format: ui.ImageByteFormat.png);
-    final dir = Directory(Platform.environment['ZLINKER_SHOT_DIR'] ?? 'docs/screenshots');
+    final dir = Directory(Platform.environment['ZGO_SHOT_DIR'] ?? 'docs/screenshots');
     await dir.create(recursive: true);
     await File('${dir.path}/$name.png')
         .writeAsBytes(data!.buffer.asUint8List());

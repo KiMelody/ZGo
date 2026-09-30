@@ -1,13 +1,13 @@
-# App Review Notes — ZGo 1.6.1 (10)
+# App Review Notes — ZGo 1.14.0 (21)
 
 ## 1. Screen recording
 
 Two recordings are attached:
 
-- `docs/demo/zlinker-add-device.mp4` — scripted walkthrough of the onboarding
+- `zgo-add-device.mp4` — scripted walkthrough of the onboarding
   flow: empty device list → tap "Add device" → paste pairing URL → confirm →
   device appears in the list → settings page (theme / language / notifications).
-- `docs/store/appstore/zlinker-review-demo.mp4` — device list with connected
+- `zgo-review-demo.mp4` — device list with connected
   desktops → native task list (pinned group, running/completed/queued states) →
   full conversation (streaming markdown reply, file-change summary).
 

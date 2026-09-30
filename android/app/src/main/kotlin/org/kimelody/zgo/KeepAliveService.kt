@@ -1,4 +1,4 @@
-package org.songsong.zlinker
+package org.kimelody.zgo
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -164,11 +164,11 @@ class KeepAliveService : Service() {
     private data class Copy(val title: String, val body: String, val channelName: String)
 
     companion object {
-        private const val TAG = "ZLinkerKeepAlive"
-        private const val CHANNEL_ID = "zlinker_keepalive"
+        private const val TAG = "ZGoKeepAlive"
+        private const val CHANNEL_ID = "zgo_keepalive"
         private const val NOTIFICATION_ID = 1
-        private const val PREFS = "zlinker_keepalive_service"
-        private const val KEY_COPY = "zlinker_keepalive_copy"
+        private const val PREFS = "zgo_keepalive_service"
+        private const val KEY_COPY = "zgo_keepalive_copy"
         private const val FALLBACK_COPY = "ZGo"
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_BODY = "body"

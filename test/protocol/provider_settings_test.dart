@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/provider_settings.dart';
+import 'package:zgo/protocol/provider_settings.dart';
 
 /// Parsing and revision-guard contracts of the provider-settings view
 /// (wire shapes per the 2026-09-28 live/static certification in the task's

@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/channel_client.dart';
-import 'package:zlinker/protocol/off_peak.dart';
+import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/off_peak.dart';
 
 class FakeChannel {
   final calls = <(String, List<Object?>)>[];

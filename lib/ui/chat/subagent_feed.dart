@@ -19,7 +19,7 @@ const subagentTerminalStatuses = {
 /// `subagents.running[]` as the terminal-hysteresis view sees it: a replayed
 /// running entry within the window of an observed terminal is dropped. This
 /// is the data source of the composer pill and the management sheet's
-/// running section (official `subagents.running` 口径, not backgroundWorks).
+/// running section (`subagents.running` 口径, not backgroundWorks).
 List<Map<String, dynamic>> subagentsRunningView(
   ConversationState state,
   SubagentFeed? feed,
@@ -61,7 +61,7 @@ class _TerminalRecord {
 /// terminal-state hysteresis (task internal-task A+B/E).
 ///
 /// The parent conversation stream never carries a subagent's tool activity
-/// (300-row sample: nestedChildToolRows=0) — the official web subscribes
+/// (300-row sample: nestedChildToolRows=0) — the web subscribes
 /// the child session and groups client-side. This pool shares ONE
 /// `ChatGateway.subscribe` per childSessionId across consumers (Agent tile
 /// expansion, running works-bar entries, goal-panel running tiles) with

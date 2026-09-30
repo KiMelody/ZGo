@@ -1,5 +1,5 @@
-import 'package:zlinker/protocol/conversation.dart';
-import 'package:zlinker/state/device_session.dart';
+import 'package:zgo/protocol/conversation.dart';
+import 'package:zgo/state/device_session.dart';
 
 /// DeviceSession subclass answering from local tables (never connects).
 ///
@@ -33,7 +33,7 @@ class FakeDeviceSession extends DeviceSession {
     }, onGap: () {});
     _workspaces = workspaces;
     _active = workspaces.isEmpty ? null : workspaces.first;
-    // Mirror _openWorkspaceNow: the seeded index carries the identity of
+    // Like _openWorkspaceNow: the seeded index carries the identity of
     // the workspace it was "subscribed" to (live-only rows attribute here).
     sessions.subscribedWorkspaceKey =
         _active == null ? null : workspaceKeyOf(_active!);

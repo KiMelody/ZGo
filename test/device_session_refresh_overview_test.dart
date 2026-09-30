@@ -2,9 +2,9 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/connection_params.dart';
-import 'package:zlinker/protocol/remote_client.dart';
-import 'package:zlinker/state/device_session.dart';
+import 'package:zgo/protocol/connection_params.dart';
+import 'package:zgo/protocol/remote_client.dart';
+import 'package:zgo/state/device_session.dart';
 
 /// Millisecond-level timings (stall_test pattern: real delays, no fake
 /// clock); the list watchdog is parked far out of the way.

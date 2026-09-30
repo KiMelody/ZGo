@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:zlinker/state/scheduled_store.dart';
+import 'package:zgo/state/scheduled_store.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -58,7 +58,7 @@ void main() {
       );
 
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString('zlinker_scheduled_v1');
+      final raw = prefs.getString('zgo_scheduled_v1');
       expect(raw, isNotNull);
 
       final reloaded = ScheduledStore();

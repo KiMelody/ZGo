@@ -5,7 +5,7 @@ HOW IT WORKS (no account, no login, no payment):
 2. In ZGo, tap "+", scan the QR or paste the URL. The device appears in the list.
 3. Tap the device to open its task list; tap a task to open the conversation.
 
-See the attached demo video (zlinker-add-device.mp4) for the full pairing flow recorded from the real app.
+See the attached demo video (zgo-add-device.mp4) for the full pairing flow recorded from the real app.
 
 FOR REVIEW WITHOUT A DESKTOP INSTANCE:
 The app opens to an empty device list with add-device instructions. All data comes from the user's own desktop ZCode instance; without one, there is simply nothing to show yet. The demo video demonstrates the complete flow.

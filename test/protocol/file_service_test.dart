@@ -3,8 +3,8 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/channel_client.dart';
-import 'package:zlinker/protocol/file_service.dart';
+import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/file_service.dart';
 
 void main() {
   test('first accepted candidate wins; misses advance in candidate order',

@@ -9,7 +9,7 @@ import '../ui_settings.dart';
 import 'chat_page.dart' show subagentActionText;
 import 'subagent_feed.dart';
 
-/// Web 目标面板 parity (chat.statusPanel.* / goalBanner.*): the active
+/// Web 目标面板 (chat.statusPanel.* / goalBanner.*): the active
 /// goal's summary + elapsed + iteration progress, the plan's process list
 /// (completed items collapsed), and running subagents with elapsed time.
 ///
@@ -323,7 +323,7 @@ class _GoalPanelState extends State<GoalPanel> {
   }
 
   /// Tile label: `title · live action` when the pooled child session has a
-  /// last toolCall to report (works-bar parity); bare title otherwise.
+  /// last toolCall to report (works-bar); bare title otherwise.
   String _agentTileLabel(BuildContext context, Map<String, dynamic> agent) {
     final title = '${agent['title'] ?? agent['subagentType'] ?? ''}';
     final action = subagentActionText(

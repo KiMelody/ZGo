@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/conversation.dart';
+import 'package:zgo/protocol/conversation.dart';
 
 void main() {
   ConversationState stateWithWindow({

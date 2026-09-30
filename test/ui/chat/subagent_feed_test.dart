@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/chat/subagent_feed.dart';
+import 'package:zgo/ui/chat/subagent_feed.dart';
 
 import '../chat_page_test.dart' show FakeChatGateway;
 

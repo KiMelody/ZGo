@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 
-/// Mirrors `aen()` / `ien()` in the web client:
+/// Proof derivation:
 /// proof = base64url_nopad(HMAC-SHA256(key: utf8(passHash),
 ///                                    msg: utf8('$nonce|$role|$deviceSid')))
 String calculateProof({

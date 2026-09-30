@@ -2,10 +2,10 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/channel_client.dart';
-import 'package:zlinker/protocol/connection_params.dart';
-import 'package:zlinker/protocol/remote_client.dart';
-import 'package:zlinker/state/device_session.dart';
+import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/connection_params.dart';
+import 'package:zgo/protocol/remote_client.dart';
+import 'package:zgo/state/device_session.dart';
 
 /// Shrunken defence timings: lets the stall policy run against REAL
 /// (millisecond) delays instead of a fake clock, whose microtask drainage

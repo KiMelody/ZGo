@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/channel_client.dart';
-import 'package:zlinker/protocol/task_commands.dart';
+import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/task_commands.dart';
 
 void main() {
   test('remembers the first accepted candidate and reuses it', () async {
@@ -32,7 +32,7 @@ void main() {
   });
 
   test('confirmed schema: payloads always key the id as taskId', () async {
-    // Source-confirmed (web client, docs/parity/web-capabilities.md §4):
+    // Source-confirmed (web client bundle):
     // zcode-task metadata commands take one object merging the workspace
     // scope + taskId; no *Session* variants on this channel.
     Map? seen;

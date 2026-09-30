@@ -1,5 +1,5 @@
-// Ported verbatim from the reference implementation; newer style lints
-// are suppressed so the file stays diffable against it.
+// Newer style lints are suppressed so this file keeps its protocol
+// handling readable as a single, self-contained unit.
 // ignore_for_file: use_null_aware_elements, prefer_initializing_formals
 import 'dart:async';
 import 'dart:convert';
@@ -15,7 +15,7 @@ import 'remote_client.dart';
 
 /// Conversation V4 protocol over the `zcode-agent` channel.
 ///
-/// Flow (mirrors `sk()`/`uk()` in the web client):
+/// Flow:
 /// 1. `helloConversationV4()` + `initializeConversationV4(clientHello)`
 /// 2. `subscribeConversationV4(scope + sessionId)` -> ack.subscriptionId
 /// 3. frames pushed via dynamic event `onDynamicConversationFrame(scope)`:
@@ -64,8 +64,8 @@ class ConversationTransport {
     this.subscribeAckTimeout = const Duration(seconds: 10),
     this.onLog,
   }) {
-    // A reopened bridge has no handshake state — start over (mirrors the
-    // web client's `wD` cache being per service instance).
+    // A reopened bridge has no handshake state — start over (the cache is
+    // per service instance).
     session.recovered.addListener(_onBridgeRecovered);
   }
 
@@ -125,9 +125,9 @@ class ConversationTransport {
     _subscriptions.remove(sessionId);
   }
 
-  /// Commands that require `baseRevision` (CAS, mirrors `eAe` in the web
-  /// client) and row-target commands that also require `baseLogEpoch`
-  /// (mirrors `tAe`).
+  /// Commands that require `baseRevision` (CAS) plus row-target commands
+  /// that also require `baseLogEpoch` (revision-guarded).
+  /// All of them are compare-and-swap sends.
   static const _casCommands = {
     'applyFileRewind',
     'forkAssistant',
@@ -195,8 +195,8 @@ class ConversationTransport {
     var res = await _sendCommandWithRetry(envelope, timeout);
     // Runtime events (turn completion etc.) also bump the revision, so a
     // CAS base can go stale even with ack tracking. The stale ack tells
-    // the server's current revision — retry once with it (mirrors the
-    // web client's stale-revision retry).
+    // the server's current revision — retry once with it (stale-revision
+    // retry).
     if (sessionId != null &&
         res is Map &&
         res['status'] == 'stale' &&
@@ -284,7 +284,7 @@ class ConversationTransport {
     }
   }
 
-  /// Creates a new session (mirrors the composer's first-send path):
+  /// Creates a new session (the composer's first-send path):
   /// command `createSession` with `{workspaceId, firstInput:{text}}` and a
   /// null envelope sessionId. Returns the new sessionId on `accepted` —
   /// or on `duplicate`, the retryAck replay of a command that reached the
@@ -327,8 +327,8 @@ class ConversationTransport {
   }
 
   /// Creates a selection-side (auxiliary) chat attached to [parentSessionId]
-  /// (command `createSelectionSideSession` with an empty payload, mirrors
-  /// the web client's "ask in side chat" flow). Returns the new sessionId.
+  /// (command `createSelectionSideSession` with an empty payload — "ask in
+  /// side chat"). Returns the new sessionId.
   Future<String> createSelectionSideSession(
     String parentSessionId, {
     Duration timeout = const Duration(seconds: 60),
@@ -440,11 +440,11 @@ class ConversationTransport {
     return res;
   }
 
-  /// build / edit / plan / yolo. Mirrors `switchCollaborationMode`.
+  /// build / edit / plan / yolo.
   Future<dynamic> switchCollaborationMode(String sessionId, String mode) =>
       sendCommand(sessionId, 'switchCollaborationMode', {'mode': mode});
 
-  /// queue / guide followup. Mirrors `setFollowupMode`.
+  /// queue / guide followup.
   Future<dynamic> setFollowupMode(String sessionId, String mode) =>
       sendCommand(sessionId, 'setFollowupMode', {'mode': mode});
 
@@ -596,7 +596,7 @@ class ConversationTransport {
 
   static const _attachmentChunkBytes = 384 * 1024;
 
-  /// Uploads an attachment (begin/chunk/commit, mirrors `rNe()`).
+  /// Uploads an attachment (begin/chunk/commit).
   /// Returns the attachment descriptor `{ref, fileName, mime, bytes}` to be
   /// passed to sendText/createSession.
   Future<Map<String, dynamic>> attachmentPut(
@@ -803,7 +803,7 @@ class ConversationTransport {
   }
 
   /// `zcode-agent.readWorkspacePresentation` — the 3.12.3+ slash-command
-  /// source (builtin + custom), same method the official web remote reads.
+  /// source (builtin + custom).
   /// One-shot RPC, no subscription lifecycle. Null on non-Map answer or
   /// channel rejection — a presentation miss must not fail the caller
   /// (slashCommands stay empty instead).
@@ -820,8 +820,8 @@ class ConversationTransport {
     }
   }
 
-  /// `skills.list` — enabled skills of this workspace (mirrors the web
-  /// client's `skillsService.list`). Skills are invoked in the composer as
+  /// `skills.list` — enabled skills of this workspace.
+  /// Skills are invoked in the composer as
   /// `$name`. Returns an empty list when the channel rejects or returns no
   /// skill data.
   /// Last successful skills.list result (mention picker reads this
@@ -902,8 +902,7 @@ class ReplayableQueueItem {
 }
 
 /// Client-side offline queue for the 3.12.3 replayable command family
-/// (`web-remote-replayable`, verified 2026-09-18 — see the task's
-/// notes.md): enqueue is a reliable direct-send while the task owner is
+/// (`web-remote-replayable`, live-verified 2026-09-18): enqueue is a reliable direct-send while the task owner is
 /// active, so bridge-degraded sendText failures are held in app memory and
 /// replayed via `enqueueTaskCommand` once the bridge recovers.
 ///
@@ -1027,7 +1026,7 @@ class ReplayableCommandQueue extends ChangeNotifier {
       'type': 'send_prompt',
       'content': content,
       'clientId': clientId,
-      'clientLabel': 'ZLinker',
+      'clientLabel': 'ZGo',
     },
   ]);
 
@@ -1144,7 +1143,7 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
   /// A late ack (or late failure) whose attempt no longer matches — a
   /// watchdog/bridge-recovery resubscribe raced the pending call — is
   /// dropped instead of overwriting the newer attempt's subscription
-  /// (same race family as internal-task).
+  /// (same race family as the 09-18 ask-q snapshot loss).
   int _startAttempt = 0;
 
   /// Abandon-in-flight guard: fires unless the ack arrives first; a
@@ -1485,9 +1484,9 @@ class ConversationSubscription extends _SubscriptionBase<ConversationState> {
   }
 
   /// Context/usage numbers ride the desktop's task-stream broadcast
-  /// (`bots:task-stream` messages on the `broadcast` channel, official
+  /// (`bots:task-stream` messages on the `broadcast` channel,
   /// `broadcastService.onMessage`), not the Conversation V4 delta stream —
-  /// the official V4 reducer only handles row/state ops. Filtered to this
+  /// the V4 reducer only handles row/state ops. Filtered to this
   /// session's taskId; everything else is dropped. Live-probed on 3.11.2:
   /// the broadcast stays silent there and the numbers flow through
   /// `state.updated` patches instead, so [ContextUsageView] reads both
@@ -1679,8 +1678,8 @@ class _LogicalFrameAssembly {
   }
 }
 
-/// Live sessions-index state (task list of a workspace), mirrors the
-/// sessions-index subscription in the web client (`QAe` delta application).
+/// Live sessions-index state (task list of a workspace), fed by the
+/// sessions-index subscription (`QAe` delta application).
 class SessionEntry {
   final String sessionId;
   final String? parentSessionId;
@@ -1875,8 +1874,8 @@ class SessionsIndexSubscription extends _SubscriptionBase<SessionsIndexState> {
   }
 }
 
-/// Conversation snapshot + row state, mirrors `fke()`/`pke()` delta
-/// application in the web client.
+/// Conversation snapshot + row state, from the `fke()`/`pke()` delta
+/// application.
 class ConversationState extends ChangeNotifier {
   Map<String, dynamic>? snapshot;
   List<Map<String, dynamic>> rows = [];
@@ -2029,7 +2028,7 @@ class ConversationState extends ChangeNotifier {
         if (index != -1) rows[index] = row;
         break;
       case 'row.removed':
-        // Mirrors `fke()` in the web client: KEEP rows with
+        // Delta application: KEEP rows with
         // rowId < fromRowId (i.e. remove rows >= fromRowId).
         final fromRowId = (delta['fromRowId'] as num?)?.toInt() ?? 0;
         final kept = rows
@@ -2156,7 +2155,7 @@ class ConversationState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Mirrors `dke()`: append streamed text to a row field.
+  /// Appends streamed text to a row field.
   Map<String, dynamic> _appendToRow(
     Map<String, dynamic> row,
     String? path,
@@ -2256,8 +2255,8 @@ class ConversationState extends ChangeNotifier {
   /// Applies one `usage_update` task-stream event
   /// (`{type: 'usage_update', size, used, cost, cache?, breakdown?}`),
   /// whitelist-parsed and defensively read: any missing/invalid field is
-  /// simply absent and falls back to the snapshot in [usage]. Mirrors the
-  /// official reducer's guards: an update without a usable `used` never
+  /// simply absent and falls back to the snapshot in [usage]. Guards: an
+  /// update without a usable `used` never
   /// clobbers current usage, and an update lacking a breakdown keeps the
   /// previous one while used/size are unchanged.
   void applyUsageUpdate(Map<String, dynamic> event) {
@@ -2288,7 +2287,7 @@ class ConversationState extends ChangeNotifier {
 
   /// Whitelist parser for one `usage_update` event. `cost` is parsed but
   /// never rendered (PRD R7); `size`/`used` must be finite and positive
-  /// (the official renderer hides usage at <= 0); `cache` reduces to
+  /// (usage is hidden at <= 0); `cache` reduces to
   /// `{hitRate}`; breakdown entries need a string `source` and finite
   /// `chars` (<= 0 entries are dropped later in [contextUsage]).
   static Map<String, dynamic> _parseUsageUpdate(Map<String, dynamic> event) {
@@ -2321,7 +2320,7 @@ class ConversationState extends ChangeNotifier {
   static num? _finiteNum(Object? value) =>
       value is num && value.isFinite ? value : null;
 
-  /// Official breakdown weight order (bundle `AI`): primary sort is chars
+  /// Breakdown weight order: primary sort is chars
   /// descending, ties break by this table; unknown sources trail in
   /// first-seen order.
   static const _breakdownWeights = {
@@ -2337,7 +2336,7 @@ class ConversationState extends ChangeNotifier {
   /// Normalized context-usage projection for the UI (usage sheet + ring):
   /// used/max from event or snapshot, cache hit rate, and the aggregated
   /// breakdown (per-source chars summed, <= 0 dropped, chars descending
-  /// with the official weight tie-break, percent of the retained total).
+  /// with the weight tie-break, percent of the retained total).
   ContextUsageView get contextUsage {
     final usage = this.usage;
     final window = usage?['contextWindow'];
@@ -2355,7 +2354,7 @@ class ConversationState extends ChangeNotifier {
     final breakdown =
         usage?['breakdown'] ?? (window is Map ? window['breakdown'] : null);
     if (breakdown is List) {
-      // Aggregate per source (official AZe), then rank: known sources by
+      // Aggregate per source, then rank: known sources by
       // the weight table, unknown ones after them in first-seen order.
       final bySource = <String, num>{};
       for (final e in breakdown) {
@@ -2398,7 +2397,7 @@ class ConversationState extends ChangeNotifier {
   }
 
   /// Older history exists beyond the current window. Prefers the server's
-  /// `hasMore` (web parity) once known; falls back to the totalCount
+  /// `hasMore` once known; falls back to the totalCount
   /// heuristic for the initial state.
   bool get canLoadOlder {
     if (firstRowId == null) return false;
@@ -2463,8 +2462,7 @@ class ConversationState extends ChangeNotifier {
 
   /// `subagents` typed: {revision, childSessionIds, running, endedTotal}.
   /// `running` entries carry childSessionId/agentId/toolCallId/subagentType/
-  /// title/status/startedAt (live-probed 2026-09-13, see
-  /// tasks/internal-task research).
+  /// title/status/startedAt (live-probed 2026-09-13).
   Map<String, dynamic>? get subagentsInfo =>
       (snapshot?['subagents'] as Map?)?.cast<String, dynamic>();
 
@@ -2498,7 +2496,7 @@ class ConversationState extends ChangeNotifier {
 
   /// Rebuilds pending AskUserQuestion interactions from the held rows.
   ///
-  /// Mirrors the agent core `onPermissionRequested`: a tool call row waiting
+  /// Waits on the agent core's permission request: a tool call row waiting
   /// on the user carries `status:'pendingApproval'` plus
   /// `approvalInteractionId` — the resolveInteraction id, derived
   /// server-side as `requestId ?? 'perm-${toolCallId}'` — and the questions
@@ -2578,13 +2576,13 @@ class ConversationState extends ChangeNotifier {
 
 /// Normalized view over [ConversationState.usage] (snapshot + merged
 /// `usage_update` events). `used`/`max` are null when absent/invalid; the
-/// sheet hides the section unless `hasData`, mirroring the official
-/// renderer (usage hidden at used/max <= 0).
+/// sheet hides the section unless `hasData` (usage is hidden at
+/// used/max <= 0).
 class ContextUsageView {
   final int? used;
   final int? max;
 
-  /// 0..1 when readable (clamped at 0 like the official formatter).
+  /// 0..1 when readable (clamped at 0).
   final double? hitRate;
   final List<ContextUsageBreakdownItem> breakdown;
 
@@ -2603,7 +2601,7 @@ class ContextUsageView {
   }
 }
 
-/// One aggregated breakdown row (official AZe output shape).
+/// One aggregated breakdown row.
 class ContextUsageBreakdownItem {
   final String source;
   final num chars;

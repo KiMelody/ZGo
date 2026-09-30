@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart';
 
 import 'quota_reset.dart';
 
-/// Phase of one entitlement snapshot — mirrors the web entitlement panel's
+/// Phase of one entitlement snapshot — the entitlement panel's
 /// status enum (Active/Error/Loading/LoginRequired/NoPlan/NotConfigured);
 /// the desktop's `unavailableReason` maps onto these.
 enum EntitlementPhase {
@@ -24,7 +24,7 @@ class Limit {
 
   const Limit(this.raw);
 
-  /// Used percent of the window; null when absent / mistyped (official PF
+  /// Used percent of the window; null when absent / mistyped (a bad value
   /// answers null → the surface hides the metric instead of guessing).
   double? get percentage {
     final p = raw['percentage'];
@@ -67,7 +67,7 @@ class EntitlementView {
   });
 
   /// Token/credit limit types whose exhaustion drives the chat warning
-  /// banner — the official bundle's token-class group. `TIME_LIMIT` is the
+  /// banner — the token-class group. `TIME_LIMIT` is the
   /// monthly built-in MCP tool quota (search-prime / web-reader / zread)
   /// and is deliberately excluded: it does not limit LLM chat, so topping
   /// it out must not raise the "switch model" banner
@@ -76,7 +76,7 @@ class EntitlementView {
 
   /// Whether the snapshot reports a token/credit limit topped out.
   ///
-  /// The top-level `remaining` block is the `TIME_LIMIT` aggregate mirror
+  /// The top-level `remaining` block is the `TIME_LIMIT` aggregate copy
   /// and never participates: a zero count there means the monthly MCP
   /// calls ran out, not the chat plan.
   bool get exhausted {
@@ -93,7 +93,7 @@ class EntitlementView {
 
   // ----------------------------------------------------------- projection
   //
-  // The official entitlement / reset semantics are encoded exactly once,
+  // The entitlement / reset semantics are encoded exactly once,
   // here: limits mining, the PF remaining clamp, the reset scope, the
   // resettable composition and the expiry clock. The UI surfaces only read
   // these — no raw-map assembly in lib/ui (C1 收口).
@@ -106,8 +106,8 @@ class EntitlementView {
         : null;
   }
 
-  /// Exact `type`(+`unit`/`number`) lookup over `quota.limits` (the
-  /// official `MF`); null when the row is absent.
+  /// Exact `type`(+`unit`/`number`) lookup over `quota.limits`;
+  /// null when the row is absent.
   Limit? limitFor(String type, {int? unit, int? number}) {
     final limits = _limits;
     if (limits == null) return null;
@@ -130,7 +130,7 @@ class EntitlementView {
     return aggregate is Map ? Limit(aggregate.cast<String, dynamic>()) : null;
   }
 
-  /// Official PF: remaining% = clamp(100 - percentage) — every quota
+  /// remaining% = clamp(100 - percentage) — every quota
   /// metric shows what is LEFT of the limit, never what is used. A null
   /// limit or an unreadable percentage answers null.
   double? remainingPercent(Limit? limit) {
@@ -144,10 +144,10 @@ class EntitlementView {
   /// card; ties break to the nearest window rollover (a row without one
   /// loses). Rows without a usable percentage cannot rank. Null when no
   /// row ranks: the card then falls back to the top-level `remaining`
-  /// mirror (the TIME_LIMIT aggregate whose count/bar mislead as
+  /// copy (the TIME_LIMIT aggregate whose count/bar mislead as
   /// 「0 / 100%」 on plans without a monthly tool quota).
   ///
-  /// Deliberately NOT type-filtered (the A2 card mirrors the official
+  /// Deliberately NOT type-filtered (the A2 card shows the
   /// panel, where the monthly tool quota is a legitimate headline); the
   /// chat-facing bottleneck below is the filtered variant.
   Limit? get primaryLimit => _rankMostTense([
@@ -213,7 +213,7 @@ class EntitlementView {
     return id is String && id.isNotEmpty ? id : null;
   }
 
-  /// Pools the plan can actually reset — the official `_I` composition
+  /// Pools the plan can actually reset — the composition
   /// ([poolVisible] over `quota.limits` × the live pools): the plan must
   /// expose the pool's window row, an unexpired opportunity must exist and
   /// the window must not be untouched (processing pools stay visible).

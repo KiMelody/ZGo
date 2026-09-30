@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-/// Value codec mirroring `Sm()`/`Cm()` in the web client.
+/// Value codec for the IPC framing.
 ///
 /// Type tags: Undefined=0, String=1, Buffer=2, VSBuffer=3, Array=4,
 /// Object=5 (JSON), Int=6. Lengths/counts are 7-bit little-endian varints.

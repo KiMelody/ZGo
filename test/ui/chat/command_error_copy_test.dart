@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/chat/chat_page.dart';
+import 'package:zgo/ui/chat/chat_page.dart';
 
 void main() {
   // Callers pass `'$e'` (the raw error text), exactly like the snack-bar

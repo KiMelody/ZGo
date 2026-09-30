@@ -31,7 +31,7 @@
                 android:max="100"
                 android:progress="0"
                 android:indeterminate="false"
-                android:progressDrawable="@drawable/zlinker_quota_ring" />
+                android:progressDrawable="@drawable/zgo_quota_ring" />
 
             <TextView
                 android:id="@+id/quota_ring_pct"
@@ -81,7 +81,7 @@
             android:paddingBottom="4dp"
             android:textSize="12sp"
             android:textStyle="bold"
-            android:background="@drawable/zlinker_quota_pill"
+            android:background="@drawable/zgo_quota_pill"
             android:visibility="gone" />
 
         <!-- Manual re-poll, visible in every phase (any state can go
@@ -92,7 +92,7 @@
             android:layout_height="40dp"
             android:layout_marginStart="2dp"
             android:padding="10dp"
-            android:src="@drawable/zlinker_quota_refresh" />
+            android:src="@drawable/zgo_quota_refresh" />
     </LinearLayout>
 
     <LinearLayout

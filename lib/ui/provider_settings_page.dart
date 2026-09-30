@@ -8,7 +8,7 @@ import '../state/device_session.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 
-/// API format choices of the provider form — official labels over the
+/// API format choices of the provider form — labels over the
 /// certified provider-settings wire values (notes.md 附录 item 1).
 const _apiFormats = [
   ('anthropic-messages', 'providers.formatAnthropic'),
@@ -17,7 +17,7 @@ const _apiFormats = [
 ];
 
 /// Desktop ≥3.14 provider management (provider-settings channel): the
-/// official mobile two-step layout — grouped list page → provider detail
+/// mobile two-step layout — grouped list page → provider detail
 /// page. Reads/writes go through [ProviderSettingsPort]; every response
 /// carries the full refreshed view, which replaces the local state behind
 /// a monotonic revision guard (onDidChange payloads race write replies).
@@ -46,7 +46,7 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
     _listen();
   }
 
-  /// Web parity: `provider-settings.onDidChange` pushes the full view
+  /// `provider-settings.onDidChange` pushes the full view
   /// after every desktop-side change — reload the list from it (≤2s after
   /// the desktop commits, per acceptance).
   void _listen() {
@@ -314,10 +314,10 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
   }
 }
 
-/// Add-provider page (official form): template groups 智谱 / 其他 plus the
+/// Add-provider page (form): template groups 智谱 / 其他 plus the
 /// free-form custom entry. Tapping a template CREATES the provider
 /// immediately (disabled, seeded with the template's endpoint/access
-/// presets) and opens its detail page — official behavior, no interim form.
+/// presets) and opens its detail page — no interim form.
 class _AddProviderPage extends StatefulWidget {
   final DeviceSession session;
   const _AddProviderPage({required this.session});
@@ -545,7 +545,7 @@ class _AddProviderPageState extends State<_AddProviderPage> {
   }
 }
 
-/// Provider detail (official inline-edit form). Personal entries carry the
+/// Provider detail (inline-edit form). Personal entries carry the
 /// full form (enable / baseUrl / api format / api key / models); account
 /// entries show the plan state and the model management area only.
 class _ProviderDetailPage extends StatefulWidget {
@@ -798,7 +798,7 @@ class _ProviderDetailPageState extends State<_ProviderDetailPage> {
         initialJsonSchema: existing?.effSupportsJsonSchemaOutput ?? false,
         initialWebSearch: existing?.effSupportsNativeWebSearch ?? false,
         initialMidSystem: existing?.effSupportsMidConversationSystem ?? false,
-        // Official T5: values come from the effective config; a fresh model
+        // Values come from the effective config; a fresh model
         // shows the recommended low/high/max trio.
         reasoningLevels:
             existing?.effReasoningLevels ?? const ['low', 'high', 'max'],
@@ -808,9 +808,9 @@ class _ProviderDetailPageState extends State<_ProviderDetailPage> {
     );
     if (result == null) return;
     final smart = result.smart;
-    // Manual-save whitelist (official extractManualModelConfig): context
+    // Manual-save whitelist (extractManualModelConfig): context
     // window + the three capability booleans (always written, true or
-    // false) + inputFormat as the official T0 three-key pick
+    // false) + inputFormat as the three-key pick
     // {supportsImage, supportsVideo, supportsPdf} (video/pdf have no UI
     // switches and stay false). The reasoning level stays unwritten — the
     // overlay merge falls back to the template's recommended levels, so we
@@ -1261,7 +1261,7 @@ class _ProviderDetailPageState extends State<_ProviderDetailPage> {
                           overflow: TextOverflow.ellipsis),
                     ),
                     // Vision pill (mock panel ④): sky outline on a light
-                    // wash, caption size — mirrors the official badge.
+                    // wash, caption size — matches the badge.
                     if (model.effSupportsImage) ...[
                       const SizedBox(width: 6),
                       Container(
@@ -1403,7 +1403,7 @@ class _ApiFormatField extends StatelessWidget {
 }
 
 /// Dialog's payload — the four capability booleans ride along so the
-/// manual-save whitelist (official extractManualModelConfig) can compose
+/// manual-save whitelist (extractManualModelConfig) can compose
 /// `properties` on the caller side.
 class _ModelDialogResult {
   final String modelId;
@@ -1426,7 +1426,7 @@ class _ModelDialogResult {
   });
 }
 
-/// 添加模型 / 编辑模型配置 dialog (official form): smart-config switch +
+/// 添加模型 / 编辑模型配置 dialog (form): smart-config switch +
 /// model id (add mode carries the /models fetch entry — pick one id to
 /// fill the field) + context window + max output (disabled while smart) +
 /// the advanced section (manual mode only: vision input, three capability
@@ -1442,7 +1442,7 @@ class _ModelDialog extends StatefulWidget {
   final bool initialWebSearch;
   final bool initialMidSystem;
 
-  /// Read-only reasoning chips; empty hides the section (official T5
+  /// Read-only reasoning chips; empty hides the section (T5
   /// backfill). A fresh model shows the recommended low/high/max trio.
   final List<String> reasoningLevels;
   final bool isEdit;
@@ -1674,7 +1674,7 @@ class _ModelDialogState extends State<_ModelDialog> {
                   _fieldDecoration(tr(context, 'providers.maxOutput')),
             ),
             // Advanced section — manual mode only (smart config lets the
-            // desktop fill in the recommended values, official
+            // desktop fill in the recommended values, via
             // addPersonalModel useRecommendedConfig=true).
             if (!_smart) ...[
               InkWell(

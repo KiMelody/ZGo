@@ -118,7 +118,7 @@ class _OffPeakPageState extends State<OffPeakPage>
     }
   }
 
-  /// Official error copy for the three known error states.
+  /// Error copy for the three known error states.
   String _offPeakErrorText(BuildContext context, OffPeakError e) =>
       switch (e.kind) {
         OffPeakError.codingPlanOnly => tr(context, 'op.err.codingPlanOnly'),
@@ -154,7 +154,7 @@ class _OffPeakPageState extends State<OffPeakPage>
       _toast(tr(context, 'op.unavailable.title'));
       return;
     }
-    // Desktop parity: model options come from the availability payload's
+    // Model options come from the availability payload's
     // allowedModels (prepareWorkspace stays the fallback); thought options
     // come from allowedModelConfigs[].reasoning.
     await showModalBottomSheet<void>(
@@ -226,7 +226,7 @@ class _OffPeakPageState extends State<OffPeakPage>
             onPressed: _load,
           ),
         ],
-        // Official two-pane layout: 设置 / 历史.
+        // Two-pane layout: 设置 / 历史.
         bottom: TabBar(
           controller: _tabs,
           onTap: (_) => HapticFeedback.selectionClick(),
@@ -338,7 +338,7 @@ class _OffPeakPageState extends State<OffPeakPage>
   }
 
   /// Subscriber banner above the queue until the first task exists
-  /// (official newTask.bannerText).
+  /// (newTask.bannerText).
   Widget _newTaskBanner(BuildContext context) {
     return Card(
       color: Theme.of(context).colorScheme.secondaryContainer,
@@ -369,7 +369,7 @@ class _OffPeakPageState extends State<OffPeakPage>
     );
   }
 
-  /// 额度余量 + 最早可用 (page header per the official layout).
+  /// 额度余量 + 最早可用 (page header).
   Widget _quotaHeader(BuildContext context) {
     final status = _status;
     if (status == null) return const SizedBox.shrink();
@@ -382,7 +382,7 @@ class _OffPeakPageState extends State<OffPeakPage>
         OffPeakError.quota => tr(context, 'op.err.quota'),
         _ => tr(context, 'op.err.unavailable'),
       };
-      // 额度耗尽: official limitReachedAt line with the remaining wait.
+      // 额度耗尽: limitReachedAt line with the remaining wait.
       final remainingMs =
           status.reason == OffPeakError.quota
               ? status.quotaResetRemainingMs(
@@ -569,7 +569,7 @@ class _OffPeakPageState extends State<OffPeakPage>
                         ),
                       ),
                       const SizedBox(width: 8),
-                      // 暂停位置徽标 (official: #{position} 已暂停).
+                      // 暂停位置徽标 (#{position} 已暂停).
                       if (task.paused && task.queuePosition != null)
                         Container(
                           margin: const EdgeInsets.only(right: 8),
@@ -588,7 +588,7 @@ class _OffPeakPageState extends State<OffPeakPage>
                             ),
                           ),
                         ),
-                      // 排队位置徽标 (official: 排队第 N 位).
+                      // 排队位置徽标 (排队第 N 位).
                       if (task.queued && task.queuePosition != null)
                         Container(
                           margin: const EdgeInsets.only(right: 8),
@@ -745,7 +745,7 @@ class _OffPeakPageState extends State<OffPeakPage>
         await _showSheet(editing: task);
         return;
       case 'pause':
-        // Official hint toasts accompany pause/continue.
+        // Hint toasts accompany pause/continue.
         await _runOp(() async {
           await session.offPeak.pause(task.id);
           if (mounted) _toast(tr(context, 'op.pauseHint'));
@@ -756,7 +756,7 @@ class _OffPeakPageState extends State<OffPeakPage>
           if (mounted) _toast(tr(context, 'op.continueHint'));
         });
       case 'cancel':
-        // Official confirm: 已修改的文件会保留.
+        // Confirm: 已修改的文件会保留.
         final confirmed = await showDialog<bool>(
           context: context,
           builder: (c) => AlertDialog(
@@ -887,7 +887,7 @@ class OffPeakSheet extends StatefulWidget {
   /// the model selector options.
   final Future<WorkspacePrep> Function()? loadOptions;
 
-  /// Desktop off-peak availability payload's `allowedModels`: the official
+  /// Desktop off-peak availability payload's `allowedModels`: the
   /// option source for the model selector (plain model names, first is the
   /// default — no unspecified choice, matching the desktop form).
   final List<String>? allowedModels;
@@ -931,7 +931,7 @@ class _OffPeakSheetState extends State<OffPeakSheet> {
       _pristine['earliest'] != null ||
       _pristine['permission'] != _permission;
 
-  /// The official one-time hint toast fires on the first non-full-access
+  /// The one-time hint toast fires on the first non-full-access
   /// submit (desktop behavior).
   bool _fullAccessHintShown = false;
 
@@ -1016,7 +1016,7 @@ class _OffPeakSheetState extends State<OffPeakSheet> {
     });
   }
 
-  /// Official discard confirmation shown over dirty sheets.
+  /// Discard confirmation shown over dirty sheets.
   Future<bool> _confirmDiscard() async {
     if (!_dirty) return true;
     final discard = await showDialog<bool>(
@@ -1263,7 +1263,7 @@ class _OffPeakSheetState extends State<OffPeakSheet> {
               ),
               if (editing) ...[
                 const SizedBox(height: 6),
-                // 峰时警示 — official edit-mode notice.
+                // 峰时警示 — edit-mode notice.
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -1320,7 +1320,7 @@ String formatRemaining(BuildContext context, int ms) {
       : trP(context, 'op.remaining.hoursMin', ['$hours', '$minutes']);
 }
 
-/// 3.14 取号等待: official four tiers — {hours} 小时 {minutes} 分钟 /
+/// 3.14 取号等待: four tiers — {hours} 小时 {minutes} 分钟 /
 /// {hours} 小时 / {minutes} 分钟 / 不到 1 分钟.
 String formatTakeRemaining(BuildContext context, int ms) {
   if (ms < 60000) return tr(context, 'op.take.remaining.lessThanMinute');

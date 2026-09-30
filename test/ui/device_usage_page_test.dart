@@ -3,10 +3,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/connection_params.dart';
-import 'package:zlinker/ui/device_usage_page.dart';
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/protocol/connection_params.dart';
+import 'package:zgo/ui/device_usage_page.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 import '../helpers/fake_device_session.dart';
 
@@ -55,8 +55,7 @@ void main() {
     );
   }
 
-  /// Recorded `not_configured` response
-  /// (internal notes).
+  /// Recorded `not_configured` response (probe 2026-09-13).
   Map<String, dynamic> notConfiguredPayload() => {
         'generatedAt': 1789280250549,
         'authenticated': true,
@@ -284,7 +283,7 @@ void main() {
 
   testWidgets('the mirror fallback renders when no limit row ranks',
       (tester) async {
-    // Same mirror shape as the recorded fixture, but quota.limits carries
+    // Same shape as the recorded fixture, but quota.limits carries
     // no usable percentage → primaryLimit is null.
     final session = sessionWith(() async => {
           ...okPayload(),

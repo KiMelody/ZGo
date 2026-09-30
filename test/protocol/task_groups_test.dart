@@ -1,9 +1,9 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:zlinker/protocol/channel_client.dart';
-import 'package:zlinker/protocol/task_groups.dart';
-import 'package:zlinker/state/device_store.dart';
+import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/task_groups.dart';
+import 'package:zgo/state/device_store.dart';
 
 import '../helpers/fake_device_session.dart';
 

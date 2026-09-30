@@ -4,8 +4,8 @@ import 'dart:typed_data';
 import 'method_probe.dart';
 
 /// Typed results of the desktop fileService (`file` channel). Field names
-/// follow the bundle reverse-engineering in task 09-29-file-preview research
-/// §1.1; the live probe may still adjust the scope shape (args only — the
+/// follow the desktop's zod-verified shapes; the live probe may still
+/// adjust the scope shape (args only — the
 /// answer fields below are the desktop's own zod-verified shapes).
 class FileStat {
   final String? type;
@@ -27,7 +27,7 @@ class TextChunk {
   final String text;
 
   /// More pages available at the next offset. Null until the live probe
-  /// certifies the pagination field (spec §1.1 "hasMore semantics").
+  /// certifies the pagination field ("hasMore semantics").
   final bool? hasMore;
   const TextChunk({required this.text, this.hasMore});
 }
@@ -36,15 +36,13 @@ class TextChunk {
 /// preview assembly) — the desktop's fileService on the `file` channel
 /// (`Channels.file`, a fixed channel name outside the probing surface).
 ///
-/// Method names come from the online web bundle reverse-engineering (task
-/// 09-29-file-preview spec §1.1: `readMediaPreview` / `readTextFile` /
-/// `stat` with the desktop-side bundle offsets) and run through [MethodProbe]
+/// Method names (`readMediaPreview` / `readTextFile` / `stat`) come
+/// from the desktop bundle and run through [MethodProbe]
 /// like every other port — never hardcoded as a success assumption. Older
 /// naming variants trail the bundle-derived names so a divergent desktop
 /// build still works.
 ///
-/// Scope shape live-certified 2026-09-29 (desktop 3.14.3, probe evidence in
-/// task spec §1.2): args.workspacePath is IGNORED (identical answers with
+/// Scope shape live-certified 2026-09-29 (desktop 3.14.3): args.workspacePath is IGNORED (identical answers with
 /// and without it) and relative paths resolve against the desktop process
 /// CWD — so the wire payload is `{path}` only and callers must pass ABSOLUTE
 /// paths. The workspacePath parameter stays on the public API so re-adding
@@ -53,7 +51,7 @@ class TextChunk {
 /// Answer parsing is defensive: a missing/mistyped primary field throws a
 /// [StateError] naming the port and the answer shape — errors surface, they
 /// are never swallowed into empty results. Answer field names are the
-/// desktop's own (spec §1.2): stat `{type, size, mtimeMs}`,
+/// desktop's own: stat `{type, size, mtimeMs}`,
 /// readMediaPreview `{dataBase64, mediaType, totalBytes}`, readTextFile
 /// `{content, offset, bytesRead, totalBytes, truncated, isBinary}`.
 class FileServicePort {
@@ -64,7 +62,7 @@ class FileServicePort {
 
   late final MethodProbe _probe = MethodProbe(call);
 
-  // Candidate tables (spec §1.1, online bundle + desktop bundle; new→old).
+  // Candidate tables (new→old).
   static const _statCandidates = ['stat', 'getStat', 'fileStat'];
   static const _mediaCandidates = [
     'readMediaPreview',
@@ -73,12 +71,12 @@ class FileServicePort {
   ];
   static const _textCandidates = ['readTextFile', 'readText', 'readFileText'];
 
-  // Wire payload is `{path}` only — workspacePath certified ignored
-  // (spec §1.2); the parameter is kept for API stability only.
+  // Wire payload is `{path}` only — workspacePath certified ignored;
+  // the parameter is kept for API stability only.
   Map<String, dynamic> _scope(String workspacePath, String path) =>
       {'path': path};
 
-  /// File metadata (`{type, size}` — the official client reads `type` and
+  /// File metadata (`{type, size}` — `type` is read and
   /// falls back to readMediaPreview when `size` is not a number).
   Future<FileStat> stat(String workspacePath, String path) async {
     final res = await _probe.run(

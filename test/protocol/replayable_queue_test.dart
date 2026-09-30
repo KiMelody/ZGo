@@ -3,8 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/channel_client.dart';
-import 'package:zlinker/protocol/conversation.dart';
+import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/conversation.dart';
 
 /// Hand-written wire fake (spec §7: port tests record (method, args) and
 /// answer from a programmed table) — the queue's [ReplayableCommandQueue.call]
@@ -13,7 +13,7 @@ class _FakeWire {
   final calls = <(String, List<Object?>)>[];
 
   /// Programmed answers/throws, dequeued front-first (empty →
-  /// `{accepted: true}` — the verification answer shape minus the command
+  /// `{accepted: true}` — the verified answer shape minus the command
   /// echo). An Exception/Error entry is thrown.
   final List<Object?> results = [];
 
@@ -50,7 +50,7 @@ Future<void> _settle(ReplayableCommandQueue queue) async {
 }
 
 void main() {
-  test('enqueueTaskCommand wire matches the verification schema', () async {
+  test('enqueueTaskCommand wire matches the verified schema', () async {
     final wire = _FakeWire();
     final recovered = ValueNotifier<int>(0);
     final queue = _queue(
@@ -69,11 +69,11 @@ void main() {
     expect(payload['taskId'], 'sess-1');
     expect(payload['content'], '你好');
     expect(payload['clientId'], 'client-1');
-    expect(payload['clientLabel'], 'ZLinker');
+    expect(payload['clientLabel'], 'ZGo');
     expect(payload['workspacePath'], '/repo/app');
     expect(payload['workspaceIdentity'], 'wid');
     expect((payload['commandId'] as String).isNotEmpty, isTrue);
-    // Schema lock (verification: no clientMode — the mode rides snapshot
+    // Schema lock (verified: no clientMode — the mode rides snapshot
     // reads only), negative assertion per protocol spec §7.
     expect(payload.containsKey('clientMode'), isFalse);
     // Accepted → removed from the queue (owner-active enqueue delivers).

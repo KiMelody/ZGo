@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/channel_client.dart';
-import 'package:zlinker/protocol/connection_params.dart';
+import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/connection_params.dart';
 
 import 'helpers/fake_device_session.dart';
 

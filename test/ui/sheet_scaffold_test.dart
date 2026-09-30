@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
-import 'package:zlinker/ui/widgets/sheet_scaffold.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
+import 'package:zgo/ui/widgets/sheet_scaffold.dart';
 
 /// Landscape sheet surface (logical 844×390, DPR 1.0).
 void useLandscape(WidgetTester tester) {

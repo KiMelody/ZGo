@@ -1,1 +1,1 @@
-Mobile remote for ZCode: live tasks, automations, off-peak runs, notifications
+Remote for ZCode: live tasks, conversations, automations, off-peak, alerts

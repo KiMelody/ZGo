@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/ipc_codec.dart';
+import 'package:zgo/protocol/ipc_codec.dart';
 
 void main() {
   group('ValueReader truncation', () {

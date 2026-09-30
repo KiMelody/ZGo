@@ -1,5 +1,5 @@
-// Ported verbatim from the reference implementation; newer style lints
-// are suppressed so the file stays diffable against it.
+// Newer style lints are suppressed so this file keeps its transport
+// handling readable as a single, self-contained unit.
 // ignore_for_file: use_null_aware_elements, prefer_initializing_formals
 import 'dart:async';
 
@@ -45,7 +45,7 @@ class RemoteClient {
   }
 
   /// `app-error {requestId?, bridgeSessionId?, reason, error?}` — reason
-  /// enum mirrors the relay close codes plus the bootstrap-timeout /
+  /// enum collects the relay close codes plus the bootstrap-timeout /
   /// recovery-timeout / unsupported-action family. Fails the pending
   /// request (if the error answers one) and republishes on [appErrors].
   void _handleAppError(Map<String, dynamic> payload) {
@@ -74,7 +74,7 @@ class RemoteClient {
 
   /// Relay reconnects happen silently (heartbeat timeout, network switch,
   /// laptop sleep). After re-pairing, every active bridge must be
-  /// recovered — mirrors the web client's connection recovery.
+  /// recovered — the connection-recovery path.
   void _onRelayState() {
     final state = relay.state;
     if (state == RelayState.reconnecting || state == RelayState.error) {
@@ -210,7 +210,7 @@ class RemoteClient {
       }
       return;
     }
-    // Mirrors the web client's `k()` helper: every pending matcher is
+    // Request matching: every pending matcher is
     // tested against every payload; responses are NOT guaranteed to echo
     // our requestId.
     final done = <String>[];
@@ -227,7 +227,7 @@ class RemoteClient {
     }
   }
 
-  /// Request/response over relay payloads (mirrors the `k()` helper).
+  /// Request/response over relay payloads.
   Future<Map<String, dynamic>> request(
     Map<String, dynamic> payload,
     bool Function(Map<String, dynamic>) match, {
@@ -276,7 +276,7 @@ class RemoteClient {
 
   /// bridge-degraded (e.g. `rpc-transport-fault`): the desktop stopped the
   /// bridge transport. Mark it degraded and kick off the retrying recovery
-  /// loop (mirrors the web client's recovery path) so it never stays stuck.
+  /// loop (the connection-recovery path) so it never stays stuck.
   Future<void> _handleBridgeDegraded(Map<String, dynamic> payload) async {
     final bridgeSessionId = payload['bridgeSessionId'] as String?;
     final reason = payload['reason'] as String?;
@@ -419,7 +419,7 @@ class RemoteClient {
     _log('[bridge] reopened: $bridge');
   }
 
-  /// mobile-view-state-update (mirrors `N()` in the web client).
+  /// mobile-view-state-update.
   Future<void> sendMobileViewState({
     required String workspaceKey,
     String? taskId,
@@ -468,7 +468,7 @@ class RemoteClient {
 }
 
 /// A relay-level `app-error`: the desktop/relay refused a request with a
-/// well-known reason. Reasons mirror the close-code family (`relayCloseReason`)
+/// well-known reason. Reasons come from the close-code family (`relayCloseReason`)
 /// plus the timeout/unsupported family that never becomes a close.
 class RemoteAppError implements Exception {
   final String reason;

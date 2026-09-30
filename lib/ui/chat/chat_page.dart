@@ -50,7 +50,7 @@ class ChatPage extends StatefulWidget {
   /// Pre-fill the composer (e.g. a slash command picked on the list page).
   final String? initialComposerText;
 
-  /// Optional workspace chip shown next to the task title (official chat
+  /// Optional workspace chip shown next to the task title (chat
   /// second header row).
   final String? workspaceLabel;
 
@@ -482,7 +482,7 @@ class _ChatPageState extends State<ChatPage> {
   /// initial snapshot is positioned.
   double? _lastContentBottom;
 
-  /// Mirrors [ChatPage.initialPinned]; flips when the 更多 pin toggle runs.
+  /// Starts from [ChatPage.initialPinned]; flips when the 更多 pin toggle runs.
   bool _pinned = false;
 
   /// Plan-quota snapshot for the composer pill / warning banner. Fetched
@@ -546,7 +546,7 @@ class _ChatPageState extends State<ChatPage> {
     });
   }
 
-  /// Web @-mention parity: typing `@` at word start opens the mention
+  /// @-mention handling: typing `@` at word start opens the mention
   /// picker; the picked reference replaces the trigger and gets a trailing
   /// space. Debounced by the sheet-open flag.
   void _maybeOpenMentionPicker(String text) {
@@ -653,7 +653,7 @@ class _ChatPageState extends State<ChatPage> {
       // (RefreshIndicator's pattern) — the finger is up again, so deferred
       // anchor compensation may resume.
       if (n.dragDetails == null) _userDragActive = false;
-      // History prefetch (official web parity, main path — official
+      // History prefetch (main path: it
       // triggers at scrollTop <= max(64, 2×viewport) from the top).
       // Programmatic frames ([_positioning]) and the pull gesture don't
       // count: a jump's pixel sweep doesn't mean the user is reading near
@@ -787,7 +787,7 @@ class _ChatPageState extends State<ChatPage> {
       // rows + backgroundWorks).
       _feed.observe(handle.state);
       // The server snapshot is a tail window (can be as few as 3 rows).
-      // The official client shows the full history immediately, so
+      // The client shows the full history immediately, so
       // auto-load the missing older rows once on open.
       if (handle.state.canLoadOlder) {
         await _loadOlder();
@@ -946,7 +946,7 @@ class _ChatPageState extends State<ChatPage> {
     if ((text.isEmpty && _pendingFiles.isEmpty) || _sending) return;
     HapticFeedback.lightImpact();
 
-    // Slash commands (mirrors the web composer).
+    // Slash commands (as in the web composer).
     if (text == '/compact' || text.startsWith('/compact ')) {
       _inputController.clear();
       setState(() => _showSlash = false);
@@ -1004,7 +1004,7 @@ class _ChatPageState extends State<ChatPage> {
         // 1) create the session (can take a while when the runtime warms)
         setState(() => _progress = tr(context, 'chat.creating'));
         // Plain text first message is sent WITH createSession (firstInput,
-        // mirrors the official composer). This avoids a send-before-subscribe
+        // as the composer does). This avoids a send-before-subscribe
         // race where the first command can be dropped on a fresh session.
         final canUseFirstInput =
             text.isNotEmpty &&
@@ -1205,7 +1205,7 @@ class _ChatPageState extends State<ChatPage> {
           debugPrint('[anchor] drop page: state replaced (resubscribe)');
           return;
         }
-        // Web parity drops the window when its log epoch no longer matches
+        // The window is dropped when its log epoch no longer matches
         // the live subscription — but our desktop advances the epoch while
         // streaming (fresh snapshot every ~10s, 09-22 13:54 device log),
         // and the request/response race then silently killed EVERY fetched
@@ -1400,7 +1400,7 @@ class _ChatPageState extends State<ChatPage> {
     // exit of [_compensateAnchor] lifts it too.
     // Prepending shifts the content above the reading position; both
     // modes compensate by re-measuring the anchor group's real position
-    // next frame (official web does scrollTop += delta — this is the
+    // next frame (the web does scrollTop += delta — this is the
     // measured variant): reading keeps the anchor's distance from the
     // viewport top, stick re-lands on the true newest end. The state
     // listener's follow still owns APPENDS; the old stick branch called
@@ -2184,7 +2184,7 @@ class _ChatPageState extends State<ChatPage> {
     _toast(tr(context, 'chat.more.linkCopied'));
   }
 
-  /// The "更多" dropdown actions (official second header row).
+  /// The "更多" dropdown actions (second header row).
   void _onMoreMenu(String action) {
     final sessionId = _sessionId;
     switch (action) {
@@ -2237,7 +2237,7 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  /// Official delete confirmation (confirmDialog.taskDelete*): the session
+  /// Delete confirmation (confirmDialog.taskDelete*): the session
   /// is removed from the workspace and records cannot be recovered. Pops
   /// the chat page after success.
   Future<void> _deleteSession(String sessionId) async {
@@ -2274,7 +2274,7 @@ class _ChatPageState extends State<ChatPage> {
     if (mounted) Navigator.of(context).maybePop();
   }
 
-  /// Official web order: pin toggle / rename / archive / unread, then the
+  /// Menu order: pin toggle / rename / archive / unread, then the
   /// copy actions; client-only extras (link, compact, usage, plans) trail.
   List<PopupMenuEntry<String>> _moreMenuItems(BuildContext context) => [
     _menuItem(
@@ -2301,7 +2301,7 @@ class _ChatPageState extends State<ChatPage> {
   /// true content end, which sits this far above the viewport bottom.
   static const EdgeInsets _listPadding = EdgeInsets.fromLTRB(16, 8, 16, 8);
 
-  /// Official content column: messages cap at 848px, the composer at 864px,
+  /// Content column: messages cap at 848px, the composer at 864px,
   /// centered inside the pane. On narrow screens they simply fill.
   static const double _kMessageColumnWidth = 848;
   static const double _kComposerColumnWidth = 864;
@@ -2347,7 +2347,7 @@ class _ChatPageState extends State<ChatPage> {
           if (groups.isEmpty && !state.canLoadOlder) {
             // Empty conversation — or the shell-session start-failure card
             // (design 09-25 D1/D2). The gate reads the task displayStatus
-            // mirror, which refreshes on the gateway's notifier, not on
+            // view, which refreshes on the gateway's notifier, not on
             // [state] — hence the double-listen (Listenable.merge).
             return AnimatedBuilder(
               animation: Listenable.merge([state, widget.gateway]),
@@ -2453,13 +2453,13 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 
-  /// The zero-rows view: the plain empty hint, or — when the task mirror
+  /// The zero-rows view: the plain empty hint, or — when the task view
   /// says the session's turn died server-side (displayStatus "error";
   /// design 09-25 D1/D2) — a start-failed card in the established
   /// phase-pill error vocabulary instead of a misleading "empty" chat.
   /// Gate = error + zero rows + a real (non-draft) session; this branch
   /// only runs after `state.ready`, i.e. an established subscription. A
-  /// mirror miss (null) renders nothing — prefer no card over a wrong
+  /// view miss (null) renders nothing — prefer no card over a wrong
   /// card. A session that gains rows mid-error drops back to the normal
   /// list (the existing task-failure presentation's domain).
   Widget _emptyOrStartFailed(BuildContext context, ConversationState state) {
@@ -2586,7 +2586,7 @@ class _ChatPageState extends State<ChatPage> {
         bottom: false,
         child: Column(
           children: [
-            // Official second header row: task title + workspace chip + 更多.
+            // Second header row: task title + workspace chip + 更多.
             _contentCol(
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 4, 4),
@@ -2846,7 +2846,7 @@ class _ChatPageState extends State<ChatPage> {
                 onRemove: (i) => setState(() => _pendingFiles.removeAt(i)),
               ),
             // Locally-queued replayable messages (3.12.3): sits directly
-            // above the composer like the official pendingCommands cards.
+            // above the composer like the pendingCommands cards.
             // Null queue (pre-3.12.3 desktop / not connected) renders nothing.
             AnimatedBuilder(
               animation: widget.gateway,
@@ -2962,7 +2962,7 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   /// Centered HH:mm divider between two groups whose timestamps are more
-  /// than 10 minutes apart (official timeline separators). Rows without a
+  /// than 10 minutes apart (timeline separators). Rows without a
   /// recognizable timestamp field produce no divider.
   String? _timeDividerLabel(
     List<Map<String, dynamic>>? previous,
@@ -3205,8 +3205,8 @@ typedef AssistantPart = ({
 
 /// Provider business-error translation (web `zcode.error.providerBusiness.*`):
 /// model-request failures carry a numeric code (1005 免费额度, 1006 登录失效,
-/// 3002/429 限流, 3006 模型不在范围, 3007 验证码, 3008-3010 系统繁忙, 2007 上游
-/// 不可用). When the failure text mentions one, show the official line
+/// 3002/429 限流, 3006 模型不在范围, 3007 验证码, 3008-3010 系统繁忙, 2007 服务端
+/// 不可用). When the failure text mentions one, show the known line
 /// instead of the raw transport error.
 ///
 /// Takes a locale (not a BuildContext) so it stays a pure function; the
@@ -3241,7 +3241,7 @@ String? businessErrorCopy(String errorText, String locale) {
 /// output (PRD internal-task R3). Returns the mapped copy, or
 /// null for unknown shapes so callers keep the raw text (logged via
 /// debugPrint at each call site). Takes a locale (not a BuildContext) so
-/// it stays a pure function, mirroring [businessErrorCopy].
+/// it stays a pure function, like [businessErrorCopy].
 String? commandErrorCopy(String errorText, String locale) {
   final t = errorText.toLowerCase();
   if (t.contains('bad state:') || t.contains('not connected')) {
@@ -3395,7 +3395,7 @@ AssistantTurnParts assistantTurnParts(List<Map<String, dynamic>> rows) {
   return (parts: parts, header: header, streaming: sawStreaming);
 }
 
-/// Groups rows into turns (mirrors the web timeline): a user message starts
+/// Groups rows into turns (like the web timeline): a user message starts
 /// a new group; assistant text/reasoning/tool rows that follow belong to
 /// the same turn and render as ONE message instead of many bubbles.
 ///
@@ -3458,8 +3458,8 @@ class _TurnGroupWidget extends StatefulWidget {
 }
 
 /// One turn group: user bubble (if any) → turn header (已工作 N + pill,
-/// official renders it at the TOP of the turn) → ordered assistant parts →
-/// file-changes card (official always-visible rounded bar with 撤销).
+/// rendered at the TOP of the turn) → ordered assistant parts →
+/// file-changes card (always-visible rounded bar with 撤销).
 class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
   bool _showChanges = true;
 
@@ -3647,7 +3647,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
       }
     }
 
-    // Official file-changes card at the end of the turn.
+    // File-changes card at the end of the turn.
     final fileChanges = header?['fileChanges'];
     if (fileChanges is Map && _showChanges) {
       children.add(
@@ -4277,7 +4277,7 @@ class _AssistantBubble extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          ZLinkerMarkdown(
+          AppMarkdown(
             text,
             imageResolver: preview.resolveImage,
             onLinkTap: (href) => preview.openLink(context, href),
@@ -4422,7 +4422,7 @@ class _ReasoningTile extends StatelessWidget {
           children: [
             Padding(
               padding: ZTile.body,
-              child: ZLinkerMarkdown(text, bodyStyle: ZType.sub),
+              child: AppMarkdown(text, bodyStyle: ZType.sub),
             ),
           ],
         ),
@@ -4431,7 +4431,7 @@ class _ReasoningTile extends StatelessWidget {
   }
 }
 
-/// Official-style tool summary: icon + "已写入 file +N" / "终端 · cmd" /
+/// Tool summary: icon + "已写入 file +N" / "终端 · cmd" /
 /// "探索 · N 文件", expandable to input/output/diff. The diff body lives
 /// INSIDE the expansion (collapsed by default — long agent dumps must not
 /// flood the chat); the live progress row stays always visible.
@@ -4505,7 +4505,7 @@ class _ToolCallTileState extends State<_ToolCallTile> {
     final canOpen =
         widget.gateway != null && (childSessionId ?? '').isNotEmpty;
 
-    // Official tool row: bold-ish first line (已写入 <file> / 终端 · cmd /
+    // Tool row: bold-ish first line (已写入 <file> / 终端 · cmd /
     // 探索 · N 文件) with +/- counts right-aligned; second line = directory
     // path (write/edit) or the tool name. Previewable file names render as
     // a tappable span that dispatches into the preview surfaces (§4.4).
@@ -4532,7 +4532,7 @@ class _ToolCallTileState extends State<_ToolCallTile> {
             ),
           ),
         if (canOpen)
-          // Web chat.toolCall.agent.openInSidePane parity: on mobile the
+          // chat.toolCall.agent.openInSidePane: on mobile the
           // drill-in affordance opens the child-session detail page. A
           // dedicated hit area keeps the header tap expanding the tile.
           Padding(
@@ -4603,7 +4603,7 @@ class _ToolCallTileState extends State<_ToolCallTile> {
                 subtitle: subtitle,
                 children: [
                   // File edits show only the diff: the raw input/output JSON
-                  // of a write/edit call is noise the official web omits too.
+                  // of a write/edit call is noise the web omits too.
                   // Agent rows expand to the dispatched prompt (web
                   // chat.toolCall.agent.prompt) instead of the raw JSON.
                   if (agentPrompt != null)
@@ -4673,7 +4673,7 @@ class _ToolCallTileState extends State<_ToolCallTile> {
                           ),
                         ),
                       ),
-                  // Inline child transcript (web childToolCalls parity):
+                  // Inline child transcript (web childToolCalls):
                   // mounted only while expanded so the pooled child
                   // subscription follows the expansion.
                   if (_expanded &&
@@ -4746,7 +4746,7 @@ class _ToolCallTileState extends State<_ToolCallTile> {
 
   Widget _kv(BuildContext context, String label, String value,
       {String? openPath}) {
-    // Pretty-print JSON input when possible (official shows structured view)
+    // Pretty-print JSON input when possible (structured view)
     var display = value;
     try {
       final decoded = jsonDecode(value);
@@ -4907,7 +4907,7 @@ class _AgentChildTimelineState extends State<_AgentChildTimeline> {
                           ZType.caption.copyWith(color: ZInk.faint(context)),
                     ),
                     const SizedBox(height: 2),
-                    ZLinkerMarkdown(
+                    AppMarkdown(
                       output.length > 600
                           ? '${output.substring(0, 600)}…'
                           : output,
@@ -4962,7 +4962,7 @@ class _ProgressRow extends StatelessWidget {
 
 /// Turn footer: "已工作 N 分 N 秒" + chevron (expands file changes) and the
 /// phase pill on the right.
-/// Turn header at the TOP of a turn (official): 「已工作 N 分 N 秒」灰字 +
+/// Turn header at the TOP of a turn: 「已工作 N 分 N 秒」灰字 +
 /// chevron (toggles the file-changes card), status pill on the right.
 class _TurnHeader extends StatelessWidget {
   final Map<String, dynamic> row;
@@ -5483,7 +5483,7 @@ class _GoalBanner extends StatelessWidget {
 }
 
 /// Bridges the conversation snapshot's goal/subagent data to the
-/// web 目标面板 parity widget (hidden when no goal is set — the plain
+/// web 目标面板 widget (hidden when no goal is set — the plain
 /// _GoalBanner covers that case).
 class _GoalProcessPanel extends StatelessWidget {
   final ConversationState state;
@@ -6193,7 +6193,7 @@ class _QueueBar extends StatelessWidget {
     return Container(
       margin: const EdgeInsets.fromLTRB(14, 4, 14, 0),
       padding: const EdgeInsets.all(10),
-      // Official web: the queue is a neutral sub-surface inside the composer
+      // The queue is a neutral sub-surface inside the composer
       // area — no accent tint. ZInk.tile's contract names the queue directly.
       decoration: BoxDecoration(
         color: ZInk.tile(context),
@@ -6231,7 +6231,7 @@ class _QueueBar extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 6),
-          // Official web parity: each queued message is its own pill row with
+          // Each queued message is its own pill row with
           // a drag handle (⋮⋮) for reordering — no up/down arrows.
           ReorderableListView.builder(
             shrinkWrap: true,
@@ -6338,7 +6338,7 @@ class _QueueBar extends StatelessWidget {
     );
   }
 
-  /// Web drag-to-reorder parity: the same `reorderQueueItem
+  /// Drag-to-reorder: the same `reorderQueueItem
   /// {queueItemId, beforeQueueItemId|null}` command, driven by the
   /// drag handle on each queued row.
   /// [targetIndex] is the index the item should occupy after the move;
@@ -6563,7 +6563,7 @@ class _QueueAction extends StatelessWidget {
 
 /// Locally-queued replayable messages (3.12.3 `web-remote-replayable`):
 /// sendText failures at bridge level, waiting for recovery to be enqueued.
-/// Official pendingCommands card semantics — one pill row per message with
+/// pendingCommands card semantics — one pill row per message with
 /// the first content line, the current state and an undo action (local
 /// removal + idempotent `cancelTaskCommand`).
 class _ReplayableQueueBar extends StatelessWidget {
@@ -6829,7 +6829,7 @@ class _InteractionCardState extends State<_InteractionCard> {
     final options = payload['options'];
     final questions = payload['questions'];
     final freeText = payload['freeText'] == true;
-    // Official web parity: a questions form replaces the free-text row —
+    // A questions form replaces the free-text row —
     // each question carries its own custom-answer input, so a second input
     // would only blur which field answers what. The plain input stays for
     // freeText-only interactions (no questions): their only answering
@@ -7244,7 +7244,7 @@ class _HookReviewItem extends StatelessWidget {
 
 /// Renders a form-style `userInput` interaction (the `questions` payload):
 /// every question with its options. Selections stay local per question and
-/// only the explicit ↑ submit sends the full official-shape content
+/// only the explicit ↑ submit sends the full-shape content
 /// (`buildBotElicitationContent`: answers text keys + answer_N + accept).
 class _QuestionsView extends StatefulWidget {
   final List<Map> questions;
@@ -7363,7 +7363,7 @@ class _QuestionsViewState extends State<_QuestionsView> {
     return answer;
   }
 
-  /// Official `buildBotElicitationContent` shape: `answers` keyed by question
+  /// `buildBotElicitationContent` shape: `answers` keyed by question
   /// text with comma-joined option labels, `answer_N` carrying option values
   /// (scalar for single-select, list for multiSelect), `answer` only for the
   /// single-question form. Custom text joins verbatim (it is its own label).
@@ -7442,7 +7442,7 @@ class _QuestionsViewState extends State<_QuestionsView> {
                     ),
                   ),
                 // ↑ submit: the composer send key's squircle, bottom-right of
-                // the card mirroring the composer. Always tappable — nothing
+                // the card like the composer. Always tappable — nothing
                 // picked sends the explicit "no answer" content; busy is the
                 // one disabled/spinner state.
                 SizedBox(
@@ -7698,7 +7698,7 @@ class _ModelModeSheet extends StatelessWidget {
                 style: ZType.body.copyWith(color: ZInk.solid(context)),
               ),
               const SizedBox(height: 8),
-              // Official web menu groups models by provider (BigModel /
+              // The menu groups models by provider (BigModel /
               // tx / kimi_zz …): header whenever the provider changes.
               for (final (i, v) in modelChoices.indexed) ...[
                 if (i == 0 ||
@@ -8131,7 +8131,7 @@ class _UsageSheet extends StatelessWidget {
   }
 
   /// R1 — capacity head: label + used/max/pct on the right, gradient bar
-  /// below (official `bg-surface` track; orange above the >0.8 threshold).
+  /// below (`bg-surface` track; orange above the >0.8 threshold).
   Widget _contextSection(BuildContext context, ContextUsageView view) {
     final ratio = view.ratio ?? 0.0;
     return Column(
@@ -8237,12 +8237,12 @@ class _UsageSheet extends StatelessWidget {
 
   /// R4 — remaining quota: the 5-hour pill carries its window expiry clock
   /// inline (「重置」stays reserved for reset opportunities, 2026-09-16);
-  /// the reset-credit row is the ZLinker entry point. Rows (and the whole
+  /// the reset-credit row is the app's entry point. Rows (and the whole
   /// block) hide when their data is absent; nothing renders as a placeholder.
   Widget _remainingSection(BuildContext context) {
     final view = entitlement;
     final limit = view?.limitFor('TOKENS_LIMIT', unit: 3, number: 5);
-    // Official semantics: the panel shows what's LEFT of the window, not
+    // The panel shows what's LEFT of the window, not
     // what's used (bundle PF: clamp(100 - percentage)).
     final percent = view?.remainingPercent(limit);
     final windowClock = switch (limit?.nextResetTime) {
@@ -8255,7 +8255,7 @@ class _UsageSheet extends StatelessWidget {
       listenable: controller,
       builder: (context, _) {
         final pools = controller.pools;
-        // Projection: the pools the plan can actually reset (official
+        // Projection: the pools the plan can actually reset (the
         // composition shared with the usage page). A pool the plan has no
         // window for (a V1 plan's weekly coupon) is never credited nor
         // offered by the dialog.
@@ -8378,7 +8378,7 @@ class _UsageSheet extends StatelessWidget {
     );
   }
 
-  /// R5 — three equal-width limit columns, all in official remaining
+  /// R5 — three equal-width limit columns, all in remaining
   /// semantics (bundle `PF`: `clamp(100 - percentage)`). 工具调用 is the
   /// monthly built-in tool quota (entitlementMonthlyMcpUsage), ZCode MCP
   /// the server-side aggregate (entitlementServerMcpUsage); a limit absent
@@ -8420,7 +8420,7 @@ class _UsageSheet extends StatelessWidget {
   }
 
   /// One limit column: title → remaining percentage → mini bar. The fill
-  /// color is a fixed per-column tone (the official chart scale), not a
+  /// color is a fixed per-column tone (the chart scale), not a
   /// usage threshold.
   Widget _limitColumn(
     BuildContext context,
@@ -8455,7 +8455,7 @@ class _UsageSheet extends StatelessWidget {
 }
 
 /// Reference-panel tone without a ZColors token: the gradient's deep stop
-/// (#4185D5 pixel spec ≈ the official color-mix step; same value in both
+/// (#4185D5 pixel spec ≈ the color-mix step; same value in both
 /// modes, design.md §3b). The old #353535 track moved into
 /// [ZInk.barTrackSoft].
 const _usageBlueDeep = Color(0xFF4185D5);
@@ -8521,7 +8521,7 @@ double _legendOpacity(int index) {
 }
 
 /// Tabular-figure value style of the panel (percentages and token counts
-/// line up column-wise, mirroring the reference's tabular-nums). [base] picks
+/// line up column-wise (tabular-nums). [base] picks
 /// the tier — the panel uses [ZType.body], [ZType.sub] and [ZType.bodyStrong].
 TextStyle _usageNumber(BuildContext context, TextStyle base) {
   return base.copyWith(
@@ -8530,7 +8530,7 @@ TextStyle _usageNumber(BuildContext context, TextStyle base) {
   );
 }
 
-/// Official `kZe` mapping: breakdown source → i18n key. Unknown sources
+/// Mapping: breakdown source → i18n key. Unknown sources
 /// render their raw id.
 String _breakdownLabelKey(String source) => switch (source) {
   'messages' => 'chat.contextUsage.breakdown.messages',
@@ -8543,7 +8543,7 @@ String _breakdownLabelKey(String source) => switch (source) {
   _ => source,
 };
 
-/// Percent with at most one decimal (official maximumFractionDigits: 1).
+/// Percent with at most one decimal (maximumFractionDigits: 1).
 String _fmtPercent(double ratio) => _fmtPercentValue(ratio * 100);
 
 /// Same formatting for an already-percent value (entitlement percentages
@@ -8563,7 +8563,7 @@ class _JsonSheet extends StatelessWidget {
     const encoder = JsonEncoder.withIndent('  ');
     return SafeArea(
       // Height cap so the sheet never grows past a readable strip even when
-      // opened scroll-controlled (mirrors _UsageSheet's 0.85 idiom, tighter).
+      // opened scroll-controlled (like _UsageSheet's 0.85 idiom, tighter).
       child: ConstrainedBox(
         constraints: BoxConstraints(
           maxHeight: MediaQuery.sizeOf(context).height * 0.7,
@@ -8694,7 +8694,7 @@ class _FileChangesSheet extends StatelessWidget {
                               BorderRadius.circular(ZRadius.field),
                           child: Padding(
                             // 13+13 padding + 18px line ≈ 44: zTouch floor
-                            // for sheet rows (mention_sheet ListTile parity).
+                            // for sheet rows (mention_sheet ListTile).
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 8, vertical: 13),
                             child: Row(
@@ -8934,12 +8934,12 @@ class _SkillsPickerSheet extends StatelessWidget {
   }
 }
 
-/// Official composer: rounded container with the text field on top and a
+/// Composer: rounded container with the text field on top and a
 /// control row underneath — left: add-context / mode chip; right: usage
 /// ring, model chip, thought chip, send/stop button.
 ///
 /// Stateful: listens to the text controller so the send button's
-/// empty-input disabled state (official web) updates on every keystroke
+/// empty-input disabled state updates on every keystroke
 /// without rebuilding the whole page.
 class _InputBar extends StatefulWidget {
   final TextEditingController controller;
@@ -9113,10 +9113,10 @@ class _InputBarState extends State<_InputBar> {
   @override
   Widget build(BuildContext context) {
     final running = state?.isRunning ?? false;
-    // Official web swaps the hint once messages are queued, so typing more
+    // The hint swaps once messages are queued, so typing more
     // keeps appending to the queue instead of looking like a fresh message.
     final queued = state?.queueItems.isNotEmpty ?? false;
-    // Official composer: icon-only buttons below sm (640), icon+label above.
+    // Composer: icon-only buttons below sm (640), icon+label above.
     final wide = MediaQuery.sizeOf(context).width >= 640;
     // Short viewport (landscape phones, folding half-open; portrait phones
     // are ~844 tall and never trigger): collapse the tool row into an
@@ -9208,8 +9208,8 @@ class _InputBarState extends State<_InputBar> {
                       onTap: () => _pickMode(context),
                       showLabel: wide,
                     ),
-                    // Subagent management entry (official composer count
-                    // button parity, subagents-only by design). Sits right of
+                    // Subagent management entry (composer count
+                    // button shape, subagents-only by design). Sits right of
                     // the mode chip; its appearance never shifts the other
                     // controls (Spacer keeps the right cluster in place).
                     if (state != null && feed != null && onSubagents != null)
@@ -9242,7 +9242,7 @@ class _InputBarState extends State<_InputBar> {
                       showLabel: wide,
                     ),
                   const SizedBox(width: 4),
-                  // Official web keeps the composer sendable while a turn
+                  // The composer stays sendable while a turn
                   // runs — follow-ups queue mid-turn — with stop appearing
                   // at the far right.
                   _SendButton(
@@ -9346,7 +9346,7 @@ class _ControlChip extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
 
-  /// Official mobile parity: below the sm breakpoint the composer controls
+  /// Mobile: below the sm breakpoint the composer controls
   /// are icon-only 28×28 buttons; labels appear on wider layouts.
   final bool showLabel;
 
@@ -9397,7 +9397,7 @@ class _ControlChip extends StatelessWidget {
   }
 }
 
-/// Composer entry pill for running subagents (official composer count
+/// Composer entry pill for running subagents (composer count
 /// button shape, subagents-only by design — bash tasks stay on the works
 /// bar). Shows the agent glyph + running count (tabular-nums) + a breathing
 /// dot on a faint brand wash, per the confirmed design mock
@@ -9549,7 +9549,7 @@ class _BreathingDotState extends State<_BreathingDot>
   }
 }
 
-/// Circular context-usage indicator (official 环形用量).
+/// Circular context-usage indicator (环形用量).
 class _UsageRing extends StatelessWidget {
   final double ratio;
   final VoidCallback onTap;
@@ -9639,7 +9639,7 @@ class _SendButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Official web: ~30px squircle (ZRadius.mini) with the arrow glyph.
+    // ~30px squircle (ZRadius.mini) with the arrow glyph.
     // The InkWell spans 48px so the touch target stays ≥48.
     return SizedBox(
       width: 48,

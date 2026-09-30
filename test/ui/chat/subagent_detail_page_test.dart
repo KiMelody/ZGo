@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/connection_params.dart';
-import 'package:zlinker/protocol/conversation.dart';
-import 'package:zlinker/state/device_session.dart';
-import 'package:zlinker/ui/chat/subagent_detail_page.dart';
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/protocol/connection_params.dart';
+import 'package:zgo/protocol/conversation.dart';
+import 'package:zgo/state/device_session.dart';
+import 'package:zgo/ui/chat/subagent_detail_page.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 import '../../helpers/fake_device_session.dart';
 

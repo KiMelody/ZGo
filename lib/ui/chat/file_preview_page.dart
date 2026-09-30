@@ -198,7 +198,7 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
 
   /// Production WebView: the document is fully inlined, so it loads from
   /// memory with file access off and no JS bridge — the same trust level
-  /// as the official desktop opening the file in a browser (design §4.2).
+  /// as the desktop opening the file in a browser (design §4.2).
   Widget _defaultWebView(BuildContext context, String html) {
     return InAppWebView(
       initialData: InAppWebViewInitialData(

@@ -5,10 +5,10 @@ import 'package:flutter/material.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/chat/image_viewer_page.dart';
-import 'package:zlinker/ui/chat/markdown_view.dart';
-import 'package:zlinker/ui/theme.dart';
-import 'package:zlinker/ui/ui_settings.dart';
+import 'package:zgo/ui/chat/image_viewer_page.dart';
+import 'package:zgo/ui/chat/markdown_view.dart';
+import 'package:zgo/ui/theme.dart';
+import 'package:zgo/ui/ui_settings.dart';
 
 /// 1x1 PNG — valid decode target for Image.memory in tests.
 final Uint8List kPng = base64Decode(
@@ -27,7 +27,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('renders paragraphs and inline code', (tester) async {
-    await tester.pumpWidget(wrap(const ZLinkerMarkdown(
+    await tester.pumpWidget(wrap(const AppMarkdown(
         'Hello **world**, see `doThing()` for details.')));
     expect(find.textContaining('Hello'), findsOneWidget);
     expect(find.textContaining('doThing()'), findsOneWidget);
@@ -35,7 +35,7 @@ void main() {
 
   testWidgets('fenced code block gets language header + copy button',
       (tester) async {
-    await tester.pumpWidget(wrap(const ZLinkerMarkdown(
+    await tester.pumpWidget(wrap(const AppMarkdown(
         '```dart\nvoid main() {}\n```')));
     await tester.pumpAndSettle();
     expect(find.text('dart'), findsOneWidget);
@@ -48,7 +48,7 @@ void main() {
 
   testWidgets('fenced code block is collapsed by default and toggles',
       (tester) async {
-    await tester.pumpWidget(wrap(const ZLinkerMarkdown(
+    await tester.pumpWidget(wrap(const AppMarkdown(
         '```dart\nvoid main() {}\nvoid x() {}\n```')));
     await tester.pumpAndSettle();
     // Collapsed: header shows language + line count, body is absent.
@@ -68,7 +68,7 @@ void main() {
   });
 
   testWidgets('unordered list renders', (tester) async {
-    await tester.pumpWidget(wrap(const ZLinkerMarkdown('- one\n- two')));
+    await tester.pumpWidget(wrap(const AppMarkdown('- one\n- two')));
     expect(find.text('one'), findsOneWidget);
     expect(find.text('two'), findsOneWidget);
   });
@@ -77,7 +77,7 @@ void main() {
     testWidgets('success renders the image; tap opens the fullscreen viewer',
         (tester) async {
       final paths = <String>[];
-      await tester.pumpWidget(wrap(ZLinkerMarkdown(
+      await tester.pumpWidget(wrap(AppMarkdown(
         '![pic](C:/w/pic.png)',
         imageResolver: (path) async {
           paths.add(path);
@@ -99,7 +99,7 @@ void main() {
 
     testWidgets('resolver failure renders the placeholder row, not a collapse',
         (tester) async {
-      await tester.pumpWidget(wrap(ZLinkerMarkdown(
+      await tester.pumpWidget(wrap(AppMarkdown(
         '![pic](C:/w/gone.png)',
         imageResolver: (_) async => null,
       )));
@@ -111,7 +111,7 @@ void main() {
     testWidgets('svg goes straight to the placeholder without a fetch',
         (tester) async {
       var fetched = false;
-      await tester.pumpWidget(wrap(ZLinkerMarkdown(
+      await tester.pumpWidget(wrap(AppMarkdown(
         '![diagram](C:/w/d.svg)',
         imageResolver: (_) async {
           fetched = true;
@@ -126,7 +126,7 @@ void main() {
 
     testWidgets('no resolver keeps the legacy inert behavior', (tester) async {
       await tester.pumpWidget(
-          wrap(const ZLinkerMarkdown('![pic](C:/w/pic.png)')));
+          wrap(const AppMarkdown('![pic](C:/w/pic.png)')));
       await tester.pumpAndSettle();
       expect(find.byType(Image), findsNothing);
       expect(find.textContaining('图片加载失败'), findsNothing);
@@ -137,7 +137,7 @@ void main() {
     testWidgets('link taps hand the raw href to the callback',
         (tester) async {
       final hrefs = <String>[];
-      await tester.pumpWidget(wrap(ZLinkerMarkdown(
+      await tester.pumpWidget(wrap(AppMarkdown(
         // Each link its own paragraph — the finder then matches the block.
         '[the doc](C:/w/doc.html)\n\n[web](https://x.y/z)',
         onLinkTap: hrefs.add,
@@ -150,7 +150,7 @@ void main() {
 
     testWidgets('links stay inert without onLinkTap (legacy)', (tester) async {
       await tester
-          .pumpWidget(wrap(const ZLinkerMarkdown('[the doc](C:/w/doc.html)')));
+          .pumpWidget(wrap(const AppMarkdown('[the doc](C:/w/doc.html)')));
       await tester.tap(find.text('the doc'));
       await tester.pumpAndSettle();
       expect(find.byType(ImageViewerPage), findsNothing);

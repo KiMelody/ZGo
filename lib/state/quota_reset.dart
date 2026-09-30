@@ -150,27 +150,27 @@ QuotaResetPools parseQuotaResetPools(Map? raw, {DateTime? now}) {
 }
 
 /// Token-class limit types: a `TOKENS_LIMIT` query also matches
-/// `CREDIT_LIMIT` rows (official alias set `qYe` behind `YYe`/`MF`).
+/// `CREDIT_LIMIT` rows (the alias set behind `YYe`/`MF`).
 const _tokensLimitTypes = {'TOKENS_LIMIT', 'CREDIT_LIMIT'};
 
-/// Whether one reset pool may be offered, reimplemented from the official
+/// Whether one reset pool may be offered, derived from the
 /// bundle (`_I` aggregate + `hI` entry) over the entitlement snapshot's
 /// `quota['limits']`:
 ///
-/// 1. the plan exposes the pool's window row (official `MF`):
+/// 1. the plan exposes the pool's window row:
 ///    [quotaResetTypeFiveHour] → `TOKENS_LIMIT unit 3 number 5`,
 ///    [quotaResetTypeWeek] → `TOKENS_LIMIT unit 6` (no number constraint).
 ///    A V1 plan ships no weekly row, so its weekly coupon — which the
 ///    account may still hold — must not be offered.
-/// 2. [count] > 0: an unexpired opportunity exists (official
-///    `opportunityVisible`).
-/// 3. the window is not untouched (official `!FF(limit)`, where `FF` is
-///    `PF(limit) == 100` and `PF` is the remaining percent `clamp(100 -
-///    percentage)` — so `FF` means 0% used, i.e. nothing worth resetting
-///    yet). A missing / non-numeric / non-finite `percentage` is not full
-///    (official `PF` answers null → `FF` false) and never throws.
+/// 2. [count] > 0: an unexpired opportunity exists (the
+///    opportunity visibility flag).
+/// 3. the window is not untouched (remaining percent < 100 — i.e.
+///    some usage, so a reset is worth offering). A missing /
+///    non-numeric / non-finite `percentage` counts as not-full too,
+///    i.e. treated as resettable. The guard below never throws on
+///    malformed input.
 ///
-/// [processing] is the official optimistic exception (`hI` keeps the entry
+/// [processing] is the optimistic exception (the entry is kept
 /// alive while a use is in flight, or before its confirmation refresh):
 /// such a pool must not disappear mid-flight.
 bool poolVisible({
@@ -207,7 +207,7 @@ bool poolVisible({
 /// Session-wide reset-opportunity controller (usage page card + chat
 /// banner action). Same shape as EntitlementPoller: staleness-cached
 /// status fetch, force bypass, errors never cached and never thrown —
-/// plus the official optimistic-use flow (research 状态机): validate →
+/// plus the optimistic-use flow (research 状态机): validate →
 /// fresh idempotency key → optimistic processing → RPC → on success
 /// force-confirm the status and force-refresh the entitlement so the
 /// pill/banner flip immediately; on failure roll the flag back and
@@ -311,7 +311,7 @@ class QuotaResetController extends ChangeNotifier {
         pool.processing) {
       return false;
     }
-    // UUID v4 like the official client (`randomUUID` with a hand-rolled
+    // UUID v4 (`randomUUID` with a hand-rolled
     // v4 fallback in the bundle); the cloud `/use` endpoint returns
     // business code 3001 for other shapes even though the client-side
     // check is merely non-empty ≤64 (2026-09-20).

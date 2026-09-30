@@ -5,8 +5,8 @@ import 'package:flutter/material.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/ui/chat/image_viewer_page.dart';
-import 'package:zlinker/ui/theme.dart';
+import 'package:zgo/ui/chat/image_viewer_page.dart';
+import 'package:zgo/ui/theme.dart';
 
 /// 1x1 PNG (valid decode target for Image.memory in tests).
 final Uint8List kPng =

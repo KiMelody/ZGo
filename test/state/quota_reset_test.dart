@@ -3,15 +3,14 @@ import 'dart:async';
 import 'package:clock/clock.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/connection_params.dart';
-import 'package:zlinker/state/entitlement_poller.dart';
-import 'package:zlinker/state/quota_reset.dart';
+import 'package:zgo/protocol/connection_params.dart';
+import 'package:zgo/state/entitlement_poller.dart';
+import 'package:zgo/state/quota_reset.dart';
 
 import '../helpers/fake_device_session.dart';
 
-/// Fixtures use only the research whitelist structure
-/// (internal notes
-/// quota-reset-bundle-analysis.md): pool entries carry `expireAt`.
+/// Fixtures use only the research whitelist structure:
+/// pool entries carry `expireAt`.
 void main() {
   RemoteConnectionParams paramsOf() => RemoteConnectionParams.parse(
         'https://zcode.z.ai/remote/v4?sid=s&hash=h&t=123&mid=m&name=test',
@@ -171,7 +170,7 @@ void main() {
         ),
         isTrue,
       );
-      // A weekly row with an unrelated `number` still matches (official MF
+      // A weekly row with an unrelated `number` still matches (the match
       // constrains unit only).
       expect(
         poolVisible(
@@ -512,7 +511,7 @@ void main() {
     final body = useCall.$3.single as Map;
     expect(body['preferredProviderId'], 'prov-1');
     expect(body['resetType'], 'FIVE_HOUR');
-    // UUID v4 like the official client — the cloud rejects other shapes
+    // UUID v4 — the cloud rejects other shapes
     // (3001), and the client-side check is merely non-empty ≤64.
     expect(
       body['idempotencyKey'],

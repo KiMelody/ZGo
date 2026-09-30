@@ -11,7 +11,7 @@ import '../state/device_store.dart';
 /// Writes a compact JSON payload the App Widget provider reads, then
 /// requests a redraw. No-ops on iOS / desktop / when the plugin is absent.
 class HomeWidgetBridge {
-  static const androidName = 'ZLinkerWidgetProvider';
+  static const androidName = 'ZGoWidgetProvider';
   static const dataKey = 'devices_json';
 
   static Future<void> syncDevices(List<Device> devices) async {
@@ -51,7 +51,7 @@ class HomeWidgetBridge {
       return;
     }
     try {
-      await HomeWidget.setAppGroupId('group.org.songsong.zlinker')
+      await HomeWidget.setAppGroupId('group.org.kimelody.zgo')
           .timeout(const Duration(milliseconds: 500));
     } catch (_) {}
   }

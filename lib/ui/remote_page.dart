@@ -10,7 +10,7 @@ import 'theme.dart';
 import 'ui_settings.dart';
 
 /// DOM contract for the injected session deep-link, verified against the
-/// official ZCode web remote (2026-08). Keep in one place so a web client
+/// ZCode web remote (2026-08). Keep in one place so a web client
 /// update only touches these selectors:
 /// - task list item: `li[data-testid]` whose testid contains the session
 ///   id, or any `[data-task-item-key]` containing it;
@@ -82,7 +82,7 @@ String buildDeepLinkJs(String sessionId, String? title) {
 ''';
 }
 
-/// Full-screen web remote control page. The official ZCode web app owns the
+/// Full-screen web remote control page. The ZCode web app owns the
 /// entire conversation protocol; we only load the device URL — plus an
 /// injected deep-link that clicks through to [targetSessionId] once the
 /// page is interactive. keepAlive keeps the session warm so reopening the
@@ -173,7 +173,7 @@ class _RemotePageState extends State<RemotePage> {
       buildDeepLinkJs(widget.targetSessionId ?? '', widget.targetTitle);
 
   /// Ensures the device URL carries its `theme=` query when present so the
-  /// official web remote opens in the matching color scheme.
+  /// web remote opens in the matching color scheme.
   String get _launchUrl {
     final raw = widget.device.url;
     final theme = widget.device.params?.theme;

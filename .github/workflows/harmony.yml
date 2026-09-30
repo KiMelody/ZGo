@@ -142,7 +142,7 @@ jobs:
           # --project-name: the checkout dir is "ZGo" (uppercase),
           # which is not a valid Dart package name for the generated
           # ohos module.
-          flutter create --platforms ohos --project-name zlinker .
+          flutter create --platforms ohos --project-name zgo .
 
       - name: Pub get
         run: |
@@ -182,6 +182,6 @@ jobs:
       - name: Upload HAP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zlinker-harmonyos-arm64-hap
+          name: zgo-harmonyos-arm64-hap
           path: ${{ steps.hap.outputs.path }}
           if-no-files-found: error

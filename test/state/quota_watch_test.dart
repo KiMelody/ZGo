@@ -3,10 +3,10 @@ import 'dart:async';
 import 'package:clock/clock.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/state/device_session.dart';
-import 'package:zlinker/state/entitlement_poller.dart';
-import 'package:zlinker/state/quota_reset.dart';
-import 'package:zlinker/state/quota_watch.dart';
+import 'package:zgo/state/device_session.dart';
+import 'package:zgo/state/entitlement_poller.dart';
+import 'package:zgo/state/quota_reset.dart';
+import 'package:zgo/state/quota_watch.dart';
 
 /// Fixed "now" for every test ([quotaTest] runs each body inside the clock
 /// zone — spec §8: inject time via package:clock, never fake timers).

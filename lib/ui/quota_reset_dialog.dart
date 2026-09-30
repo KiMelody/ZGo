@@ -4,7 +4,7 @@ import '../state/quota_reset.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 
-/// Reset dialog aligned with the official flow (research 状态机): the pools
+/// Reset dialog (research 状态机): the pools
 /// the caller's `poolVisible` predicate approved over the entitlement limits
 /// as rows (name + available count + expiry countdown), cancel/reset
 /// actions, and processing/failed states rendered live from the controller's

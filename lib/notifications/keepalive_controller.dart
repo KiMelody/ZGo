@@ -8,11 +8,11 @@ import '../ui/ui_settings.dart';
 /// Dart side of the Android foreground service that keeps the relay
 /// connection (and therefore background task notifications) alive.
 ///
-/// Mirrors `KeepAliveService.kt` over the `zlinker/keepalive` channel. The
+/// Drives the native `KeepAliveService.kt` over the `zgo/keepalive` channel. The
 /// persistent notice's copy is localized here (`trLocale`, same pattern as
 /// `notify.channel.*`) because the native side has no translation table.
 class KeepAliveController {
-  static const _channel = MethodChannel('zlinker/keepalive');
+  static const _channel = MethodChannel('zgo/keepalive');
 
   /// Android only — iOS has no foreground-service equivalent and the
   /// ohos/test hosts have no channel.

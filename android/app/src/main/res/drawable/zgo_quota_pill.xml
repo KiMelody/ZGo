@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Pill border of the quota-watch notice's inline reset button
-     (accent variant; the warn state swaps in zlinker_quota_pill_warn). -->
+     (accent variant; the warn state swaps in zgo_quota_pill_warn). -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
     <stroke

@@ -1,7 +1,7 @@
 /// Parses a ZCode web-remote connection URL, e.g.
 /// https://zcode.z.ai/remote/v4?sid=...&hash=...&t=...&mid=...&name=...&app_version=...
 ///
-/// Mirrors `zC()` in the web client bundle. The URL also derives the relay
+/// Parses the connection URL. The URL also derives the relay
 /// websocket endpoint; if the URL shape changes, the raw URL is still stored
 /// verbatim by the device store and stays openable in the WebView.
 class RemoteConnectionParams {
@@ -53,7 +53,7 @@ class RemoteConnectionParams {
     );
   }
 
-  /// Relay websocket URL. Mirrors `Jc()` / `pen.connect()` in the web client:
+  /// Relay websocket URL:
   /// `ws(s)://<host>/ws` plus `?mid=` when present.
   Uri get relayWsUri {
     final scheme = uriSchemeIsSecure ? 'wss' : 'ws';

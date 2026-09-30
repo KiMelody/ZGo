@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 import 'ipc_codec.dart';
 
-/// Channel RPC client mirroring `Pne` (ChannelClient) in the web client.
+/// Channel RPC client over the relay channel.
 ///
 /// Request header array: [reqType, reqId, channelName, name] followed by the
 /// argument value (an args list for calls, free-form for event listens).
@@ -96,7 +96,7 @@ class ChannelClient {
   }
 
   /// Subscribe to a channel event. Returns a cancel function which sends
-  /// EventDispose. Mirrors `requestEvent` / `sendCancelOrDispose`.
+  /// EventDispose. Backs `requestEvent` / `sendCancelOrDispose`.
   void Function() addEventListener(
     String channel,
     String event,

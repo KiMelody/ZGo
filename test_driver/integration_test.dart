@@ -3,7 +3,7 @@
 // reportData['screenshots'] ({screenshotName, bytes}); this driver unpacks
 // them to PNGs (see docs/store/SCREENSHOTS.md).
 //
-//   ZLINKER_SHOT_DIR=docs/screenshots flutter drive \
+//   ZGO_SHOT_DIR=docs/screenshots flutter drive \
 //     --driver=test_driver/integration_test.dart \
 //     --target=integration_test/screenshots_test.dart -d <device> \
 //     --dart-define=SHOT_LOCALE=en-US
@@ -12,7 +12,7 @@ import 'dart:io';
 import 'package:integration_test/integration_test_driver.dart';
 
 Future<void> main() async {
-  final dir = Platform.environment['ZLINKER_SHOT_DIR'] ?? 'build/screenshots';
+  final dir = Platform.environment['ZGO_SHOT_DIR'] ?? 'build/screenshots';
   await Directory(dir).create(recursive: true);
   await integrationDriver(
     responseDataCallback: (data) async {

@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/conversation.dart';
-import 'package:zlinker/state/new_task_defaults.dart';
+import 'package:zgo/protocol/conversation.dart';
+import 'package:zgo/state/new_task_defaults.dart';
 
 void main() {
   // ConfigOption has no public constructor; everything goes through

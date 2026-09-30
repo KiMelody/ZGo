@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/conversation.dart';
-import 'package:zlinker/state/task_directory.dart';
+import 'package:zgo/protocol/conversation.dart';
+import 'package:zgo/state/task_directory.dart';
 
 /// TaskDirectory 的直穿测试：relay⊕live 合并规则、归档两态、置顶、计数、
 /// notificationRows 含归档的显式语义（Q3a 裁决）。
@@ -168,7 +168,7 @@ void main() {
 
   test('live rows attribute by the index subscription identity, not the '
       'relay pick key', () {
-    // 2026-09-23 mirror-row fix: the relay key can be a desktop mirror
+    // 2026-09-23 copy-row fix: the relay key can be a desktop
     // row (wrong group), while the live sessions-index is the product of
     // `listSessions(directory = workspace)` — membership in it is the
     // ground truth of the session's home. The live row therefore
@@ -264,10 +264,10 @@ void main() {
 
   test('duplicate relay rows (desktop mirror) pick the greatest updatedAt',
       () {
-    // 2026-09-23: the desktop registry mirrors every task into
+    // 2026-09-23: the desktop registry copies every task into
     // remote-enabled workspaces — two active rows per id, and their order
     // in the bootstrap frame varies between snapshots. The real row keeps
-    // receiving activity updates while the mirror freezes at registration,
+    // receiving activity updates while the copy freezes at registration,
     // so the newer row must win in either frame order.
     for (final rows in [
       [
@@ -308,7 +308,7 @@ void main() {
   });
 
   test('with duplicate relay rows, the live row still wins per task id', () {
-    // Live override precedence is unchanged by the mirror-row dedup: the
+    // Live override precedence is unchanged by the row dedup: the
     // live row refreshes the data and attributes by the index's own
     // subscription identity — listSessions membership beats the relay
     // pick key.
@@ -333,14 +333,14 @@ void main() {
 
   test('live membership beats a relay pick won by the mirror row', () {
     // 2026-09-23 emulator acceptance, direct regression: the session
-    // really lives in the real workspace, but its desktop mirror row
+    // really lives in the real workspace, but its desktop copy row
     // (stale foreign key) had the greater updatedAt and won the relay
-    // pick — the live row then inherited that mirror key and the session
+    // pick — the live row then inherited that copy key and the session
     // stayed in the wrong group, viewable there but unoperable. The live
     // index of the real workspace self-certifies the home: it must win.
     final dir = TaskDirectory(
       relayTasks: [
-        _relayTask('t1', 'stale_zlinker', updatedAt: 200),
+        _relayTask('t1', 'stale_zgo', updatedAt: 200),
         _relayTask('t1', 'real_ws', updatedAt: 100),
       ],
       sessions: _liveIndex([

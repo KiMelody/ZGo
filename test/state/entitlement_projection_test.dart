@@ -1,20 +1,19 @@
 import 'package:clock/clock.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zlinker/protocol/connection_params.dart';
-import 'package:zlinker/state/entitlement_poller.dart';
-import 'package:zlinker/state/quota_reset.dart';
+import 'package:zgo/protocol/connection_params.dart';
+import 'package:zgo/state/entitlement_poller.dart';
+import 'package:zgo/state/quota_reset.dart';
 
 import '../helpers/fake_device_session.dart';
 
-/// The official entitlement / reset semantics live in exactly one place —
+/// The entitlement / reset semantics live in exactly one place —
 /// the [EntitlementView] projection. These tests are the migrated rule
 /// assertions of the former per-surface widget tests (usage page reset
 /// card / summary line, chat usage sheet, reset dialog); the widget files
 /// keep one wiring smoke each.
 ///
-/// Fixtures use only the live-probed snapshot structure
-/// (internal notes).
+/// Fixtures use only the live-probed snapshot structure.
 void main() {
   EntitlementView view(Map<String, dynamic> data) =>
       EntitlementView(phase: EntitlementPhase.ok, data: data);

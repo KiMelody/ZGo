@@ -29,7 +29,7 @@ class RelayFailure {
   String toString() => message == null ? reason : '$reason: $message';
 }
 
-/// Close-code mapping, mirrors `VC()` / `BC` in the web client.
+/// Close-code mapping.
 String? relayCloseReason(int code) {
   switch (code) {
     case 4004:
