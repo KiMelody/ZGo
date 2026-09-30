@@ -53,7 +53,7 @@ final _sessions = _isEn
     ? [
         {
           'sessionId': 'sess_shot_1',
-          'title': 'ZLinker store copy & screenshots',
+          'title': 'ZGo store copy & screenshots',
           'phase': 'running',
           'lastAssistantPreview':
               'Screenshot tests passed — generating bilingual store assets…',
@@ -79,7 +79,7 @@ final _sessions = _isEn
     : [
         {
           'sessionId': 'sess_shot_1',
-          'title': 'ZLinker 商店页文案与截图',
+          'title': 'ZGo 商店页文案与截图',
           'phase': 'running',
           'lastAssistantPreview': '截图测试已通过，正在生成双语言商店素材…',
           'lastActivityAt': _now - 1000 * 62,
@@ -102,13 +102,13 @@ final _sessions = _isEn
       ];
 
 final _workspaces = [
-  {'workspacePath': '/Users/dev/ZLinker', 'workspaceIdentity': 'ZLinker'},
+  {'workspacePath': '/Users/dev/ZGo', 'workspaceIdentity': 'ZGo'},
 ];
 
 /// Second workspace + relay overview tasks (`Dg`): feed the merged task
 /// data source (non-active workspace rows, archive view, tags).
 final _workspacesRich = [
-  {'workspacePath': '/Users/dev/ZLinker', 'workspaceIdentity': 'ZLinker'},
+  {'workspacePath': '/Users/dev/ZGo', 'workspaceIdentity': 'ZGo'},
   {
     'workspacePath': '/Users/dev/api-server',
     'workspaceIdentity': 'api-server',
@@ -120,9 +120,9 @@ final _relayTasks = _isEn
     ? [
         {
           'taskId': 'sess_shot_1',
-          'title': 'ZLinker store copy & screenshots',
-          'workspacePath': '/Users/dev/ZLinker',
-          'workspaceIdentity': 'ZLinker',
+          'title': 'ZGo store copy & screenshots',
+          'workspacePath': '/Users/dev/ZGo',
+          'workspaceIdentity': 'ZGo',
           'displayStatus': 'running',
           'pinned': true,
           'updatedAt': _now - 1000 * 62,
@@ -130,32 +130,32 @@ final _relayTasks = _isEn
         {
           'taskId': 'sess_shot_2',
           'title': 'Deep dive: GitHub description generation',
-          'workspacePath': '/Users/dev/ZLinker',
-          'workspaceIdentity': 'ZLinker',
+          'workspacePath': '/Users/dev/ZGo',
+          'workspaceIdentity': 'ZGo',
           'displayStatus': 'completed',
           'updatedAt': _now - 1000 * 60 * 41,
         },
         {
           'taskId': 'sess_shot_3',
           'title': 'Off-peak: daily build patrol report',
-          'workspacePath': '/Users/dev/ZLinker',
-          'workspaceIdentity': 'ZLinker',
+          'workspacePath': '/Users/dev/ZGo',
+          'workspaceIdentity': 'ZGo',
           'displayStatus': 'completed',
           'updatedAt': _now - 1000 * 60 * 60 * 5,
         },
         {
           'taskId': 'sess_await',
           'title': 'Deploy staging after review',
-          'workspacePath': '/Users/dev/ZLinker',
-          'workspaceIdentity': 'ZLinker',
+          'workspacePath': '/Users/dev/ZGo',
+          'workspaceIdentity': 'ZGo',
           'displayStatus': 'idle',
           'updatedAt': _now - 1000 * 60 * 12,
         },
         {
           'taskId': 'sess_unread',
           'title': 'Refactor the notifier registry',
-          'workspacePath': '/Users/dev/ZLinker',
-          'workspaceIdentity': 'ZLinker',
+          'workspacePath': '/Users/dev/ZGo',
+          'workspaceIdentity': 'ZGo',
           'displayStatus': 'completed',
           'unreadAt': _now - 1000 * 60 * 30,
           'updatedAt': _now - 1000 * 60 * 30,
@@ -180,8 +180,8 @@ final _relayTasks = _isEn
         {
           'taskId': 'relay_task_3',
           'title': 'Audit CI cache keys',
-          'workspacePath': '/Users/dev/ZLinker',
-          'workspaceIdentity': 'ZLinker',
+          'workspacePath': '/Users/dev/ZGo',
+          'workspaceIdentity': 'ZGo',
           'displayStatus': 'error',
           'archived': true,
           'updatedAt': _now - 1000 * 60 * 60 * 40,
@@ -190,9 +190,9 @@ final _relayTasks = _isEn
     : [
         {
           'taskId': 'sess_shot_1',
-          'title': 'ZLinker 商店页文案与截图',
-          'workspacePath': '/Users/dev/ZLinker',
-          'workspaceIdentity': 'ZLinker',
+          'title': 'ZGo 商店页文案与截图',
+          'workspacePath': '/Users/dev/ZGo',
+          'workspaceIdentity': 'ZGo',
           'displayStatus': 'running',
           'pinned': true,
           'updatedAt': _now - 1000 * 62,
@@ -200,32 +200,32 @@ final _relayTasks = _isEn
         {
           'taskId': 'sess_shot_2',
           'title': '深度解析 GitHub 描述生成',
-          'workspacePath': '/Users/dev/ZLinker',
-          'workspaceIdentity': 'ZLinker',
+          'workspacePath': '/Users/dev/ZGo',
+          'workspaceIdentity': 'ZGo',
           'displayStatus': 'completed',
           'updatedAt': _now - 1000 * 60 * 41,
         },
         {
           'taskId': 'sess_shot_3',
           'title': '闲时任务：每日构建巡检报告',
-          'workspacePath': '/Users/dev/ZLinker',
-          'workspaceIdentity': 'ZLinker',
+          'workspacePath': '/Users/dev/ZGo',
+          'workspaceIdentity': 'ZGo',
           'displayStatus': 'completed',
           'updatedAt': _now - 1000 * 60 * 60 * 5,
         },
         {
           'taskId': 'sess_await',
           'title': '评审后部署到预发环境',
-          'workspacePath': '/Users/dev/ZLinker',
-          'workspaceIdentity': 'ZLinker',
+          'workspacePath': '/Users/dev/ZGo',
+          'workspaceIdentity': 'ZGo',
           'displayStatus': 'idle',
           'updatedAt': _now - 1000 * 60 * 12,
         },
         {
           'taskId': 'sess_unread',
           'title': '重构通知器注册表',
-          'workspacePath': '/Users/dev/ZLinker',
-          'workspaceIdentity': 'ZLinker',
+          'workspacePath': '/Users/dev/ZGo',
+          'workspaceIdentity': 'ZGo',
           'displayStatus': 'completed',
           'unreadAt': _now - 1000 * 60 * 30,
           'updatedAt': _now - 1000 * 60 * 30,
@@ -250,8 +250,8 @@ final _relayTasks = _isEn
         {
           'taskId': 'relay_task_3',
           'title': '审计 CI 缓存键',
-          'workspacePath': '/Users/dev/ZLinker',
-          'workspaceIdentity': 'ZLinker',
+          'workspacePath': '/Users/dev/ZGo',
+          'workspaceIdentity': 'ZGo',
           'displayStatus': 'error',
           'archived': true,
           'updatedAt': _now - 1000 * 60 * 60 * 40,
@@ -360,7 +360,7 @@ final _automations = _isEn
       ];
 
 final _chatTitle =
-    _isEn ? 'ZLinker store copy & screenshots' : 'ZLinker 商店页文案与截图';
+    _isEn ? 'ZGo store copy & screenshots' : 'ZGo 商店页文案与截图';
 
 final _chatRows = _isEn
     ? [
@@ -414,16 +414,42 @@ Widget _wrap(Widget child, ThemeController theme, UiSettings ui) =>
 
 final _phoneKey = GlobalKey();
 
+/// Phone-shaped capture frame: fixed 430×932 viewport with a matching
+/// MediaQuery so surface-width gates (e.g. the chat composer's wide ≥640dp)
+/// resolve as they would on a real phone — not against the host surface the
+/// test happens to run on (a wide tablet surface would flip chips into
+/// their labelled layout and overflow the 430dp frame).
+Widget _phoneFrame(Widget child) => MediaQuery(
+      data: const MediaQueryData(size: Size(430, 932)),
+      child: SizedBox(width: 430, height: 932, child: child),
+    );
+
 /// Rasterize the phone-shaped viewport ([_phoneKey]).
+///
+/// Mobile runs cannot write to the repo tree (sandboxed read-only cwd), so
+/// the PNG bytes ride back through reportData['screenshots'] and the host
+/// driver unpacks them (test_driver/integration_test.dart); desktop keeps
+/// writing files directly.
 Future<void> _capturePhone(WidgetTester tester, String name) async {
   final boundary =
       _phoneKey.currentContext!.findRenderObject()! as RenderRepaintBoundary;
-  final image = await boundary.toImage(pixelRatio: 2.0);
+  // 430dp * 3.0698 = 1320px wide, matching the iPhone-native store shots.
+  final image = await boundary.toImage(pixelRatio: 1320 / 430);
   final data = await image.toByteData(format: ui.ImageByteFormat.png);
-  final dir =
-      Directory(Platform.environment['ZLINKER_SHOT_DIR'] ?? 'docs/screenshots');
-  await dir.create(recursive: true);
-  await File('${dir.path}/$name.png').writeAsBytes(data!.buffer.asUint8List());
+  final bytes = data!.buffer.asUint8List();
+  if (Platform.isAndroid || Platform.isIOS) {
+    final report = IntegrationTestWidgetsFlutterBinding.instance.reportData ??=
+        <String, dynamic>{};
+    final shots = (report['screenshots'] as List<dynamic>? ?? <dynamic>[])
+        .toList();
+    shots.add({'screenshotName': name, 'bytes': bytes});
+    report['screenshots'] = shots;
+  } else {
+    final dir =
+        Directory(Platform.environment['ZLINKER_SHOT_DIR'] ?? 'docs/screenshots');
+    await dir.create(recursive: true);
+    await File('${dir.path}/$name.png').writeAsBytes(bytes);
+  }
   await tester.pump(const Duration(milliseconds: 100));
 }
 
@@ -557,16 +583,13 @@ void main() {
     // the official mobile layout (the Windows window itself is a wide
     // desktop surface), and modal sheets/dialogs/menus must render inside
     // the captured frame, so they resolve against the nested navigator.
-    const phoneBox = Size(400, 850);
     Future<void> pumpTasks() async {
       await tester.pumpWidget(_wrap(
         Center(
           child: RepaintBoundary(
             key: _phoneKey,
-            child: SizedBox(
-              width: phoneBox.width,
-              height: phoneBox.height,
-              child: Navigator(
+            child: _phoneFrame(
+Navigator(
                 onGenerateRoute: (_) => MaterialPageRoute<void>(
                   builder: (_) => TaskListPage(
                     store: store,
@@ -649,8 +672,10 @@ void main() {
 
     // Same open sheet: tap 删除 → official confirm dialog, then cancel and
     // dismiss (the scrim lives in the navigator overlay, one fresh pump set
-    // fully closes the stack before the archive capture).
-    await tester.tap(find.text(_isEn ? 'Delete' : '删除'));
+    // fully closes the stack before the archive capture). `.last`: the
+    // left-swipe tray exposes the same 删除 verb, the sheet's copy sits in
+    // the overlay at the end of the tree.
+    await tester.tap(find.text(_isEn ? 'Delete' : '删除').last);
     for (var i = 0; i < 6; i++) {
       await tester.pump(const Duration(milliseconds: 200));
     }
@@ -682,10 +707,8 @@ void main() {
       Center(
         child: RepaintBoundary(
           key: _phoneKey,
-          child: SizedBox(
-            width: 400,
-            height: 850,
-            child: Navigator(
+          child: _phoneFrame(
+              Navigator(
               key: UniqueKey(),
               onGenerateRoute: (_) => MaterialPageRoute<void>(
                 builder: (_) => ChatPage(
@@ -745,10 +768,8 @@ void main() {
       Center(
         child: RepaintBoundary(
           key: _phoneKey,
-          child: SizedBox(
-            width: 400,
-            height: 850,
-            child: Navigator(
+          child: _phoneFrame(
+              Navigator(
               key: UniqueKey(),
               onGenerateRoute: (_) => MaterialPageRoute<void>(
                 builder: (_) => ChatPage(
@@ -866,10 +887,8 @@ void main() {
       Center(
         child: RepaintBoundary(
           key: _phoneKey,
-          child: SizedBox(
-            width: 400,
-            height: 850,
-            child: Navigator(
+          child: _phoneFrame(
+              Navigator(
               key: UniqueKey(),
               onGenerateRoute: (_) => MaterialPageRoute<void>(
                 builder: (_) => DeviceUsagePage(session: sessionUsage),
@@ -912,10 +931,8 @@ void main() {
       Center(
         child: RepaintBoundary(
           key: _phoneKey,
-          child: SizedBox(
-            width: 400,
-            height: 850,
-            child: Navigator(
+          child: _phoneFrame(
+              Navigator(
               key: UniqueKey(),
               onGenerateRoute: (_) => MaterialPageRoute<void>(
                 builder: (_) => ModelProvidersPage(session: sessionProviders),
@@ -950,10 +967,8 @@ void main() {
       Center(
         child: RepaintBoundary(
           key: _phoneKey,
-          child: SizedBox(
-            width: 400,
-            height: 850,
-            child: Navigator(
+          child: _phoneFrame(
+              Navigator(
               key: UniqueKey(),
               onGenerateRoute: (_) => MaterialPageRoute<void>(
                 builder: (_) => DesktopSettingsPage(session: sessionDeskSet),
