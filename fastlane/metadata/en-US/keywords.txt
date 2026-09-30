@@ -1,0 +1,1 @@
+zcode,remote,agent,ai,coding,tasks,automation,terminal,dev

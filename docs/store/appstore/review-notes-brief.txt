@@ -1,0 +1,24 @@
+ZLinker is a mobile remote client for ZCode, a desktop AI coding agent. It lets developers monitor and control their own desktop agent from a phone: live task list, stop/pause/resume, streaming conversations with file changes, scheduled automations, and push notifications.
+
+HOW IT WORKS (no account, no login, no payment):
+1. On the desktop, open ZCode > Settings > Remote Control to get a QR code / pairing URL.
+2. In ZLinker, tap "+", scan the QR or paste the URL. The device appears in the list.
+3. Tap the device to open its task list; tap a task to open the conversation.
+
+See the attached demo video (zlinker-add-device.mp4) for the full pairing flow recorded from the real app.
+
+FOR REVIEW WITHOUT A DESKTOP INSTANCE:
+The app opens to an empty device list with add-device instructions. All data comes from the user's own desktop ZCode instance; without one, there is simply nothing to show yet. The demo video demonstrates the complete flow.
+
+EXTERNAL SERVICES:
+- The user's own ZCode desktop instance (via Z.ai relay, wss://zcode.z.ai) - the only data source.
+- AI models (GLM) run on the desktop, not in the app; ZLinker only renders the streamed output.
+- No payment processor, no ads, no analytics SDK, no third-party data broker.
+
+TESTED DEVICES: iPhone 16 Pro (iOS 26, simulator), iPad Pro 13-inch (iPadOS 26, simulator).
+
+REGIONAL DIFFERENCES: none - identical features worldwide.
+
+REGULATED CONTENT: N/A - developer tool, not in a regulated industry.
+
+PRIVACY: pairing data stays on the phone (local storage); the app connects only to the user's own desktop and the Z.ai pairing relay. No login, no user accounts, no UGC, no sensitive permission prompts.

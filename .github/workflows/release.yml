@@ -1,0 +1,175 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Restore release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEYSTORE_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > android/zlinker-release.jks
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=zlinker-release.jks\n' \
+            "$KEYSTORE_PASSWORD" "$KEY_PASSWORD" "$KEY_ALIAS" > android/key.properties
+
+      - name: Build APK (github channel)
+        run: flutter build apk --release --dart-define=APP_CHANNEL=github
+
+      - name: Build AAB (play channel)
+        run: flutter build appbundle --release --dart-define=APP_CHANNEL=play
+
+      - name: Upload to Google Play (internal track)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: org.songsong.zlinker
+          releaseFiles: build/app/outputs/bundle/release/app-release.aab
+          track: internal
+          status: completed
+
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aab
+          path: build/app/outputs/bundle/release/app-release.aab
+
+      - name: Rename artifact
+        run: |
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             zlinker-${{ github.ref_name }}.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: zlinker-${{ github.ref_name }}.apk
+
+  ios:
+    name: Build iOS (signed)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Restore App Store Connect API key
+        env:
+          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY_B64 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/private_keys" ./private_keys
+          echo "$APPLE_API_KEY_B64" | base64 -d > "$RUNNER_TEMP/AuthKey.p8"
+          cp "$RUNNER_TEMP/AuthKey.p8" "./private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8"
+
+      - name: Build iOS framework
+        run: flutter build ios --release --no-codesign --dart-define=APP_CHANNEL=appstore
+
+      - name: Archive (auto signing via ASC API key)
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner             -configuration Release -destination 'generic/platform=iOS'             -allowProvisioningUpdates             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8"             -authenticationKeyID "$APPLE_API_KEY_ID"             -authenticationKeyIssuerID "$APPLE_API_ISSUER_ID" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO archive -archivePath "$RUNNER_TEMP/Runner.xcarchive" | xcbeautify || true
+          test -d "$RUNNER_TEMP/Runner.xcarchive"
+
+      - name: Export IPA
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store</string>
+            <key>teamID</key><string>DSA846ZFPA</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>uploadSymbols</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive             -archivePath "$RUNNER_TEMP/Runner.xcarchive"             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"             -exportPath build/ipa             -allowProvisioningUpdates             -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8"             -authenticationKeyID "$APPLE_API_KEY_ID"             -authenticationKeyIssuerID "$APPLE_API_ISSUER_ID"
+          ls build/ipa
+
+      - name: Rename IPA artifact
+        run: mv build/ipa/*.ipa "zlinker-${{ github.ref_name }}.ipa"
+
+      - name: Upload to TestFlight
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          brew install fastlane
+          python3 - << 'PY'
+          import json, os
+          key = open(os.environ["RUNNER_TEMP"] + "/AuthKey.p8").read()
+          json.dump({
+              "key_id": os.environ["APPLE_API_KEY_ID"],
+              "issuer_id": os.environ["APPLE_API_ISSUER_ID"],
+              "key": key,
+              "in_house": False,
+          }, open("api-key.json", "w"))
+          PY
+          fastlane pilot upload --ipa "zlinker-${{ github.ref_name }}.ipa" --api_key_path api-key.json --skip_waiting_for_build_processing
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: zlinker-${{ github.ref_name }}.ipa
+
+  release:
+    name: Publish GitHub Release
+    needs: [android, ios]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+

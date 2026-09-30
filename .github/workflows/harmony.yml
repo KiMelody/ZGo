@@ -1,0 +1,187 @@
+# HarmonyOS NEXT build: produces a HAP package via the OpenHarmony SIG
+# Flutter fork (official Flutter has no ohos target).
+#
+# Requirements handled here:
+# - SIG Flutter SDK cloned from gitcode (branch tracks Flutter 3.22.x)
+# - DevEco Command Line Tools 5.0.5 (hvigor/ohpm/node) from the Huawei
+#   Cloud mirror — bundles the HarmonyOS NEXT SDK, no login needed
+# - JDK 17
+# - A local storage proxy (scripts/ohos_storage_proxy.py): the SIG OBS
+#   bucket lacks some upstream host artifacts (e.g. linux-x64/font-subset.zip);
+#   the proxy fronts the bucket and falls back to storage.flutter-io.cn.
+#   FLUTTER_STORAGE_BASE_URL points at the proxy for all flutter steps.
+#
+# The HAP is UNSIGNED unless OHOS signing secrets are configured — signing
+# material (p12/cer/p7b from AGC) can be added later as repo secrets.
+name: HarmonyOS HAP
+
+on:
+  workflow_dispatch:
+    inputs:
+      cmdline_tools_url:
+        description: 'URL of command-line-tools linux zip (override if the default mirror is stale)'
+        required: false
+        # Huawei Cloud mirror, no login required (verified 200 OK, ~3.0GB).
+        # Bundles the HarmonyOS NEXT SDK — no sdkmgr step needed.
+        default: 'https://repo.huaweicloud.com/harmonyos/ohpm/5.0.5/commandline-tools-linux-x64-5.0.5.310.zip'
+  push:
+    tags: ['v*']
+
+env:
+  # IMPORTANT: release tags point at engine hashes the SIG bucket NEVER
+  # published artifacts for; only the dev/master engine hash has a full
+  # artifact set. The README's "clone dev or master" guidance is load-bearing.
+  FLUTTER_OHOS_BRANCH: 'master'
+  FLUTTER_OHOS_REPO: 'https://gitcode.com/openharmony-sig/flutter_flutter.git'
+  FLUTTER_OHOS_REPO_MIRROR: 'https://gitee.com/openharmony-sig/flutter_flutter.git'
+  PUB_HOSTED_URL: https://pub.flutter-io.cn
+  FLUTTER_STORAGE_BASE_URL: http://127.0.0.1:8899
+
+jobs:
+  build-hap:
+    name: Build HAP (ohos-arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Start local storage proxy
+        # The SIG OBS bucket misses some upstream host artifacts
+        # (font-subset.zip 404s for every engine hash); front it with a
+        # fallback proxy so flutter's artifact bootstrap completes.
+        run: |
+          set -e
+          nohup python3 scripts/ohos_storage_proxy.py 8899 > /tmp/ohos-proxy.log 2>&1 &
+          for i in $(seq 1 15); do
+            sleep 1
+            if curl -fsS -o /dev/null \
+              "http://127.0.0.1:8899/flutter_infra_release/flutter/f6344b75dcf861d8bf1f1322780b8811f982e31a/linux-x64/font-subset.zip"; then
+              echo "proxy fallback OK (after ${i}s)"
+              exit 0
+            fi
+          done
+          echo "::error::proxy did not come up — startup log follows"
+          cat /tmp/ohos-proxy.log
+          exit 1
+
+      - name: Install HarmonyOS command line tools
+        working-directory: ${{ runner.temp }}
+        env:
+          CMDLINE_TOOLS_URL: ${{ github.event.inputs.cmdline_tools_url || 'https://repo.huaweicloud.com/harmonyos/ohpm/5.0.5/commandline-tools-linux-x64-5.0.5.310.zip' }}
+        run: |
+          set -e
+          curl -fL --retry 3 -o clt.zip "$CMDLINE_TOOLS_URL"
+          unzip -q clt.zip -d "$HOME"
+          # expected layout: $HOME/command-line-tools/{sdk,tools/ohpm,tools/hvigor,tools/node,...}
+          ls "$HOME/command-line-tools"
+
+      - name: Verify bundled SDK
+        run: |
+          set -e
+          export TOOL_HOME="$HOME/command-line-tools"
+          export DEVECO_SDK_HOME="$TOOL_HOME/sdk"
+          export JAVA_TOOL_OPTIONS="$JAVA_TOOL_OPTIONS -Duser.country=CN"
+          # 5.x bundles the HarmonyOS NEXT SDK — verify presence, only fall
+          # back to sdkmgr for older CLT layouts.
+          if [ -d "$TOOL_HOME/sdk" ] && ls "$TOOL_HOME/sdk" | grep -q .; then
+            echo "bundled SDK present:"
+            ls "$TOOL_HOME/sdk"
+          else
+            chmod +x "$TOOL_HOME/sdkmanager/bin/sdkmgr" 2>/dev/null || true
+            "$TOOL_HOME/sdkmanager/bin/sdkmgr" install --accept-license \
+              toolchains:9 "OpenHarmony/toolchains:9" \
+              || echo "::warning::sdkmgr install failed — build may fail"
+          fi
+
+      - name: Set up OpenHarmony Flutter SDK
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -e
+          git clone --depth 1 -b "$FLUTTER_OHOS_BRANCH" "$FLUTTER_OHOS_REPO" flutter-ohos \
+            || git clone --depth 1 -b "$FLUTTER_OHOS_BRANCH" "$FLUTTER_OHOS_REPO_MIRROR" flutter-ohos
+          export PATH="$PWD/flutter-ohos/bin:$PATH"
+          echo "$PWD/flutter-ohos/bin" >> "$GITHUB_PATH"
+          flutter --version
+
+      - name: Configure environment
+        run: |
+          set -e
+          export TOOL_HOME="$HOME/command-line-tools"
+          echo "TOOL_HOME=$TOOL_HOME" >> "$GITHUB_ENV"
+          echo "DEVECO_SDK_HOME=$TOOL_HOME/sdk" >> "$GITHUB_ENV"
+          for d in tools/ohpm/bin tools/hvigor/bin tools/node/bin; do
+            echo "$TOOL_HOME/$d" >> "$GITHUB_PATH"
+          done
+          # CLT layouts vary — locate hvigorw wherever it lives
+          HV=$(find "$TOOL_HOME" -name 'hvigorw' -o -name 'hvigorw.js' 2>/dev/null | head -1)
+          if [ -n "$HV" ]; then
+            HV_DIR=$(dirname "$HV")
+            case ":$PATH:" in
+              *":$HV_DIR:"*) ;;
+              *) echo "$HV_DIR" >> "$GITHUB_PATH"; export PATH="$HV_DIR:$PATH" ;;
+            esac
+            echo "hvigorw at $HV"
+          else
+            echo "::warning::hvigorw not found under $TOOL_HOME"
+            find "$TOOL_HOME" -maxdepth 3 -type d | head -20
+          fi
+          # hvigor pulls @ohos/* from the Huawei registry; pnpm and the rest
+          # come from npmjs — the Huawei registry is @ohos-only (pnpm 404s).
+          mkdir -p ~/.config 2>/dev/null || true
+          printf '@ohos:registry=https://repo.harmonyos.com/npm/\nregistry=https://registry.npmjs.org/\n' > ~/.npmrc
+
+      - name: Add ohos platform to the project
+        run: |
+          set -e
+          export PATH="$HOME/command-line-tools/tools/node/bin:$PATH"
+          # --project-name: the checkout dir is "ZLinker" (uppercase),
+          # which is not a valid Dart package name for the generated
+          # ohos module.
+          flutter create --platforms ohos --project-name zlinker .
+
+      - name: Pub get
+        run: |
+          set -e
+          # The committed lock pins newest packages (Dart >=3.12); the ohos
+          # fork ships Dart 3.4 — resolve fresh so pub picks compatible
+          # versions.
+          rm -f pubspec.lock
+          flutter pub get
+
+      - name: flutter doctor -v
+        run: flutter doctor -v || true
+
+      - name: Prime hvigor (visible errors, warms npm deps)
+        # First hvigorw run resolves @ohos/hvigor from the Huawei npm
+        # registry; flutter's wrapper swallows its output, so run it once
+        # here where failures are visible.
+        run: |
+          cd ohos
+          hvigorw --mode module -p product=default assembleHap --no-daemon \
+            2>&1 | tail -60 || true
+
+      - name: Build HAP (release)
+        run: |
+          set -e
+          flutter build hap --release \
+            --target-platform ohos-arm64 \
+            --dart-define=APP_CHANNEL=harmony
+
+      - name: Locate HAP
+        id: hap
+        run: |
+          f=$(find ohos -name "*.hap" | head -1)
+          echo "path=$f" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$f")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload HAP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zlinker-harmonyos-arm64-hap
+          path: ${{ steps.hap.outputs.path }}
+          if-no-files-found: error

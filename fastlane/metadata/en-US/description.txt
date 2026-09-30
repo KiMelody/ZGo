@@ -1,0 +1,21 @@
+ZLinker is a mobile remote for ZCode — your desktop coding agent, in your pocket.
+
+NATIVE TASK LIST
+Live tasks from all your devices: running state, latest reply preview, pinned groups. Stop, pause or resume from your phone; tap to jump straight into the conversation.
+
+SCHEDULED AUTOMATIONS
+Create, edit and toggle server-side automations from your phone: cron, fixed intervals, or one-shot delays.
+
+OFF-PEAK TASKS
+Submit work to run free when compute is idle, watch your queue position live, get notified when done. (Requires a Coding Plan subscription.)
+
+LOCAL NOTIFICATIONS
+Task finished, off-peak done, automation fired — push notifications straight to your phone, tapping one opens the conversation. The web remote can't do this.
+
+MULTI-DEVICE
+Add devices by scanning or pasting a QR link, rename, pin, export backups. Credentials never leave your phone.
+
+PRIVACY
+No data collected. No accounts, no relay servers of ours. Device links stay on your device.
+
+ZLinker is an independent community tool, not affiliated with Zhipu AI. Only connect devices you own.
