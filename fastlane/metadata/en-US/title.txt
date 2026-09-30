@@ -1,1 +1,1 @@
-ZLinker - Remote for ZCode
+ZGo - Remote for ZCode

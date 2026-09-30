@@ -169,7 +169,7 @@ class KeepAliveService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val PREFS = "zlinker_keepalive_service"
         private const val KEY_COPY = "zlinker_keepalive_copy"
-        private const val FALLBACK_COPY = "ZLinker"
+        private const val FALLBACK_COPY = "ZGo"
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_BODY = "body"
         private const val EXTRA_CHANNEL_NAME = "channelName"

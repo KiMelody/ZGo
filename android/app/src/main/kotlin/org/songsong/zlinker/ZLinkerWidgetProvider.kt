@@ -93,7 +93,7 @@ class ZLinkerWidgetProvider : AppWidgetProvider() {
 
             if (devices.length() == 0) {
                 views.setViewVisibility(R.id.device_1, View.VISIBLE)
-                views.setTextViewText(R.id.device_1_label, "Add a device in ZLinker")
+                views.setTextViewText(R.id.device_1_label, "Add a device in ZGo")
                 views.setOnClickPendingIntent(
                     R.id.device_1,
                     PendingIntent.getActivity(

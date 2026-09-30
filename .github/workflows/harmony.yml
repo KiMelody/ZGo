@@ -139,7 +139,7 @@ jobs:
         run: |
           set -e
           export PATH="$HOME/command-line-tools/tools/node/bin:$PATH"
-          # --project-name: the checkout dir is "ZLinker" (uppercase),
+          # --project-name: the checkout dir is "ZGo" (uppercase),
           # which is not a valid Dart package name for the generated
           # ohos module.
           flutter create --platforms ohos --project-name zlinker .

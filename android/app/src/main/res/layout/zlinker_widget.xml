@@ -11,7 +11,7 @@
         android:id="@+id/widget_title"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="ZLinker"
+        android:text="ZGo"
         android:textColor="#E5E5E5"
         android:textSize="14sp"
         android:textStyle="bold"

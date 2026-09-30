@@ -1,4 +1,4 @@
-ZLinker is a mobile remote for ZCode — your desktop coding agent, in your pocket.
+ZGo is a mobile remote for ZCode — your desktop coding agent, in your pocket.
 
 NATIVE TASK LIST
 Live tasks from all your devices: running state, latest reply preview, pinned groups. Stop, pause or resume from your phone; tap to jump straight into the conversation.
@@ -18,4 +18,4 @@ Add devices by scanning or pasting a QR link, rename, pin, export backups. Crede
 PRIVACY
 No data collected. No accounts, no relay servers of ours. Device links stay on your device.
 
-ZLinker is an independent community tool, not affiliated with Zhipu AI. Only connect devices you own.
+ZGo is an independent community tool, not affiliated with Zhipu AI. Only connect devices you own.

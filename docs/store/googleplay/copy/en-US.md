@@ -1,11 +1,11 @@
 # Google Play listing — English (en-US)
 
-> Product name on device: **ZLinker**. Application ID: `org.songsong.zlinker`.
+> Product name on device: **ZGo**. Application ID: `org.songsong.zlinker`.
 > Copy is written to Play Console field limits (character counts noted).
 
 ## App title (max 30)
 ```
-ZLinker — Remote for ZCode
+ZGo — Remote for ZCode
 ```
 <sub>25 characters</sub>
 
@@ -17,7 +17,7 @@ Remote for ZCode: live tasks, conversations, automations, off-peak, alerts
 
 ## Full description (max 4000)
 ```
-ZLinker is a mobile remote for ZCode — your desktop coding agent, in your pocket. It speaks the native protocol, so you get live status, a real task list and full streaming conversations without opening a browser.
+ZGo is a mobile remote for ZCode — your desktop coding agent, in your pocket. It speaks the native protocol, so you get live status, a real task list and full streaming conversations without opening a browser.
 
 NATIVE TASK LIST
 See tasks from every device in one place: running state, latest-reply preview and pinned groups. Stop, pause or resume from your phone, then tap a task to jump straight into the conversation.
@@ -43,7 +43,7 @@ If the protocol ever changes, any task still opens in the official web remote. T
 PRIVACY FIRST
 No data collected. No accounts, no relay servers of ours. Device links stay on your device.
 
-ZLinker is an independent, community-built tool and is not affiliated with, endorsed by, or connected to Zhipu AI. Only connect devices you own and use it in accordance with the ZCode terms of service.
+ZGo is an independent, community-built tool and is not affiliated with, endorsed by, or connected to Zhipu AI. Only connect devices you own and use it in accordance with the ZCode terms of service.
 ```
 
 ## Release notes (max 500)
@@ -60,6 +60,6 @@ ZLinker is an independent, community-built tool and is not affiliated with, endo
 - Category: Tools (alt: Productivity)
 - Tags: developer tools, remote control, productivity
 - Contact email: (add a support email in Play Console)
-- Website: `https://github.com/opensymph/ZLinker`
+- Website: `https://github.com/KiMelody/ZGo`
 - Privacy Policy: `https://privacy.songsong.org/en.html`
 - Content rating: Everyone

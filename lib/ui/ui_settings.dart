@@ -315,7 +315,7 @@ String _trimZero(double v) {
 }
 
 const _zh = {
-  'app.title': 'ZLinker',
+  'app.title': 'ZGo',
   'devices.empty.title': '还没有设备',
   'devices.empty.body': '在桌面 ZCode 中打开「远程控制」，\n扫码或粘贴链接即可添加设备',
   'devices.add': '添加设备',
@@ -789,13 +789,13 @@ const _zh = {
   'settings.data': '数据',
   'settings.usageStats': '使用统计',
   'settings.usageStatsHint': '仅保存在本机',
-  'settings.about': '关于 ZLinker',
+  'settings.about': '关于 ZGo',
   'about.version': '版本',
   'about.github': 'GitHub 仓库',
   'about.licenses': '开源许可',
   'about.privacy': '隐私政策',
   'about.tos': '服务条款',
-  'about.disclaimer': 'ZLinker 是非官方的社区客户端，与 Zhipu AI 及 ZCode 无关联。',
+  'about.disclaimer': 'ZGo 是非官方的社区客户端，与 Zhipu AI 及 ZCode 无关联。',
   'usage.title': '使用统计',
   'usage.summary.devices': '设备数',
   'usage.summary.opens': '累计打开',
@@ -1161,12 +1161,12 @@ const _zh = {
   // trLocale and handed to the native side, which caches the last copy so a
   // STICKY restart can rebuild the notice.
   'keepalive.channel.name': '后台连接',
-  'keepalive.notify.title': 'ZLinker 正在后台保持连接',
+  'keepalive.notify.title': 'ZGo 正在后台保持连接',
   'keepalive.notify.body': '以便任务完成时实时通知你',
   'settings.checkUpdate': '检查更新',
   'update.latest': '已是最新版本',
   'update.newVersion': '发现新版本 v\$0',
-  'update.availableBody': '有新的 ZLinker 版本可用。',
+  'update.availableBody': '有新的 ZGo 版本可用。',
   'update.download': '到浏览器下载',
   'update.later': '稍后',
   'update.failed': '检查更新失败: \$0',
@@ -1283,7 +1283,7 @@ const _zh = {
 };
 
 const _en = {
-  'app.title': 'ZLinker',
+  'app.title': 'ZGo',
   'devices.empty.title': 'No devices yet',
   'devices.empty.body':
       'Open "Remote Control" in ZCode desktop,\nthen scan or paste the link',
@@ -1798,14 +1798,14 @@ const _en = {
   'settings.data': 'Data',
   'settings.usageStats': 'Usage statistics',
   'settings.usageStatsHint': 'Stored on this device only',
-  'settings.about': 'About ZLinker',
+  'settings.about': 'About ZGo',
   'about.version': 'Version',
   'about.github': 'GitHub repository',
   'about.licenses': 'Open-source licenses',
   'about.privacy': 'Privacy policy',
   'about.tos': 'Terms of Service',
   'about.disclaimer':
-      'ZLinker is an unofficial community client, not affiliated with Zhipu AI or ZCode.',
+      'ZGo is an unofficial community client, not affiliated with Zhipu AI or ZCode.',
   'usage.title': 'Usage statistics',
   'usage.summary.devices': 'Devices',
   'usage.summary.opens': 'Total opens',
@@ -2193,12 +2193,12 @@ const _en = {
   'notify.channel.quota.desc': 'Coding plan quota monitoring and low-quota alerts',
   // Foreground-service notice (see the zh table note).
   'keepalive.channel.name': 'Background connection',
-  'keepalive.notify.title': 'ZLinker is keeping the connection alive',
+  'keepalive.notify.title': 'ZGo is keeping the connection alive',
   'keepalive.notify.body': 'So task notifications reach you in real time',
   'settings.checkUpdate': 'Check for updates',
   'update.latest': 'Up to date',
   'update.newVersion': 'New version v\$0',
-  'update.availableBody': 'A new ZLinker version is available.',
+  'update.availableBody': 'A new ZGo version is available.',
   'update.download': 'Download in browser',
   'update.later': 'Later',
   'update.failed': 'Update check failed: \$0',
