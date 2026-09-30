@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:app_links/app_links.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:home_widget/home_widget.dart';
@@ -26,7 +27,26 @@ import 'widgets/home_widget_bridge.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  _registerBundledFontLicenses();
   runApp(const ZLinkerApp());
+}
+
+/// The bundled font subsets live under assets/fonts/ with no package root,
+/// so the build-time NOTICES collector never sees their licenses. Feed them
+/// into the licenses page by hand — addLicense is lazy, the asset loads only
+/// run when a licenses page is actually opened.
+void _registerBundledFontLicenses() {
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks(
+      ['Noto Sans SC'],
+      await rootBundle.loadString('assets/fonts/OFL-NotoSansSC.txt'),
+    );
+    yield LicenseEntryWithLineBreaks(
+      ['Material Symbols Rounded'],
+      await rootBundle
+          .loadString('assets/fonts/LICENSE-MaterialSymbolsRounded.txt'),
+    );
+  });
 }
 
 class ZLinkerApp extends StatefulWidget {
