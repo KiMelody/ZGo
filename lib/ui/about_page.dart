@@ -7,7 +7,7 @@ import 'ui_settings.dart';
 
 /// Links shown on the about page. Legal pages have zh / en variants picked
 /// by the in-app language.
-const _kGithubUrl = 'https://github.com/opensymph/ZLinker';
+const _kGithubUrl = 'https://github.com/KiMelody/ZGo';
 const _kPrivacyUrlZh = 'https://privacy.songsong.org/';
 const _kPrivacyUrlEn = 'https://privacy.songsong.org/en.html';
 const _kTosUrlZh = 'https://privacy.songsong.org/tos.html';
@@ -70,7 +70,7 @@ class _AboutPageState extends State<AboutPage> {
           const SizedBox(height: 12),
           Center(
             child: Text(
-              'ZLinker',
+              'ZGo',
               style: ZType.display.copyWith(color: ZInk.solid(context)),
             ),
           ),
@@ -108,7 +108,7 @@ class _AboutPageState extends State<AboutPage> {
             trailing: const Icon(Icons.chevron_right),
             onTap: () => showLicensePage(
               context: context,
-              applicationName: 'ZLinker',
+              applicationName: 'ZGo',
               applicationVersion:
                   _version.isEmpty ? null : '$_version+$_build',
             ),

@@ -62,7 +62,7 @@ object QuotaWatchNotifier {
         manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
-                "ZLinker",
+                "ZGo",
                 NotificationManager.IMPORTANCE_DEFAULT
             )
         )

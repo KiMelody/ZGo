@@ -39,7 +39,7 @@ void main() {
     )));
     await tester.pumpAndSettle();
 
-    expect(find.text('ZLinker'), findsOneWidget);
+    expect(find.text('ZGo'), findsOneWidget);
     expect(find.text('还没有设备'), findsOneWidget);
     expect(find.text('添加设备'), findsOneWidget);
   });
@@ -81,6 +81,6 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(const ZLinkerApp());
     await tester.pumpAndSettle();
-    expect(find.text('ZLinker'), findsOneWidget);
+    expect(find.text('ZGo'), findsOneWidget);
   });
 }

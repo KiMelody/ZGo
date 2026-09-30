@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate App Store / Google Play marketing assets for ZLinker.
+"""Generate App Store / Google Play marketing assets for ZGo.
 
 Outputs (under docs/store/):
   appstore/icon/app-icon-1024.png            1024x1024, no alpha
@@ -32,7 +32,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "docs", "store")
 SHOTS = os.path.join(ROOT, "docs", "screenshots")
 ICON_SRC = os.path.join(ROOT, "assets", "icon", "icon.png")
-APP = "ZLinker"
+APP = "ZGo"
 
 # Fonts: Linux CI uses Inter + WenQuanYi; Windows uses Segoe UI + Microsoft YaHei.
 if platform.system() == "Windows":
@@ -289,7 +289,7 @@ def browser_frame(shot, target_w):
 
 
 def wordmark(canvas, cx, y, scale=1.0):
-    """Icon + ZLinker + sky underline accent."""
+    """Icon + ZGo + sky underline accent."""
     isz = int(66 * scale)
     ic = load_icon(isz)
     fnt = font("bold", int(46 * scale))

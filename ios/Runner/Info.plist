@@ -7,13 +7,13 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>ZLinker</string>
+	<string>ZGo</string>
 	<key>NSCameraUsageDescription</key>
-	<string>ZLinker 需要相机权限以扫码添加桌面设备 / ZLinker uses the camera to scan the remote-control QR code.</string>
+	<string>ZGo 需要相机权限以扫码添加桌面设备 / ZGo uses the camera to scan the remote-control QR code.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>ZLinker 需要相册权限以从二维码截图识别设备链接 / ZLinker uses the photo library to decode a QR screenshot.</string>
+	<string>ZGo 需要相册权限以从二维码截图识别设备链接 / ZGo uses the photo library to decode a QR screenshot.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>ZLinker 本身不使用定位。仅当内置网页页面请求位置信息时才会用到，用于响应该网页的定位请求 / ZLinker does not track your location. It is used only to answer location requests made by a web page opened inside the app.</string>
+	<string>ZGo 本身不使用定位。仅当内置网页页面请求位置信息时才会用到，用于响应该网页的定位请求 / ZGo does not track your location. It is used only to answer location requests made by a web page opened inside the app.</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

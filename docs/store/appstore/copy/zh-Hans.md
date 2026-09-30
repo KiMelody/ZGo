@@ -1,11 +1,11 @@
 # App Store 商店文案 — 简体中文(zh-Hans)
 
-> 产品名称:**ZLinker**。包名:`org.songsong.zlinker`。
+> 产品名称:**ZGo**。包名:`org.songsong.zlinker`。
 > 文案按 App Store Connect 字段上限撰写(已标注字数,中文按字符计)。
 
 ## 应用名称 App Name(最多 30)
 ```
-ZLinker 智能体远程控制
+ZGo 智能体远程控制
 ```
 <sub>13 字符</sub>
 
@@ -29,7 +29,7 @@ ZCode,远程控制,智能体,Agent,自动化,任务,闲时,Coding,AI,开发,终�
 
 ## 描述 Description(最多 4000)
 ```
-ZLinker 是 ZCode 的移动遥控器——把桌面上的编程智能体装进手机。它直接讲原生协议,因此无需打开网页,就能看到实时状态、真实任务列表和完整的流式对话。
+ZGo 是 ZCode 的移动遥控器——把桌面上的编程智能体装进手机。它直接讲原生协议,因此无需打开网页,就能看到实时状态、真实任务列表和完整的流式对话。
 
 【原生任务列表】
 所有设备的任务集中一处:运行状态、最新回复预览、置顶分组。随手停止 / 暂停 / 恢复,点开任务即达对话。
@@ -55,7 +55,7 @@ ZLinker 是 ZCode 的移动遥控器——把桌面上的编程智能体装进�
 【隐私优先】
 不收集任何数据。无账号、无我方中转服务器。设备链接只保存在你的手机上。
 
-ZLinker 为独立的社区工具,与 Zhipu AI 无任何关联或背书。请仅用于连接你自己拥有的设备,并遵守 ZCode 的服务条款。
+ZGo 为独立的社区工具,与 Zhipu AI 无任何关联或背书。请仅用于连接你自己拥有的设备,并遵守 ZCode 的服务条款。
 ```
 
 ## 更新说明 What's New(最多 4000)
@@ -68,8 +68,8 @@ ZLinker 为独立的社区工具,与 Zhipu AI 无任何关联或背书。请仅�
 ```
 
 ## 链接
-- 支持网址 Support URL:`https://github.com/opensymph/ZLinker`
-- 营销网址 Marketing URL:`https://github.com/opensymph/ZLinker`
+- 支持网址 Support URL:`https://github.com/KiMelody/ZGo`
+- 营销网址 Marketing URL:`https://github.com/KiMelody/ZGo`
 - 隐私政策 Privacy Policy:`https://privacy.songsong.org/zh.html`
 
 ## 分类与分级

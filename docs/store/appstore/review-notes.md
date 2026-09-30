@@ -1,4 +1,4 @@
-# App Review Notes — ZLinker 1.6.1 (10)
+# App Review Notes — ZGo 1.6.1 (10)
 
 ## 1. Screen recording
 
@@ -23,7 +23,7 @@ appear in the recordings.
 
 ## 3. App functions and target audience
 
-ZLinker is a mobile remote client for ZCode, a desktop AI coding agent. It
+ZGo is a mobile remote client for ZCode, a desktop AI coding agent. It
 speaks ZCode's native protocol and lets the developer monitor and control
 their desktop agent from a phone: live task list with running state and
 reply previews, stop/pause/resume, full streaming conversations with tool
@@ -42,7 +42,7 @@ desktop ZCode instance:
 
 1. On the desktop, open ZCode → Settings → Remote Control → enable. This
    shows a QR code and a pairing URL.
-2. In ZLinker, tap "+" on the device list, scan the QR code (or paste the
+2. In ZGo, tap "+" on the device list, scan the QR code (or paste the
    URL). The device appears in the list with a live connection dot.
 3. Tap the device to open its task list; tap a task to open the conversation.
 
@@ -57,7 +57,7 @@ shows the paired flow end-to-end.
 - **Z.ai relay** (`zcode.z.ai`) — the pairing QR codes route through this
   relay so phone and desktop can find each other across networks.
 - **AI models** (GLM series) — run on the desktop ZCode instance, not in the
-  app. ZLinker only renders the streamed output.
+  app. ZGo only renders the streamed output.
 
 No payment processor, analytics SDK, advertising SDK, or third-party data
 broker is integrated.
@@ -68,7 +68,7 @@ None. Feature set is identical in all regions.
 
 ## 7. Regulated industry / protected content
 
-Not applicable. ZLinker is a developer tool, does not operate in a regulated
+Not applicable. ZGo is a developer tool, does not operate in a regulated
 industry, and does not include protected third-party material.
 
 ---

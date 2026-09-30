@@ -330,7 +330,7 @@ class _ZLinkerAppState extends State<ZLinkerApp>
       builder: (context, _) {
         return MaterialApp(
           navigatorKey: _navigatorKey,
-          title: 'ZLinker',
+          title: 'ZGo',
           debugShowCheckedModeBanner: false,
           theme: buildLightTheme(),
           darkTheme: buildDarkTheme(),

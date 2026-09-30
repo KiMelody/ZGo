@@ -14,7 +14,7 @@
     <!-- Device URLs carry sid/hash credentials — keep them out of cloud
          backups. -->
     <application
-        android:label="ZLinker"
+        android:label="ZGo"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false">
@@ -50,7 +50,7 @@
         <receiver
             android:name=".ZLinkerWidgetProvider"
             android:exported="true"
-            android:label="ZLinker">
+            android:label="ZGo">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
             </intent-filter>

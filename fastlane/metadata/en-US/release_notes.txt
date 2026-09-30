@@ -1,4 +1,4 @@
-- Fresh ZLinker branding
+- Fresh ZGo branding
 - Scheduled automations & off-peak tasks
 - Local push notifications
 - Dual store release
