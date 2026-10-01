@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:clock/clock.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
@@ -321,6 +322,25 @@ typedef _HistoryAnchor = ({
   double measurePixels,
 });
 
+/// The most recent optimistic model/thought switch (design 10-01): kept so
+/// a bridge-lost switch can be auto-retried ONCE when the authoritative
+/// frame overrides it. A new switch replaces the stored one; [retried]
+/// guards against retry loops.
+class _LastSwitch {
+  _LastSwitch(this.sid, this.provider, this.model, this.thought, this.patch);
+
+  final String sid;
+  final String provider;
+  final String model;
+  final String thought;
+
+  /// Re-lands the optimistic patch (the sheet's captured closure — merges
+  /// onto whatever config is current at call time).
+  final void Function() patch;
+  final DateTime at = clock.now();
+  bool retried = false;
+}
+
 class _ChatPageState extends State<ChatPage> {
   ChatHandle? _handle;
   final _inputController = TextEditingController();
@@ -336,6 +356,11 @@ class _ChatPageState extends State<ChatPage> {
   String? _sessionId;
   String? _error;
   bool _sending = false;
+
+  /// The latest optimistic model/thought switch the config sheet issued
+  /// (design 10-01) — the raw material for the one-shot bridge-lost retry
+  /// in [_onConfigMaybeReverted]. Null until a sheet switch happens.
+  _LastSwitch? _lastSwitch;
 
   /// History paging decisions (entry gate, fetch, identity guard, DRAG HOLD
   /// parking, prepend commit, chain generation) — a pure Dart command class
@@ -907,11 +932,53 @@ class _ChatPageState extends State<ChatPage> {
   /// was lost in a bridge swing) — surface it instead of silently
   /// snapping the sheet back. The state flag is consume-on-read; the
   /// `state.updated` confirmation path never sets it.
+  ///
+  /// Design 10-01: before reverting honestly, a switch that is still fresh
+  /// (≤15s) and never retried is re-sent ONCE with the same parameters —
+  /// the desktop's enqueue path cannot replay model switches, so the app
+  /// bridges the crash window itself. A second override always falls back
+  /// to the revert notice; no loops.
   void _onConfigMaybeReverted() {
     final state = _handle?.state;
     if (state == null || !state.consumeConfigReverted()) return;
+    final last = _lastSwitch;
+    final retryable = last != null &&
+        !last.retried &&
+        clock.now().difference(last.at) <= _switchRetryWindow;
+    if (retryable) {
+      last.retried = true;
+      unawaited(_retryLastSwitch(last));
+      return;
+    }
     if (!mounted) return;
     _toast(tr(context, 'chat.sheet.switchReverted'));
+  }
+
+  /// How long after a switch its bridge-lost re-send is still worth trying.
+  static const Duration _switchRetryWindow = Duration(seconds: 15);
+
+  /// Re-issues the lost switch (same parameters — the command is a setting,
+  /// idempotent) and re-lands the optimistic patch; any failure or a later
+  /// override lands on the honest revert notice (see above).
+  Future<void> _retryLastSwitch(_LastSwitch last) async {
+    debugPrint('[chat] switch retry '
+        'model=${last.model} thought=${last.thought}');
+    try {
+      await widget.gateway.conversationCommands.switchModelConfig(
+        last.sid,
+        provider: last.provider,
+        model: last.model,
+        thought: last.thought,
+      );
+    } catch (e) {
+      debugPrint('[chat] switch retry failed: $e');
+      if (!mounted) return;
+      _toast(tr(context, 'chat.sheet.switchReverted'));
+      return;
+    }
+    last.patch();
+    if (!mounted) return;
+    _toast(tr(context, 'chat.sheet.switchRetrying'));
   }
 
   Future<void> _run(String errorPrefix, Future<dynamic> Function() run) async {
@@ -1879,6 +1946,7 @@ class _ChatPageState extends State<ChatPage> {
         onDraftChange: (key, value) {
           setState(() => _draftConfig[key] = value);
         },
+        onSwitchIssued: (record) => _lastSwitch = record,
       ),
     );
   }
@@ -7440,6 +7508,11 @@ class _ModelModeSheet extends StatelessWidget {
   final Map<String, String>? draftConfig;
   final void Function(String key, String value)? onDraftChange;
 
+  /// Design 10-01: every issued switchModelConfig is reported to the page
+  /// (which stores it as [_ChatPageState._lastSwitch]) so a bridge-lost
+  /// switch can be auto-retried once on revert detection.
+  final void Function(_LastSwitch record)? onSwitchIssued;
+
   const _ModelModeSheet({
     required this.gateway,
     required this.state,
@@ -7448,6 +7521,7 @@ class _ModelModeSheet extends StatelessWidget {
     required this.providerCatalog,
     this.draftConfig,
     this.onDraftChange,
+    this.onSwitchIssued,
   });
 
   bool get _isDraft => sessionId == null || sessionId!.isEmpty;
@@ -7602,6 +7676,9 @@ class _ModelModeSheet extends StatelessWidget {
                           'thought': thought,
                         },
                       });
+                      onSwitchIssued?.call(
+                        _LastSwitch(sid, provider, model, thought, patch),
+                      );
                       _apply(
                         context,
                         () => gateway.conversationCommands.switchModelConfig(
@@ -7659,6 +7736,9 @@ class _ModelModeSheet extends StatelessWidget {
                               'thought': v.value,
                             },
                           });
+                          onSwitchIssued?.call(
+                            _LastSwitch(sid, provider, model, v.value, patch),
+                          );
                           _apply(
                             context,
                             () => gateway.conversationCommands.switchModelConfig(
@@ -7689,15 +7769,29 @@ class _ModelModeSheet extends StatelessWidget {
                     ChoiceChip(
                       label: Text(level),
                       selected: state?.currentThought == level,
-                      onSelected: (_) => _apply(
-                        context,
-                        () => gateway.conversationCommands.switchModelConfig(
-                          sid,
-                          provider: '${config['provider'] ?? ''}',
-                          model: '${config['model'] ?? ''}',
-                          thought: level,
-                        ),
-                      ),
+                      onSelected: (_) {
+                        // The degraded path never patched optimistically, so
+                        // the record's re-land is a no-op — the retry only
+                        // re-sends the command (behavior frozen otherwise).
+                        onSwitchIssued?.call(
+                          _LastSwitch(
+                            sid,
+                            '${config['provider'] ?? ''}',
+                            '${config['model'] ?? ''}',
+                            level,
+                            () {},
+                          ),
+                        );
+                        _apply(
+                          context,
+                          () => gateway.conversationCommands.switchModelConfig(
+                            sid,
+                            provider: '${config['provider'] ?? ''}',
+                            model: '${config['model'] ?? ''}',
+                            thought: level,
+                          ),
+                        );
+                      },
                     ),
                 ],
               ),

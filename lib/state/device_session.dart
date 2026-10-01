@@ -1258,8 +1258,21 @@ class DeviceSession extends ChangeNotifier
   /// source-confirmed; probe kept as a safety net — see [TaskCommandsPort]).
   late final TaskCommandsPort taskCommands = TaskCommandsPort(
     (method, args) => callChannel('zcode-task', method, args),
-    scope: () => offPeakScope,
+    scope: _taskMutationScope,
   );
+
+  /// Mutation 作用域按目标任务的归属工作区组装（桌面 resolveTaskAddress
+  /// 按 taskId+workspacePath+workspaceIdentity 三元组寻址）；relay 概览
+  /// 全工作区覆盖，查不到（冷启动未拉到/会话库私有行）回退活动工作区。
+  Map<String, dynamic> _taskMutationScope(String taskId) {
+    final row = relayTasks.where((t) => t['taskId'] == taskId).firstOrNull;
+    if (row == null) return offPeakScope;
+    return {
+      'workspacePath': row['workspacePath'],
+      if (row['workspaceIdentity'] != null)
+        'workspaceIdentity': row['workspaceIdentity'],
+    };
+  }
 
   /// Workspace file reads on the `file` channel (the desktop's fileService —
   /// the markdown-image / HTML-preview data source). Late final like the

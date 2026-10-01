@@ -12,7 +12,7 @@ void main() {
         if (method == 'renameTask') return {'ok': true};
         throw ChannelRpcError('no such method: $method', null);
       },
-      scope: () => {'workspacePath': '/repo'},
+      scope: (_) => {'workspacePath': '/repo'},
     );
 
     final res = await port.rename('s1', '新标题');
@@ -58,7 +58,7 @@ void main() {
         calls.add((method, (args.single as Map).cast<String, Object?>()));
         return null;
       },
-      scope: () => {'workspacePath': '/repo'},
+      scope: (_) => {'workspacePath': '/repo'},
     );
 
     await port.setArchived('s1', true);
@@ -78,7 +78,7 @@ void main() {
         methods.add(method);
         return null;
       },
-      scope: () => {'workspacePath': '/repo'},
+      scope: (_) => {'workspacePath': '/repo'},
     );
     await port.delete('s1');
     await port.listArchived();
@@ -94,6 +94,47 @@ void main() {
       () => port.setArchived('s1', true),
       throwsA(isA<ChannelRpcError>()),
     );
+  });
+
+  test('per-taskId scope: each mutation carries its own task\'s workspace; '
+      'listArchived asks for the workspace-level (empty taskId) one', () async {
+    final scopeAskedWith = <String>[];
+    final calls = <(String, Map<String, Object?>)>[];
+    final port = TaskCommandsPort(
+      (method, args) async {
+        calls.add((method, (args.single as Map).cast<String, Object?>()));
+        return null;
+      },
+      scope: (taskId) {
+        scopeAskedWith.add(taskId);
+        // The owning-workspace lookup keyed by the target task; the desktop
+        // matches (taskId, workspacePath, workspaceIdentity) exactly once.
+        return {'workspacePath': taskId.isEmpty ? '/archived' : '/ws/$taskId'};
+      },
+    );
+
+    await port.rename('t1', 'x');
+    await port.setPinned('t2', true);
+    await port.setArchived('t3', true);
+    await port.setUnread('t4', true);
+    await port.delete('t5');
+    await port.listArchived();
+
+    expect(
+      calls.map((c) => c.$1).toList(),
+      ['renameTask', 'setTaskPinned', 'archiveTask', 'setTaskUnread',
+        'deleteTask', 'listArchivedTasks'],
+    );
+    // Every payload rides the scope of ITS task, not one fixed workspace.
+    expect(
+      [for (final (_, payload) in calls) payload['workspacePath']],
+      ['/ws/t1', '/ws/t2', '/ws/t3', '/ws/t4', '/ws/t5', '/archived'],
+    );
+    expect(
+      [for (final (_, payload) in calls) payload['taskId']],
+      ['t1', 't2', 't3', 't4', 't5', isNull],
+    );
+    expect(scopeAskedWith, ['t1', 't2', 't3', 't4', 't5', '']);
   });
 
   test('validation errors do not advance to the next candidate', () async {
