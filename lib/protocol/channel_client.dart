@@ -148,6 +148,16 @@ bool isChannelMissingError(Object error) =>
 bool isChannelLevelError(Object error) =>
     error is TimeoutException || isChannelMissingError(error);
 
+/// The bridge-health gate expiring ([BridgeSession.waitHealthy] timing
+/// out): the link itself is degraded, so — unlike the per-channel counting
+/// of [isChannelLevelError] — its FIRST occurrence escalates into a rebuild
+/// (ADR-0009 bridge-level tier). Matches the deliberate, language-neutral
+/// diagnostic text waitHealthy throws; that text is the cross-layer
+/// contract this predicate rides.
+bool isBridgeGateTimeoutError(Object error) =>
+    error is TimeoutException &&
+    (error.message ?? '').startsWith('bridge recovery timed out');
+
 /// Well-known channel names (`Wb` enum in the web client).
 class Channels {
   static const file = 'file';

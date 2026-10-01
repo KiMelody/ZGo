@@ -50,9 +50,9 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
   /// after every desktop-side change — reload the list from it (≤2s after
   /// the desktop commits, per acceptance).
   void _listen() {
-    final bridge = widget.session.bridge;
-    if (bridge == null) return;
-    _cancelListener = bridge.channels.addEventListener(
+    // Managed listen: survives bridge rebuilds (re-attached by the
+    // session); idles silently while no bridge is open.
+    _cancelListener = widget.session.listenChannel(
       Channels.providerSettings,
       'onDidChange',
       (data) => _apply(ProviderSettingsView.parse(data)),
@@ -591,9 +591,9 @@ class _ProviderDetailPageState extends State<_ProviderDetailPage> {
   }
 
   void _listen() {
-    final bridge = widget.session.bridge;
-    if (bridge == null) return;
-    _cancelListener = bridge.channels.addEventListener(
+    // Managed listen: survives bridge rebuilds (re-attached by the
+    // session); idles silently while no bridge is open.
+    _cancelListener = widget.session.listenChannel(
       Channels.providerSettings,
       'onDidChange',
       (data) => _apply(ProviderSettingsView.parse(data)),

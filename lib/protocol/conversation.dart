@@ -41,6 +41,17 @@ class ConversationTransport {
   final bool workspaceHookReviewUi;
   final void Function(String line)? onLog;
 
+  /// Link-failure ledger hooks for the send paths ([sendCommand] /
+  /// [_replayableWireCall]), injected by the host so chat sends feed the
+  /// same failure ledger its callChannel path uses. Null = report nothing
+  /// (pre-ledger behavior). The transport only reports wire facts — a
+  /// success, or a TimeoutException / channel-missing rejection — the
+  /// failure-TIER classification (bridge gate expiry vs per-channel
+  /// failure) stays on the receiving side; this layer never imports the
+  /// ledger type.
+  final void Function(String channel, Object error)? onLinkLevelFailure;
+  final void Function(String channel)? onChannelSuccess;
+
   /// Subscribe-ack watchdog bound for the subscriptions this transport
   /// creates ([subscribe] / [subscribeSessionsIndex]): a subscribe call
   /// silent this long is abandoned and resubscribed. The desktop can park a
@@ -64,6 +75,8 @@ class ConversationTransport {
     this.workspaceHookReviewUi = false,
     this.subscribeAckTimeout = const Duration(seconds: 10),
     this.onLog,
+    this.onLinkLevelFailure,
+    this.onChannelSuccess,
   }) {
     // A reopened bridge has no handshake state — start over (the cache is
     // per service instance).
@@ -169,66 +182,82 @@ class ConversationTransport {
     Map<String, dynamic> payload, {
     Duration timeout = const Duration(seconds: 30),
   }) async {
-    await handshake();
-    // Gate on a healthy bridge: during a relay drop/recovery the old bridge
-    // is dead and requests would otherwise hang until timeout. Once the
-    // bridge recovers, the send goes through on the fresh transport.
-    await session.waitHealthy(timeout: const Duration(seconds: 45));
-    final sub = sessionId == null ? null : _subscriptions[sessionId];
-    final baseRevision = sessionId == null
-        ? null
-        : [
-            sub?.state.revision ?? 0,
-            _ackedRevisions[sessionId] ?? 0,
-          ].reduce((a, b) => a > b ? a : b);
-    final envelope = {
-      'commandId': generateUuid(),
-      'clientId': clientId,
-      'sessionId': sessionId,
-      if (_casCommands.contains(type)) 'baseRevision': baseRevision,
-      if (_rowTargetCommands.contains(type) && sub?.state.logEpoch != null)
-        'baseLogEpoch': sub!.state.logEpoch,
-      'type': type,
-      'payload': payload,
-      'issuedAt': DateTime.now().millisecondsSinceEpoch,
-    };
-    _log('[v4] command $type');
-    var res = await _sendCommandWithRetry(envelope, timeout);
-    // Runtime events (turn completion etc.) also bump the revision, so a
-    // CAS base can go stale even with ack tracking. The stale ack tells
-    // the server's current revision — retry once with it (stale-revision
-    // retry).
-    if (sessionId != null &&
-        res is Map &&
-        res['status'] == 'stale' &&
-        res['revisionAtDecision'] is num) {
-      final serverRevision = (res['revisionAtDecision'] as num).toInt();
-      _log('[v4] command $type stale, retry at rev $serverRevision');
-      if (serverRevision > (_ackedRevisions[sessionId] ?? 0)) {
-        _ackedRevisions[sessionId] = serverRevision;
-      }
-      final retryEnvelope = {
-        ...envelope,
+    // The ledger hooks bracket the whole path (handshake + health gate +
+    // wire call): a TimeoutException or channel-missing rejection anywhere
+    // on it is a link fact for the host's failure ledger (ADR-0009), while
+    // deterministic RPC errors are normal answers and report nothing.
+    try {
+      await handshake();
+      // Gate on a healthy bridge: during a relay drop/recovery the old bridge
+      // is dead and requests would otherwise hang until timeout. Once the
+      // bridge recovers, the send goes through on the fresh transport.
+      await session.waitHealthy(timeout: const Duration(seconds: 45));
+      final sub = sessionId == null ? null : _subscriptions[sessionId];
+      final baseRevision = sessionId == null
+          ? null
+          : [
+              sub?.state.revision ?? 0,
+              _ackedRevisions[sessionId] ?? 0,
+            ].reduce((a, b) => a > b ? a : b);
+      final envelope = {
         'commandId': generateUuid(),
-        'baseRevision': serverRevision,
+        'clientId': clientId,
+        'sessionId': sessionId,
+        if (_casCommands.contains(type)) 'baseRevision': baseRevision,
+        if (_rowTargetCommands.contains(type) && sub?.state.logEpoch != null)
+          'baseLogEpoch': sub!.state.logEpoch,
+        'type': type,
+        'payload': payload,
         'issuedAt': DateTime.now().millisecondsSinceEpoch,
       };
-      res = await _sendCommandWithRetry(retryEnvelope, timeout);
-    }
-    if (sessionId != null && res is Map && res['revisionAtDecision'] is num) {
-      final rev = (res['revisionAtDecision'] as num).toInt();
-      final status = res['status'];
-      // revisionAtDecision is the base at decision time; an accepted
-      // command bumps the revision by one, so the next CAS base is +1.
+      _log('[v4] command $type');
+      var res = await _sendCommandWithRetry(envelope, timeout);
+      // Runtime events (turn completion etc.) also bump the revision, so a
+      // CAS base can go stale even with ack tracking. The stale ack tells
+      // the server's current revision — retry once with it (stale-revision
+      // retry).
+      if (sessionId != null &&
+          res is Map &&
+          res['status'] == 'stale' &&
+          res['revisionAtDecision'] is num) {
+        final serverRevision = (res['revisionAtDecision'] as num).toInt();
+        _log('[v4] command $type stale, retry at rev $serverRevision');
+        if (serverRevision > (_ackedRevisions[sessionId] ?? 0)) {
+          _ackedRevisions[sessionId] = serverRevision;
+        }
+        final retryEnvelope = {
+          ...envelope,
+          'commandId': generateUuid(),
+          'baseRevision': serverRevision,
+          'issuedAt': DateTime.now().millisecondsSinceEpoch,
+        };
+        res = await _sendCommandWithRetry(retryEnvelope, timeout);
+      }
+      if (sessionId != null &&
+          res is Map &&
+          res['revisionAtDecision'] is num) {
+        final rev = (res['revisionAtDecision'] as num).toInt();
+        final status = res['status'];
+        // revisionAtDecision is the base at decision time; an accepted
+        // command bumps the revision by one, so the next CAS base is +1.
       final floor =
           (status == 'accepted' || status == 'noop' || status == 'duplicate')
           ? rev + 1
           : rev;
-      if (floor > (_ackedRevisions[sessionId] ?? 0)) {
-        _ackedRevisions[sessionId] = floor;
+        if (floor > (_ackedRevisions[sessionId] ?? 0)) {
+          _ackedRevisions[sessionId] = floor;
+        }
       }
+      // The wire answered the command — proof enough of a live channel for
+      // the ledger (a rejected ack is still a healthy link).
+      onChannelSuccess?.call(channel);
+      return res;
+    } catch (e) {
+      if (e is TimeoutException || isChannelMissingError(e)) {
+        onLinkLevelFailure?.call(channel, e);
+      }
+      rethrow;
     }
-    return res;
   }
 
   /// Session-creating commands (no sessionId of their own yet): the
@@ -869,14 +898,24 @@ class ConversationTransport {
   /// Wire binding for [replayableQueue]: the zcode-task channel, gated on
   /// the same handshake + bridge-health as [sendCommand] so a drain during
   /// a reconnect window waits for recovery instead of hanging on a dead
-  /// bridge.
+  /// bridge. Reports the same link facts to the host's ledger hooks as
+  /// [sendCommand] does for the zcode-agent channel.
   Future<dynamic> _replayableWireCall(
     String method,
     List<Object?> args,
   ) async {
-    await handshake();
-    await session.waitHealthy(timeout: const Duration(seconds: 45));
-    return _channels.call(Channels.zcodeTask, method, args);
+    try {
+      await handshake();
+      await session.waitHealthy(timeout: const Duration(seconds: 45));
+      final res = await _channels.call(Channels.zcodeTask, method, args);
+      onChannelSuccess?.call(Channels.zcodeTask);
+      return res;
+    } catch (e) {
+      if (e is TimeoutException || isChannelMissingError(e)) {
+        onLinkLevelFailure?.call(Channels.zcodeTask, e);
+      }
+      rethrow;
+    }
   }
 
   // ---------------------------------------- send + replayable queue (native)

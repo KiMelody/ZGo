@@ -584,6 +584,8 @@ class BridgeSession {
   ConversationTransport conversation(
     Map<String, dynamic> scope, {
     void Function(String line)? onLog,
+    void Function(String channel, Object error)? onLinkLevelFailure,
+    void Function(String channel)? onChannelSuccess,
   }) {
     final key = '${scope['workspaceIdentity'] ?? scope['workspacePath']}';
     return _conversations.putIfAbsent(
@@ -593,6 +595,8 @@ class BridgeSession {
         scope: scope,
         onLog: onLog,
         workspaceHookReviewUi: workspaceHookReviewUi,
+        onLinkLevelFailure: onLinkLevelFailure,
+        onChannelSuccess: onChannelSuccess,
       ),
     );
   }
