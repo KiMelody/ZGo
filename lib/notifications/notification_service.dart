@@ -4,7 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-import '../ui/ui_settings.dart';
+import '../i18n/lexicon.dart';
 
 /// Notification channels (each can be silenced separately, in-app and by
 /// the OS): 任务事件 / 闲时事件 / 自动化结果 / 额度监控.
