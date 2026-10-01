@@ -121,9 +121,9 @@ class _LegacyModelProvidersPageState extends State<_LegacyModelProvidersPage> {
   }
 
   void _listenRegistry() {
-    final bridge = widget.session.bridge;
-    if (bridge == null) return;
-    _cancelRegistryListener = bridge.channels.addEventListener(
+    // Managed listen: survives bridge rebuilds (re-attached by the
+    // session); idles silently while no bridge is open.
+    _cancelRegistryListener = widget.session.listenChannel(
       Channels.modelProvider,
       'onDidChangeProviderRegistry',
       (_) => _load(),

@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import '../protocol/automation.dart';
 import '../protocol/channel_client.dart'
-    show Channels, isChannelLevelError, isChannelMissingError;
+    show Channels, isBridgeGateTimeoutError, isChannelLevelError, isChannelMissingError;
 import '../protocol/connection_params.dart';
 import '../protocol/conversation.dart';
 import '../protocol/file_service.dart';
@@ -18,6 +18,7 @@ import '../protocol/task_commands.dart';
 import '../protocol/task_groups.dart';
 import 'device_store.dart';
 import 'entitlement_poller.dart';
+import 'link_supervisor.dart';
 import 'quota_reset.dart';
 import 'quota_watch.dart' show QuotaWatchSource;
 import 'task_directory.dart';
@@ -331,6 +332,11 @@ class DeviceSession extends ChangeNotifier
   ConversationTransport? _conversation;
   SessionsIndexSubscription? _sessionsSub;
   final Map<String, ConversationSubscription> _chatSubs = {};
+
+  /// Managed channel-event listeners registered via [listenChannel]: their
+  /// wire attaches die with every bridge and are re-hung from this registry
+  /// on the next bridge rebuild.
+  final List<_ManagedChannelListener> _channelListeners = [];
   StreamSubscription? _failureSub;
   StreamSubscription? _wsListSub;
   StreamSubscription? _appErrSub;
@@ -346,13 +352,19 @@ class DeviceSession extends ChangeNotifier
   int _listEscalations = 0;
 
   // --- Channel-level failure isolation (dead-channel defence) ---
-  /// Consecutive channel-level failures per channel name. A single dead
-  /// desktop channel (2026-09-13 model-provider/settings outage) must not
-  /// rebuild the whole link — only a streak of
-  /// [_channelFailEscalationThreshold] consecutive failures does; any
-  /// success on the channel clears its streak.
-  static const int _channelFailEscalationThreshold = 3;
-  final Map<String, int> _channelFailStreaks = {};
+  /// Failure-tier ledger (per-channel tri-strike) + escalation policy —
+  /// the tier semantics live on [LinkSupervisor]. Escalations (bridge-level
+  /// and tri-strike alike) land in [_forceRebuildAfterStall], which keeps
+  /// the authoritative debounce window shared with the list watchdog and
+  /// reloadTasks.
+  late final LinkSupervisor _linkSupervisor = LinkSupervisor(
+    onEscalate: _forceRebuildAfterStall,
+    now: clock.now,
+    escalationDebounce: timings.minRebuildInterval,
+    // `_log` prepends the device id; the `[session]` tag keeps the
+    // tri-strike line byte-identical to the pre-extraction output.
+    onLog: (line) => _log('[session] $line'),
+  );
 
   /// Wall clock of the last forced rebuild, for debouncing.
   DateTime _lastStallRebuildAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -692,6 +704,8 @@ class DeviceSession extends ChangeNotifier
       _chatSubs.clear();
       _bridge = bridge;
       _activeWorkspace = workspace;
+      // Fresh bridge = fresh channel client: re-hang the managed listeners.
+      _reattachChannelListeners();
       unawaited(oldSub?.dispose());
       for (final s in oldChats) {
         unawaited(s.dispose());
@@ -703,7 +717,14 @@ class DeviceSession extends ChangeNotifier
         if (workspace['workspaceIdentity'] != null)
           'workspaceIdentity': workspace['workspaceIdentity'],
       };
-      final conversation = bridge.conversation(scope, onLog: _log);
+      final conversation = bridge.conversation(
+        scope,
+        onLog: _log,
+        // Chat sends feed the same failure ledger callChannel uses
+        // (ADR-0009 covers every send path).
+        onLinkLevelFailure: _onTransportLinkLevelFailure,
+        onChannelSuccess: _onTransportChannelSuccess,
+      );
       _conversation = conversation;
       final sub = await conversation.subscribeSessionsIndex();
       if (_disposed || _bridge != bridge) {
@@ -953,14 +974,10 @@ class DeviceSession extends ChangeNotifier
   /// model-provider, automations, off-peak...). Throws when no bridge is
   /// open.
   ///
-  /// Failure tiers:
-  /// - Bridge-level (the [WorkspaceGate.waitHealthy] expiry): the link
-  ///   itself is degraded — one full suspend+connect rebuild immediately.
-  /// - Channel-level (the desktop's `Channel name … timed out` answer, or
-  ///   the RPC timing out): counted per channel; only
-  ///   [_channelFailEscalationThreshold] consecutive failures escalate to a
-  ///   rebuild, and any success on the channel clears its streak. A dead
-  ///   channel then degrades only the pages that use it, not the link.
+  /// Failure tiers: the bridge-level waitHealthy expiry escalates
+  /// immediately ([LinkSupervisor.noteGateTimeout]); channel-level failures
+  /// (the desktop's `Channel name … timed out` answer, or the RPC timing
+  /// out) feed the per-channel tri-strike ledger on [LinkSupervisor].
   Future<dynamic> callChannel(
     String channel,
     String method, [
@@ -971,7 +988,7 @@ class DeviceSession extends ChangeNotifier
     try {
       await gate.waitHealthy(timeout: timings.healthyWaitTimeout);
     } on TimeoutException {
-      _forceRebuildAfterStall(
+      _linkSupervisor.noteGateTimeout(
         'workspace bridge unhealthy > ${timings.healthyWaitTimeout.inSeconds}s',
       );
       rethrow;
@@ -980,36 +997,75 @@ class DeviceSession extends ChangeNotifier
       final result =
           await gate.call(channel, method, args).timeout(timings.rpcTimeout);
       // Any success proves the channel rides a live bridge again.
-      _channelFailStreaks.remove(channel);
+      _linkSupervisor.noteChannelSuccess(channel);
       return result;
     } on TimeoutException {
-      _noteChannelLevelFailure(channel, '$channel.$method timed out');
+      _linkSupervisor.noteChannelLevelFailure(
+          channel, '$channel.$method timed out');
       rethrow;
     } catch (e) {
       // Only the desktop's channel-missing shape is channel-level; other
       // RPC errors (method not found, bad args) are deterministic answers
       // and never imply a stalled link.
       if (isChannelMissingError(e)) {
-        _noteChannelLevelFailure(channel, 'channel $channel unavailable: $e');
+        _linkSupervisor.noteChannelLevelFailure(
+            channel, 'channel $channel unavailable: $e');
       }
       rethrow;
     }
   }
 
-  /// Counts one channel-level failure of [channel]. At the threshold the
-  /// streak escalates into the (debounced) link rebuild and resets, so a
-  /// permanently dead channel rebuilds at most once per debounce window
-  /// instead of on every call.
-  void _noteChannelLevelFailure(String channel, String reason) {
-    final streak = (_channelFailStreaks[channel] ?? 0) + 1;
-    if (streak < _channelFailEscalationThreshold) {
-      _channelFailStreaks[channel] = streak;
+  /// Transport-side report of the chat send paths
+  /// ([ConversationTransport.sendCommand] / its replayable wire call),
+  /// feeding the SAME ledger [callChannel] uses. Tier classification
+  /// mirrors callChannel by error shape: the bridge-health gate expiring
+  /// escalates immediately ([LinkSupervisor.noteGateTimeout]); RPC timeouts
+  /// and channel-missing answers count toward the per-channel tri-strike.
+  void _onTransportLinkLevelFailure(String channel, Object error) {
+    if (isBridgeGateTimeoutError(error)) {
+      _linkSupervisor.noteGateTimeout('conversation bridge gate expired: $error');
       return;
     }
-    _channelFailStreaks.remove(channel);
-    _log('[session] channel $channel failed $streak times in a row; '
-        'treating the link as stalled');
-    _forceRebuildAfterStall(reason);
+    _linkSupervisor.noteChannelLevelFailure(channel, '$error');
+  }
+
+  void _onTransportChannelSuccess(String channel) {
+    _linkSupervisor.noteChannelSuccess(channel);
+  }
+
+  /// Managed channel-event listen — the controlled alternative to reaching
+  /// for [bridge] directly: subscribes [handler] to [event] on the active
+  /// workspace bridge and re-attaches automatically after every bridge
+  /// rebuild (a raw `bridge.channels.addEventListener` attach dies with its
+  /// bridge and would strand the listener). With no bridge open the
+  /// registration idles until the next rebuild. Returns the cancel
+  /// function.
+  ///
+  /// Never throws: like the [ChatGateway] fallbacks, a listener is an
+  /// enhancement — attach and cancel failures stay silent and the page
+  /// keeps working off its initial load.
+  VoidCallback listenChannel(
+    String channel,
+    String event,
+    void Function(dynamic) handler,
+  ) {
+    final entry = _ManagedChannelListener(channel, event, handler);
+    _channelListeners.add(entry);
+    entry.attachTo(_bridge);
+    return () {
+      _channelListeners.remove(entry);
+      entry.detach();
+    };
+  }
+
+  /// Bridge (re)build hook: drops the stale wire attaches and re-hangs
+  /// every registration on the fresh bridge. Attach failures are silent —
+  /// a listener that cannot attach must not break the workspace open.
+  void _reattachChannelListeners() {
+    for (final entry in _channelListeners) {
+      entry.detach();
+      entry.attachTo(_bridge);
+    }
   }
 
   // --- model-provider capability gate (removed in desktop 3.12.3) ---
@@ -1655,7 +1711,7 @@ class DeviceSession extends ChangeNotifier
     _listWatchdog?.cancel();
     _listEscalations = 0;
     _softReloadFails = 0;
-    _channelFailStreaks.clear();
+    _linkSupervisor.reset();
     _connecting = false;
     _openingWorkspace = false;
     final client = _client;
@@ -1665,6 +1721,11 @@ class DeviceSession extends ChangeNotifier
     _client = null;
     _bridge = null;
     _conversation = null;
+    // Registrations survive the suspend (their owners are UI pages); only
+    // the wire attaches die with the bridge and re-attach on the next one.
+    for (final entry in _channelListeners) {
+      entry.detach();
+    }
     _sessionsSub = null;
     _chatSubs.clear();
     _activeWorkspace = null;
@@ -1840,5 +1901,40 @@ class DeviceSessionHub extends ChangeNotifier {
 
   void _onSessionChanged() {
     if (!_disposed) notifyListeners();
+  }
+}
+
+/// One [DeviceSession.listenChannel] registration: the handler plus its
+/// current wire attach. Attach and detach never throw — listeners decorate
+/// the session, so they must not break connects or suspends.
+class _ManagedChannelListener {
+  _ManagedChannelListener(this.channel, this.event, this.handler);
+
+  final String channel;
+  final String event;
+  final void Function(dynamic) handler;
+
+  /// Cancel function of the current wire attach (null while detached).
+  void Function()? _cancel;
+
+  /// Attaches to [bridge]'s channel client unless already attached.
+  void attachTo(BridgeSession? bridge) {
+    if (bridge == null || _cancel != null) return;
+    try {
+      _cancel = bridge.channels.addEventListener(channel, event, handler);
+    } catch (_) {
+      _cancel = null;
+    }
+  }
+
+  /// Drops the current wire attach (no-op while detached). The EventDispose
+  /// send can hit a bridge that just died — swallowed by design.
+  void detach() {
+    final cancel = _cancel;
+    _cancel = null;
+    if (cancel == null) return;
+    try {
+      cancel();
+    } catch (_) {}
   }
 }
