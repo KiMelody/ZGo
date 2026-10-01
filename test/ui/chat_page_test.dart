@@ -3623,6 +3623,126 @@ void main() {
 
     expect(find.text('模型/思考切换未生效，已恢复为桌面当前设置'), findsOneWidget);
   });
+
+  // ---------------- bridge-lost switch auto-retry (design 10-01) -----------
+
+  /// Desktop config the authoritative snapshots keep replaying (the switch
+  /// command died in the bridge swing, so the desktop never saw it).
+  Map<String, dynamic> desktopBaselineConfig() => {
+    'provider': 'builtin',
+    'model': 'builtin/glm-5.2',
+    'thought': 'enabled',
+  };
+
+  /// Pumps a chat page, walks the config sheet to switch GLM-5.2 → Air
+  /// (accepted → optimistic patch landed, sheet closed, no toast), and
+  /// hands back the gateway + transport for the revert choreography.
+  Future<(_SwitchGateway, _SwitchTransport)> pumpSheetSwitch(
+    WidgetTester tester,
+  ) async {
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('模型')); // placeholder chip
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('GLM-5.2 Air'));
+    await tester.pumpAndSettle();
+    expect(transport.switches, hasLength(1));
+    return (gateway, transport);
+  }
+
+  testWidgets('switch retry: an in-window authoritative override re-sends the '
+      'same switch once, shows the retrying toast, and a confirming frame '
+      'raises no revert notice', (tester) async {
+    final (gateway, transport) = await pumpSheetSwitch(tester);
+    final first = transport.switches.single;
+
+    // The resubscribe snapshot replays the desktop's old config → revert
+    // flag → the page auto-retries with the very same parameters.
+    gateway.snapshotExtra = {'config': desktopBaselineConfig()};
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
+    ]);
+    await tester.pump();
+    await tester.pump();
+
+    expect(transport.switches, hasLength(2));
+    expect(transport.switches.last, first);
+    expect(find.text('切换未生效，正在重试…'), findsOneWidget);
+    // The retry re-landed the optimistic patch: the chip reads the switched
+    // model again.
+    expect(find.text('glm-5.2-air'), findsOneWidget);
+
+    // A later authoritative frame CONFIRMING the switch is no override —
+    // no revert notice, no further sends.
+    gateway.snapshotExtra = {
+      'config': {
+        'provider': 'builtin',
+        'model': 'glm-5.2-air',
+        'thought': 'enabled',
+      },
+    };
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
+    ]);
+    await tester.pump();
+    expect(find.text('模型/思考切换未生效，已恢复为桌面当前设置'), findsNothing);
+    expect(transport.switches, hasLength(2));
+  });
+
+  testWidgets('switch retry: a second override falls back to the revert '
+      'notice — no retry loop', (tester) async {
+    final (gateway, transport) = await pumpSheetSwitch(tester);
+
+    gateway.snapshotExtra = {'config': desktopBaselineConfig()};
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
+    ]);
+    await tester.pump();
+    await tester.pump();
+    expect(transport.switches, hasLength(2)); // exactly the one auto-retry
+
+    // The retry died too: another old-config snapshot → honest revert
+    // notice (queued behind the retrying toast) and no third send.
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
+    ]);
+    // The notice SnackBar queues behind the still-showing retrying toast:
+    // first let that one finish entering (its 4s dismiss timer only starts
+    // at entrance-complete), then advance past its expiry so the queued
+    // notice takes the stage — pumpAndSettle alone never reaches the
+    // dismiss timer.
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(seconds: 5)); // retry toast expires
+    await tester.pumpAndSettle();
+    expect(find.text('模型/思考切换未生效，已恢复为桌面当前设置'), findsOneWidget);
+    expect(transport.switches, hasLength(2));
+  });
+
+  testWidgets('switch retry: an override past the 15s window reverts '
+      'directly with zero re-sends', (tester) async {
+    final (gateway, transport) = await pumpSheetSwitch(tester);
+
+    // Stale past the retry window (still inside the state's 60s optimism
+    // freshness, so the revert flag does fire): straight to the notice.
+    await tester.pump(const Duration(seconds: 16));
+    gateway.snapshotExtra = {'config': desktopBaselineConfig()};
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
+    ]);
+    await tester.pump();
+
+    expect(transport.switches, hasLength(1));
+    expect(find.text('切换未生效，正在重试…'), findsNothing);
+    expect(find.text('模型/思考切换未生效，已恢复为桌面当前设置'), findsOneWidget);
+  });
 }
 
 /// Unmounts the page, then unblocks a [_StalledGateway] subscribe: the

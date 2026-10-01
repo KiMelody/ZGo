@@ -358,6 +358,7 @@ const _zh = {
   'chat.sheet.rejected': '被拒绝: \$0',
   'chat.sheet.switchPending': '已提交，切换稍后生效',
   'chat.sheet.switchReverted': '模型/思考切换未生效，已恢复为桌面当前设置',
+  'chat.sheet.switchRetrying': '切换未生效，正在重试…',
   'chat.session.startFailedTitle': '会话未能启动',
   'chat.session.startFailedBody':
       '会话未能启动，请重试或检查模型/思考档配置。',
@@ -1359,6 +1360,8 @@ const _en = {
   'chat.sheet.switchPending': 'Submitted — the switch lands shortly',
   'chat.sheet.switchReverted':
       "The switch did not take effect; reverted to the desktop's current setting",
+  'chat.sheet.switchRetrying':
+      'The switch did not take effect; retrying…',
   'chat.session.startFailedTitle': 'Session failed to start',
   'chat.session.startFailedBody':
       'The session failed to start. '

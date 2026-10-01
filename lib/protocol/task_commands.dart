@@ -23,10 +23,16 @@ class TaskCommandsPort {
   final Future<dynamic> Function(String method, List<Object?> args) call;
 
   /// Workspace scope (workspacePath/identity) merged into every payload.
-  final Map<String, dynamic> Function() scopeOf;
+  /// Receives the target taskId: the desktop's `resolveTaskAddress` matches
+  /// the (taskId, workspacePath, workspaceIdentity) triple exactly once, so
+  /// mutations must carry the task's OWNING workspace scope. [listArchived]
+  /// is workspace-level and calls it with the empty taskId.
+  final Map<String, dynamic> Function(String taskId) scopeOf;
 
-  TaskCommandsPort(this.call, {Map<String, dynamic> Function()? scope})
-    : scopeOf = scope ?? (() => const {});
+  TaskCommandsPort(
+    this.call, {
+    Map<String, dynamic> Function(String taskId)? scope,
+  }) : scopeOf = scope ?? ((_) => const {});
 
   late final MethodProbe _probe = MethodProbe(call);
 
@@ -39,7 +45,7 @@ class TaskCommandsPort {
   static const _unreadMethods = ['setTaskUnread', 'markTaskUnread'];
 
   Map<String, dynamic> _payload(String taskId) => {
-    ...scopeOf(),
+    ...scopeOf(taskId),
     'taskId': taskId,
   };
 
@@ -85,5 +91,6 @@ class TaskCommandsPort {
       _run('delete', const ['deleteTask'], taskId, const {});
 
   /// Archived tasks of this workspace (the archive view's data source).
-  Future<dynamic> listArchived() => call('listArchivedTasks', [scopeOf()]);
+  /// Workspace-level scope — the empty taskId, not any single task's owner.
+  Future<dynamic> listArchived() => call('listArchivedTasks', [scopeOf('')]);
 }
