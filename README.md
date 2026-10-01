@@ -268,9 +268,11 @@ lib/
 │   ├── phase_snapshot_store.dart # phase baselines persisted on disk
 │   ├── quota_watch_presenter.dart# the resident quota bar and its actions
 │   └── notify_rules.dart         # pure rules deriving events from snapshots
+├── i18n/
+│   └── lexicon.dart              # the _zh/_en lexicon tables + tr lookups
 ├── ui/
 │   ├── theme.dart                # the token set and both themes
-│   ├── ui_settings.dart          # locale, toggles, and the tr() lexicon
+│   ├── ui_settings.dart          # locale and toggles; tr()/trP() wrappers
 │   ├── devices_page.dart         # device cards: status dot, task badges
 │   ├── task_list_page.dart       # the task directory page (mobile layout)
 │   ├── chat/chat_page.dart       # the chat page (full V4 surface)

@@ -5,10 +5,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import '../i18n/lexicon.dart';
 import '../state/entitlement_poller.dart';
 import '../state/quota_reset.dart';
 import '../state/quota_watch.dart';
-import '../ui/ui_settings.dart';
 import 'notification_service.dart';
 
 /// Dart side of the quota-watch notices: turns the state layer's judged

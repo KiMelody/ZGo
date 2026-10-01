@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-import '../ui/ui_settings.dart';
+import '../i18n/lexicon.dart';
 
 /// Dart side of the Android foreground service that keeps the relay
 /// connection (and therefore background task notifications) alive.

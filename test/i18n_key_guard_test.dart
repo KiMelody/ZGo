@@ -1,6 +1,6 @@
 // Guard: every i18n key referenced through tr()/trP()/trByKey()/
 // trByKeyP()/trLocale() in lib/ must exist in BOTH tables of
-// lib/ui/ui_settings.dart. A missing key is silent: trLocale falls back to
+// lib/i18n/lexicon.dart. A missing key is silent: trLocale falls back to
 // the key itself, so the raw key text ("auto.custom.every") ships to users.
 // Catches the rename-leftover class that the CJK scan (i18n_cjk_scan_test)
 // cannot see. Keys built with interpolation ('chat.mode.$m') are skipped —
@@ -9,7 +9,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-const String _tablePath = 'lib/ui/ui_settings.dart';
+const String _tablePath = 'lib/i18n/lexicon.dart';
 
 /// Dart files under lib/, excluding the i18n table itself.
 List<String> _dartSources() => Directory('lib')
@@ -19,7 +19,7 @@ List<String> _dartSources() => Directory('lib')
     .where((p) => p.endsWith('.dart') && p != _tablePath)
     .toList();
 
-/// Keys of one table (`_zh` / `_en`) in ui_settings.dart.
+/// Keys of one table (`_zh` / `_en`) in lexicon.dart.
 Set<String> _tableKeys(String source, String tableName) {
   final start = source.indexOf('const $tableName = {');
   expect(start, isPositive, reason: '$tableName not found in $_tablePath');

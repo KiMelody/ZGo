@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
-import '../ui_settings.dart';
+import '../../i18n/lexicon.dart';
 import 'diff_view.dart';
 
 /// Per-tool row semantics for one `kind=='toolCall'` row:

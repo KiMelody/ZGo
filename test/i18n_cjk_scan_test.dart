@@ -1,5 +1,5 @@
 // Guard: user-visible copy must come from the tr() tables in
-// lib/ui/ui_settings.dart. A CJK character inside a string literal outside that
+// lib/i18n/lexicon.dart. A CJK character inside a string literal outside that
 // table means a Chinese-only string leaks into the en UI (the table falls back
 // zh -> key, so the leak is silent).
 //
@@ -78,6 +78,13 @@ const List<Exemption> exemptions = [
         '(takeover buttons), never rendered by the app',
     substring: true,
   ),
+  Exemption(
+    file: 'lib/ui/ui_settings.dart',
+    literal: r'${_trimZero(n / 10000)}万',
+    reason: 'compactTokens zh-branch unit suffix, locale-branched in code '
+        '(the en branch renders k/M); sat inside the excluded table file '
+        'before the lexicon split',
+  ),
 ];
 
 /// Han ideographs plus CJK punctuation and compatibility forms.
@@ -87,7 +94,7 @@ final RegExp _cjk = RegExp(
 );
 
 /// Never scanned: this file *is* the table.
-const String _tablePath = 'lib/ui/ui_settings.dart';
+const String _tablePath = 'lib/i18n/lexicon.dart';
 
 /// Dart files under [root], excluding the i18n table.
 List<String> dartSources(String root) => Directory(root)
@@ -122,7 +129,7 @@ void main() {
     expect(
       hits,
       isEmpty,
-      reason: 'Move these into lib/ui/ui_settings.dart (zh + en) and read them '
+      reason: 'Move these into lib/i18n/lexicon.dart (zh + en) and read them '
           'through tr()/trP()/trLocale():\n$report',
     );
   });

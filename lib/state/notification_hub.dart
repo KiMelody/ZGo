@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../i18n/lexicon.dart';
 import '../notifications/notification_service.dart';
 import '../notifications/notify_rules.dart';
 import '../notifications/phase_snapshot_store.dart';

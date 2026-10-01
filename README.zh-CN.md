@@ -247,9 +247,11 @@ lib/
 │   ├── phase_snapshot_store.dart # 阶段基线持久化
 │   ├── quota_watch_presenter.dart# 额度常驻通知及其操作
 │   └── notify_rules.dart         # 纯函数:比较前后快照,得出事件
+├── i18n/
+│   └── lexicon.dart              # _zh/_en 词条双表与纯取值函数
 ├── ui/
 │   ├── theme.dart                # 设计 token 与深浅两套主题
-│   ├── ui_settings.dart          # 语言与开关设置、tr() 词条表
+│   ├── ui_settings.dart          # 语言与开关设置;tr()/trP() 取值包装
 │   ├── devices_page.dart         # 设备卡片:状态点与任务徽标
 │   ├── task_list_page.dart       # 任务目录页(移动端布局)
 │   ├── chat/chat_page.dart       # 对话主页(V4 全能力)

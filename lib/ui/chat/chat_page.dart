@@ -11,6 +11,7 @@ import 'package:flutter/rendering.dart'
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../i18n/lexicon.dart';
 import '../../protocol/conversation.dart';
 import '../../state/device_session.dart';
 import '../../state/entitlement_poller.dart';
@@ -25,6 +26,7 @@ import 'diff_view.dart';
 import 'file_preview_page.dart';
 import 'history_pager.dart';
 import 'image_viewer_page.dart';
+import 'interaction_answer.dart';
 import 'markdown_view.dart';
 import 'goal_panel.dart';
 import 'jump_to_bottom_button.dart';
@@ -7140,12 +7142,10 @@ class _QuestionsView extends StatefulWidget {
 }
 
 class _QuestionsViewState extends State<_QuestionsView> {
-  /// Collected option values per question index — nothing resolves until
-  /// the explicit submit.
-  final Map<int, List<String>> _selections = {};
-
-  /// Questions with the inline custom-answer input expanded.
-  final Set<int> _customOpen = {};
+  /// Collector — the semantic truth for option picks, custom-input open
+  /// flags and custom text (see [InteractionAnswers]); the controllers
+  /// below are view buffers only.
+  InteractionAnswers _answers = const InteractionAnswers();
 
   /// One controller per question, created eagerly so the inline input can
   /// mount/unmount freely; a collapse always clears its text (no hidden
@@ -7183,6 +7183,16 @@ class _QuestionsViewState extends State<_QuestionsView> {
     super.dispose();
   }
 
+  /// View-buffer half of a collapse: the collector already dropped the
+  /// semantic text — controller.clear() never fires onChanged, so the
+  /// buffer is dropped here and mirrored via [InteractionAnswers.setCustom].
+  void _clearCustomView(int index) {
+    if (_customControllers[index]!.text.isNotEmpty) {
+      _customControllers[index]!.clear();
+      _answers = _answers.setCustom(index, '');
+    }
+  }
+
   /// Unified toggle: tapping the picked option deselects it (single-select
   /// may return to "nothing picked"), tapping another single-select option
   /// re-chooses. Any option tap collapses the custom input and drops its
@@ -7190,18 +7200,8 @@ class _QuestionsViewState extends State<_QuestionsView> {
   /// exclusive.
   void _toggleOption(int index, Map question, String value) {
     setState(() {
-      _closeCustom(index);
-      final selected = _selections.putIfAbsent(index, () => []);
-      if (question['multiSelect'] == true) {
-        // Set semantics: a duplicate toggle must not grow the list.
-        selected.contains(value) ? selected.remove(value) : selected.add(value);
-      } else if (selected.contains(value)) {
-        selected.remove(value);
-      } else {
-        selected
-          ..clear()
-          ..add(value);
-      }
+      _answers = _answers.toggleOption(index, question, value);
+      _clearCustomView(index);
     });
   }
 
@@ -7211,76 +7211,27 @@ class _QuestionsViewState extends State<_QuestionsView> {
   /// answer; single-select clears the picked option first.
   void _toggleCustom(int index, Map question) {
     setState(() {
-      if (_customOpen.contains(index)) {
-        _closeCustom(index);
-        return;
-      }
-      if (question['multiSelect'] != true) _selections[index]?.clear();
-      _customOpen.add(index);
+      final wasOpen = _answers.customOpen.contains(index);
+      _answers = _answers.toggleCustom(index, question);
+      if (wasOpen) _clearCustomView(index);
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _customOpen.contains(index)) {
+      if (mounted && _answers.customOpen.contains(index)) {
         _customFocusNodes[index]?.requestFocus();
       }
     });
   }
 
-  /// Collapse + clear in one place so every collapse path drops the text.
-  void _closeCustom(int index) {
-    if (_customOpen.remove(index)) _customControllers[index]?.clear();
-  }
-
-  /// A question's answer: selected option values ∪ (custom input open with
-  /// non-blank text ? [text] : ∅) — blank text is not an answer.
-  List<String> _answersOf(int index) {
-    final answer = List<String>.of(_selections[index] ?? const []);
-    if (_customOpen.contains(index)) {
-      final text = _customControllers[index]!.text.trim();
-      if (text.isNotEmpty) answer.add(text);
-    }
-    return answer;
-  }
-
-  /// `buildBotElicitationContent` shape: `answers` keyed by question
-  /// text with comma-joined option labels, `answer_N` carrying option values
-  /// (scalar for single-select, list for multiSelect), `answer` only for the
-  /// single-question form. Custom text joins verbatim (it is its own label).
-  /// Unanswered questions are silently skipped; nothing answered yields just
-  /// the empty `answers` map (the explicit "no answer" submit).
-  Map<String, dynamic> _buildContent() {
-    final content = <String, dynamic>{};
-    final answers = <String, String>{};
-    for (var i = 0; i < widget.questions.length; i++) {
-      final answer = _answersOf(i);
-      if (answer.isEmpty) continue;
-      final q = widget.questions[i];
-      final multi = q['multiSelect'] == true;
-      final options = (q['options'] as List?) ?? const [];
-      String labelOf(String value) {
-        for (final o in options) {
-          if (o is Map && '${o['value']}' == value) {
-            return '${o['label'] ?? o['value'] ?? value}';
-          }
-        }
-        return value;
-      }
-
-      answers['${q['label'] ?? q['question'] ?? q['value'] ?? 'answer_$i'}'] =
-          answer.map(labelOf).join(', ');
-      content['answer_$i'] = multi ? answer : answer.first;
-    }
-    content['answers'] = answers;
-    if (widget.questions.length == 1 && content.containsKey('answer_0')) {
-      content['answer'] = content['answer_0'];
-    }
-    return content;
-  }
+  /// Wire shape assembly lives in [buildInteractionContent]; this only
+  /// pairs the current questions with the collector.
+  Map<String, dynamic> _buildContent() =>
+      buildInteractionContent(widget.questions, _answers);
 
   @override
   Widget build(BuildContext context) {
     final answered = [
       for (var i = 0; i < widget.questions.length; i++)
-        if (_answersOf(i).isNotEmpty) i,
+        if (_answers.answersOf(i).isNotEmpty) i,
     ].length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -7290,13 +7241,14 @@ class _QuestionsViewState extends State<_QuestionsView> {
             index: i,
             question: widget.questions[i],
             busy: widget.busy,
-            selected: _selections[i] ?? const [],
-            customOpen: _customOpen.contains(i),
+            selected: _answers.selections[i] ?? const [],
+            customOpen: _answers.customOpen.contains(i),
             customController: _customControllers[i]!,
             customFocusNode: _customFocusNodes[i]!,
             onToggleOption: (value) =>
                 _toggleOption(i, widget.questions[i], value),
             onToggleCustom: () => _toggleCustom(i, widget.questions[i]),
+            onCustomChanged: (text) => _answers = _answers.setCustom(i, text),
           ),
         Align(
           alignment: Alignment.centerRight,
@@ -7378,6 +7330,12 @@ class _QuestionItem extends StatelessWidget {
   final void Function(String value) onToggleOption;
   final void Function() onToggleCustom;
 
+  /// Single sync point from the view buffer into the collector — the
+  /// controller stays the view truth, [InteractionAnswers] the semantic one
+  /// (the live rebuild for the answered counter rides the controller's
+  /// addListener above).
+  final void Function(String text) onCustomChanged;
+
   const _QuestionItem({
     required this.index,
     required this.question,
@@ -7388,6 +7346,7 @@ class _QuestionItem extends StatelessWidget {
     required this.customFocusNode,
     required this.onToggleOption,
     required this.onToggleCustom,
+    required this.onCustomChanged,
   });
 
   @override
@@ -7451,6 +7410,7 @@ class _QuestionItem extends StatelessWidget {
                   controller: customController,
                   focusNode: customFocusNode,
                   enabled: !busy,
+                  onChanged: onCustomChanged,
                   style: ZType.sub,
                   decoration: InputDecoration(
                     isDense: true,
