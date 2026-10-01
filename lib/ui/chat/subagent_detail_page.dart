@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../protocol/conversation.dart';
 import '../../state/device_session.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
@@ -185,38 +186,16 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
         beforeRowId: state.oldestRowId,
         limit: 60,
       );
-      List? rows;
-      bool? hasMore;
-      String? atLogEpoch;
-      if (res is Map) {
-        hasMore = res['hasMore'] as bool?;
-        atLogEpoch = res['atLogEpoch'] as String?;
-        // Drop the whole result when the epoch moved.
-        if (!state.rangeEnvelopeMatches(atLogEpoch)) {
-          if (mounted) _toast(tr(context, 'chat.loadOlder.stale'));
-          return;
-        }
-        final rowsObj = res['rows'];
-        if (rowsObj is Map) {
-          rows = rowsObj['window'] as List? ?? rowsObj['rows'] as List?;
-        } else if (rowsObj is List) {
-          rows = rowsObj;
-        }
-        rows ??= res['items'] as List? ?? res['window'] as List?;
-      } else if (res is List) {
-        rows = res;
+      final page = parseRowsRangeResponse(res, state: state);
+      // Drop the whole result when the epoch moved.
+      if (!page.epochMatches) {
+        if (mounted) _toast(tr(context, 'chat.loadOlder.stale'));
+        return;
       }
-      if (rows != null && rows.isNotEmpty) {
-        final older = rows
-            .whereType<Map>()
-            .map((e) => e.cast<String, dynamic>())
-            .toList()
-          ..sort(
-            (a, b) =>
-                ((a['rowId'] as num?) ?? 0).compareTo((b['rowId'] as num?) ?? 0),
-          );
+      final older = page.rows;
+      if (older != null && older.isNotEmpty) {
         state
-          ..hasMore = hasMore
+          ..hasMore = page.hasMore
           ..prependOlderRows(older);
         // Prepending keeps pixels (only maxScrollExtent grows → no scroll
         // notification), so the pinned cache is stale: recompute once the
@@ -229,7 +208,7 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
           }
         });
       } else if (state.rows.isNotEmpty) {
-        state.hasMore = hasMore ?? false;
+        state.hasMore = page.hasMore ?? false;
         if (mounted) _toast(tr(context, 'chat.noOlder'));
       }
     } catch (e) {

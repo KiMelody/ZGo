@@ -176,18 +176,22 @@ void main() {
     expect(find.text('排队中'), findsNothing);
   });
 
-  testWidgets('sendText channel failure parks the message in the queue', (
+  testWidgets('a queued send result clears the composer; the bar keeps it', (
     tester,
   ) async {
     final wire = _FakeWire()..results.add(TimeoutException('dead'));
     final queue = _queue(wire);
     final gateway = await _pumpPage(tester, queue);
-    gateway.sendTextResults.add(TimeoutException('bridge down'));
+
+    // The transport parked the message and handed back its queue item —
+    // the real sendTextOrQueue contract on a channel-level failure. The
+    // page must clear the composer and keep rendering the bar, no toast.
+    final item = queue.queueLocal(taskId: 's1', content: '弱网里的消息');
+    gateway.sendTextOrQueueResults.add(SendTextResult.queued(item));
 
     await _send(tester, '弱网里的消息');
     await tester.pump(const Duration(milliseconds: 10));
 
-    // Composer cleared, message on the bar — no error toast.
     expect(
       tester
           .widget<TextField>(find.byType(TextField))
@@ -197,40 +201,10 @@ void main() {
     );
     expect(find.text('弱网里的消息'), findsOneWidget);
     expect(find.text('排队中'), findsOneWidget);
-    expect(find.textContaining('bridge down'), findsNothing);
-    expect(gateway.calls.where((c) => c.$1 == 'sendText'), hasLength(1));
-  });
-
-  testWidgets('non-channel sendText failures still surface the toast', (
-    tester,
-  ) async {
-    final wire = _FakeWire();
-    final queue = _queue(wire);
-    final gateway = await _pumpPage(tester, queue);
-    gateway.sendTextResults.add(StateError('remote.rpcFrame.fault'));
-
-    await _send(tester, '普通失败');
-    await tester.pump(const Duration(milliseconds: 10));
-
-    // Not channel-level → no queuing, the failure surfaces as before.
-    expect(queue.items, isEmpty);
-    expect(wire.calls, isEmpty);
-    expect(find.textContaining('remote.rpcFrame.fault'), findsOneWidget);
-  });
-
-  testWidgets('pre-3.12.3 desktops (null queue) keep the toast path', (
-    tester,
-  ) async {
-    final gateway = await _pumpPage(tester, null);
-    gateway.sendTextResults.add(TimeoutException('bridge down'));
-
-    await _send(tester, '老桌面的消息');
-    await tester.pump(const Duration(milliseconds: 10));
-
-    expect(find.textContaining('bridge down'), findsOneWidget);
-    // The legacy path keeps the text in the composer (retryable) — zero
-    // behavior change on pre-3.12.3 desktops.
-    expect(find.text('老桌面的消息'), findsOneWidget);
-    expect(find.text('排队中'), findsNothing);
+    expect(find.textContaining('发送失败'), findsNothing);
+    expect(
+      gateway.calls.where((c) => c.$1 == 'sendTextOrQueue'),
+      hasLength(1),
+    );
   });
 }
