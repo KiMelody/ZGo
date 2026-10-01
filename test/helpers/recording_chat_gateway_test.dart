@@ -1,5 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:zgo/protocol/conversation.dart';
+
 import 'recording_chat_gateway.dart';
 
 void main() {
@@ -17,13 +19,13 @@ void main() {
     final sessionId = await gateway.conversationCommands
         .createSession('ws-1', firstText: '你好');
     expect(sessionId, 'new-s1');
-    final res = await gateway.conversationCommands.sendText('s1', '继续',
+    final res = await gateway.conversationCommands.sendTextOrQueue('s1', '继续',
         heldQueueDisposition: 'queue');
-    expect(res, {'status': 'accepted'});
+    expect(res, isA<SendTextSent>());
     expect(gateway.calls.length, 2);
     expect(gateway.calls[0].$1, 'createSession');
     expect(gateway.calls[0].$2, ['ws-1', '你好', null]);
-    expect(gateway.calls[1].$1, 'sendText');
+    expect(gateway.calls[1].$1, 'sendTextOrQueue');
     expect(gateway.calls[1].$2, ['s1', '继续', 'queue']);
   });
 

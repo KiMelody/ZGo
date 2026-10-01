@@ -36,7 +36,8 @@ class ConversationTransport {
   /// RemoteClient): only then does clientHello carry
   /// `capabilities: {workspaceHookReviewUi: true}` — the strict hello
   /// schema of older desktops is untested against unknown fields, so the
-  /// key is omitted entirely (not sent as false).
+  /// key is omitted entirely (not sent as false). The same gate also
+  /// decides replayable-queue availability ([replayableQueue]).
   final bool workspaceHookReviewUi;
   final void Function(String line)? onLog;
 
@@ -848,18 +849,22 @@ class ConversationTransport {
   ReplayableCommandQueue? _replayableQueue;
 
   /// Offline replayable-command queue (`zcode-task.enqueueTaskCommand`
-  /// family, desktop 3.12.3). Lazily created on first access — the chat
-  /// page touches it only from the send-failure path and the queue bar.
-  /// Session lifetime is structural: the queue hangs off this transport
-  /// and is dropped with it on workspace/device switch (memory-only 一期).
-  ReplayableCommandQueue get replayableQueue =>
-      _replayableQueue ??= ReplayableCommandQueue(
-        call: _replayableWireCall,
-        scope: scope,
-        clientId: clientId,
-        recovered: session.recovered,
-        onLog: _log,
-      );
+  /// family, desktop 3.12.3). Lazily created on first access — the send
+  /// path ([sendTextOrQueue]) and the chat queue bar touch it only on the
+  /// send-failure path. Null on pre-3.12.3 desktops: the gate rides
+  /// [workspaceHookReviewUi], the same `params.atLeast(3, 12, 3)` version
+  /// flag the RemoteClient stamps on the bridge (DeviceSession re-checks
+  /// it live for its ChatGateway getter) — older desktops never queue,
+  /// zero behavior change (ADR-0010).
+  ReplayableCommandQueue? get replayableQueue => workspaceHookReviewUi
+      ? (_replayableQueue ??= ReplayableCommandQueue(
+          call: _replayableWireCall,
+          scope: scope,
+          clientId: clientId,
+          recovered: session.recovered,
+          onLog: _log,
+        ))
+      : null;
 
   /// Wire binding for [replayableQueue]: the zcode-task channel, gated on
   /// the same handshake + bridge-health as [sendCommand] so a drain during
@@ -872,6 +877,64 @@ class ConversationTransport {
     await handshake();
     await session.waitHealthy(timeout: const Duration(seconds: 45));
     return _channels.call(Channels.zcodeTask, method, args);
+  }
+
+  // ---------------------------------------- send + replayable queue (native)
+  //
+  // Native addition, NOT line-by-line ported code — keep this block
+  // distinguishable from the ported body above (ADR-0013). ADR-0010: the
+  // queueable-failure decision lives in [sendTextOrQueue] and only there;
+  // UI layers must not inline channel-error enqueue judgments.
+
+  /// Sends one `sendText` and classifies the outcome as a sealed
+  /// [SendTextResult] — the chat composer's plain-send path.
+  ///
+  /// Design B boundary (ADR-0010): only THIS call is queueable.
+  /// createSession / slash / goal / attachment-upload paths surface their
+  /// errors themselves and never queue.
+  ///
+  /// A thrown error parks the message in [replayableQueue] (returns
+  /// [SendTextQueued] after [ReplayableCommandQueue.queueLocal]) exactly
+  /// when ALL of these hold:
+  /// - the error came from the [sendText] call itself — this method's body
+  ///   is that call's scope, replacing the former UI `sendTextInFlight`
+  ///   flag;
+  /// - [replayableQueue] != null (the 3.12.3 version gate — null on older
+  ///   desktops, which then never queue);
+  /// - [text] is non-empty;
+  /// - [attachments] is null/empty (the enqueue schema is text-only);
+  /// - `isChannelLevelError(e)` holds.
+  /// Any other thrown error surfaces as [SendTextFailed] carrying the
+  /// original error; a wire-shaped ack rejection becomes
+  /// [SendTextRejected] via [ackRejected] / [ackReason].
+  Future<SendTextResult> sendTextOrQueue(
+    String sessionId,
+    String text, {
+    List<Map<String, dynamic>>? attachments,
+    String? heldQueueDisposition,
+  }) async {
+    dynamic res;
+    try {
+      res = await sendText(
+        sessionId,
+        text,
+        attachments: attachments,
+        heldQueueDisposition: heldQueueDisposition,
+      );
+    } catch (e) {
+      final queue = replayableQueue;
+      if (queue != null &&
+          text.isNotEmpty &&
+          (attachments == null || attachments.isEmpty) &&
+          isChannelLevelError(e)) {
+        return SendTextResult.queued(
+          queue.queueLocal(taskId: sessionId, content: text),
+        );
+      }
+      return SendTextResult.failed(e);
+    }
+    if (ackRejected(res)) return SendTextResult.rejected(ackReason(res));
+    return SendTextResult.sent(res);
   }
 }
 
@@ -1121,6 +1184,141 @@ class ReplayableCommandQueue extends ChangeNotifier {
     _items.clear();
     super.dispose();
   }
+}
+
+/// Outcome of [ConversationTransport.sendTextOrQueue], switched over by the
+/// chat composer — one variant per former `_send` handling branch, so the
+/// UI maps them 1:1. Native addition, distinct from the line-by-line ported
+/// body of this file (ADR-0013); the queueable-failure decision behind
+/// [SendTextQueued] is single-sourced in sendTextOrQueue (ADR-0010).
+sealed class SendTextResult {
+  const SendTextResult._();
+
+  /// ack passed (`accepted` / `noop` / `duplicate`); [res] is the raw
+  /// command ack.
+  const factory SendTextResult.sent(dynamic res) = SendTextSent;
+
+  /// Wire-shaped ack rejection ([ackRejected]); [reason] is the [ackReason]
+  /// extraction for the toast.
+  const factory SendTextResult.rejected(String reason) = SendTextRejected;
+
+  /// Channel-level sendText failure parked in the replayable queue;
+  /// [item] is already enqueued ([ReplayableCommandQueue.queueLocal]).
+  const factory SendTextResult.queued(ReplayableQueueItem item) =
+      SendTextQueued;
+
+  /// Not queueable — non-channel error, attachments present, empty text,
+  /// or null queue on pre-3.12.3 desktops. [error] is the original failure
+  /// for the toast.
+  const factory SendTextResult.failed(Object error) = SendTextFailed;
+}
+
+class SendTextSent extends SendTextResult {
+  final dynamic res;
+  const SendTextSent(this.res) : super._();
+}
+
+class SendTextRejected extends SendTextResult {
+  final String reason;
+  const SendTextRejected(this.reason) : super._();
+}
+
+class SendTextQueued extends SendTextResult {
+  final ReplayableQueueItem item;
+  const SendTextQueued(this.item) : super._();
+}
+
+class SendTextFailed extends SendTextResult {
+  final Object error;
+  const SendTextFailed(this.error) : super._();
+}
+
+/// Wire-shaped command-ack rejection: a `status` that is present and none
+/// of the pass values. Moved verbatim from the former chat-page
+/// `_ackRejected` (behavior frozen; the /goal path shares it).
+bool ackRejected(dynamic res) =>
+    res is Map &&
+    res['status'] != null &&
+    res['status'] != 'accepted' &&
+    res['status'] != 'noop' &&
+    res['status'] != 'duplicate';
+
+/// Human-readable reason of a command ack: `reasonCode` → `message` →
+/// `status`; non-Map answers stringify verbatim. Former chat-page
+/// `_ackReason`, moved with [ackRejected].
+String ackReason(dynamic res) {
+  if (res is! Map) return '$res';
+  return '${res['reasonCode'] ?? res['message'] ?? res['status']}';
+}
+
+// ---------------------------------------- rowsRange paging (native)
+//
+// Native addition, NOT line-by-line ported code — keep this block
+// distinguishable from the ported body below (ADR-0013). Single home for
+// the conversationRowsRangeV4 response fallback chain that used to live
+// as three private copies (chat `_loadOlderSettled` / subagent-sheet
+// `_loadEarlier` / subagent-detail `_loadOlder`). Pure parsing only:
+// each caller keeps its own epoch policy (chat applies drifted pages
+// with a toast, round 23; sheet/detail drop them) and its own drop /
+// toast / cursor decisions.
+
+/// Parsed [parseRowsRangeResponse] outcome. `rows` is already cast to
+/// `Map<String, dynamic>` (non-Map elements dropped); null means the
+/// response carried no recognizable row list. `epochMatches` folds the
+/// envelope-missing case (`atLogEpoch == null`) into a match — the web
+/// store's lenient [ConversationState.rangeEnvelopeMatches] semantics.
+typedef RowsRangePage = ({
+  List<Map<String, dynamic>>? rows,
+  bool? hasMore,
+  dynamic atLogEpoch,
+  bool epochMatches,
+});
+
+/// Parses one conversationRowsRangeV4 response: the frozen fallback chain
+/// `rows.window ?? rows.rows` → bare `rows` List → top-level
+/// `items ?? window` → `res is List` → unrecognizable (null), plus cast
+/// and an optional rowId-ascending sort ([sortOldestFirst]; the subagent
+/// sheet pages in response order and passes false). The epoch verdict is
+/// computed against the [state] the fetch was made on; reporting drift is
+/// this function's job — acting on it stays with the caller.
+RowsRangePage parseRowsRangeResponse(
+  dynamic res, {
+  required ConversationState state,
+  bool sortOldestFirst = true,
+}) {
+  List? rows;
+  bool? hasMore;
+  dynamic atLogEpoch;
+  if (res is Map) {
+    hasMore = res['hasMore'] as bool?;
+    atLogEpoch = res['atLogEpoch'];
+    final rowsObj = res['rows'];
+    if (rowsObj is Map) {
+      rows = rowsObj['window'] as List? ?? rowsObj['rows'] as List?;
+    } else if (rowsObj is List) {
+      rows = rowsObj;
+    }
+    rows ??= res['items'] as List? ?? res['window'] as List?;
+  } else if (res is List) {
+    rows = res;
+  }
+  List<Map<String, dynamic>>? cast;
+  if (rows != null) {
+    cast = rows.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
+    if (sortOldestFirst) {
+      cast.sort(
+        (a, b) => ((a['rowId'] as num?) ?? 0).compareTo(
+          (b['rowId'] as num?) ?? 0,
+        ),
+      );
+    }
+  }
+  return (
+    rows: cast,
+    hasMore: hasMore,
+    atLogEpoch: atLogEpoch,
+    epochMatches: atLogEpoch == null || atLogEpoch == state.logEpoch,
+  );
 }
 
 /// Shared base for Conversation/SessionsIndex subscriptions.

@@ -11,7 +11,6 @@ import 'package:flutter/rendering.dart'
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../protocol/channel_client.dart' show isChannelLevelError;
 import '../../protocol/conversation.dart';
 import '../../state/device_session.dart';
 import '../../state/entitlement_poller.dart';
@@ -24,6 +23,7 @@ import '../ui_settings.dart';
 import '../widgets/sheet_scaffold.dart';
 import 'diff_view.dart';
 import 'file_preview_page.dart';
+import 'history_pager.dart';
 import 'image_viewer_page.dart';
 import 'markdown_view.dart';
 import 'goal_panel.dart';
@@ -334,14 +334,66 @@ class _ChatPageState extends State<ChatPage> {
   String? _sessionId;
   String? _error;
   bool _sending = false;
-  bool _loadingOlder = false;
 
-  /// A fetched history page parked because the finger was still down when
-  /// the response arrived (see the DRAG HOLD note in [_loadOlderSettled]).
-  /// Flushed by [_flushPendingOlder] after [ScrollEndNotification]; cleared
-  /// on session switch (a stale page belongs to a state nobody shows).
-  ({ConversationState state, List<Map<String, dynamic>> older, bool? hasMore})?
-      _pendingOlderPage;
+  /// History paging decisions (entry gate, fetch, identity guard, DRAG HOLD
+  /// parking, prepend commit, chain generation) — a pure Dart command class
+  /// (task 10-01-history-pager-extract). The measurement chain below
+  /// ([_measureAnchor] / [_prependOlderPage] / [_compensateAnchor]) stays in
+  /// this State; [_compensationPending] remains the shared re-entry gate,
+  /// injected into the pager read/write so there is a single truth.
+  late final HistoryPager _pager = HistoryPager(
+    fetch: _fetchOlderRows,
+    currentState: () => _state,
+    isScrollIdle: () => !_userDragActive && _scrollSettled,
+    isCompensationPending: () => _compensationPending,
+    setCompensationPending: (value) => _compensationPending = value,
+    // Every old post-frame callback started with `if (!mounted) return` —
+    // the seam carries that guard so the pager's frame callbacks keep the
+    // exact old semantics.
+    postFrame: (callback) => WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) callback();
+    }),
+    onStep: _onHistoryStep,
+    onGateChanged: () {
+      if (mounted) setState(() {});
+    },
+  );
+
+  /// Loading gate forwarded from the pager (the「加载更早」button spinner and
+  /// the scroll bookkeeping read it; the pager owns the flips).
+  bool get _loadingOlder => _pager.loadingOlder;
+
+  /// The conversationRowsRangeV4 RPC behind [HistoryPager.settle].
+  Future<dynamic> _fetchOlderRows(
+    String sessionId, {
+    int? beforeRowId,
+    int limit = 60,
+  }) =>
+      widget.gateway.conversationCommands.rowsRange(
+        sessionId,
+        beforeRowId: beforeRowId,
+        limit: limit,
+      );
+
+  /// Reactions to the pager's typed outcomes: toasts here, measurement-chain
+  /// scheduling here, everything else already happened inside the pager.
+  void _onHistoryStep(HistoryLoadStep step) {
+    if (!mounted) return;
+    switch (step) {
+      case HistoryStale():
+        _toast(tr(context, 'chat.loadOlder.stale'));
+      case HistoryNoOlder():
+        _toast(tr(context, 'chat.noOlder'));
+      case HistoryFailed(:final error):
+        _toast(trP(context, 'chat.loadOlder.failed', ['$error']));
+      case HistoryProceed(:final state, :final older, :final hasMore):
+        unawaited(_prependOlderPage(state, older, hasMore));
+      case HistoryHold():
+        break; // parked in the pager; flushed on ScrollEnd ([_flushPendingOlder])
+      case HistoryDuplicateDropped():
+        break; // the measurement chain saw inserted == 0 and released the gate
+    }
+  }
 
   /// Pull threshold (logical px) for the history pull gesture: releasing a
   /// top overscroll at least this deep loads the older page.
@@ -366,7 +418,7 @@ class _ChatPageState extends State<ChatPage> {
   /// frame, so neither flag alone can answer "is the viewport moving right
   /// now": a prepend landing mid-coast must not jumpTo (kills the user's
   /// momentum, "滑着也被拉", 09-22 round 15) — the fetched page is held
-  /// (see the DRAG HOLD note in [_loadOlderSettled]) and flushed after the
+  /// (see the DRAG HOLD note in [HistoryPager.settle]) and flushed after the
   /// ScrollEnd, and the prepend gate ([_prependOlderPage]) requires it too.
   bool _scrollSettled = true;
 
@@ -407,11 +459,10 @@ class _ChatPageState extends State<ChatPage> {
   /// the landing is measured, never estimated.
   double? _anchorCacheExtent;
 
-  /// Invalidation epoch for anchor-compensation chains: incremented on
-  /// every load's anchor measurement; a chain whose captured epoch is no
-  /// longer current dies before its next landing (see
-  /// [_loadOlderSettled] / [_compensateAnchor]).
-  int _anchorGeneration = 0;
+  /// Invalidation epoch for anchor-compensation chains: stored (and bumped
+  /// per prepend commit) in the pager; forwarded here so the compensation
+  /// chain ([_compensateAnchor]) reads it unchanged.
+  int get _anchorGeneration => _pager.anchorGeneration;
 
   /// Last page's MEASURED content shift — pure prepend height with every
   /// viewport movement cancelled out (see the LAND note in
@@ -683,7 +734,7 @@ class _ChatPageState extends State<ChatPage> {
       _scrollSettled = true;
       // The scroll has truly settled (drag released, spring/fling done):
       // a drag-held history page may now flush (see the DRAG HOLD note in
-      // [_loadOlderSettled]).
+      // [HistoryPager.settle]).
       _flushPendingOlder();
     }
     return false;
@@ -993,11 +1044,6 @@ class _ChatPageState extends State<ChatPage> {
       _showSlash = false;
       _progress = null;
     });
-    // True only while the plain sendText call is in flight — the
-    // replayable-queue capture in the catch below applies to that call
-    // alone (design B: createSession / slash / goal / upload paths surface
-    // errors as before).
-    var sendTextInFlight = false;
     try {
       var sessionId = _sessionId;
       if (sessionId == null) {
@@ -1041,9 +1087,9 @@ class _ChatPageState extends State<ChatPage> {
           text.substring('/goal '.length).trim(),
           heldQueueDisposition: heldDisposition,
         );
-        if (_ackRejected(res)) {
+        if (ackRejected(res)) {
           if (mounted) {
-            _toast(trP(context, 'chat.send.failed', [_ackReason(res)]));
+            _toast(trP(context, 'chat.send.failed', [ackReason(res)]));
           }
           return;
         }
@@ -1056,38 +1102,37 @@ class _ChatPageState extends State<ChatPage> {
         attachments = await _uploadPending(sessionId);
         setState(() => _progress = null);
       }
-      sendTextInFlight = true;
-      final res = await widget.gateway.conversationCommands.sendText(
-        sessionId,
-        text,
-        attachments: attachments,
-        heldQueueDisposition: heldDisposition,
-      );
-      sendTextInFlight = false;
-      if (_ackRejected(res)) {
-        if (mounted) {
-          _toast(trP(context, 'chat.send.failed', [_ackReason(res)]));
-        }
-        return;
+      // Plain send: the transport classifies the outcome (queued on a
+      // channel-level failure, ADR-0010) and this switch maps the four
+      // variants 1:1 onto the former inline handling.
+      final result = await widget.gateway.conversationCommands
+          .sendTextOrQueue(
+            sessionId,
+            text,
+            attachments: attachments,
+            heldQueueDisposition: heldDisposition,
+          );
+      switch (result) {
+        case SendTextSent():
+          _inputController.clear();
+          setState(() => _pendingFiles.clear());
+        case SendTextQueued():
+          // The transport already parked the message (the bar above shows
+          // it); attachments cannot be present in this branch.
+          _inputController.clear();
+        case SendTextRejected(:final reason):
+          if (mounted) {
+            _toast(trP(context, 'chat.send.failed', [reason]));
+          }
+        case SendTextFailed(:final error):
+          if (mounted) {
+            _toast(trP(context, 'chat.send.failed', ['$error']));
+          }
       }
-      _inputController.clear();
-      setState(() => _pendingFiles.clear());
     } catch (e) {
-      // 3.12.3 replayable queue: a bridge-level sendText failure parks the
-      // message in the local offline queue (composer clears; the queue bar
-      // above shows it) instead of surfacing an error. Attachments-only
-      // sends are not queueable (enqueue schema is text-only) — toast.
-      final queue = widget.gateway.replayableQueue;
-      final taskId = _sessionId;
-      if (sendTextInFlight &&
-          queue != null &&
-          taskId != null &&
-          text.isNotEmpty &&
-          _pendingFiles.isEmpty &&
-          isChannelLevelError(e)) {
-        queue.queueLocal(taskId: taskId, content: text);
-        _inputController.clear();
-      } else if (mounted) {
+      // createSession / slash / goal / upload paths surface errors as
+      // before — they do not go through sendTextOrQueue (design B).
+      if (mounted) {
         _toast(trP(context, 'chat.send.failed', ['$e']));
       }
     } finally {
@@ -1099,18 +1144,6 @@ class _ChatPageState extends State<ChatPage> {
         });
       }
     }
-  }
-
-  bool _ackRejected(dynamic res) =>
-      res is Map &&
-      res['status'] != null &&
-      res['status'] != 'accepted' &&
-      res['status'] != 'noop' &&
-      res['status'] != 'duplicate';
-
-  String _ackReason(dynamic res) {
-    if (res is! Map) return '$res';
-    return '${res['reasonCode'] ?? res['message'] ?? res['status']}';
   }
 
   String _requireSession() {
@@ -1149,148 +1182,30 @@ class _ChatPageState extends State<ChatPage> {
 
   // ------------------------------------------------------------ history
 
+  /// Loads one older history page — the single entry ALL four triggers
+  /// (open auto-load / prefetch window / pull release / button) funnel
+  /// into; the mutual-exclusion gate lives in the pager ([HistoryPager.beginLoad]).
+  /// The fetch decisions themselves live in [HistoryPager.settle].
   Future<void> _loadOlder() async {
-    final state = _state;
-    final sessionId = _sessionId;
-    if (state == null ||
-        sessionId == null ||
-        _loadingOlder ||
-        _compensationPending) {
-      return;
-    }
-    setState(() => _loadingOlder = true);
+    final request = _pager.beginLoad(_sessionId);
+    if (request == null) return;
     // Post-frame so the list has actually mounted (the subscribe microtask
     // chain can beat the first build) — the anchor itself is NOT measured
     // here anymore: since round 18 the prepend only runs with the viewport
-    // at rest (see the DRAG HOLD note in [_loadOlderSettled]) and measures
+    // at rest (see the DRAG HOLD note in [HistoryPager.settle]) and measures
     // fresh right before it applies the page, so the anchored position IS
     // the reader's settled position — no armed pre-fetch anchor to yank
     // them back to, and the SliverList's own retained-child stability does
     // the mid-list anchoring (see the VEIL note in [_prependOlderPage]).
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _loadOlderSettled(state, sessionId);
+      unawaited(_pager.settle(request));
     });
-  }
-
-  /// The deferred body of [_loadOlder] — fetches the page, then either
-  /// applies it directly or parks it for the drag-hold flush (see the DRAG
-  /// HOLD note in the body). The prepend path measures a fresh anchor when
-  /// it applies the page.
-  Future<void> _loadOlderSettled(
-    ConversationState state,
-    String sessionId,
-  ) async {
-    if (!mounted) return;
-    try {
-      // Cursor = the oldest row actually held (state.oldestRowId). Snapshot
-      // `firstRowId` can be a placeholder (live-probed 1) — using it
-      // re-fetched the newest window and the「加载更早」button spin forever
-      // (live_child_rows_probe documents the same trap).
-      final res = await widget.gateway.conversationCommands.rowsRange(
-        sessionId,
-        beforeRowId: state.oldestRowId,
-        limit: 60,
-      );
-      List? rows;
-      bool? hasMore;
-      String? atLogEpoch;
-      if (res is Map) {
-        hasMore = res['hasMore'] as bool?;
-        atLogEpoch = res['atLogEpoch'] as String?;
-        // Subscription identity guard: a resubscribe (bridge restart)
-        // swapped the state out from under this fetch — its page belongs
-        // to a state nobody shows.
-        if (state != _state) {
-          debugPrint('[anchor] drop page: state replaced (resubscribe)');
-          return;
-        }
-        // The window is dropped when its log epoch no longer matches
-        // the live subscription — but our desktop advances the epoch while
-        // streaming (fresh snapshot every ~10s, 09-22 13:54 device log),
-        // and the request/response race then silently killed EVERY fetched
-        // page ("stuck at loading": prefetches fired for three minutes,
-        // none ever reached the prepend). The rows themselves are
-        // immutable log entries — an epoch drift does not invalidate them.
-        // Log it and apply anyway (round 23); the toast stays as a trace
-        // of the drift for future diagnosis.
-        if (!state.rangeEnvelopeMatches(atLogEpoch)) {
-          debugPrint('[anchor] epoch drift on fetched page '
-              '(at=$atLogEpoch live=${state.logEpoch}) — applying anyway');
-          if (mounted) _toast(tr(context, 'chat.loadOlder.stale'));
-        }
-        final rowsObj = res['rows'];
-        if (rowsObj is Map) {
-          rows = rowsObj['window'] as List? ?? rowsObj['rows'] as List?;
-        } else if (rowsObj is List) {
-          rows = rowsObj;
-        }
-        rows ??= res['items'] as List? ?? res['window'] as List?;
-      } else if (res is List) {
-        rows = res;
-      }
-      if (rows != null && rows.isNotEmpty) {
-        final older =
-            rows.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList()
-              ..sort(
-                (a, b) => ((a['rowId'] as num?) ?? 0).compareTo(
-                  (b['rowId'] as num?) ?? 0,
-                ),
-              );
-        // DRAG HOLD: while the viewport is still IN MOTION the prepend
-        // cannot be compensated — no landing may jumpTo under a live
-        // gesture (it would kill the drag or the coast), and unhedged the
-        // anchor lands outside the cache extent, the chain gives up, and
-        // the viewport keeps staring at swapped-in older rows (09-22 round
-        // 13: consecutive give-ups at pixels≈1000, then a landing yanked
-        // 1086 -> 14246 correcting the stacked error). Covers the
-        // finger-down drag AND the release: ballistic coast, pull rebound
-        // — round 16 log showed the reply landing mid-rebound (armed -1144
-        // -> pixels 0 = drift surrender, position lost) and mid-slow-coast
-        // (a wait-shift check still let a prepend through, the raw landing
-        // then jumped a full page 1984 -> 5945). Park the fetched page
-        // until the scroll truly ends ([ScrollEndNotification] fires after
-        // the release spring settles), then flush through the normal
-        // measure→prepend→land path.
-        if (_userDragActive || !_scrollSettled) {
-          _pendingOlderPage = (state: state, older: older, hasMore: hasMore);
-          return; // finally keeps _loadingOlder up — no duplicate fetch
-        }
-        // Post-frame: the response can land in a microtask BEFORE the list
-        // has ever mounted (feedSnapshot fires the open auto-load while
-        // pumpWidget is still ahead — hasClients=false, the anchor measure
-        // dies, no chain registers, and the follow's extent-estimate
-        // animateTo is left owning the viewport). One frame also re-reads
-        // SETTLED boxes for the measurement.
-        //
-        // The re-entry gate closes HERE, not inside the post-frame prepend:
-        // _loadingOlder clears in the finally below (same microtask), and a
-        // coasting prefetch firing in the frame between would pass both
-        // gates and re-fire on the SAME cursor (duplicate page, 09-22
-        // round 15: the fling test armed a third fetch while page two's
-        // prepend was still a frame away). _prependOlderPage clears it if
-        // no anchor can be measured.
-        _compensationPending = true;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          unawaited(_prependOlderPage(state, older, hasMore));
-        });
-      } else if (state.rows.isNotEmpty) {
-        state.hasMore = hasMore ?? false;
-        if (mounted) _toast(tr(context, 'chat.noOlder'));
-      }
-    } catch (e) {
-      if (mounted) _toast(trP(context, 'chat.loadOlder.failed', ['$e']));
-    } finally {
-      if (mounted && _pendingOlderPage == null) {
-        setState(() => _loadingOlder = false);
-      }
-    }
   }
 
   /// Applies a fetched history page. The anchor is ALWAYS measured here,
   /// right before the prepend — since round 17 the prepend only runs with
-  /// the viewport at rest (see the DRAG HOLD note in [_loadOlderSettled]),
+  /// the viewport at rest (see the DRAG HOLD note in [HistoryPager.settle]),
   /// so "now" is already the reader's settled position and a fresh measure
   /// is the correct anchor (the old pre-fetch armed anchor anchored the
   /// REQUEST-time position; whatever the reader drifted to during the ~1s
@@ -1305,25 +1220,13 @@ class _ChatPageState extends State<ChatPage> {
     List<Map<String, dynamic>> older,
     bool? hasMore,
   ) async {
-    // Hold re-check AT THE PREPEND FRAME: the arrival microtask's settled
-    // verdict can be one frame stale — a slow reader's rhythm is stop-and-go,
-    // and a reply that lands in a pause then prepends just as the NEXT drag
-    // starts would prepend into a moving viewport: the veiled landing waits
-    // the gesture out behind a lifted veil while the anchor drifts beyond
-    // the cache extent — give-up, position lost, and the NEXT page's landing
-    // corrects the accumulated offset in one throw (09-22 round 16 device
-    // log: give-up at pixels 320, next landing 3616 -> 6581). Same remedy as
-    // the arrival hold — park the page until the true ScrollEnd; the flush
-    // measures a fresh anchor then.
-    if (_userDragActive || !_scrollSettled) {
-      _pendingOlderPage = (state: state, older: older, hasMore: hasMore);
-      // The arrival path already lowered the loading gate (its finally saw
-      // no pending page back then) — raise it back, or the one-frame gap
-      // lets a prefetch re-fire on the same cursor (the duplicate-page drop
-      // makes that harmless, but it wastes a round trip).
-      setState(() => _loadingOlder = true);
-      return;
-    }
+    // Hold re-check AT THE PREPEND FRAME (the park lives in the pager): the
+    // arrival microtask's settled verdict can be one frame stale — a slow
+    // reader's rhythm is stop-and-go, and a reply that lands in a pause
+    // then prepends just as the NEXT drag starts would prepend into a
+    // moving viewport (09-22 round 16 device log: give-up at pixels 320,
+    // next landing 3616 -> 6581).
+    if (_pager.parkPrependIfBusy(state, older, hasMore)) return;
     // FROZEN FRAME (round 24): capture the list's CURRENT paint before the
     // prepend applies — the plain transparent veil replaced the list with a
     // blank for 1-2 frames and read as a full-screen black flash on device
@@ -1349,10 +1252,8 @@ class _ChatPageState extends State<ChatPage> {
     // The capture is async (GPU read-back): re-check the hold AFTER the
     // gap — a drag that started mid-capture must park the page, not
     // prepend under a moving finger (same remedy as the entry hold).
-    if (_userDragActive || !_scrollSettled) {
+    if (_pager.parkPrependIfBusy(state, older, hasMore)) {
       frozen?.dispose();
-      _pendingOlderPage = (state: state, older: older, hasMore: hasMore);
-      setState(() => _loadingOlder = true);
       return;
     }
     // Viewport anchor (R3, shared by prefetch / gesture / button): measured
@@ -1370,10 +1271,11 @@ class _ChatPageState extends State<ChatPage> {
     // interleave — each landing on a viewport the previous one already
     // moved, stacking misplaced jumps (the 09-22 log shows three chains
     // landing 796→7288→10134→8656 = yanked to the bottom). Only the newest
-    // page's chain may still land.
-    final gen = ++_anchorGeneration;
-    state.hasMore = hasMore;
-    final inserted = state.prependOlderRows(older);
+    // page's chain may still land. The bump and the data write-back live
+    // in the pager commit.
+    final outcome = _pager.commitPrepend(state, older, hasMore);
+    final gen = outcome.generation;
+    final inserted = outcome.inserted;
     if (inserted == 0) {
       // Duplicate page: a re-fire raced this chain's prepend window (same
       // beforeRowId cursor, e.g. a prefetch issued between the drag-hold
@@ -1449,38 +1351,14 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  /// Flushes a drag-held history page ([_pendingOlderPage]) once the scroll
-  /// has truly ended (drag released AND the release spring / fling settled —
-  /// [ScrollEndNotification]). If an earlier chain's compensation is still
-  /// pending, waits a frame for it to settle first: two prepends without a
-  /// landing in between would stack un-compensated offsets.
+  /// Flushes a drag-held history page once the scroll has truly ended (drag
+  /// released AND the release spring / fling settled —
+  /// [ScrollEndNotification]); the parked page and all flush decisions
+  /// (identity drop, compensation wait, gate sequencing) live in the pager
+  /// ([HistoryPager.flushHeld]) — this shim only contributes `mounted`.
   void _flushPendingOlder() {
-    final page = _pendingOlderPage;
-    if (page == null || !mounted) return;
-    if (page.state != _state) {
-      // The subscription was rebuilt under us (bridge restart / resubscribe):
-      // the held page belongs to a state nobody shows — drop it, and release
-      // the loading gate the hold kept up.
-      _pendingOlderPage = null;
-      setState(() => _loadingOlder = false);
-      return;
-    }
-    if (_compensationPending) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _flushPendingOlder());
-      return;
-    }
-    _pendingOlderPage = null;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      // The gate opens only AFTER the prepend (not here, at the flush): in
-      // between, the cursor still points at the held page's boundary, so a
-      // prefetch fired in that window re-fetches the SAME page — it dedupes
-      // to zero inserted rows, and anchoring a no-op prepend is the full
-      // jump-out-and-back of 09-22 round 14.
-      setState(() => _loadingOlder = false);
-      unawaited(
-          _prependOlderPage(page.state, page.older, page.hasMore));
-    });
+    if (!mounted) return;
+    _pager.flushHeld();
   }
 
   /// Reading anchor for the prepend compensation, measured from real
@@ -5733,19 +5611,21 @@ class _SubagentSheetState extends State<_SubagentSheet> {
         _noMore = true;
         return;
       }
-      if (!widget.state.rangeEnvelopeMatches(res['atLogEpoch'] as String?)) {
+      // Response order is preserved (sortOldestFirst: false): the sheet
+      // filters kind=='subagent' rows in arrival order and tracks its own
+      // min-rowId cursor below — no state writeback, results stay sheet-
+      // local (chat-conventions §7.3).
+      final page = parseRowsRangeResponse(
+        res,
+        state: widget.state,
+        sortOldestFirst: false,
+      );
+      if (!page.epochMatches) {
         if (mounted) _toast(tr(context, 'chat.loadOlder.stale'));
         return;
       }
-      final rowsObj = res['rows'];
-      List? rows;
-      if (rowsObj is Map) {
-        rows = rowsObj['window'] as List? ?? rowsObj['rows'] as List?;
-      } else if (rowsObj is List) {
-        rows = rowsObj;
-      }
-      rows ??= res['items'] as List? ?? res['window'] as List?;
-      final hasMore = res['hasMore'] as bool?;
+      final hasMore = page.hasMore;
+      final rows = page.rows;
       if (rows == null || rows.isEmpty) {
         _noMore = hasMore != true;
         return;
@@ -5753,9 +5633,7 @@ class _SubagentSheetState extends State<_SubagentSheet> {
       final existing = _older
           .map((r) => (r['rowId'] as num?)?.toInt())
           .toSet();
-      for (final e in rows) {
-        if (e is! Map) continue;
-        final row = e.cast<String, dynamic>();
+      for (final row in rows) {
         if (row['kind'] != 'subagent') continue;
         if (existing.add((row['rowId'] as num?)?.toInt())) {
           _older.add(row);

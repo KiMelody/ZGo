@@ -1331,7 +1331,9 @@ void main() {
     expect(call.$2[2], {'thought': 'off'});
   });
 
-  testWidgets('existing session: send goes through sendText', (tester) async {
+  testWidgets('existing session: send goes through sendTextOrQueue', (
+    tester,
+  ) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
       wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
@@ -1346,7 +1348,10 @@ void main() {
     await tester.tap(find.byIcon(Icons.arrow_upward));
     await tester.pumpAndSettle();
 
-    final call = gateway.calls.where((c) => c.$1 == 'sendText').toList().single;
+    final call = gateway.calls
+        .where((c) => c.$1 == 'sendTextOrQueue')
+        .toList()
+        .single;
     expect(call.$2, ['s1', '继续', null]);
   });
 
@@ -1372,7 +1377,10 @@ void main() {
     await tester.pump();
     await tester.tap(find.byIcon(Icons.arrow_upward));
     await tester.pumpAndSettle();
-    final call = gateway.calls.where((c) => c.$1 == 'sendText').toList().single;
+    final call = gateway.calls
+        .where((c) => c.$1 == 'sendTextOrQueue')
+        .toList()
+        .single;
     expect(call.$2[1], '排队消息 A');
   });
 

@@ -18,8 +18,8 @@ String _symbolName(Symbol s) =>
 /// `calls` list the gateway records into.
 ///
 /// Commands whose recorded shape tests assert on (createSession /
-/// sendText / resolveInteraction) are overridden explicitly to keep the
-/// historical FakeChatGateway recording shape; everything else falls
+/// sendTextOrQueue / resolveInteraction) are overridden explicitly to keep
+/// the historical FakeChatGateway recording shape; everything else falls
 /// through to noSuchMethod.
 class RecordingConversationTransport implements ConversationTransport {
   RecordingConversationTransport(this._accept, this._strictIsOn);
@@ -42,34 +42,26 @@ class RecordingConversationTransport implements ConversationTransport {
     return 'new-s1';
   }
 
+  /// Programmed [sendTextOrQueue] results, dequeued front-first (empty →
+  /// `SendTextResult.sent` with the default accepted ack). The chat page
+  /// consumes typed results, so send-path tests program at the result
+  /// level — e.g. `SendTextResult.queued(item)` with an item from the
+  /// gateway's injected replayable queue (queue-bar smoke).
+  final List<SendTextResult> sendTextOrQueueResults = [];
+
   @override
-  Future<dynamic> sendText(
+  Future<SendTextResult> sendTextOrQueue(
     String sessionId,
     String text, {
     List<Map<String, dynamic>>? attachments,
     String? heldQueueDisposition,
-    List<String>? expectedHeldQueueItemIds,
-    String? automationId,
-    String? offPeakTaskId,
-    String? offPeakRunType,
-    String? botDeliveryTarget,
-    List<String>? toolDisallowlist,
   }) async {
-    _accept('sendText', [sessionId, text, heldQueueDisposition]);
-    // Dequeued front-first: an Exception/Error is thrown (replayable-queue
-    // capture tests), anything else is returned.
-    if (sendTextResults.isNotEmpty) {
-      final next = sendTextResults.removeAt(0);
-      if (next is Exception) throw next;
-      if (next is Error) throw next;
-      return next;
+    _accept('sendTextOrQueue', [sessionId, text, heldQueueDisposition]);
+    if (sendTextOrQueueResults.isNotEmpty) {
+      return sendTextOrQueueResults.removeAt(0);
     }
-    return const {'status': 'accepted'};
+    return SendTextResult.sent(const {'status': 'accepted'});
   }
-
-  /// Programmed `sendText` answers, dequeued front-first (empty → accepted
-  /// ack; an Exception/Error entry is thrown — bridge-level failure tests).
-  final List<Object?> sendTextResults = [];
 
   @override
   Future<dynamic> resolveInteraction(
@@ -209,9 +201,10 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   /// tests program this on the gateway.
   List<Object?> get rowsRangeResults => _commands.rowsRangeResults;
 
-  /// Programmed `sendText` answers (see the transport's field): an
-  /// Exception/Error entry is thrown — replayable-queue capture tests.
-  List<Object?> get sendTextResults => _commands.sendTextResults;
+  /// Programmed [ConversationTransport.sendTextOrQueue] results (see the
+  /// transport's field) — send-path tests program at the result level.
+  List<SendTextResult> get sendTextOrQueueResults =>
+      _commands.sendTextOrQueueResults;
 
   /// Records (method, args) and returns the default `accepted` ack.
   dynamic _accept(String method, [List<Object?> args = const []]) {
