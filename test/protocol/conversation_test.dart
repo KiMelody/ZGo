@@ -459,7 +459,8 @@ void main() {
     });
   });
 
-  group('optimistic config trace & revert detection (design 09-25 D3)', () {
+  group('optimistic config trace & revert detection (design 09-25 D3; '
+      'trace armed on the lost-ack path only — 10-02 Step 3)', () {
     late ConversationState state;
 
     setUp(() {
@@ -472,22 +473,28 @@ void main() {
       'thought': 'enabled',
     };
 
-    test('optimistic patch confirmed by a same-value snapshot raises no flag',
-        () {
+    test('an accepted switch never flags on old-config snapshots — the '
+        'desktop keeps the old value until the next message (AC8)', () {
       _injectSnapshot(state, snapshot: {'config': config('A')});
+      // The sheet's accepted path: clear (no-op when nothing is armed)
+      // then land the patch. optimisticPatch itself must NOT arm.
+      state.clearConfigRevertTrace();
       state.optimisticPatch({'config': config('B')});
       expect(state.currentModel, 'B');
 
-      _injectSnapshot(state, snapshot: {'config': config('B')});
+      // Authoritative snapshot replaying the desktop's old config — the
+      // pending semantics, not evidence of a lost command.
+      _injectSnapshot(state, snapshot: {'config': config('A')});
       expect(state.consumeConfigReverted(), isFalse,
-          reason: 'the authoritative snapshot agrees with the optimism');
-      expect(state.currentModel, 'B');
+          reason: 'accepted switches are never suspect');
     });
 
-    test('authoritative snapshot with a different value within 60s sets the '
-        'one-shot flag; the state.updated merge path never does', () {
+    test('a lost-ack arm + an old-config snapshot fires the one-shot flag; '
+        'the state.updated merge path never does', () {
       _injectSnapshot(state, snapshot: {'config': config('A')});
+      // The sheet's onTimeoutOptimistic path: land the patch AND arm.
       state.optimisticPatch({'config': config('B')});
+      state.armConfigRevertTrace({'config': config('B')});
 
       // Incremental confirmation (the normal accepted path): merging a
       // patch — even with a different config — must not count as a revert.
@@ -511,11 +518,22 @@ void main() {
           reason: 'one-shot: consumed on read');
     });
 
+    test('a late accepted clears the armed trace: slow is not lost', () {
+      _injectSnapshot(state, snapshot: {'config': config('A')});
+      state.armConfigRevertTrace({'config': config('B')});
+      // The response finally arrived — the sheet's accepted path clears
+      // the arm before any verdict snapshot shows up.
+      state.clearConfigRevertTrace();
+
+      _injectSnapshot(state, snapshot: {'config': config('A')});
+      expect(state.consumeConfigReverted(), isFalse,
+          reason: 'a cleared trace is never compared');
+    });
+
     test('a differing snapshot past the 60s window raises no flag', () {
       var now = DateTime(2026, 9, 25, 12);
       withClock(Clock(() => now), () {
-        _injectSnapshot(state, snapshot: {'config': config('A')});
-        state.optimisticPatch({'config': config('B')});
+        state.armConfigRevertTrace({'config': config('B')});
 
         now = now.add(const Duration(seconds: 61));
         _injectSnapshot(state, snapshot: {'config': config('A')});
@@ -524,16 +542,22 @@ void main() {
       });
     });
 
-    test('a second optimistic patch re-bases the trace on the newest value',
-        () {
-      _injectSnapshot(state, snapshot: {'config': config('A')});
-      state.optimisticPatch({'config': config('B')});
-      state.optimisticPatch({'config': config('C')});
+    test('a second arm re-bases the trace on the newest value', () {
+      state.armConfigRevertTrace({'config': config('B')});
+      state.armConfigRevertTrace({'config': config('C')});
 
-      // A snapshot with B differs from the LATEST optimistic value (C) —
+      // A snapshot with B differs from the LATEST armed value (C) —
       // the verdict must be computed against the new trace.
       _injectSnapshot(state, snapshot: {'config': config('B')});
       expect(state.consumeConfigReverted(), isTrue);
+    });
+
+    test('armConfigRevertTrace ignores a patch without a config member', () {
+      // Negative payload lock: arming is config-shaped only; a stray
+      // patch must not leave a trace behind.
+      state.armConfigRevertTrace({'mode': 'yolo'});
+      _injectSnapshot(state, snapshot: {'config': config('A')});
+      expect(state.consumeConfigReverted(), isFalse);
     });
   });
 

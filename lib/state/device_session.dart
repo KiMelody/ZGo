@@ -389,6 +389,29 @@ class DeviceSession extends ChangeNotifier
   /// non-active workspaces (and the archive view) from exactly this list.
   List<Map<String, dynamic>> _relayTasks = [];
 
+  /// Task ids whose delete RPC completed successfully on THIS device
+  /// (design 10-02 Step 3). The desktop's live sessions-index has no
+  /// deleted concept (its subscription snapshot still lists them) and the
+  /// relay overview row can lag in memory when a reloadTasks response is
+  /// swallowed by a bridge reopen — this client-side tombstone is the only
+  /// layer covering both resurrection paths (see [TaskDirectory
+  /// .locallyDeletedTaskIds]). Add-only by design: task ids are never
+  /// reused and the set stays small. A timed-out / errored delete must
+  /// NOT land here — with the outcome unknown, hiding a task the user
+  /// believes deleted but isn't is worse than a stale row.
+  final Set<String> _locallyDeletedTaskIds = <String>{};
+
+  /// Live-confirmed workspace homes (design 10-02 sticky home): task
+  /// id → workspace key, written every time a live sessions-index
+  /// snapshot arrives (membership IS the ground truth of a task's
+  /// home, spec §3.2). Extends that verdict's lifetime past the
+  /// subscription itself, so a bridge swing's resubscribe window —
+  /// where live coverage drops and rows would fall back to the relay
+  /// pick key — can no longer flip a confirmed row's group. Pure
+  /// memory, never serialized; a real move overwrites via the next
+  /// live confirmation.
+  final Map<String, String> _confirmedHomeKeys = {};
+
   /// Well-known `app-error` reason of the last fatal failure (the
   /// web's `webRemoteControl.failure.*` enum); UI maps it to localized copy.
   String? _failureReason;
@@ -414,7 +437,28 @@ class DeviceSession extends ChangeNotifier
   TaskDirectory get taskDirectory => TaskDirectory(
         relayTasks: relayTasks,
         sessions: sessions,
+        locallyDeletedTaskIds: _locallyDeletedTaskIds,
+        confirmedHomeKeys: _confirmedHomeKeys,
       );
+
+  /// Confirms every live sessions-index membership into
+  /// [_confirmedHomeKeys] (design 10-02 sticky home): the index is the
+  /// product of `listSessions(directory = workspace)`, so membership in
+  /// it IS the ground truth of a task's home (task-registry-semantics
+  /// §3.2) — recording the verdict extends it past the subscription
+  /// itself, so a bridge swing's resubscribe window (live coverage down,
+  /// rows fall back to the relay pick) cannot re-group a confirmed row.
+  /// Entries without any attribution (no identity/path and no
+  /// subscription key) confirm nothing. Wired to every live frame via
+  /// [_onSessionsChanged]; the fake session replays the same wiring.
+  void confirmLiveHomes() {
+    final state = sessions;
+    if (state == null || !state.ready) return;
+    for (final entry in state.list) {
+      final key = TaskDirectory.liveKeyOf(entry, state.subscribedWorkspaceKey);
+      if (key != null) _confirmedHomeKeys[entry.sessionId] = key;
+    }
+  }
 
   /// True while a workspace bridge + sessions-index open is in flight.
   bool get openingWorkspace => _openingWorkspace;
@@ -751,6 +795,10 @@ class DeviceSession extends ChangeNotifier
         sub.state.deletedTaskIds = const {};
       }
       sub.state.addListener(_onSessionsChanged);
+      // A snapshot may have landed during the tombstone probe above —
+      // before the listener attached. Confirm whatever is already there
+      // (a no-op while the index is still empty).
+      confirmLiveHomes();
       _error = null;
       onWorkspaceOpened?.call(key);
       notifyListeners();
@@ -774,6 +822,7 @@ class DeviceSession extends ChangeNotifier
     if (_disposed) return;
     final sub = _sessionsSub;
     if (sub != null && sub.state.ready) {
+      confirmLiveHomes();
       // First snapshot landed — the list is alive again.
       _listWatchdog?.cancel();
       _listEscalations = 0;
@@ -1299,8 +1348,16 @@ class DeviceSession extends ChangeNotifier
       taskCommands.setUnread(sessionId, unread);
 
   @override
-  Future<dynamic> deleteTask(String sessionId) =>
-      taskCommands.delete(sessionId);
+  Future<dynamic> deleteTask(String sessionId) async {
+    final res = await taskCommands.delete(sessionId);
+    // Explicit success only (the await above threw on timeout / error):
+    // tombstone the row and re-notify so the merged directory recomputes
+    // even when the desktop's workspace-list-updated push was swallowed
+    // by a bridge reopen (design 10-02 Step 3).
+    _locallyDeletedTaskIds.add(sessionId);
+    notifyListeners();
+    return res;
+  }
 
   @override
   Future<FileStat> fileStat(String workspacePath, String path) =>

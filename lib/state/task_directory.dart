@@ -21,9 +21,32 @@ class TaskDirectory {
   /// Live sessions-index of the subscribed workspace (null until subscribed).
   final SessionsIndexState? sessions;
 
+  /// Locally-confirmed deletes (design 10-02 Step 3): task ids whose
+  /// delete RPC returned success on this device. Unlike the probe-derived
+  /// [SessionsIndexState.deletedTaskIds] — which guards the live loops
+  /// only so a relay base row survives — this set filters BOTH sources:
+  /// a successful delete is definitive, while the relay overview row can
+  /// lag in memory when a reloadTasks response is swallowed by a bridge
+  /// reopen. Owned by the session and add-only, so it is aliased here
+  /// without copying and re-reads see every new tombstone.
+  final Set<String> locallyDeletedTaskIds;
+
+  /// Live-confirmed workspace homes (design 10-02 sticky home): task id →
+  /// workspace key as recorded by the session's live sessions-index
+  /// ([DeviceSession.confirmLiveHomes]). The relay pick phase still
+  /// resolves duplicate rows with the raw relay keys, but the surviving
+  /// row's grouping key is pinned to the confirmed home — a bridge
+  /// swing's resubscribe window (live coverage down, rows fall back to
+  /// the relay pick) can no longer flip a confirmed row's group. Aliased
+  /// without copying, like [locallyDeletedTaskIds]; a cold start passes
+  /// the empty map and keeps the pure relay-pick behavior.
+  final Map<String, String> confirmedHomeKeys;
+
   const TaskDirectory({
     this.relayTasks = const [],
     this.sessions,
+    this.locallyDeletedTaskIds = const {},
+    this.confirmedHomeKeys = const {},
   });
 
   /// Merged rows: relay base, live override per task id. Each row carries
@@ -52,6 +75,9 @@ class TaskDirectory {
     for (final task in relayTasks) {
       final entry = SessionEntry.fromRelayTask(task);
       if (entry.sessionId.isEmpty) continue;
+      // Locally-confirmed delete: drop the relay row too — the overview
+      // in memory may be stale (see [locallyDeletedTaskIds]).
+      if (locallyDeletedTaskIds.contains(entry.sessionId)) continue;
       final key = relayKeyOf(task);
       final existing = byId[entry.sessionId];
       // Duplicate relay rows (desktop copies) resolve deterministically
@@ -62,13 +88,31 @@ class TaskDirectory {
       }
       byId[entry.sessionId] = (entry, key, task['archived'] == true);
     }
+    // Sticky homes (design 10-02): pin the surviving rows to their
+    // live-confirmed group. Applied AFTER the pick so [_relayRowBeats]
+    // keeps comparing raw relay keys — the row selection semantics are
+    // unchanged, only the final grouping key is overridden. The live loop
+    // below still outranks a pinned key whenever the index is ready (and
+    // the same snapshot overwrote the cache, so they agree anyway).
+    for (final id in byId.keys) {
+      final home = confirmedHomeKeys[id];
+      if (home != null) {
+        final (entry, _, archived) = byId[id]!;
+        byId[id] = (entry, home, archived);
+      }
+    }
     if (sessions?.ready == true) {
       for (final entry in sessions!.list) {
         // Deleted-task tombstones: the live index still lists tasks the
         // user deleted on the desktop, and relay has no anchor row for
         // them — without this filter the live merge resurrects them
-        // (Addendum 2, 2026-09-23 device report: default 12 → 22).
-        if (sessions!.deletedTaskIds.contains(entry.sessionId)) continue;
+        // (Addendum 2, 2026-09-23 device report: default 12 → 22). The
+        // local set covers deletes this device confirmed while the
+        // desktop index (and its probe) lag behind.
+        if (sessions!.deletedTaskIds.contains(entry.sessionId) ||
+            locallyDeletedTaskIds.contains(entry.sessionId)) {
+          continue;
+        }
         byId[entry.sessionId] = (
           entry,
           liveKeyOf(entry, sessions!.subscribedWorkspaceKey),
@@ -154,6 +198,9 @@ class TaskDirectory {
       if (task['pinned'] != true || task['archived'] == true) continue;
       final entry = SessionEntry.fromRelayTask(task);
       if (entry.sessionId.isEmpty) continue;
+      // Same locally-deleted rule as [_rows] — a confirmed delete never
+      // pins, whatever the stale overview says.
+      if (locallyDeletedTaskIds.contains(entry.sessionId)) continue;
       final key = relayKeyOf(task);
       final existing = byId[entry.sessionId];
       // Same duplicate-row rule as [_rows] — see [_relayRowBeats].
@@ -163,10 +210,23 @@ class TaskDirectory {
       }
       byId[entry.sessionId] = (entry, key);
     }
+    // Same sticky-home rule as [_rows] — the pinned rows group by their
+    // live-confirmed home, after the pick so its raw-key tie-break stays
+    // frame-order independent.
+    for (final id in byId.keys) {
+      final home = confirmedHomeKeys[id];
+      if (home != null) {
+        final (entry, _) = byId[id]!;
+        byId[id] = (entry, home);
+      }
+    }
     if (sessions?.ready == true) {
       for (final entry in sessions!.list) {
-        // Same tombstone rule as [_rows] — deleted live rows never pin.
-        if (sessions!.deletedTaskIds.contains(entry.sessionId)) continue;
+        // Same tombstone rules as [_rows] — deleted live rows never pin.
+        if (sessions!.deletedTaskIds.contains(entry.sessionId) ||
+            locallyDeletedTaskIds.contains(entry.sessionId)) {
+          continue;
+        }
         if (entry.raw['pinned'] == true) {
           byId[entry.sessionId] = (
             entry,
@@ -182,8 +242,17 @@ class TaskDirectory {
 
   /// Task count for the summary line: all non-archived relay
   /// tasks, falling back to the live index when no overview has arrived.
+  /// Locally-confirmed deletes come off the relay count (the live
+  /// fallback stays raw — same accepted over-count as the probe
+  /// tombstones, task-registry-semantics §4).
   int get totalTaskCount {
-    final relay = relayTasks.where((t) => t['archived'] != true).length;
+    final relay = relayTasks
+        .where(
+          (t) =>
+              t['archived'] != true &&
+              !locallyDeletedTaskIds.contains(t['taskId']),
+        )
+        .length;
     if (relay > 0) return relay;
     return sessions?.list.where((e) => e.raw['archived'] != true).length ?? 0;
   }

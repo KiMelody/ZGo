@@ -356,7 +356,7 @@ const _zh = {
   'chat.sheet.followup': '后续消息',
   'chat.sheet.other': '其他配置',
   'chat.sheet.rejected': '被拒绝: \$0',
-  'chat.sheet.switchPending': '已提交，切换稍后生效',
+  'chat.sheet.switchPending': '已切换，下一条消息生效',
   'chat.sheet.switchReverted': '模型/思考切换未生效，已恢复为桌面当前设置',
   'chat.sheet.switchRetrying': '切换未生效，正在重试…',
   'chat.session.startFailedTitle': '会话未能启动',
@@ -1357,7 +1357,8 @@ const _en = {
   'chat.sheet.followup': 'Follow-up messages',
   'chat.sheet.other': 'Other settings',
   'chat.sheet.rejected': 'Rejected: \$0',
-  'chat.sheet.switchPending': 'Submitted — the switch lands shortly',
+  'chat.sheet.switchPending':
+      'Switched — takes effect on your next message',
   'chat.sheet.switchReverted':
       "The switch did not take effect; reverted to the desktop's current setting",
   'chat.sheet.switchRetrying':

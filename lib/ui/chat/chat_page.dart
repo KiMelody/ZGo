@@ -7668,13 +7668,17 @@ class _ModelModeSheet extends StatelessWidget {
                                   false)
                           ? currentThought
                           : '${thoughtOpt?.currentValue ?? (currentThought.isNotEmpty ? currentThought : 'enabled')}';
+                      // Config exactly as the switch leaves it — the
+                      // optimistic patch lands it, the lost-ack path arms
+                      // the revert trace with the same value.
+                      Map<String, dynamic> switchedConfig() => {
+                        ...?state!.config,
+                        'provider': provider,
+                        'model': model,
+                        'thought': thought,
+                      };
                       void patch() => state?.optimisticPatch({
-                        'config': {
-                          ...?state!.config,
-                          'provider': provider,
-                          'model': model,
-                          'thought': thought,
-                        },
+                        'config': switchedConfig(),
                       });
                       onSwitchIssued?.call(
                         _LastSwitch(sid, provider, model, thought, patch),
@@ -7687,10 +7691,25 @@ class _ModelModeSheet extends StatelessWidget {
                           model: model,
                           thought: thought,
                         ),
-                        onAccepted: patch,
+                        // Accepted (design 10-02 Step 3): clear any trace
+                        // armed earlier — old-config snapshots from here
+                        // on are the desktop's pending semantics, never a
+                        // lost command.
+                        onAccepted: () {
+                          state?.clearConfigRevertTrace();
+                          patch();
+                        },
                         // PRD 09-19: a lost ack (bridge reconnect window)
-                        // is not a rejection — land the patch anyway.
-                        onTimeoutOptimistic: patch,
+                        // is not a rejection — land the patch anyway and
+                        // ARM the revert trace: an authoritative snapshot
+                        // still carrying the old config is now evidence
+                        // of a swallowed command (design 10-02 Step 3).
+                        onTimeoutOptimistic: () {
+                          patch();
+                          state?.armConfigRevertTrace({
+                            'config': switchedConfig(),
+                          });
+                        },
                       );
                     }
                   },
@@ -7730,11 +7749,12 @@ class _ModelModeSheet extends StatelessWidget {
                                   '${config['provider'] ?? ''}',
                                   '${config['model'] ?? ''}',
                                 );
+                          Map<String, dynamic> switchedConfig() => {
+                            ...?state!.config,
+                            'thought': v.value,
+                          };
                           void patch() => state?.optimisticPatch({
-                            'config': {
-                              ...?state!.config,
-                              'thought': v.value,
-                            },
+                            'config': switchedConfig(),
                           });
                           onSwitchIssued?.call(
                             _LastSwitch(sid, provider, model, v.value, patch),
@@ -7747,9 +7767,19 @@ class _ModelModeSheet extends StatelessWidget {
                               model: model,
                               thought: v.value,
                             ),
-                            onAccepted: patch,
-                            // Same lost-ack optimism as the model switch.
-                            onTimeoutOptimistic: patch,
+                            // Same trace discipline as the model switch
+                            // (design 10-02 Step 3): accepted clears, lost
+                            // ack lands the patch and arms.
+                            onAccepted: () {
+                              state?.clearConfigRevertTrace();
+                              patch();
+                            },
+                            onTimeoutOptimistic: () {
+                              patch();
+                              state?.armConfigRevertTrace({
+                                'config': switchedConfig(),
+                              });
+                            },
                           );
                         }
                       },
@@ -7952,6 +7982,11 @@ class _ModelModeSheet extends StatelessWidget {
   /// the sheet closes with a "pending" toast, and the next sheet open (or
   /// a later state frame) shows the real value. Explicit status
   /// rejections keep the rejection SnackBar and never patch.
+  ///
+  /// Design 10-02 Step 3: the same switch calls also confirm an ACCEPTED
+  /// switch with the pending-semantics toast — the desktop applies the
+  /// switch lazily (it lands on the user's next message), so the sheet
+  /// close alone reads as "nothing happened".
   Future<void> _apply(
     BuildContext context,
     Future<dynamic> Function() run, {
@@ -7976,6 +8011,11 @@ class _ModelModeSheet extends StatelessWidget {
         } else {
           onAccepted?.call();
           Navigator.pop(context);
+          if (onTimeoutOptimistic != null) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(tr(context, 'chat.sheet.switchPending'))),
+            );
+          }
         }
       }
     } catch (e) {

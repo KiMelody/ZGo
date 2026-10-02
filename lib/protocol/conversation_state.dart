@@ -475,23 +475,45 @@ class ConversationState extends ChangeNotifier {
 
   /// Optimistic local update (command already accepted; the confirming
   /// `state.updated` frame may lag). Merges into snapshot immediately.
+  ///
+  /// Never arms the revert trace (design 10-02 Step 3): the desktop keeps
+  /// the OLD config in authoritative snapshots until the user's next
+  /// message (its pending semantics), so arming on every write misread
+  /// every acknowledged switch as a lost command. Arming is the lost-ack
+  /// path's job — [armConfigRevertTrace].
   void optimisticPatch(Map<String, dynamic> patch) {
     if (snapshot == null) return;
-    final config = patch['config'];
-    if (config is Map) {
-      _optimisticConfig = (
-        value: Map<String, dynamic>.from(config),
-        at: clock.now(),
-      );
-    }
     snapshot = {...snapshot!, ...patch};
     notifyListeners();
   }
 
-  /// Optimistic-config trace (design 09-25 D3): what [optimisticPatch]
-  /// last wrote under the `config` key and when — the "switch did not
-  /// take effect" detector's baseline. Null when no optimistic config
-  /// write is pending comparison.
+  /// Arms the revert trace WITHOUT landing a patch (design 10-02 Step 3):
+  /// the lost-ack path only — the sheet's onTimeoutOptimistic callback,
+  /// where the switch response never arrived and a later authoritative
+  /// snapshot still carrying the old config is evidence the command died
+  /// in a bridge swing. [patch] has the same shape as [optimisticPatch]'s;
+  /// its `config` member becomes the compared value.
+  void armConfigRevertTrace(Map<String, dynamic> patch) {
+    final config = patch['config'];
+    if (config is! Map) return;
+    _optimisticConfig = (
+      value: Map<String, dynamic>.from(config),
+      at: clock.now(),
+    );
+  }
+
+  /// Clears an armed trace without a verdict (design 10-02 Step 3): the
+  /// accepted path — a switch that was acknowledged, even late, must not
+  /// be judged by later old-config snapshots (those are the desktop's
+  /// pending semantics, not a lost command).
+  void clearConfigRevertTrace() {
+    _optimisticConfig = null;
+  }
+
+  /// Optimistic-config trace (design 09-25 D3): what [armConfigRevertTrace]
+  /// last armed under the `config` key and when — the "switch did not
+  /// take effect" detector's baseline. Null when no lost-ack switch is
+  /// pending comparison.
   ({Map<String, dynamic> value, DateTime at})? _optimisticConfig;
 
   /// How long an optimistic write stays worth comparing (design D3:
@@ -511,7 +533,8 @@ class ConversationState extends ChangeNotifier {
 
   /// Revert detection (design D3), run against each authoritative
   /// snapshot's `config`: a value differing from a still-fresh (≤60s)
-  /// optimistic write means the switch command was lost in a bridge swing
+  /// armed trace (armed on the lost-ack path only, design 10-02 Step 3)
+  /// means the switch command was lost in a bridge swing
   /// and this snapshot silently rolled the UI back to the desktop's old
   /// setting — raise the one-shot flag. Same value = the switch survived
   /// (trace clears, no flag). Snapshots without `config` are not a
