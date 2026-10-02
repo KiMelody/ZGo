@@ -4,7 +4,7 @@ import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/state/task_directory.dart';
 
 /// TaskDirectory 的直穿测试：relay⊕live 合并规则、归档两态、置顶、计数、
-/// notificationRows 含归档的显式语义（Q3a 裁决）。
+/// notificationRows 含归档的显式语义（Q3a 裁决）、sticky 确认家（10-02）。
 
 SessionsIndexState _liveIndex(
   List<Map<String, dynamic>> entries, {
@@ -443,5 +443,185 @@ void main() {
       ).totalTaskCount,
       1,
     );
+  });
+
+  // ---- locally-confirmed deletes (design 10-02 Step 3 / AC7) -----------
+  // Unlike the probe tombstones above (live rows only, the relay base row
+  // stays defensive), a delete RPC that returned SUCCESS is definitive:
+  // the local set filters the relay rows too — the overview in memory can
+  // lag when a reloadTasks response is swallowed by a bridge reopen.
+
+  test('locally-deleted relay rows drop from every list view and the count',
+      () {
+    final dir = TaskDirectory(
+      relayTasks: [_relayTask('a', 'alpha'), _relayTask('b', 'alpha')],
+      locallyDeletedTaskIds: {'a'},
+    );
+    expect(
+      [for (final (e, _) in dir.allEntries()) e.sessionId],
+      ['b'],
+    );
+    expect(
+      [for (final (e, _) in dir.entriesFor('alpha')) e.sessionId],
+      ['b'],
+    );
+    expect(dir.notificationRows().map((e) => e.sessionId), ['b']);
+    expect(dir.totalTaskCount, 1);
+  });
+
+  test('a locally-deleted pinned relay row never pins', () {
+    final dir = TaskDirectory(
+      relayTasks: [_relayTask('a', 'alpha', pinned: true)],
+      locallyDeletedTaskIds: {'a'},
+    );
+    expect(dir.pinnedEntries(), isEmpty);
+  });
+
+  test('locally-deleted ids drop the live row even when the stale relay '
+      'row and a live row both linger', () {
+    // The device bug this fixes: delete succeeded, the desktop's live
+    // index re-sent the session (no deleted concept) AND the in-memory
+    // relay overview was stale — both paths resurrected the row.
+    final dir = TaskDirectory(
+      relayTasks: [_relayTask('a', 'alpha')],
+      sessions: _liveIndex([
+        {
+          'sessionId': 'a',
+          'title': 'live-a',
+          'phase': 'running',
+          'pinned': true,
+          'lastActivityAt': 9,
+        },
+      ], subscribedWorkspaceKey: 'alpha'),
+      locallyDeletedTaskIds: {'a'},
+    );
+    expect(dir.allEntries(), isEmpty);
+    expect(dir.pinnedEntries(), isEmpty);
+    expect(dir.notificationRows(), isEmpty);
+  });
+
+  test('without local tombstones nothing changes (default constructor)',
+      () {
+    final dir = TaskDirectory(
+      relayTasks: [_relayTask('a', 'alpha')],
+      sessions: _liveIndex([
+        {'sessionId': 'a', 'title': 'live-a', 'phase': 'running'},
+      ], subscribedWorkspaceKey: 'alpha'),
+    );
+    expect(dir.allEntries(), hasLength(1));
+    expect(dir.totalTaskCount, 1);
+  });
+
+  // ---- sticky live-confirmed homes (design 10-02 / AC1-AC4) ------------
+  // A live sessions-index confirmation pins the row's group past the
+  // subscription itself: the bridge swing's resubscribe window (live
+  // coverage down) drops rows back onto the relay pick key — the pick
+  // loses mirror rows to stale foreign keys, the row oscillates between
+  // groups. The confirmed home overrides the final grouping key only;
+  // the pick phase itself still compares raw relay keys.
+
+  test('a confirmed home pins the relay pick row (AC1/AC4)', () {
+    // The stale desktop copy row (stale_zgo) has the greater updatedAt and
+    // wins the relay pick — live had confirmed the real home real_ws.
+    final rows = [
+      _relayTask('t1', 'stale_zgo', updatedAt: 200),
+      _relayTask('t1', 'real_ws', updatedAt: 100),
+    ];
+    // While the index is ready, live confirms real_ws anyway.
+    final ready = TaskDirectory(
+      relayTasks: rows,
+      confirmedHomeKeys: {'t1': 'real_ws'},
+      sessions: _liveIndex([
+        {'sessionId': 't1', 'title': 'live-t1', 'phase': 'running'},
+      ], subscribedWorkspaceKey: 'real_ws'),
+    );
+    expect(ready.allEntries().single.$2, 'real_ws');
+    // Resubscribe window: the index drops out entirely — the row must
+    // stay in its confirmed group instead of falling back to stale_zgo.
+    final window = TaskDirectory(
+      relayTasks: rows,
+      confirmedHomeKeys: {'t1': 'real_ws'},
+    );
+    expect(window.allEntries().single.$2, 'real_ws');
+    expect(window.entriesFor('stale_zgo'), isEmpty);
+  });
+
+  test('cold start (no confirmed homes) keeps the pure relay pick (AC3)',
+      () {
+    // Empty cache = pre-feature behavior: the pick key rules, no pin.
+    final dir = TaskDirectory(
+      relayTasks: [
+        _relayTask('t1', 'mirror', updatedAt: 200),
+        _relayTask('t1', 'real', updatedAt: 100),
+      ],
+    );
+    expect(dir.allEntries().single.$2, 'mirror');
+  });
+
+  test('the pick still resolves duplicate rows by RAW relay keys when a '
+      'confirmed home exists', () {
+    // The home key ('a') sorts below both raw keys ('b', 'c'): if the
+    // sticky key leaked into the beats comparison, the equal-updatedAt
+    // tie-break would flip with the frame order. Both orders must pick
+    // the same row data and pin the group to the confirmed home.
+    for (final rows in [
+      [
+        {
+          ..._relayTask('t1', 'c', updatedAt: 5),
+          'title': 'row-c',
+        },
+        {
+          ..._relayTask('t1', 'b', updatedAt: 5),
+          'title': 'row-b',
+        },
+      ],
+      [
+        {
+          ..._relayTask('t1', 'b', updatedAt: 5),
+          'title': 'row-b',
+        },
+        {
+          ..._relayTask('t1', 'c', updatedAt: 5),
+          'title': 'row-c',
+        },
+      ],
+    ]) {
+      final dir = TaskDirectory(
+        relayTasks: rows,
+        confirmedHomeKeys: {'t1': 'a'},
+      );
+      final row = dir.allEntries().single;
+      expect(row.$1.title, 'row-b'); // raw-key tie-break, either order
+      expect(row.$2, 'a'); // group pinned by the confirmed home
+    }
+  });
+
+  test('pinned: a confirmed home pins the relay row the same way', () {
+    final dir = TaskDirectory(
+      relayTasks: [
+        _relayTask('t1', 'stale_zgo', pinned: true, updatedAt: 200),
+        _relayTask('t1', 'real_ws', pinned: true, updatedAt: 100),
+      ],
+      confirmedHomeKeys: {'t1': 'real_ws'},
+    );
+    final pinned = dir.pinnedEntries();
+    expect(pinned, hasLength(1));
+    expect(pinned.single.$2, 'real_ws');
+  });
+
+  test('a ready live index still outranks the pinned home', () {
+    // The live loop is untouched: when the index is ready its membership
+    // rules (and the same snapshot has just overwritten the cache — the
+    // real move case, AC2), so the pin never blocks a live correction.
+    final dir = TaskDirectory(
+      relayTasks: [_relayTask('t1', 'stale_zgo')],
+      confirmedHomeKeys: {'t1': 'old_ws'},
+      sessions: _liveIndex([
+        {'sessionId': 't1', 'title': 'live-t1', 'phase': 'running'},
+      ], subscribedWorkspaceKey: 'new_ws'),
+    );
+    final row = dir.allEntries().single;
+    expect(row.$1.title, 'live-t1');
+    expect(row.$2, 'new_ws');
   });
 }

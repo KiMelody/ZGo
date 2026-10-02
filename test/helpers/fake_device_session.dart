@@ -24,6 +24,18 @@ class FakeDeviceSession extends DeviceSession {
   }) : status = DeviceStatus.connected,
        sessions = SessionsIndexState(),
        super() {
+    _workspaces = workspaces;
+    _active = workspaces.isEmpty ? null : workspaces.first;
+    // Like _openWorkspaceNow: the seeded index carries the identity of
+    // the workspace it was "subscribed" to (live-only rows attribute here).
+    // Recorded BEFORE the seed frame so the confirmation below sees it.
+    sessions.subscribedWorkspaceKey =
+        _active == null ? null : workspaceKeyOf(_active!);
+    // Replay the production wiring (openWorkspace attaches the session's
+    // live-frame listener to the subscribed index): every frame this fake
+    // delivers re-confirms the sticky home cache (design 10-02) — the
+    // seeded snapshot included.
+    sessions.addListener(confirmLiveHomes);
     sessions.applyFrame({
       'toSeq': 1,
       'payload': {
@@ -31,12 +43,6 @@ class FakeDeviceSession extends DeviceSession {
         'snapshot': {'workspaceId': 'ws-1', 'sessions': entries},
       },
     }, onGap: () {});
-    _workspaces = workspaces;
-    _active = workspaces.isEmpty ? null : workspaces.first;
-    // Like _openWorkspaceNow: the seeded index carries the identity of
-    // the workspace it was "subscribed" to (live-only rows attribute here).
-    sessions.subscribedWorkspaceKey =
-        _active == null ? null : workspaceKeyOf(_active!);
   }
 
   late List<Map<String, dynamic>> _workspaces;
