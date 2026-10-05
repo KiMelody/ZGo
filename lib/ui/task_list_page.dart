@@ -265,10 +265,12 @@ class _TaskListPageState extends State<TaskListPage>
     SessionEntry entry,
     String? key,
   ) {
-    if (key == null) return null;
     for (final ws in session.workspaces) {
-      if (workspaceKeyOf(ws) == key) return ws;
+      if (key != null && workspaceKeyOf(ws) == key) return ws;
     }
+    // No directory anchor (archived rows are filtered out of allEntries,
+    // session-only rows never had one): the row's own origin fields still
+    // say where it belongs — cross-workspace rows keep their chip.
     final path = entry.raw['workspacePath'];
     if (path is! String || path.isEmpty) return null;
     return {
@@ -636,11 +638,11 @@ class _TaskListPageState extends State<TaskListPage>
                     ),
                   ),
                 ),
-                if (isActive || entries.isNotEmpty)
-                  Text(
-                    '${entries.length}',
-                    style: ZType.caption.copyWith(color: ZInk.ghost(context)),
-                  ),
+                // Count on every folder (B7): 0 says the folder is empty.
+                Text(
+                  '${entries.length}',
+                  style: ZType.caption.copyWith(color: ZInk.ghost(context)),
+                ),
               ],
             ),
           ),
@@ -655,11 +657,15 @@ class _TaskListPageState extends State<TaskListPage>
               indent: true,
               workspace: ws,
             ),
-          if (_showArchived && entries.isEmpty)
+          // Empty-group feedback (B7); the archive filter keeps its own copy.
+          if (entries.isEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(24, 2, 8, 6),
               child: Text(
-                tr(context, 'tasks.archive.empty'),
+                tr(
+                  context,
+                  _showArchived ? 'tasks.archive.empty' : 'tasks.empty',
+                ),
                 style: ZType.sub.copyWith(color: ZInk.ghost(context)),
               ),
             ),
@@ -1115,14 +1121,20 @@ class _TaskListPageState extends State<TaskListPage>
 
   /// 整理任务 panel: group (workspace / timeline) + sort
   /// (created / updated), radio-style like the web popover.
+  ///
+  /// The sheet is its own route: the page-level [setState] below never
+  /// rebuilds it (the radio visuals froze on the first selection, B2), so a
+  /// StatefulBuilder carries the sheet subtree while the page setState
+  /// re-groups / re-sorts the list behind it.
   Future<void> _showTidyPanel(BuildContext context) {
     return showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       isScrollControlled: true,
-      builder: (sheetCtx) => zSheetScaffold(
-        sheetCtx,
-        child: Column(
+      builder: (sheetCtx) => StatefulBuilder(
+        builder: (sheetCtx, setSheetState) => zSheetScaffold(
+          sheetCtx,
+          child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1138,6 +1150,7 @@ class _TaskListPageState extends State<TaskListPage>
               groupValue: _groupBy,
               onChanged: (v) {
                 setState(() => _groupBy = v ?? _groupBy);
+                setSheetState(() {});
                 _saveOrganizePrefs();
               },
               child: Column(
@@ -1173,6 +1186,7 @@ class _TaskListPageState extends State<TaskListPage>
               groupValue: _sortBy,
               onChanged: (v) {
                 setState(() => _sortBy = v ?? _sortBy);
+                setSheetState(() {});
                 _saveOrganizePrefs();
               },
               child: Column(
@@ -1193,6 +1207,7 @@ class _TaskListPageState extends State<TaskListPage>
             ),
             const SizedBox(height: 8),
           ],
+          ),
         ),
       ),
     );
@@ -1469,6 +1484,22 @@ class _TaskListPageState extends State<TaskListPage>
     _ => ZColors.neutral400,
   };
 
+  /// B8: taskId → its task group's palette dot. The SAME grouped view the
+  /// timeline headers render is the source, so a task grouped under the
+  /// cron group (blue) carries the same blue dot in the workspace view —
+  /// one membership judgment, both groupings. Empty while the once-per-
+  /// session load is in flight or unsupported (R4 silent degrade).
+  Map<String, Color> _groupDotOf(DeviceSession session) {
+    final grouped = identical(_groupedViewSession, session)
+        ? _groupedView
+        : null;
+    if (grouped == null) return const {};
+    return {
+      for (final g in grouped.groups)
+        for (final m in grouped.membersOf(g.id)) m.taskId: _groupColor(g.color),
+    };
+  }
+
   /// Row prefix label: the task's own workspace (timeline grouping), else
   /// the label handed down by the card.
   String? _rowWorkspaceLabel(DeviceSession session, Map<String, dynamic>? ws) {
@@ -1574,6 +1605,10 @@ class _TaskListPageState extends State<TaskListPage>
     // Highlight: the "current" task row (latest running, else the
     // most recently active) gets a rounded white/10 background.
     final current = _currentEntry(entries);
+    // B8: the grouped-view load is kicked here too so workspace rows can
+    // carry the group dot; a miss (older desktops) keeps the flat rows.
+    _ensureGroupedView(session);
+    final groupDotOf = _groupDotOf(session);
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -1624,11 +1659,12 @@ class _TaskListPageState extends State<TaskListPage>
                     ),
                   ),
                   const SizedBox(width: 8),
-                  if (isActive || entries.isNotEmpty)
-                    Text(
-                      trP(context, 'tasks.taskCount', ['${entries.length}']),
-                      style: ZType.caption.copyWith(color: ZInk.faint(context)),
-                    ),
+                  // Count on every card (B7): a 0-task workspace says so
+                  // instead of going silent like a broken header.
+                  Text(
+                    trP(context, 'tasks.taskCount', ['${entries.length}']),
+                    style: ZType.caption.copyWith(color: ZInk.faint(context)),
+                  ),
                   Icon(
                     expanded
                         ? Icons.keyboard_arrow_up
@@ -1642,8 +1678,7 @@ class _TaskListPageState extends State<TaskListPage>
               ),
             ),
           ),
-          if (expanded &&
-              (isActive ? sessions != null : entries.isNotEmpty)) ...[
+          if (expanded && (isActive ? sessions != null : true)) ...[
             Divider(height: 1, color: ZInk.hairline(context)),
             if (isActive && sessions != null && !sessions.ready)
               const Padding(
@@ -1655,6 +1690,8 @@ class _TaskListPageState extends State<TaskListPage>
                 ),
               )
             else if (entries.isEmpty)
+              // Empty-group feedback (B7): expanding a 0-task workspace
+              // explains itself instead of showing a bare divider.
               Padding(
                 padding: const EdgeInsets.all(16),
                 child: Center(
@@ -1677,6 +1714,7 @@ class _TaskListPageState extends State<TaskListPage>
                   // identical check below skips the reopen, for the others
                   // opening rides workspace-bridge-open.
                   workspace: ws,
+                  groupDot: groupDotOf[entries[i].sessionId],
                 ),
           ],
         ],
@@ -1759,7 +1797,8 @@ class _TaskListPageState extends State<TaskListPage>
   /// rounded white/10 highlight. Rows of other workspaces carry [workspace]
   /// so opening them re-points the bridge (web: workspace-bridge-open with
   /// taskId). Tags: 「等待确认」(pending interaction) and the
-  /// unread dot (`unreadAt`).
+  /// unread dot (`unreadAt`). [groupDot] marks a task-group member with its
+  /// group's palette dot — the same marker the timeline headers render (B8).
   Widget _taskRow(
     BuildContext context,
     DeviceSession session,
@@ -1767,6 +1806,7 @@ class _TaskListPageState extends State<TaskListPage>
     bool highlight = false,
     String? workspaceLabel,
     Map<String, dynamic>? workspace,
+    Color? groupDot,
   }) {
     final (phaseLabel, _) = _phaseVisual(entry.phase);
     final title = entry.title.trim().isEmpty
@@ -1805,6 +1845,17 @@ class _TaskListPageState extends State<TaskListPage>
                       children: [
                         Row(
                           children: [
+                            if (groupDot != null) ...[
+                              Container(
+                                width: ZListRow.dot,
+                                height: ZListRow.dot,
+                                decoration: BoxDecoration(
+                                  color: groupDot,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                            ],
                             if (unread) ...[
                               Container(
                                 width: ZListRow.dot,
@@ -2029,6 +2080,20 @@ class _TaskListPageState extends State<TaskListPage>
     final unread = entry.raw['unreadAt'] != null;
     final isDraft =
         session.taskDirectory.sessionOnlyIds.contains(entry.sessionId);
+    // B9 object title: which workspace the task belongs to, resolved from
+    // the merged directory (the same source the grouped views use) with the
+    // row's own origin fields as fallback.
+    String? wsKey;
+    for (final (e, key) in session.taskDirectory.allEntries()) {
+      if (e.sessionId == entry.sessionId) {
+        wsKey = key;
+        break;
+      }
+    }
+    final ws = _workspaceForKey(session, entry, wsKey);
+    final sheetTitle = entry.title.trim().isEmpty
+        ? tr(context, 'tasks.untitled')
+        : entry.title;
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
@@ -2038,6 +2103,48 @@ class _TaskListPageState extends State<TaskListPage>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // Object title row (B9): the target task first, so a
+              // long-press never acts on a guessed row. Same tier as the
+              // delete dialog's title; workspace chip beside it.
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 12, 24, 4),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        sheetTitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ZType.title,
+                      ),
+                    ),
+                    if (ws != null) ...[
+                      const SizedBox(width: 8),
+                      ConstrainedBox(
+                        // Chip caps its share; a long workspace name
+                        // ellipsizes instead of squeezing the title out.
+                        constraints: const BoxConstraints(maxWidth: 96),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: ZInk.tile(sheetCtx),
+                            borderRadius:
+                                BorderRadius.circular(ZRadius.mini),
+                          ),
+                          child: Text(
+                            workspaceTitle(ws),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: ZType.caption
+                                .copyWith(color: ZInk.faint(sheetCtx)),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
               _tokenUsageLine(sheetCtx, session, entry),
               ListTile(
                 leading: const Icon(Icons.stop_circle_outlined),

@@ -4,6 +4,7 @@ import 'package:app_links/app_links.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:home_widget/home_widget.dart';
 
 import 'notifications/keepalive_controller.dart';
@@ -29,6 +30,27 @@ void main() {
   WidgetsFlutterBinding.ensureInitialized();
   _registerBundledFontLicenses();
   runApp(const ZGoApp());
+}
+
+/// Framework locale resolution (B3): zh-family system locales land on the
+/// zh table (simplified), other supported languages match theirs, and fully
+/// unknown system locales fall back to zh — supportedLocales[0]. The single
+/// callback only sees the first device locale (the default resolution would
+/// walk the whole list, so a [fr,en] system would otherwise resolve en
+/// while the app's own tr() chain — driven by the persisted UiSettings
+/// locale — shows zh).
+Locale _resolveFrameworkLocale(
+  Locale? deviceLocale,
+  Iterable<Locale> supported,
+) {
+  if (deviceLocale != null) {
+    for (final candidate in supported) {
+      if (candidate.languageCode == deviceLocale.languageCode) {
+        return candidate;
+      }
+    }
+  }
+  return supported.first;
 }
 
 /// The bundled font subsets live under assets/fonts/ with no package root,
@@ -352,6 +374,24 @@ class _ZGoAppState extends State<ZGoApp>
           navigatorKey: _navigatorKey,
           title: 'ZGo',
           debugShowCheckedModeBanner: false,
+          // B3: framework-level zh copy (paste/copy/select-all menus, date
+          // pickers, tooltips). Cupertino rides along so iOS text-selection
+          // menus stay consistent with Material.
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          supportedLocales: const [Locale('zh'), Locale('en')],
+          // The framework layer follows the app's UiSettings locale (the
+          // same source tr() reads) — a system-en/UISettings-zh user must
+          // not get English paste/copy menus inside a Chinese UI (and vice
+          // versa). The resolution callback stays as the device-locale
+          // fallback for anything still unmatched.
+          locale: _ui.locale.startsWith('en')
+              ? const Locale('en')
+              : const Locale('zh'),
+          localeResolutionCallback: _resolveFrameworkLocale,
           theme: buildLightTheme(),
           darkTheme: buildDarkTheme(),
           themeMode: _theme.mode,

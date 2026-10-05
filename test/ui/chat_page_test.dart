@@ -2713,6 +2713,41 @@ void main() {
     expect(find.text('GLM-5.3'), findsNothing); // sheet closed
   });
 
+  testWidgets('model sheet section header rides the local lexicon, not the '
+      'desktop English option name (B4)', (tester) async {
+    // Wire 定证 (3.14 workspace-config research): desktop ships config
+    // option names in English — `{id: "model", name: "Model"}`. The
+    // section header must show the local lexicon copy (「模型」), never
+    // the raw desktop name.
+    final gateway = _SwitchGateway(
+      _SwitchTransport(),
+      prep: WorkspacePrep.fromMap(const {
+        'configOptions': [
+          {
+            'id': 'model',
+            'name': 'Model',
+            'currentValue': 'builtin/glm-5.2',
+            'options': [
+              {'value': 'builtin/glm-5.2', 'name': 'GLM-5.2'},
+            ],
+          },
+        ],
+        'slashCommands': <Map<String, dynamic>>[],
+      }),
+    )..entitlementResult = okQuota(
+        {'count': 0, 'percentage': 100, 'isShow': true},
+        tokenPercentage: 100,
+      );
+    await pumpWithQuota(tester, gateway);
+
+    await tester.tap(find.text('切换模型'));
+    await tester.pumpAndSettle();
+    // Local lexicon header (plus another 模型 label in the sheet); the
+    // desktop's English option name is gone.
+    expect(find.text('模型'), findsAtLeastNWidgets(1));
+    expect(find.text('Model'), findsNothing);
+  });
+
   testWidgets('config-sheet fallback: empty catalog keeps the degraded '
       'current-model text', (tester) async {
     final gateway = _SwitchGateway(_SwitchTransport(), prep: barePrep())
