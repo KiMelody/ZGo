@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../protocol/channel_client.dart';
 import '../protocol/conversation.dart';
 import '../protocol/task_groups.dart';
 import '../state/device_session.dart';
@@ -1864,38 +1865,49 @@ class _TaskListPageState extends State<TaskListPage>
   /// FOREGROUND tones on the neutral tray: brand sky for archive (dark
   /// sky400 / light sky600), the sheet's neutral for read/unread, and the
   /// destructive tone for delete — same language as the sheet entries.
+  ///
+  /// C1 (10-05) draft awareness: a draft row (sessions-index only, no
+  /// registry anchor) can never resolve a registry mutation, so the archive
+  /// and unread actions are omitted entirely — unlike the sheet there is no
+  /// disabled state to lean on, and a dead tap would only end in the
+  /// matches=0 error. Delete stays (V4 deleteSession route). Same gate as
+  /// the long-press sheet's four muted registry ops.
   List<SwipeAction> _swipeActions(DeviceSession session, SessionEntry entry) {
     final archived = entry.raw['archived'] == true;
     final unread = entry.raw['unreadAt'] != null;
+    final isDraft =
+        session.taskDirectory.sessionOnlyIds.contains(entry.sessionId);
     final archiveFg =
         ZInk.isDark(context) ? ZColors.sky400 : ZColors.sky600;
     return [
-      SwipeAction(
-        icon: archived ? Icons.unarchive_outlined : Icons.archive_outlined,
-        label: tr(
-          context,
-          archived ? 'tasks.action.unarchive' : 'tasks.action.archive',
+      if (!isDraft)
+        SwipeAction(
+          icon: archived ? Icons.unarchive_outlined : Icons.archive_outlined,
+          label: tr(
+            context,
+            archived ? 'tasks.action.unarchive' : 'tasks.action.archive',
+          ),
+          fgColor: archiveFg,
+          onTap: () => _runOp(() async {
+            await session.setTaskArchived(entry.sessionId, !archived);
+            await session.reloadTasks();
+          }),
         ),
-        fgColor: archiveFg,
-        onTap: () => _runOp(() async {
-          await session.setTaskArchived(entry.sessionId, !archived);
-          await session.reloadTasks();
-        }),
-      ),
-      SwipeAction(
-        icon: unread
-            ? Icons.mark_email_read_outlined
-            : Icons.mark_email_unread_outlined,
-        label: tr(
-          context,
-          unread ? 'tasks.action.markRead' : 'tasks.action.markUnread',
+      if (!isDraft)
+        SwipeAction(
+          icon: unread
+              ? Icons.mark_email_read_outlined
+              : Icons.mark_email_unread_outlined,
+          label: tr(
+            context,
+            unread ? 'tasks.action.markRead' : 'tasks.action.markUnread',
+          ),
+          fgColor: ZInk.soft(context),
+          onTap: () => _runOp(() async {
+            await session.setTaskUnread(entry.sessionId, !unread);
+            await session.reloadTasks();
+          }),
         ),
-        fgColor: ZInk.soft(context),
-        onTap: () => _runOp(() async {
-          await session.setTaskUnread(entry.sessionId, !unread);
-          await session.reloadTasks();
-        }),
-      ),
       SwipeAction(
         icon: Icons.delete_outline,
         label: tr(context, 'tasks.action.delete'),
@@ -1996,6 +2008,14 @@ class _TaskListPageState extends State<TaskListPage>
   /// Delete carries the confirm dialog (records cannot be
   /// recovered). Metadata ops run on the zcode-task channel and refresh the
   /// list (the relay also pushes workspace-list-updated).
+  ///
+  /// C1 (10-05) draft awareness: a row that exists only in the live
+  /// sessions-index (fork draft, no registry anchor) can never resolve a
+  /// task mutation (matches=0, research.md R2) — the four registry ops are
+  /// disabled (same mute style as the phase gates) while delete stays
+  /// available and routes to the V4 session command (see
+  /// [_deleteTaskDialog]). sessionOnlyIds is read fresh at sheet open, the
+  /// same read point as every other directory view.
   Future<void> _taskActions(
     BuildContext context,
     DeviceSession session,
@@ -2007,6 +2027,8 @@ class _TaskListPageState extends State<TaskListPage>
     final pinned = entry.raw['pinned'] == true;
     final archived = entry.raw['archived'] == true;
     final unread = entry.raw['unreadAt'] != null;
+    final isDraft =
+        session.taskDirectory.sessionOnlyIds.contains(entry.sessionId);
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
@@ -2054,6 +2076,7 @@ class _TaskListPageState extends State<TaskListPage>
                     pinned ? 'tasks.action.unpin' : 'tasks.action.pin',
                   ),
                 ),
+                enabled: !isDraft,
                 onTap: () {
                   Navigator.of(sheetCtx).pop();
                   _runOp(() async {
@@ -2065,6 +2088,7 @@ class _TaskListPageState extends State<TaskListPage>
               ListTile(
                 leading: const Icon(Icons.drive_file_rename_outline),
                 title: Text(tr(sheetCtx, 'tasks.action.rename')),
+                enabled: !isDraft,
                 onTap: () {
                   Navigator.of(sheetCtx).pop();
                   _renameTaskDialog(session, entry);
@@ -2082,6 +2106,7 @@ class _TaskListPageState extends State<TaskListPage>
                         : 'tasks.action.archive',
                   ),
                 ),
+                enabled: !isDraft,
                 onTap: () {
                   Navigator.of(sheetCtx).pop();
                   _runOp(() async {
@@ -2104,6 +2129,7 @@ class _TaskListPageState extends State<TaskListPage>
                         : 'tasks.action.markUnread',
                   ),
                 ),
+                enabled: !isDraft,
                 onTap: () {
                   Navigator.of(sheetCtx).pop();
                   _runOp(() async {
@@ -2175,6 +2201,14 @@ class _TaskListPageState extends State<TaskListPage>
 
   /// Delete confirmation:
   /// 「删除这个任务？…会从当前工作区移除，现有记录无法恢复。」
+  ///
+  /// C1 (10-05) routing: a draft row (sessions-only, no registry anchor)
+  /// goes straight to the V4 session command — the task mutation can never
+  /// resolve it (research-emulator.md A-1/A-2). Registered rows keep
+  /// deleteTask, with ONE fallback to the session command when the registry
+  /// resolve comes back empty at delete time (the draft-materialize edge,
+  /// design D4). The draft verdict is re-read at delete time, not carried
+  /// over from the sheet — the directory can change while the dialog is up.
   Future<void> _deleteTaskDialog(
     DeviceSession session,
     SessionEntry entry,
@@ -2204,8 +2238,19 @@ class _TaskListPageState extends State<TaskListPage>
       ),
     );
     if (confirmed != true) return;
+    final isDraft =
+        session.taskDirectory.sessionOnlyIds.contains(entry.sessionId);
     await _runOp(() async {
-      await session.deleteTask(entry.sessionId);
+      if (isDraft) {
+        await session.deleteSession(entry.sessionId);
+      } else {
+        try {
+          await session.deleteTask(entry.sessionId);
+        } catch (e) {
+          if (!isTaskResolveFailure(e)) rethrow;
+          await session.deleteSession(entry.sessionId);
+        }
+      }
       await session.reloadTasks();
       if (_paneSessionId == entry.sessionId) {
         setState(() {
@@ -2282,12 +2327,23 @@ class _TaskListPageState extends State<TaskListPage>
   }
 
   Future<void> _runOp(Future<void> Function() op) async {
+    // Read the locale before the async gap: [businessErrorCopy] takes the
+    // UiSettings locale tag, and must not receive a BuildContext.
+    final locale = UiSettingsProvider.of(context)?.locale ?? 'zh-CN';
     try {
       await op();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(trP(context, 'tasks.opFailed', ['$e']))),
+        SnackBar(
+          content: Text(
+            // Same humanized-error chain as chat's _run: classify the
+            // raw message (resolve-failure / busy) before falling back
+            // to the generic prefix.
+            businessErrorCopy('$e', locale) ??
+                trP(context, 'tasks.opFailed', ['$e']),
+          ),
+        ),
       );
     }
   }

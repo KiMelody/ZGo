@@ -52,4 +52,76 @@ void main() {
     expect(businessErrorCopy('connection reset by peer', 'zh-CN'), isNull);
     expect(businessErrorCopy('code 4290', 'en-US'), isNull);
   });
+
+  // ---- C1 (10-05 D5/D1): task-mutation mappings ----
+  //
+  // Checked before the numeric provider codes (a taskId can carry digits
+  // that would false-match the \b-code regex); the markers come from
+  // channel_client's string-level predicates, one source with the
+  // error-level forms.
+  group('task mutation mappings', () {
+    test('registry resolve failure maps to the unregistered-draft copy', () {
+      // Live desktop shape (research-emulator.md A-1).
+      expect(
+        businessErrorCopy(
+          '操作失败: ChannelRpcError: 列表 mutation 无法解析唯一 source, '
+              'taskId=fork1',
+          'zh-CN',
+        ),
+        '该会话尚未在桌面任务目录登记（草稿），发送首条消息后即可管理',
+      );
+      expect(
+        businessErrorCopy(
+          'ChannelRpcError: 列表 mutation 无法解析唯一 source (matches=0)',
+          'en-US',
+        ),
+        "This session isn't registered in the desktop task directory yet "
+            '(draft) — send the first message to manage it',
+      );
+    });
+
+    test('session-busy refusal maps to the retry-later copy', () {
+      // Live desktop wording (research-emulator.md「busy 之谜」, four hits).
+      expect(
+        businessErrorCopy(
+          '操作失败: ChannelRpcError: 会话正在进行中，稍后再试',
+          'zh-CN',
+        ),
+        '会话正在处理中，请稍后重试',
+      );
+      expect(
+        businessErrorCopy('ChannelRpcError: 会话正在进行中，稍后再试', 'en-US'),
+        'The session is busy right now — please try again shortly',
+      );
+    });
+
+    test('mapped en copy never leaks Chinese', () {
+      for (final raw in [
+        'ChannelRpcError: 列表 mutation 无法解析唯一 source, taskId=fork1',
+        'ChannelRpcError: 会话正在进行中，稍后再试',
+      ]) {
+        final copy = businessErrorCopy(raw, 'en-US');
+        expect(copy, isNotNull, reason: raw);
+        expect(
+          RegExp(r'[\u4e00-\u9fff]').hasMatch(copy!),
+          isFalse,
+          reason: 'leaked zh copy for $raw: $copy',
+        );
+      }
+    });
+
+    test('unrelated ChannelRpcError still returns null', () {
+      expect(
+        businessErrorCopy('操作失败: ChannelRpcError: Method not found', 'zh-CN'),
+        isNull,
+      );
+      expect(
+        businessErrorCopy(
+          '操作失败: ChannelRpcError: 会话不存在',
+          'zh-CN',
+        ),
+        isNull,
+      );
+    });
+  });
 }

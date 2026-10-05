@@ -624,4 +624,95 @@ void main() {
     expect(row.$1.title, 'live-t1');
     expect(row.$2, 'new_ws');
   });
+
+  // ---- sessions-only source marker (task 10-05 C1-D2) -------------------
+  // Rows that exist ONLY in the live sessions-index have no task-registry
+  // (relay) anchor: the desktop parks fork drafts in the session library
+  // with `persistence:'deferred'`, deliberately skipping the task index
+  // (createZCodeDeferredDraftRegistry, research.md R2) — registry
+  // mutations (deleteTask…) can never resolve them, so consumers need the
+  // marker to route them to session commands. Pure read-only output: the
+  // merge rules above are untouched.
+
+  test('a task present in both sources is not sessions-only', () {
+    final dir = TaskDirectory(
+      relayTasks: [_relayTask('t1', 'alpha')],
+      sessions: _liveIndex([
+        {'sessionId': 't1', 'title': 'live-t1', 'phase': 'running'},
+      ], subscribedWorkspaceKey: 'alpha'),
+    );
+    expect(dir.sessionOnlyIds, isEmpty);
+    expect(dir.allEntries(), hasLength(1)); // merged view unchanged
+  });
+
+  test('a live row without a relay anchor is sessions-only', () {
+    final dir = TaskDirectory(
+      relayTasks: const [],
+      sessions: _liveIndex([
+        {'sessionId': 'd1', 'title': 'Fork of x', 'phase': 'idle'},
+      ], subscribedWorkspaceKey: 'alpha'),
+    );
+    expect(dir.sessionOnlyIds, {'d1'});
+    expect(dir.allEntries(), hasLength(1)); // the row still lists
+  });
+
+  test('a late relayTasks arrival unmarks the id (no mislabel)', () {
+    // The directory is stateless — every read recomputes. A draft marked
+    // session-only while only the live index knew it must lose the marker
+    // as soon as the relay overview delivers its registry row, exactly
+    // like the row data switches from live to relay-anchored.
+    final before = TaskDirectory(
+      relayTasks: const [],
+      sessions: _liveIndex([
+        {'sessionId': 'd1', 'title': 'Fork of x', 'phase': 'idle'},
+      ], subscribedWorkspaceKey: 'alpha'),
+    );
+    expect(before.sessionOnlyIds, {'d1'});
+    final after = TaskDirectory(
+      relayTasks: [_relayTask('d1', 'alpha')],
+      sessions: _liveIndex([
+        {'sessionId': 'd1', 'title': 'Fork of x', 'phase': 'idle'},
+      ], subscribedWorkspaceKey: 'alpha'),
+    );
+    expect(after.sessionOnlyIds, isEmpty);
+  });
+
+  test('a tombstoned live row never lands in sessionOnlyIds', () {
+    // Same deletion semantics as the merge: the probe tombstone skips the
+    // live row entirely, so it is neither listed nor marked.
+    final dir = TaskDirectory(
+      relayTasks: const [],
+      sessions: _liveIndex(
+        [{'sessionId': 'd1', 'title': 'gone', 'phase': 'idle'}],
+        subscribedWorkspaceKey: 'alpha',
+        deletedTaskIds: {'d1'},
+      ),
+    );
+    expect(dir.sessionOnlyIds, isEmpty);
+    expect(dir.allEntries(), isEmpty);
+  });
+
+  test('a locally-deleted id follows the same deletion semantics', () {
+    final dir = TaskDirectory(
+      relayTasks: const [],
+      sessions: _liveIndex([
+        {'sessionId': 'd1', 'title': 'gone', 'phase': 'idle'},
+      ], subscribedWorkspaceKey: 'alpha'),
+      locallyDeletedTaskIds: {'d1'},
+    );
+    expect(dir.sessionOnlyIds, isEmpty);
+    expect(dir.allEntries(), isEmpty);
+  });
+
+  test('no live index (or one not ready yet) answers an empty set', () {
+    expect(
+      TaskDirectory(relayTasks: [_relayTask('t1', 'alpha')]).sessionOnlyIds,
+      isEmpty,
+    );
+    // Fresh index: subscribed but no snapshot applied → not ready.
+    expect(
+      TaskDirectory(sessions: SessionsIndexState()).sessionOnlyIds,
+      isEmpty,
+    );
+  });
 }

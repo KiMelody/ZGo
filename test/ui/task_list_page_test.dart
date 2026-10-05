@@ -9,6 +9,7 @@ import 'package:zgo/ui/chat/chat_page.dart';
 import 'package:zgo/ui/task_list_page.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
+import 'package:zgo/ui/widgets/swipe_actions.dart';
 
 import '../helpers/fake_device_session.dart';
 
@@ -1615,5 +1616,246 @@ void main() {
         matching: find.byType(Scrollable),
       ),
     );
+  });
+
+  // ---- C1 (10-05): draft-aware task list + delete routing ----
+  //
+  // A fork draft exists ONLY in the live sessions-index (no registry
+  // anchor): task mutations can never resolve it (matches=0, live evidence
+  // 12.png) while the V4 deleteSession command can (A-2). The sheet gates
+  // the four registry ops on draft rows; the delete confirm routes drafts
+  // straight to deleteSession and falls back to it once when a registered
+  // row's registry resolve comes back empty.
+  group('C1 draft-aware list: sheet gating + delete routing', () {
+    // The session goes through hub.installForTesting (not sessionOverride)
+    // so session notifications rebuild the page — the tombstone-driven
+    // instant row removal is part of what these tests assert.
+    Future<(DeviceStore, Device, FakeDeviceSession)> setupC1(
+      WidgetTester tester, {
+      required List<Map<String, dynamic>> relayTasks,
+      Future<dynamic> Function(String channel, String method,
+              List<Object?> args)?
+          channelHandler,
+    }) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 'fork1',
+            'title': 'Fork 草稿',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+        ],
+        relayTasks: relayTasks,
+        channelHandler: channelHandler,
+      );
+      final hub = DeviceSessionHub(nativeListEnabled: () => false)
+        ..installForTesting(session);
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: hub,
+        device: device,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      return (store, device, session);
+    }
+
+    // Registered (relay-anchored) twin of the fixture row: same id, so the
+    // directory merge anchors it and sessionOnlyIds must NOT contain it.
+    Map<String, dynamic> registeredRelayRow() => {
+          'taskId': 'fork1',
+          'title': 'Fork 草稿',
+          'workspacePath': '/repo/app',
+          'workspaceIdentity': 'app-id',
+          'displayStatus': 'idle',
+          'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        };
+
+    Finder sheetTile(String label) => find.widgetWithText(ListTile, label);
+
+    /// long-press → sheet → 删除 → confirm dialog → danger button.
+    Future<void> deleteViaSheet(WidgetTester tester) async {
+      await tester.longPress(find.text('Fork 草稿'));
+      await tester.pumpAndSettle();
+      await tester.tap(sheetTile('删除'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '删除'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('draft row: the four registry ops are disabled, delete stays',
+        (tester) async {
+      // No relay row → the live-only row is a draft (sessionOnlyIds).
+      final (_, _, session) = await setupC1(tester, relayTasks: const []);
+      await tester.longPress(find.text('Fork 草稿'));
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<ListTile>(sheetTile('置顶')).enabled, isFalse);
+      expect(tester.widget<ListTile>(sheetTile('重命名')).enabled, isFalse);
+      expect(tester.widget<ListTile>(sheetTile('归档')).enabled, isFalse);
+      expect(
+          tester.widget<ListTile>(sheetTile('标记为未读')).enabled, isFalse);
+      expect(tester.widget<ListTile>(sheetTile('删除')).enabled, isTrue);
+
+      // A disabled tile must not fire its registry mutation.
+      await tester.tap(sheetTile('置顶'));
+      await tester.pumpAndSettle();
+      expect(
+        session.channelCalls.where((c) => c.$2 == 'setTaskPinned'),
+        isEmpty,
+      );
+    });
+
+    testWidgets('registered row: the four ops stay enabled (unchanged)',
+        (tester) async {
+      await setupC1(tester, relayTasks: [registeredRelayRow()]);
+      await tester.longPress(find.text('Fork 草稿'));
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<ListTile>(sheetTile('置顶')).enabled, isTrue);
+      expect(tester.widget<ListTile>(sheetTile('重命名')).enabled, isTrue);
+      expect(tester.widget<ListTile>(sheetTile('归档')).enabled, isTrue);
+      expect(tester.widget<ListTile>(sheetTile('标记为未读')).enabled, isTrue);
+    });
+
+    // The swipe tray has no disabled state to lean on (Step 3 check P2-1):
+    // draft rows OMIT archive/unread outright — a dead tap could only end
+    // in the matches=0 error. Delete stays on both row kinds.
+    testWidgets('draft row: swipe tray keeps delete only, no archive/unread',
+        (tester) async {
+      await setupC1(tester, relayTasks: const []);
+
+      final labels = tester
+          .widget<SwipeActionsRow>(find.byType(SwipeActionsRow))
+          .actions
+          .map((a) => a.label)
+          .toList();
+
+      expect(labels, ['删除']);
+      expect(find.text('归档'), findsNothing);
+      expect(find.text('标记为未读'), findsNothing);
+    });
+
+    testWidgets('registered row: swipe tray keeps all three actions',
+        (tester) async {
+      await setupC1(tester, relayTasks: [registeredRelayRow()]);
+
+      final labels = tester
+          .widget<SwipeActionsRow>(find.byType(SwipeActionsRow))
+          .actions
+          .map((a) => a.label)
+          .toList();
+
+      expect(labels, containsAll(['归档', '标记为未读', '删除']));
+      expect(labels, hasLength(3));
+    });
+
+    testWidgets(
+        'draft row delete: routes to the V4 session command, never deleteTask',
+        (tester) async {
+      final (_, _, session) = await setupC1(tester, relayTasks: const []);
+
+      await deleteViaSheet(tester);
+
+      expect(
+        session.conversationCalls.where((c) => c.$1 == 'deleteSession'),
+        hasLength(1),
+      );
+      expect(session.conversationCalls.last.$2, ['fork1']);
+      expect(
+        session.channelCalls.where((c) => c.$2 == 'deleteTask'),
+        isEmpty,
+        reason: 'the registry op can never resolve a draft (matches=0)',
+      );
+      // The tombstone must drop the row at once — no resurrection window.
+      expect(find.text('Fork 草稿'), findsNothing);
+    });
+
+    testWidgets(
+        'registered row delete: deleteTask success path keeps working '
+        '(no regression, no fallback)', (tester) async {
+      final (_, _, session) =
+          await setupC1(tester, relayTasks: [registeredRelayRow()]);
+
+      await deleteViaSheet(tester);
+
+      expect(
+        session.channelCalls.where((c) => c.$2 == 'deleteTask'),
+        hasLength(1),
+      );
+      expect(
+        session.conversationCalls.where((c) => c.$1 == 'deleteSession'),
+        isEmpty,
+      );
+      expect(find.text('Fork 草稿'), findsNothing);
+    });
+
+    testWidgets(
+        'registered row delete hitting matches=0 falls back to deleteSession '
+        'once and presents success', (tester) async {
+      final (_, _, session) = await setupC1(
+        tester,
+        relayTasks: [registeredRelayRow()],
+        channelHandler: (channel, method, args) async {
+          if (method == 'deleteTask') {
+            // The live matches=0 shape (research-emulator.md A-1).
+            throw ChannelRpcError(
+                '列表 mutation 无法解析唯一 source, taskId=fork1', null);
+          }
+          return null;
+        },
+      );
+
+      await deleteViaSheet(tester);
+
+      expect(
+        session.conversationCalls.where((c) => c.$1 == 'deleteSession'),
+        hasLength(1),
+        reason: 'the registry row vanished under the tap — one session-'
+            'command fallback (design D4)',
+      );
+      expect(find.textContaining('操作失败'), findsNothing);
+      expect(find.text('Fork 草稿'), findsNothing);
+    });
+
+    testWidgets(
+        'unrelated deleteTask failure: no fallback, the error surfaces '
+        'humanized (busy maps via businessErrorCopy)', (tester) async {
+      final (_, _, session) = await setupC1(
+        tester,
+        relayTasks: [registeredRelayRow()],
+        channelHandler: (channel, method, args) async {
+          if (method == 'deleteTask') {
+            throw ChannelRpcError('会话正在进行中，稍后再试', null);
+          }
+          return null;
+        },
+      );
+
+      await deleteViaSheet(tester);
+
+      expect(
+        session.conversationCalls.where((c) => c.$1 == 'deleteSession'),
+        isEmpty,
+        reason: 'only the resolve-failure shape may fall back',
+      );
+      // _runOp routes through businessErrorCopy: the busy wire text
+      // maps to tasks.error.sessionBusy instead of surfacing raw.
+      expect(find.textContaining('会话正在处理中，请稍后重试'), findsOneWidget);
+      expect(find.textContaining('ChannelRpcError'), findsNothing);
+
+      // Drain the SnackBar auto-dismiss timer.
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pumpAndSettle();
+    });
   });
 }

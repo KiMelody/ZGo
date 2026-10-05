@@ -13,6 +13,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../i18n/lexicon.dart';
+import '../../protocol/channel_client.dart';
 import '../../protocol/conversation.dart';
 import '../../state/device_session.dart';
 import '../../state/entitlement_poller.dart';
@@ -2378,6 +2379,7 @@ class _ChatPageState extends State<ChatPage> {
                                 feed: _feed,
                                 preview: _preview,
                                 confirmWindow: widget.turnFooterConfirmWindow,
+                                workspaceLabel: widget.workspaceLabel,
                               ),
                             ],
                           );
@@ -3157,9 +3159,22 @@ typedef AssistantPart = ({
 /// 不可用). When the failure text mentions one, show the known line
 /// instead of the raw transport error.
 ///
+/// Task-mutation shapes are checked first (C1 10-05 D5/D1): a registry
+/// resolve failure means the session row is a registry-external draft
+/// (tasks.error.unregistered), and the session-busy refusal means the
+/// desktop declined a session-scoped command mid-turn
+/// (tasks.error.sessionBusy). Both ride the string-level predicates in
+/// channel_client so predicate and copy share one marker source.
+///
 /// Takes a locale (not a BuildContext) so it stays a pure function; the
 /// `chat.bizErr.*` table entries supply the copy.
 String? businessErrorCopy(String errorText, String locale) {
+  if (isTaskResolveFailureText(errorText)) {
+    return trLocale(locale, 'tasks.error.unregistered');
+  }
+  if (isSessionBusyErrorText(errorText)) {
+    return trLocale(locale, 'tasks.error.sessionBusy');
+  }
   final m = RegExp(r'\b(1006|1005|3006|3001|3007|3008|3009|3010|3002|2007|429)\b')
       .firstMatch(errorText);
   if (m == null) return null;
@@ -3215,6 +3230,75 @@ typedef AssistantTurnParts = ({
 /// hold a BuildContext but render through the module, not `tr`.
 String _localeOf(BuildContext context) =>
     UiSettingsProvider.of(context)?.locale ?? 'zh-CN';
+
+/// Fork flow shared by the message-action sheet and the feedback row (task
+/// C1, official parity): send `forkAssistant`, then — like the web's onFork
+/// — push the ack's new sessionId as a fresh ChatPage (the landing IS the
+/// feedback; no extra toast), or snack the fallback copy when the server
+/// acked created without a usable id (the row surfaces via sessions-index).
+/// Failures keep _run's snack shapes: a non-pass status reads
+/// 「分叉失败: `reasonCode|status`」, a thrown error goes through
+/// commandErrorCopy/businessErrorCopy (busy and resolve-failure map to
+/// plain-language copy).
+///
+/// [context] must be a page-lifetime context (a row's element), not the
+/// action sheet's — the sheet pops before the command round-trip. Navigator
+/// and ScaffoldMessenger are captured up front, so post-await use is safe.
+Future<void> _forkToNewSession(
+  BuildContext context, {
+  required ChatGateway gateway,
+  required String sessionId,
+  required Map<String, dynamic> target,
+  String? workspaceLabel,
+}) async {
+  final navigator = Navigator.of(context);
+  final messenger = ScaffoldMessenger.of(context);
+  final locale = _localeOf(context);
+  final errorPrefix = tr(context, 'chat.action.fork.failed');
+  final createdCopy = tr(context, 'chat.fork.created');
+  final draftTitle = tr(context, 'tasks.new');
+  dynamic ack;
+  try {
+    ack = await gateway.conversationCommands.forkAssistant(sessionId, target);
+  } catch (e) {
+    debugPrint('[chat] $errorPrefix: $e');
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          commandErrorCopy('$e', locale) ??
+              businessErrorCopy('$e', locale) ??
+              '$errorPrefix: $e',
+        ),
+      ),
+    );
+    return;
+  }
+  final newId = forkSessionIdOf(ack);
+  if (newId != null) {
+    navigator.push(
+      zRoute(
+        (_) => ChatPage(
+          gateway: gateway,
+          sessionId: newId,
+          title: draftTitle,
+          workspaceLabel: workspaceLabel,
+        ),
+      ),
+    );
+    return;
+  }
+  // Same pass-set as the wire (accepted | duplicate carry the result) —
+  // unlike _run's generic check, `duplicate` here means "created" (the
+  // commandId dedupe replaying the original ack).
+  final status = ack is Map ? ack['status'] : null;
+  if (status == 'accepted' || status == 'duplicate') {
+    messenger.showSnackBar(SnackBar(content: Text(createdCopy)));
+  } else if (status != null) {
+    messenger.showSnackBar(
+      SnackBar(content: Text('$errorPrefix: ${ack['reasonCode'] ?? status}')),
+    );
+  }
+}
 
 /// turnHeader states whose footer (terminal pill + feedback row) is gated
 /// behind the confirm window (see _TurnGroupWidgetState).
@@ -3389,6 +3473,10 @@ class _TurnGroupWidget extends StatefulWidget {
   /// Terminal-footer confirm window (see [_TurnGroupWidgetState]).
   final Duration confirmWindow;
 
+  /// Source page's workspace chip label — carried so the fork flow can open
+  /// the new session's page with the same chip (same workspace, fork parity).
+  final String? workspaceLabel;
+
   const _TurnGroupWidget({
     super.key,
     required this.rows,
@@ -3399,6 +3487,7 @@ class _TurnGroupWidget extends StatefulWidget {
     required this.feed,
     required this.preview,
     required this.confirmWindow,
+    required this.workspaceLabel,
   });
 
   @override
@@ -3485,6 +3574,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
     final gateway = widget.gateway;
     final sessionId = widget.sessionId;
     final onAction = widget.onAction;
+    final workspaceLabel = widget.workspaceLabel;
     // single timeline marker
     if (rows.length == 1 && rows.first['kind'] == 'timelineMarker') {
       return _TimelineMarkerWidget(row: rows.first);
@@ -3519,6 +3609,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
           state: widget.state,
           preview: widget.preview,
           feed: widget.feed,
+          workspaceLabel: workspaceLabel,
         ),
       );
     }
@@ -3561,6 +3652,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
             preview: widget.preview,
             feed: widget.feed,
             turnFeedbackLocked: _feedbackLocked,
+            workspaceLabel: workspaceLabel,
           ),
         );
       } else if (p.kind == 'rowGroup') {
@@ -3576,6 +3668,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
             state: widget.state,
             preview: widget.preview,
             feed: widget.feed,
+            workspaceLabel: workspaceLabel,
           ),
         );
       } else {
@@ -3634,6 +3727,10 @@ class _RowWidget extends StatelessWidget {
   /// confirm window — see [_TurnGroupWidgetState._feedbackLocked]).
   final bool turnFeedbackLocked;
 
+  /// Source page's workspace chip label — the fork flow opens the new
+  /// session's page with the same chip (fork parity with the web panel).
+  final String? workspaceLabel;
+
   const _RowWidget({
     super.key,
     required this.row,
@@ -3645,6 +3742,7 @@ class _RowWidget extends StatelessWidget {
     this.showFeedback = true,
     this.feed,
     this.turnFeedbackLocked = false,
+    this.workspaceLabel,
   });
 
   Map<String, dynamic> get _target => {
@@ -3656,6 +3754,9 @@ class _RowWidget extends StatelessWidget {
     final kind = row['kind'];
     if (kind != 'userInput' && kind != 'assistantText') return;
     HapticFeedback.mediumImpact();
+    // The row's own element outlives the sheet — the fork flow navigates and
+    // snacks after the command round-trip, when the sheet context is gone.
+    final rowContext = context;
     showModalBottomSheet(
       context: context,
       showDragHandle: true,
@@ -3690,9 +3791,12 @@ class _RowWidget extends StatelessWidget {
               title: Text(tr(context, 'chat.action.fork')),
               onTap: () {
                 Navigator.pop(context);
-                onAction(
-                  tr(context, 'chat.action.fork.failed'),
-                  () => gateway.conversationCommands.forkAssistant(sessionId, _target),
+                _forkToNewSession(
+                  rowContext,
+                  gateway: gateway,
+                  sessionId: sessionId,
+                  target: _target,
+                  workspaceLabel: workspaceLabel,
                 );
               },
             ),
@@ -3834,6 +3938,7 @@ class _RowWidget extends StatelessWidget {
         preview: preview,
         showFeedback: showFeedback,
         turnFeedbackLocked: turnFeedbackLocked,
+        workspaceLabel: workspaceLabel,
       ),
       'reasoning' => _ReasoningTile(
         text: row['text'] as String? ?? '',
@@ -4193,6 +4298,10 @@ class _AssistantBubble extends StatelessWidget {
   /// feedback UI, see _TurnGroupWidget).
   final bool turnFeedbackLocked;
 
+  /// Source page's workspace chip label — carried for the fork flow's new
+  /// page (same workspace, fork parity with the web panel).
+  final String? workspaceLabel;
+
   const _AssistantBubble({
     required this.row,
     required this.gateway,
@@ -4201,6 +4310,7 @@ class _AssistantBubble extends StatelessWidget {
     required this.preview,
     this.showFeedback = true,
     this.turnFeedbackLocked = false,
+    this.workspaceLabel,
   });
 
   void _setFeedback(String? value) {
@@ -4272,10 +4382,17 @@ class _AssistantBubble extends StatelessWidget {
                   _FeedbackButton(
                     icon: Icons.fork_right,
                     active: false,
-                    onTap: () => gateway.conversationCommands.forkAssistant(sessionId, {
-                      'rowId': row['rowId'],
-                      if (row['entityId'] != null) 'entityId': row['entityId'],
-                    }),
+                    onTap: () => _forkToNewSession(
+                      context,
+                      gateway: gateway,
+                      sessionId: sessionId,
+                      target: {
+                        'rowId': row['rowId'],
+                        if (row['entityId'] != null)
+                          'entityId': row['entityId'],
+                      },
+                      workspaceLabel: workspaceLabel,
+                    ),
                   ),
                 ],
                 const Spacer(),
@@ -6373,6 +6490,9 @@ class _ToolGroupCard extends StatefulWidget {
   /// Workspace file-preview plumbing (tappable file entries).
   final _ChatPreview preview;
 
+  /// Fork parity: the source page's workspace chip label for the fork flow.
+  final String? workspaceLabel;
+
   const _ToolGroupCard({
     super.key,
     required this.rows,
@@ -6381,6 +6501,7 @@ class _ToolGroupCard extends StatefulWidget {
     required this.onAction,
     required this.state,
     required this.preview,
+    required this.workspaceLabel,
     this.feed,
   });
 
@@ -6473,6 +6594,7 @@ class _ToolGroupCardState extends State<_ToolGroupCard> {
                       state: widget.state,
                       preview: widget.preview,
                       feed: widget.feed,
+                      workspaceLabel: widget.workspaceLabel,
                     ),
                 ],
               ),

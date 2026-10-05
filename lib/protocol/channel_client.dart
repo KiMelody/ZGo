@@ -158,6 +158,45 @@ bool isBridgeGateTimeoutError(Object error) =>
     error is TimeoutException &&
     (error.message ?? '').startsWith('bridge recovery timed out');
 
+/// The task mutation's registry-resolve failure (design C1 10-05 D4): the
+/// desktop's resolveTaskAddress matched zero rows for the
+/// (taskId, workspacePath, identity) triple — the live shape is
+/// 「列表 mutation 无法解析唯一 source, taskId=…」(research-emulator.md
+/// A-1), the numeric `matches=0` form covers other desktop wordings. A
+/// registry-external row (fork draft) or a row vanished between listing
+/// and confirming can never resolve; delete routing falls back to the V4
+/// session command through this predicate.
+///
+/// The desktop markers are shared constants so the string-level
+/// [isTaskResolveFailureText] (used by the error-copy mapping, which only
+/// sees the stringified error) and this predicate stay one source of truth.
+const String taskResolveSourceMarker = '无法解析唯一 source';
+const String taskResolveMatchesMarker = 'matches=0';
+
+/// String-level form of [isTaskResolveFailure] for callers that hold the
+/// error only as text (`'$e'` in a SnackBar path).
+bool isTaskResolveFailureText(String text) =>
+    text.contains(taskResolveSourceMarker) ||
+    text.contains(taskResolveMatchesMarker);
+
+bool isTaskResolveFailure(Object error) =>
+    error is ChannelRpcError && isTaskResolveFailureText(error.message);
+
+/// The desktop's session-busy refusal (design C1 10-05 D1): session-scoped
+/// commands (fork, …) are rejected with 「会话正在进行中，稍后再试」 while
+/// the session is mid-turn (research-emulator.md「busy 之谜」, four
+/// consecutive live hits). Matches the stable core phrase — the trailing
+/// 「稍后再试」 is desktop copy, not contract. User intent stays a manual
+/// retry; the app maps this to plain-language copy, never auto-resends.
+const String sessionBusyMarker = '会话正在进行中';
+
+/// String-level form of [isSessionBusyError] for callers that hold the
+/// error only as text (`'$e'` in a SnackBar path).
+bool isSessionBusyErrorText(String text) => text.contains(sessionBusyMarker);
+
+bool isSessionBusyError(Object error) =>
+    error is ChannelRpcError && isSessionBusyErrorText(error.message);
+
 /// Well-known channel names (`Wb` enum in the web client).
 class Channels {
   static const file = 'file';

@@ -72,6 +72,18 @@ const List<Exemption> exemptions = [
     reason: 'normalize(): classifies raw desktop error messages, not UI copy',
   ),
   Exemption(
+    file: 'lib/protocol/channel_client.dart',
+    literal: '无法解析唯一 source',
+    reason: 'isTaskResolveFailure(): classifies the raw desktop task-mutation '
+        'resolve error (matches=0 shape), never rendered by the app',
+  ),
+  Exemption(
+    file: 'lib/protocol/channel_client.dart',
+    literal: '会话正在进行中',
+    reason: 'isSessionBusyError(): classifies the raw desktop session-busy '
+        'refusal (「会话正在进行中，稍后再试」), never rendered by the app',
+  ),
+  Exemption(
     file: 'lib/ui/remote_page.dart',
     literal: '(function () {',
     reason: 'injected deep-link JS: matches the desktop web DOM text '

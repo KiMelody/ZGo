@@ -438,6 +438,7 @@ const _zh = {
   'chat.action.retry.failed': '重试失败',
   'chat.action.fork': '分叉对话',
   'chat.action.fork.failed': '分叉失败',
+  'chat.fork.created': '已创建分支会话',
   'chat.action.rewind': '回滚文件到此',
   'chat.action.rewind.title': '回滚文件？',
   'chat.action.rewind.body': '将把此消息之后产生的文件变更回滚，对话保留',
@@ -466,6 +467,9 @@ const _zh = {
   'tasks.taskCount': '\$0 个任务',
   'tasks.local': '本地',
   'tasks.new': '新建任务',
+  'tasks.error.unregistered':
+      '该会话尚未在桌面任务目录登记（草稿），发送首条消息后即可管理',
+  'tasks.error.sessionBusy': '会话正在处理中，请稍后重试',
   'tasks.banner.nativeOff': '原生列表未启用，可在设置中开启',
   'tasks.banner.kicked': '其他终端占用了此设备连接，可等待其退出后重试',
   'tasks.banner.connecting': '正在连接桌面端…',
@@ -1444,6 +1448,7 @@ const _en = {
   'chat.action.retry.failed': 'Retry failed',
   'chat.action.fork': 'Fork conversation',
   'chat.action.fork.failed': 'Fork failed',
+  'chat.fork.created': 'Fork created',
   'chat.action.rewind': 'Rewind files here',
   'chat.action.rewind.title': 'Rewind files?',
   'chat.action.rewind.body':
@@ -1473,6 +1478,11 @@ const _en = {
   'tasks.taskCount': '\$0 tasks',
   'tasks.local': 'Local',
   'tasks.new': 'New task',
+  'tasks.error.unregistered':
+      "This session isn't registered in the desktop task directory yet "
+      '(draft) — send the first message to manage it',
+  'tasks.error.sessionBusy':
+      'The session is busy right now — please try again shortly',
   'tasks.banner.nativeOff': 'The native list is off; enable it in settings',
   'tasks.banner.kicked':
       'Another terminal holds this device connection; retry after it exits',
