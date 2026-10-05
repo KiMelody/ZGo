@@ -1858,4 +1858,272 @@ void main() {
       await tester.pumpAndSettle();
     });
   });
+
+  // ---- C2 (10-05): task-list UX batch — B2 radio freeze / B7 empty group /
+  // B8 group dot / B9 sheet object title ----
+  group('C2 task-list UX: radio sync, empty group, group dot, sheet title', () {
+    testWidgets('tidy panel radio switches its visual at once, sheet stays '
+        'open (B2)', (tester) async {
+      await setupTwoWorkspaces(tester);
+
+      await tester.tap(find.byTooltip('整理任务'));
+      await tester.pumpAndSettle();
+
+      // Both radio groups live in the sheet; the sheet is its own route, so
+      // their groupValue only moves when the SHEET rebuilds (the B2 freeze).
+      Finder groupOf() => find.byType(RadioGroup<String>).first;
+      Finder sortOf() => find.byType(RadioGroup<String>).last;
+      expect(tester.widget<RadioGroup<String>>(groupOf()).groupValue,
+          'workspace');
+      expect(tester.widget<RadioGroup<String>>(sortOf()).groupValue,
+          'updated');
+
+      await tester.tap(find.text('按时间线'));
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(tester.widget<RadioGroup<String>>(groupOf()).groupValue,
+          'timeline');
+
+      await tester.tap(find.text('创建时间'));
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(tester.widget<RadioGroup<String>>(sortOf()).groupValue,
+          'created');
+    });
+
+    testWidgets('0-task workspace shows the 0 count; expanding shows the '
+        'empty hint (B7)', (tester) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      // beta carries no relay rows and is not active — the empty group.
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 's1',
+            'title': '任务甲',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+          {'workspacePath': '/repo/beta', 'workspaceIdentity': 'beta'},
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Collapsed header already says 「0 个任务」 (hidden before B7).
+      expect(
+        find.descendant(
+            of: cardOf('beta'), matching: find.text('0 个任务')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('beta'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(
+        find.descendant(
+            of: cardOf('beta'), matching: find.text('暂无任务')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('workspace-view rows carry the task group dot (B8)',
+        (tester) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 's1',
+            'title': '未分组任务',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now,
+          },
+          {
+            'sessionId': 's2',
+            'title': '组内任务',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now - 10,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+        ],
+        channelHandler: (c, m, a) async => m == 'listGroupedTaskViewStructure'
+            ? {
+                'groups': [
+                  {
+                    'id': 'g1',
+                    'title': 'cron',
+                    'color': 'blue',
+                    'createdAt': 5,
+                  },
+                ],
+                'members': [
+                  {'groupId': 'g1', 'taskId': 's2', 'addedAt': 3},
+                ],
+                'topLevelOrders': <dynamic>[],
+              }
+            : null,
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      // Let the once-per-session grouped-view RPC land and the page rebuild.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Default (workspace) grouping: the grouped row carries the group's
+      // blue palette dot — the same marker the timeline header renders.
+      // No unread/pill noise in this fixture, so the dot count is exact.
+      Finder skyDot() => find.byWidgetPredicate((w) =>
+          w is Container &&
+          w.decoration is BoxDecoration &&
+          (w.decoration! as BoxDecoration).color == ZColors.sky500 &&
+          (w.decoration! as BoxDecoration).shape == BoxShape.circle);
+      expect(skyDot(), findsOneWidget);
+      // The dot sits on the grouped row (its InkWell), not the sibling's.
+      Finder dotRow() => find.ancestor(of: skyDot(), matching: find.byType(InkWell));
+      expect(
+        find.descendant(of: dotRow(), matching: find.text('组内任务')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: dotRow(), matching: find.text('未分组任务')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('long-press sheet opens with the task title and workspace '
+        'chip; a long title ellipsizes (B9)', (tester) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final longTitle = '一个特别特别长的任务标题' * 12;
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 's1',
+            'title': longTitle,
+            'phase': 'completedSuccess',
+            'lastActivityAt': DateTime.now().millisecondsSinceEpoch,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.longPress(find.text(longTitle));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(BottomSheet), findsOneWidget);
+      // Object title row is the sheet's first row (no usage line in this
+      // fixture), carrying the workspace chip beside it.
+      final titleText = tester.widget<Text>(
+        find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.text(longTitle),
+        ),
+      );
+      expect(titleText.maxLines, 1);
+      expect(titleText.overflow, TextOverflow.ellipsis);
+      expect(
+        find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.text('app'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('archived rows keep the sheet workspace chip via the raw '
+        'origin fallback (B9 P2)', (tester) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [],
+        workspaces: [
+          {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+          // The archived row's workspace must be listed for the archive
+          // view to render its group; the sheet's wsKey lookup still
+          // misses (allEntries filters archived), so the chip rides the
+          // raw origin fallback.
+          {'workspacePath': '/repo/gone', 'workspaceIdentity': 'gone-id'},
+        ],
+        // Archived rows are filtered out of allEntries, so the sheet's
+        // wsKey lookup misses — the chip must survive on the row's own
+        // origin fields, even for a workspace no longer in the list.
+        relayTasks: [
+          {
+            'taskId': 'ra1',
+            'title': '归档任务',
+            'workspacePath': '/repo/gone',
+            'workspaceIdentity': 'gone-id',
+            'displayStatus': 'idle',
+            'archived': true,
+            'updatedAt': DateTime.now().millisecondsSinceEpoch,
+          },
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Mobile reaches the archived view through the overflow menu.
+      await tester.tap(find.byType(PopupMenuButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('查看归档'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.longPress(find.text('归档任务'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.text('gone'),
+        ),
+        findsOneWidget,
+        reason: 'archived row keeps its workspace chip via raw fallback',
+      );
+    });
+  });
 }

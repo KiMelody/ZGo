@@ -7726,9 +7726,13 @@ class _ModelModeSheet extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             if (modelChoices.isNotEmpty) ...[
+              // Desktop ships config-option names in English (wire 3.14 定证
+              // `{id:"model", name:"Model"}` — same class as "Full access",
+              // i18n spec §9), so the section header always rides the local
+              // lexicon; `option('model')` matches by id, so there is no
+              // other legit desktop name to fall back to.
               Text(
-                modelOption?.name ??
-                    tr(context, 'chat.composer.modelPlaceholder'),
+                tr(context, 'chat.composer.modelPlaceholder'),
                 style: ZType.body.copyWith(color: ZInk.solid(context)),
               ),
               const SizedBox(height: 8),
