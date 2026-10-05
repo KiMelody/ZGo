@@ -1044,6 +1044,24 @@ String ackReason(dynamic res) {
   return '${res['reasonCode'] ?? res['message'] ?? res['status']}';
 }
 
+/// New-session id carried by a `forkAssistant` command ack — null on any
+/// other shape. Native helper (ADR-0013): the desktop's command ack union
+/// is `{status, result:{type, sessionId}}` and both `accepted` and
+/// `duplicate` carry the result (`duplicate` = the commandId dedupe
+/// replaying the original result, same as createSession) — evidence: asar
+/// command ack union + fork bundle ack part, task research.md R1.
+/// Defensive by design: the ack is dynamic wire data, nothing is cast.
+String? forkSessionIdOf(dynamic ack) {
+  if (ack is! Map) return null;
+  final status = ack['status'];
+  if (status != 'accepted' && status != 'duplicate') return null;
+  final result = ack['result'];
+  if (result is! Map || result['type'] != 'forkAssistant') return null;
+  final sessionId = result['sessionId'];
+  if (sessionId is! String || sessionId.isEmpty) return null;
+  return sessionId;
+}
+
 // ---------------------------------------- rowsRange paging (native)
 //
 // Native addition, NOT line-by-line ported code — keep this block

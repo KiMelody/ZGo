@@ -1359,6 +1359,26 @@ class DeviceSession extends ChangeNotifier
     return res;
   }
 
+  /// Deletes a session through the V4 conversation command (`deleteSession`,
+  /// addressed by sessionId — no task-registry resolve). C1 (10-05): fork
+  /// drafts are parked outside the registry (createZCodeDeferredDraftRegistry,
+  /// research.md R2), so [deleteTask] can never resolve them — the session
+  /// command is the only deletion channel (device-verified against a
+  /// deferred draft, research-emulator.md A-2), and a registry delete that
+  /// resolves zero rows falls back to it. Deliberately a session-level
+  /// wrapper, not a page call through [conversationCommands]: the tombstone
+  /// + re-notify below are session-owned state, and a successful delete must
+  /// drop the row from the merged directory at once — the sessions-index
+  /// `session.removed` push can be swallowed by a bridge reopen (same
+  /// resurrection paths [deleteTask]'s tombstone covers). Callers confirm
+  /// first.
+  Future<dynamic> deleteSession(String sessionId) async {
+    final res = await conversationCommands.deleteSession(sessionId);
+    _locallyDeletedTaskIds.add(sessionId);
+    notifyListeners();
+    return res;
+  }
+
   @override
   Future<FileStat> fileStat(String workspacePath, String path) =>
       fileService.stat(workspacePath, path);

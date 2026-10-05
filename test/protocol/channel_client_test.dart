@@ -153,4 +153,43 @@ void main() {
     );
     expect(isChannelLevelError(StateError('not connected')), isFalse);
   });
+
+  test('task-mutation error classification (C1 10-05)', () {
+    // Resolve failure: the live matches=0 shape (research-emulator.md A-1)
+    // and the numeric form covering other desktop wordings.
+    expect(
+      isTaskResolveFailure(ChannelRpcError(
+          '列表 mutation 无法解析唯一 source, taskId=fork1', null)),
+      isTrue,
+    );
+    expect(
+      isTaskResolveFailure(ChannelRpcError('mutation failed (matches=0)', null)),
+      isTrue,
+    );
+    expect(
+      isTaskResolveFailure(ChannelRpcError('Method not found', null)),
+      isFalse,
+    );
+    expect(isTaskResolveFailure(StateError('matches=0')), isFalse);
+    // The string-level form shares the predicate's markers (one source with
+    // the error-copy mapping); non-ChannelRpcError shapes are out of scope.
+    expect(
+      isTaskResolveFailureText('ChannelRpcError: matches=0 somewhere'),
+      isTrue,
+    );
+    expect(isTaskResolveFailureText('Method not found'), isFalse);
+
+    // Session-busy refusal (research-emulator.md「busy 之谜」): the stable
+    // core phrase matches; a ChannelRpcError is required at error level.
+    expect(
+      isSessionBusyError(ChannelRpcError('会话正在进行中，稍后再试', null)),
+      isTrue,
+    );
+    expect(isSessionBusyErrorText('…会话正在进行中…'), isTrue);
+    expect(
+      isSessionBusyError(ChannelRpcError('Method not found', null)),
+      isFalse,
+    );
+    expect(isSessionBusyError(StateError('busy')), isFalse);
+  });
 }

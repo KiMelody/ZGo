@@ -3814,6 +3814,139 @@ void main() {
     expect(find.text('切换未生效，正在重试…'), findsNothing);
     expect(find.text('模型/思考切换未生效，已恢复为桌面当前设置'), findsNothing);
   });
+
+  // ---- fork lands the new session (10-05-fork-session-lifecycle C1) ----
+
+  /// The fork bundle's ack union (research.md R1): accepted/duplicate both
+  /// carry `result:{type:'forkAssistant', sessionId}`; other statuses (and
+  /// a missing result) must NOT navigate.
+  Map<String, dynamic> forkAck({
+    String status = 'accepted',
+    Object? result = const {
+      'type': 'forkAssistant',
+      'sessionId': 'sess_fork',
+    },
+  }) =>
+      {'status': status, if (result != null) 'result': result};
+
+  /// One turn (user + assistant text) so the feedback row renders; the
+  /// phone viewport keeps the sheet path tappable like the edit-resend
+  /// tests. Returns the gateway for ack programming / assertions.
+  Future<FakeChatGateway> pumpForkSource(
+    WidgetTester tester, {
+    String? workspaceLabel,
+  }) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(
+        ChatPage(
+          gateway: gateway,
+          sessionId: 's1',
+          title: 't',
+          workspaceLabel: workspaceLabel,
+        ),
+      ),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录', 'state': 'done'},
+      {'rowId': 2, 'kind': 'assistantText', 'text': '已修复'},
+    ]);
+    await tester.pumpAndSettle();
+    return gateway;
+  }
+
+  testWidgets('feedback-row fork pushes the acked session: new page with '
+      'the sessionId, same gateway/workspace, draft title (official '
+      'onFork parity — the landing is the feedback)', (tester) async {
+    final gateway = await pumpForkSource(tester, workspaceLabel: 'ZLinker');
+    gateway.forkAssistantResults.add(forkAck());
+
+    await tester.tap(find.byIcon(Icons.fork_right));
+    await tester.pumpAndSettle();
+
+    // The command went out addressed to the source row...
+    final call = gateway.calls.firstWhere((c) => c.$1 == 'forkAssistant');
+    expect(call.$2[0], 's1');
+    expect(call.$2[1], {'rowId': 2});
+
+    // ...and the ack's sessionId became the pushed page.
+    expect(gateway.subscribedSessions, contains('sess_fork'));
+    // The source page stays mounted underneath (offstage behind the opaque
+    // route) — both must exist.
+    expect(find.byType(ChatPage, skipOffstage: false), findsNWidgets(2));
+    final pushed = tester.widget<ChatPage>(find.byType(ChatPage).last);
+    expect(pushed.sessionId, 'sess_fork');
+    expect(pushed.gateway, same(gateway));
+    expect(pushed.workspaceLabel, 'ZLinker');
+    expect(find.text('新建任务'), findsOneWidget);
+  });
+
+  testWidgets('message-sheet fork pushes the acked session too — the row '
+      'context survives the sheet pop', (tester) async {
+    final gateway = await pumpForkSource(tester);
+    gateway.forkAssistantResults.add(forkAck());
+
+    // Long-press just outside the bubble text: the row's GestureDetector
+    // owns the press there (the SelectableText would win on the text).
+    final textTopLeft = tester.getTopLeft(find.text('帮我修复登录'));
+    await tester.longPressAt(textTopLeft - const Offset(8, 4));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('分叉对话'));
+    await tester.pumpAndSettle();
+
+    expect(gateway.subscribedSessions, contains('sess_fork'));
+    final pushed = tester.widget<ChatPage>(find.byType(ChatPage).last);
+    expect(pushed.sessionId, 'sess_fork');
+    expect(pushed.workspaceLabel, isNull);
+    expect(find.text('已创建分支会话'), findsNothing);
+  });
+
+  testWidgets('created ack without a usable sessionId snacks the fallback '
+      'copy and stays put (the row surfaces via sessions-index)',
+      (tester) async {
+    final gateway = await pumpForkSource(tester);
+    gateway.forkAssistantResults.add(forkAck(result: null));
+
+    await tester.tap(find.byIcon(Icons.fork_right));
+    await tester.pumpAndSettle();
+
+    expect(find.text('已创建分支会话'), findsOneWidget);
+    expect(find.byType(ChatPage), findsOneWidget);
+    expect(gateway.subscribedSessions, isNot(contains('sess_fork')));
+  });
+
+  testWidgets('rejected fork keeps the status failure copy — sheet path, '
+      'no navigation', (tester) async {
+    final gateway = await pumpForkSource(tester);
+    gateway.forkAssistantResults.add(forkAck(status: 'rejected'));
+
+    final textTopLeft = tester.getTopLeft(find.text('帮我修复登录'));
+    await tester.longPressAt(textTopLeft - const Offset(8, 4));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('分叉对话'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('分叉失败: rejected'), findsOneWidget);
+    expect(find.byType(ChatPage), findsOneWidget);
+    expect(gateway.subscribedSessions, isNot(contains('sess_fork')));
+  });
+
+  testWidgets('a thrown fork (the live session_busy shape) surfaces the '
+      'plain-language busy copy, not the raw desktop error', (tester) async {
+    final gateway = await pumpForkSource(tester);
+    gateway.forkAssistantResults
+        .add(Exception('ChannelRpcError: 会话正在进行中，稍后再试'));
+
+    await tester.tap(find.byIcon(Icons.fork_right));
+    await tester.pumpAndSettle();
+
+    expect(find.text('会话正在处理中，请稍后重试'), findsOneWidget);
+    expect(find.textContaining('稍后再试'), findsNothing);
+    expect(find.byType(ChatPage), findsOneWidget);
+  });
 }
 
 /// Unmounts the page, then unblocks a [_StalledGateway] subscribe: the

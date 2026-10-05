@@ -1,6 +1,8 @@
 import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/state/device_session.dart';
 
+import 'recording_chat_gateway.dart';
+
 /// DeviceSession subclass answering from local tables (never connects).
 ///
 /// [channelHandler] intercepts every channel RPC (automation/off-peak ports
@@ -100,6 +102,32 @@ class FakeDeviceSession extends DeviceSession {
 
   @override
   Future<void> reloadTasks() async {}
+
+  /// Conversation V4 command surface (C1 10-05): a recording transport so
+  /// the session's REAL [DeviceSession.deleteSession] — transport call +
+  /// local tombstone + notify — runs end-to-end in tests (the inherited
+  /// getter throws `not connected`; this fake never opens a workspace).
+  /// Every call lands in [conversationCalls]; [deleteSessionResults]
+  /// programs outcomes front-per-call (empty → plain accepted, an
+  /// Exception entry is thrown — the fallback-failure branch).
+  final List<(String, List<Object?>)> conversationCalls = [];
+  final List<Object?> deleteSessionResults = [];
+  late final RecordingConversationTransport _conversationCommands =
+      RecordingConversationTransport(
+    (method, args) {
+      conversationCalls.add((method, args));
+      if (method == 'deleteSession' && deleteSessionResults.isNotEmpty) {
+        final next = deleteSessionResults.removeAt(0);
+        if (next is Exception) throw next;
+        return next;
+      }
+      return const {'status': 'accepted'};
+    },
+    () => false,
+  );
+
+  @override
+  ConversationTransport get conversationCommands => _conversationCommands;
 
   /// Recorded [openWorkspace] calls `(workspace, taskId)` for assertions on
   /// the open path's workspace scope.

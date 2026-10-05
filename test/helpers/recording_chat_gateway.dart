@@ -81,6 +81,27 @@ class RecordingConversationTransport implements ConversationTransport {
         action,
       ]);
 
+  /// Programmed `forkAssistant` acks, dequeued front-per-call (empty →
+  /// plain accepted). The fork-jump tests (10-05 C1) program the ack union
+  /// `{status, result:{type:'forkAssistant', sessionId}}`; an Exception
+  /// entry is thrown (the busy rejection arrives as a thrown
+  /// ChannelRpcError, research-emulator.md「busy 之谜」).
+  final List<Object?> forkAssistantResults = [];
+
+  @override
+  Future<dynamic> forkAssistant(
+    String sessionId,
+    Map<String, dynamic> target,
+  ) async {
+    _accept('forkAssistant', [sessionId, target]);
+    if (forkAssistantResults.isNotEmpty) {
+      final next = forkAssistantResults.removeAt(0);
+      if (next is Exception) throw next;
+      return next;
+    }
+    return const {'status': 'accepted'};
+  }
+
   @override
   Future<Map<String, dynamic>> attachmentPut(
     String sessionId, {
@@ -205,6 +226,10 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   /// transport's field) — send-path tests program at the result level.
   List<SendTextResult> get sendTextOrQueueResults =>
       _commands.sendTextOrQueueResults;
+
+  /// Programmed [ConversationTransport.forkAssistant] acks (see the
+  /// transport's field) — fork-jump tests program at the ack level.
+  List<Object?> get forkAssistantResults => _commands.forkAssistantResults;
 
   /// Records (method, args) and returns the default `accepted` ack.
   dynamic _accept(String method, [List<Object?> args = const []]) {

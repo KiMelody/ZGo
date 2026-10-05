@@ -49,6 +49,12 @@ class TaskDirectory {
     this.confirmedHomeKeys = const {},
   });
 
+  /// Merged rows plus the source marker of the live rows
+  /// ([sessionOnlyIds]) — one pass so the marker can never drift from the
+  /// merge itself. The pick / override rules below are unchanged by the
+  /// marker; it only observes which live rows found no surviving relay
+  /// anchor.
+  ///
   /// Merged rows: relay base, live override per task id. Each row carries
   /// its workspace key and the archived flag read off the RELAY map only —
   /// the relay `archived` field is the sole authority (live-probed
@@ -70,8 +76,10 @@ class TaskDirectory {
   /// ([SessionsIndexState.subscribedWorkspaceKey]) — recorded at subscribe
   /// time, the data self-certifies its home and stays immune to the
   /// page-level switch / re-subscribe drift window.
-  List<(SessionEntry, String?, bool)> _rows() {
+  ({List<(SessionEntry, String?, bool)> rows, Set<String> sessionOnlyIds})
+      _merge() {
     final byId = <String, (SessionEntry, String?, bool)>{};
+    final sessionOnlyIds = <String>{};
     for (final task in relayTasks) {
       final entry = SessionEntry.fromRelayTask(task);
       if (entry.sessionId.isEmpty) continue;
@@ -113,6 +121,11 @@ class TaskDirectory {
             locallyDeletedTaskIds.contains(entry.sessionId)) {
           continue;
         }
+        // Source marker (C1-D2): no surviving relay anchor above → the
+        // row exists only in the live sessions-index.
+        if (!byId.containsKey(entry.sessionId)) {
+          sessionOnlyIds.add(entry.sessionId);
+        }
         byId[entry.sessionId] = (
           entry,
           liveKeyOf(entry, sessions!.subscribedWorkspaceKey),
@@ -120,8 +133,22 @@ class TaskDirectory {
         );
       }
     }
-    return byId.values.toList();
+    return (rows: byId.values.toList(), sessionOnlyIds: sessionOnlyIds);
   }
+
+  List<(SessionEntry, String?, bool)> _rows() => _merge().rows;
+
+  /// Ids of rows that exist ONLY in the live sessions-index — no
+  /// surviving task-registry (relay) anchor behind them (design C1-D2).
+  /// The desktop parks fork drafts in the session library with
+  /// `persistence:'deferred'`, deliberately skipping the task index
+  /// (createZCodeDeferredDraftRegistry, research.md R2): these rows have
+  /// no registry row, so registry mutations (deleteTask…) can never
+  /// resolve them — consumers route them to session commands instead.
+  /// Recomputed with the merge like every other read (stateless class);
+  /// a late relay row unmarks the id on the next read, mirroring how the
+  /// row itself gains its anchor.
+  Set<String> get sessionOnlyIds => _merge().sessionOnlyIds;
 
   /// Workspace key of a LIVE sessions-index row (not yet in the relay
   /// overview): its own fields under the same rule as [relayKeyOf], then
