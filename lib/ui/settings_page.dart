@@ -226,9 +226,14 @@ class _SettingsPageState extends State<SettingsPage> {
                   onChanged: (v) => ui.setNotificationsEnabled(v),
                 ),
                 if (ui.notificationsEnabled) ...[
+                  // Child rows share one indent (parent title +16): the
+                  // 24-wide invisible leading slot plus contentPadding
+                  // start 32 puts every child title on a single edge.
                   SwitchListTile(
                     secondary: const SizedBox(width: 24),
                     dense: true,
+                    contentPadding: const EdgeInsetsDirectional.only(
+                        start: 16 + ZSpacing.cardGap, end: 24),
                     title: Text(tr(context, 'settings.notify.tasks')),
                     value: ui.notifyTasksEnabled,
                     onChanged: (v) => ui.setNotifyTasksEnabled(v),
@@ -236,6 +241,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   SwitchListTile(
                     secondary: const SizedBox(width: 24),
                     dense: true,
+                    contentPadding: const EdgeInsetsDirectional.only(
+                        start: 16 + ZSpacing.cardGap, end: 24),
                     title: Text(tr(context, 'settings.notify.offPeak')),
                     value: ui.notifyOffPeakEnabled,
                     onChanged: (v) => ui.setNotifyOffPeakEnabled(v),
@@ -243,6 +250,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   SwitchListTile(
                     secondary: const SizedBox(width: 24),
                     dense: true,
+                    contentPadding: const EdgeInsetsDirectional.only(
+                        start: 16 + ZSpacing.cardGap, end: 24),
                     title: Text(tr(context, 'settings.notify.auto')),
                     value: ui.notifyAutoEnabled,
                     onChanged: (v) => ui.setNotifyAutoEnabled(v),
@@ -253,6 +262,8 @@ class _SettingsPageState extends State<SettingsPage> {
                     SwitchListTile(
                       secondary: const SizedBox(width: 24),
                       dense: true,
+                      contentPadding: const EdgeInsetsDirectional.only(
+                          start: 16 + ZSpacing.cardGap, end: 24),
                       title: Text(tr(context, 'settings.keepAlive')),
                       subtitle: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -305,7 +316,8 @@ class _SettingsPageState extends State<SettingsPage> {
                     // it the notice only updates while the app is foregrounded.
                     if (!ui.keepAliveEnabled)
                       Padding(
-                        padding: const EdgeInsets.only(left: 16),
+                        padding: const EdgeInsets.only(
+                            left: 16 + ZSpacing.cardGap),
                         child: Align(
                           alignment: Alignment.centerLeft,
                           child: TextButton(
@@ -317,7 +329,10 @@ class _SettingsPageState extends State<SettingsPage> {
                         ),
                       ),
                     ListTile(
+                      leading: const SizedBox(width: 24),
                       dense: true,
+                      contentPadding: const EdgeInsetsDirectional.only(
+                          start: 16 + ZSpacing.cardGap, end: 24),
                       title: Text(tr(context, 'settings.quotaWatch.threshold')),
                       subtitle: Text(trP(context, 'settings.quotaWatch.thresholdHint',
                           ['${ui.quotaWatchThreshold}'])),
@@ -336,34 +351,34 @@ class _SettingsPageState extends State<SettingsPage> {
                         ),
                       ),
                     ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Row(
-                        children: [
-                          Text(tr(context, 'settings.quotaWatch.interval')),
-                          const Spacer(),
-                          SegmentedButton<int>(
-                            segments: [
-                              for (final minutes in const [1, 5, 15])
-                                ButtonSegment(
-                                  value: minutes,
-                                  label: Text(
-                                      trP(context, 'op.minutes', ['$minutes'])),
-                                ),
-                            ],
-                            selected: {ui.quotaWatchIntervalMinutes},
-                            onSelectionChanged: (s) {
-                              HapticFeedback.selectionClick();
-                              ui.setQuotaWatchIntervalMinutes(s.first);
-                            },
-                            showSelectedIcon: false,
-                          ),
+                    ListTile(
+                      leading: const SizedBox(width: 24),
+                      dense: true,
+                      contentPadding: const EdgeInsetsDirectional.only(
+                          start: 16 + ZSpacing.cardGap, end: 24),
+                      title: Text(tr(context, 'settings.quotaWatch.interval')),
+                      trailing: SegmentedButton<int>(
+                        segments: [
+                          for (final minutes in const [1, 5, 15])
+                            ButtonSegment(
+                              value: minutes,
+                              label: Text(
+                                  trP(context, 'op.minutes', ['$minutes'])),
+                            ),
                         ],
+                        selected: {ui.quotaWatchIntervalMinutes},
+                        onSelectionChanged: (s) {
+                          HapticFeedback.selectionClick();
+                          ui.setQuotaWatchIntervalMinutes(s.first);
+                        },
+                        showSelectedIcon: false,
                       ),
                     ),
                     SwitchListTile(
                       secondary: const SizedBox(width: 24),
                       dense: true,
+                      contentPadding: const EdgeInsetsDirectional.only(
+                          start: 16 + ZSpacing.cardGap, end: 24),
                       title: Text(tr(context, 'settings.quotaWatch.expiryReminder')),
                       subtitle:
                           Text(tr(context, 'settings.quotaWatch.expiryReminderHint')),
@@ -374,7 +389,10 @@ class _SettingsPageState extends State<SettingsPage> {
                     // reminder is off, so they ride its switch.
                     if (ui.quotaWatchExpiryReminderEnabled) ...[
                       ListTile(
+                        leading: const SizedBox(width: 24),
                         dense: true,
+                        contentPadding: const EdgeInsetsDirectional.only(
+                            start: 16 + ZSpacing.cardGap, end: 24),
                         title: Text(tr(context, 'settings.quotaWatch.expiryLead5h')),
                         trailing: SizedBox(
                           width: 150,
@@ -393,7 +411,10 @@ class _SettingsPageState extends State<SettingsPage> {
                         ),
                       ),
                       ListTile(
+                        leading: const SizedBox(width: 24),
                         dense: true,
+                        contentPadding: const EdgeInsetsDirectional.only(
+                            start: 16 + ZSpacing.cardGap, end: 24),
                         title:
                             Text(tr(context, 'settings.quotaWatch.expiryLeadWeek')),
                         trailing: SizedBox(

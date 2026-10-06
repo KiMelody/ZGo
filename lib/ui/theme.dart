@@ -627,6 +627,31 @@ ThemeData _base(ColorScheme scheme, Color background, Color card,
       shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(ZRadius.field)),
     ),
+    // The four add-FABs (devices / providers / off-peak / scheduled, all
+    // "add" primary actions): the scheme leaves primaryContainer unset, so
+    // the M3 default falls back to the text-color primary (white-on-white
+    // inversion). Brand sky fill + white glyph, the same pairing as the
+    // device-card running badge.
+    floatingActionButtonTheme: const FloatingActionButtonThemeData(
+      backgroundColor: ZColors.sky500,
+      foregroundColor: Colors.white,
+    ),
+    // Settings sliders (quota threshold / expiry leads) sit bare on the
+    // page background: the M3 default inactive track (the card color) is
+    // invisible there. Active track + thumb ride the brand sky; the
+    // inactive track takes the [ZInk.ghost] of this mode (α .30 dark /
+    // .40 light — mirrored because _base() has no BuildContext).
+    // trackHeight stays on the SDK default (4).
+    sliderTheme: SliderThemeData(
+      activeTrackColor: ZColors.sky500,
+      thumbColor: ZColors.sky500,
+      inactiveTrackColor: foreground.withValues(
+          alpha: scheme.brightness == Brightness.dark ? 0.30 : 0.40),
+      // Drag bubble rides the same sky as the active track (M3 default would
+      // fall back to the neutral text primary, clashing with the sky rail).
+      valueIndicatorColor: ZColors.sky500,
+      valueIndicatorTextStyle: const TextStyle(color: Colors.white),
+    ),
     // Provider-settings page switches (enable provider / disable model):
     // active track rides the brand sky accent, inactive track stays on the
     // hairline border tone; thumbs neutral in both states.

@@ -3982,6 +3982,64 @@ void main() {
     expect(find.textContaining('稍后再试'), findsNothing);
     expect(find.byType(ChatPage), findsOneWidget);
   });
+
+  testWidgets('assistant copy feedback morphs copy → check with no toast, '
+      'reverts after 1200ms; re-tap restarts the window', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'assistantText', 'text': '回答正文'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.copy_outlined));
+    await tester.pump();
+    expect(find.byIcon(Icons.check), findsOneWidget);
+    expect(find.byIcon(Icons.copy_outlined), findsNothing);
+    // Icon morph is the only feedback — no "已复制" toast.
+    expect(find.byType(SnackBar), findsNothing);
+    expect(find.text('已复制'), findsNothing);
+
+    // Re-tap mid-window restarts the 1200ms clock: tap again at +600ms, so
+    // the restarted deadline (+1800ms) must outlive the original (+1200ms).
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.tap(find.byIcon(Icons.check));
+    await tester.pump(const Duration(milliseconds: 700));
+    // +1300ms: the un-restarted timer would have reverted by now.
+    expect(find.byIcon(Icons.check), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(find.byIcon(Icons.copy_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.check), findsNothing);
+  });
+
+  testWidgets('composer cursor is transparent while empty, theme default '
+      'once there is input', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'assistantText', 'text': '回答正文'},
+    ]);
+    await tester.pumpAndSettle();
+
+    final field = find.byType(TextField);
+    expect(field, findsOneWidget); // the composer
+    // Empty composer: cursor hidden so it never overlaps the placeholder.
+    expect(tester.widget<TextField>(field).cursorColor, Colors.transparent);
+
+    await tester.enterText(field, '你好');
+    await tester.pump();
+    // Any input restores the theme default (null → theme resolution).
+    expect(tester.widget<TextField>(field).cursorColor, isNull);
+
+    // Back to empty → hidden again.
+    await tester.enterText(field, '');
+    await tester.pump();
+    expect(tester.widget<TextField>(field).cursorColor, Colors.transparent);
+  });
 }
 
 /// Unmounts the page, then unblocks a [_StalledGateway] subscribe: the

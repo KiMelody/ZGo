@@ -172,4 +172,69 @@ void main() {
     expect(ui.keepAliveEnabled, isTrue);
     expect(find.text('开启后台保活以持续监控 →'), findsNothing);
   });
+
+  testWidgets('child rows share one indented left edge (B12)',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({});
+    await enlargeSurface(tester);
+    final ui = UiSettings()..quotaWatchEnabled = true;
+    final controller = QuotaWatchController(
+      sessionsOf: () => const [],
+      onEvent: (_) {},
+    );
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(_host(_page(ui, controller), ui));
+    await tester.pumpAndSettle();
+
+    // Child rows indent one ZSpacing tier past the M3 default start 16;
+    // combined with the invisible 24-wide leading slot every child title
+    // lands on a single edge (parent title +16).
+    const childPadding =
+        EdgeInsetsDirectional.only(start: 16 + ZSpacing.cardGap, end: 24);
+
+    SwitchListTile switchOf(String title) => tester.widget<SwitchListTile>(
+          find.ancestor(
+            of: find.text(title),
+            matching: find.byType(SwitchListTile),
+          ),
+        );
+    expect(switchOf('任务事件').contentPadding, childPadding);
+    expect(switchOf('重置券临期提醒').contentPadding, childPadding);
+
+    // Slider rows carry the same structure as the switches.
+    ListTile tileOf(String title) => tester.widget<ListTile>(
+          find.ancestor(
+            of: find.text(title),
+            matching: find.byType(ListTile),
+          ),
+        );
+    expect(tileOf('低额度阈值').contentPadding, childPadding);
+    expect(tileOf('低额度阈值').leading, isA<SizedBox>());
+    // The interval row was promoted from Padding+Row to the same ListTile
+    // structure, so its label rides the shared child edge too.
+    expect(tileOf('刷新频率').contentPadding, childPadding);
+    expect(tileOf('刷新频率').leading, isA<SizedBox>());
+    for (final title in ['5 小时券提醒提前量', '周额度券提醒提前量']) {
+      expect(tileOf(title).contentPadding, childPadding);
+    }
+
+    // The geometry itself: every child title sits exactly one ZSpacing
+    // tier right of the parent title (switches and slider rows alike).
+    final parentTitleX = tester.getTopLeft(find.text('额度监控通知')).dx;
+    for (final title in ['任务事件', '低额度阈值', '刷新频率']) {
+      expect(tester.getTopLeft(find.text(title)).dx, parentTitleX + ZSpacing.cardGap,
+          reason: 'child row "$title" must indent +16 under the parent');
+    }
+
+    // The keep-alive guide button rides the same child edge (its box, at
+    // least — the button carries its own internal inset).
+    final guidePaddings = tester.widgetList<Padding>(find.ancestor(
+      of: find.text('开启后台保活以持续监控 →'),
+      matching: find.byType(Padding),
+    ));
+    expect(
+      guidePaddings.map((p) => p.padding),
+      contains(const EdgeInsets.only(left: 16 + ZSpacing.cardGap)),
+    );
+  });
 }
