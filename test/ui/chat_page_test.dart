@@ -1161,6 +1161,36 @@ void main() {
     expect(find.text('重新连接'), findsOneWidget);
   });
 
+  testWidgets('kicked takeover overlay blocks the send path (D1 revert '
+      'lock: the full-screen overlay, not a banner/gray-out, owns the '
+      'kicked UX)', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), '下一条消息');
+    await tester.pump();
+
+    gateway.kicked = true;
+    gateway.notifyListeners();
+    await tester.pumpAndSettle();
+
+    // The overlay absorbs the tap: nothing reaches the wire while kicked,
+    // and no duplicate banner shows under the 92% scrim.
+    await tester.tap(find.text('已被其他设备接管'), warnIfMissed: false);
+    await tester.tap(find.byIcon(Icons.arrow_upward), warnIfMissed: false);
+    await tester.pump();
+    expect(gateway.calls.where((c) => c.$1 == 'sendTextOrQueue'), isEmpty);
+    expect(
+      find.text('其他终端占用了此设备连接，可等待其退出后重试'),
+      findsNothing,
+    );
+  });
+
   testWidgets('subscribe failure surfaces the retry banner', (tester) async {
     final gateway = FakeChatGateway()
       ..failSubscribeWith = (m) => StateError('bridge down');
@@ -1244,6 +1274,169 @@ void main() {
     expect(find.byIcon(Icons.unfold_more), findsNothing);
     expect(find.byIcon(Icons.unfold_less), findsNothing);
     expect(find.byIcon(Icons.add_circle_outline), findsOneWidget);
+  });
+
+  group('C6 landscape density (915×412 + device insets, mock 方案 B)', () {
+    // Real-device landscape surface (记忆 zlinker-device-acceptance: top 40
+    // status strip + left 45 punch hole; the simulator's all-zero insets
+    // make the problem invisible). Probe-measured baseline before C6:
+    // appBar 96 + second header row 32 + composer ≈130 → list 154 (37.4%).
+    Future<void> pumpLandscape(
+      WidgetTester tester, {
+      FakeChatGateway? gateway,
+    }) async {
+      tester.view.physicalSize = const Size(915, 412);
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.padding = const FakeViewPadding(left: 45, top: 40);
+      addTearDown(tester.view.reset);
+      final gw = gateway ?? FakeChatGateway();
+      await tester.pumpWidget(
+        wrap(ChatPage(
+          gateway: gw,
+          sessionId: 's1',
+          title: 't',
+          workspaceLabel: 'my-repo',
+        )),
+      );
+      gw.feedSnapshot(const [
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi', 'state': 'done'},
+        {
+          'rowId': 2,
+          'kind': 'assistantText',
+          'text': 'hello',
+          'state': 'done',
+        },
+        {'rowId': 3, 'kind': 'userInput', 'text': 'q2', 'state': 'done'},
+        {'rowId': 4, 'kind': 'assistantText', 'text': 'a2', 'state': 'done'},
+      ]);
+      // finite pumps: a connecting spinner keeps animating on this
+      // surface — pumpAndSettle would time out on it.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    testWidgets('message viewport clears 40% of screen height', (tester) async {
+      await pumpLandscape(tester);
+      final listH = tester.getSize(find.byType(ListView).first).height;
+      final appBarH = tester.getSize(find.byType(AppBar)).height;
+      // C6 acceptance line (≥40%); the shipped state measures 198px ≈ 48%.
+      expect(
+        listH / 412,
+        greaterThanOrEqualTo(0.40),
+        reason: 'message viewport ${listH}px of 412 '
+            '((${(listH / 412 * 100).toStringAsFixed(1)}%), appBar '
+            '${appBarH}px) — below the 40% density line',
+      );
+    });
+
+    testWidgets('header compact: chip visible, caption dropped, ⋮ menu', (
+      tester,
+    ) async {
+      await pumpLandscape(tester);
+      expect(find.text('my-repo'), findsOneWidget); // chip survives landscape
+      expect(find.text('任务会话'), findsNothing); // caption line dropped
+      expect(find.text('更多'), findsNothing); // text button became ⋮
+      expect(find.byIcon(Icons.more_vert), findsOneWidget);
+    });
+
+    testWidgets('composer chips hidden until the input focuses, blur takes '
+        'them back', (tester) async {
+      await pumpLandscape(
+        tester,
+        gateway: _PrepGateway(prepWithoutThoughtCurrent()),
+      );
+      // Collapsed default: no model/thought chips (icon probes the row —
+      // labels vary with state/prep).
+      expect(find.byIcon(Icons.memory_outlined), findsNothing);
+      expect(find.byIcon(Icons.psychology_alt_outlined), findsNothing);
+
+      // Focus reveals the chips.
+      await tester.tap(find.byType(TextField).first);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byIcon(Icons.memory_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.psychology_alt_outlined), findsOneWidget);
+
+      // Blur reclaims the row.
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byIcon(Icons.memory_outlined), findsNothing);
+      expect(find.byIcon(Icons.psychology_alt_outlined), findsNothing);
+    });
+
+    testWidgets('rotating portrait→landscape mid-typing keeps the chips with '
+        'the retained focus', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.reset);
+      final gateway = _PrepGateway(prepWithoutThoughtCurrent());
+      await tester.pumpWidget(
+        wrap(ChatPage(
+          gateway: gateway,
+          sessionId: 's1',
+          title: 't',
+          workspaceLabel: 'my-repo',
+        )),
+      );
+      gateway.feedSnapshot(const [
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi', 'state': 'done'},
+        {
+          'rowId': 2,
+          'kind': 'assistantText',
+          'text': 'hello',
+          'state': 'done',
+        },
+      ]);
+      await tester.pumpAndSettle();
+
+      // Focus in portrait, then rotate onto the landscape surface — the
+      // focus listener only fires on focus events, so the short-viewport
+      // flip must adopt the retained focus (方案 B: focused ⇒ chips shown).
+      await tester.tap(find.byType(TextField).first);
+      await tester.pump();
+      tester.view.physicalSize = const Size(915, 412);
+      tester.view.padding = const FakeViewPadding(left: 45, top: 40);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byIcon(Icons.memory_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.psychology_alt_outlined), findsOneWidget);
+    });
+  });
+
+  testWidgets('portrait lock: caption + second-row chip + text 更多 + chips '
+      'unaffected (C6 zero-change guard)', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final gateway = _PrepGateway(prepWithoutThoughtCurrent());
+    await tester.pumpWidget(
+      wrap(ChatPage(
+        gateway: gateway,
+        sessionId: 's1',
+        title: 't',
+        workspaceLabel: 'my-repo',
+      )),
+    );
+    gateway.feedSnapshot(const [
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi', 'state': 'done'},
+      {'rowId': 2, 'kind': 'assistantText', 'text': 'hello', 'state': 'done'},
+    ]);
+    await tester.pumpAndSettle();
+
+    expect(find.text('任务会话'), findsOneWidget); // caption app bar
+    expect(find.text('my-repo'), findsOneWidget); // second-row chip
+    expect(find.text('更多'), findsOneWidget); // text menu button
+    expect(find.byIcon(Icons.more_vert), findsNothing);
+    expect(find.byIcon(Icons.memory_outlined), findsOneWidget); // model chip
+    expect(find.byIcon(Icons.unfold_more), findsNothing); // no suffix toggle
+
+    // Focusing the input toggles nothing in portrait.
+    await tester.tap(find.byType(TextField).first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byIcon(Icons.memory_outlined), findsOneWidget);
   });
 
   testWidgets('timeline markers render as centered capsules', (tester) async {
@@ -2748,6 +2941,40 @@ void main() {
     expect(find.text('Model'), findsNothing);
   });
 
+  testWidgets('thought sheet section header rides the local lexicon, not '
+      'the desktop English option name (D1)', (tester) async {
+    // Same wire discipline as the model header (B4): desktop ships
+    // `{id: "thought_level", name: "Thought level"}` in English — the
+    // section title must be the lexicon copy (「思考等级」), never the raw
+    // desktop name. Chip labels stay the desktop originals.
+    final gateway = _SwitchGateway(
+      _SwitchTransport(),
+      prep: WorkspacePrep.fromMap(const {
+        'configOptions': [
+          {
+            'id': 'thought_level',
+            'name': 'Thought level',
+            'currentValue': 'enabled',
+            'options': [
+              {'value': 'enabled', 'name': 'Enabled'},
+              {'value': 'off', 'name': 'Off'},
+            ],
+          },
+        ],
+        'slashCommands': <Map<String, dynamic>>[],
+      }),
+    )..entitlementResult = okQuota(
+        {'count': 0, 'percentage': 100, 'isShow': true},
+        tokenPercentage: 100,
+      );
+    await pumpWithQuota(tester, gateway);
+
+    await tester.tap(find.text('切换模型'));
+    await tester.pumpAndSettle();
+    expect(find.text('思考等级'), findsOneWidget);
+    expect(find.text('Thought level'), findsNothing);
+  });
+
   testWidgets('config-sheet fallback: empty catalog keeps the degraded '
       'current-model text', (tester) async {
     final gateway = _SwitchGateway(_SwitchTransport(), prep: barePrep())
@@ -3870,6 +4097,7 @@ void main() {
   Future<FakeChatGateway> pumpForkSource(
     WidgetTester tester, {
     String? workspaceLabel,
+    ThemeController? theme,
   }) async {
     tester.view.devicePixelRatio = 1.0;
     tester.view.physicalSize = const Size(390, 844);
@@ -3882,6 +4110,7 @@ void main() {
           sessionId: 's1',
           title: 't',
           workspaceLabel: workspaceLabel,
+          theme: theme,
         ),
       ),
     );
@@ -3917,6 +4146,23 @@ void main() {
     expect(pushed.gateway, same(gateway));
     expect(pushed.workspaceLabel, 'ZLinker');
     expect(find.text('新建任务'), findsOneWidget);
+  });
+
+  testWidgets('fork hands the theme controller to the pushed page — the '
+      'forked session keeps the theme toggle (D1)', (tester) async {
+    final theme = ThemeController();
+    final gateway = await pumpForkSource(tester, theme: theme);
+    gateway.forkAssistantResults.add(forkAck());
+
+    await tester.tap(find.byIcon(Icons.fork_right));
+    await tester.pumpAndSettle();
+
+    // The controller rides the fork: the pushed page carries the same
+    // instance, so its app bar renders the toggle (dark mode → dark_mode
+    // glyph; the source page is offstage behind the opaque route).
+    final pushed = tester.widget<ChatPage>(find.byType(ChatPage).last);
+    expect(pushed.theme, same(theme));
+    expect(find.byIcon(Icons.dark_mode_outlined), findsOneWidget);
   });
 
   testWidgets('message-sheet fork pushes the acked session too — the row '

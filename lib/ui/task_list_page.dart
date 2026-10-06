@@ -179,6 +179,11 @@ class _TaskListPageState extends State<TaskListPage>
   String? _paneInitialComposerText;
   bool _panePinned = false;
 
+  /// True while a [DeviceSession.reloadTasks] RPC is in flight — the list
+  /// is about to be replaced, so the list surfaces go pointer-dead for the
+  /// round-trip (no stale-row taps mid-reshuffle; page-level, not per row).
+  bool _reloading = false;
+
   /// Layout breakpoint: Tailwind md — single column below, dual ≥768.
   static const double kDualPaneBreakpoint = 768;
 
@@ -510,14 +515,20 @@ class _TaskListPageState extends State<TaskListPage>
             Expanded(
               child: session == null || session.workspaces.isEmpty
                   ? _fallback(context, session)
-                  : ListView(
-                      padding: zScreenPadding(context,
-                          top: 0, bottom: 16, horizontal: 6),
-                      children: [
-                        ..._desktopPinned(context, session),
-                        for (final ws in session.workspaces)
-                          _desktopWorkspaceFolder(context, session, ws),
-                      ],
+                  // Same replace-window discipline as the mobile list: the
+                  // sidebar tree goes pointer-dead while a reload is in
+                  // flight.
+                  : IgnorePointer(
+                      ignoring: _reloading,
+                      child: ListView(
+                        padding: zScreenPadding(context,
+                            top: 0, bottom: 16, horizontal: 6),
+                        children: [
+                          ..._desktopPinned(context, session),
+                          for (final ws in session.workspaces)
+                            _desktopWorkspaceFolder(context, session, ws),
+                        ],
+                      ),
                     ),
             ),
           ],
@@ -602,6 +613,11 @@ class _TaskListPageState extends State<TaskListPage>
                 .entriesFor(dirKey, includeArchived: _showArchived))
               e,
           ]);
+    // C2 parity: sidebar rows under a workspace folder carry the same
+    // group palette dot the mobile card rows do (same grouped-view source;
+    // a miss on older desktops keeps the plain rows).
+    _ensureGroupedView(session);
+    final groupDotOf = _groupDotOf(session);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -656,6 +672,7 @@ class _TaskListPageState extends State<TaskListPage>
               selected: e.sessionId == _paneSessionId,
               indent: true,
               workspace: ws,
+              groupDot: groupDotOf[e.sessionId],
             ),
           // Empty-group feedback (B7); the archive filter keeps its own copy.
           if (entries.isEmpty)
@@ -681,6 +698,7 @@ class _TaskListPageState extends State<TaskListPage>
     bool selected = false,
     bool indent = false,
     Map<String, dynamic>? workspace,
+    Color? groupDot,
   }) {
     final title = entry.title.trim().isEmpty
         ? tr(context, 'tasks.untitled')
@@ -703,6 +721,17 @@ class _TaskListPageState extends State<TaskListPage>
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             child: Row(
               children: [
+                if (groupDot != null) ...[
+                  Container(
+                    width: ZListRow.dot,
+                    height: ZListRow.dot,
+                    decoration: BoxDecoration(
+                      color: groupDot,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                ],
                 Expanded(
                   child: Text(
                     title,
@@ -1008,16 +1037,23 @@ class _TaskListPageState extends State<TaskListPage>
                 ),
           ],
         ];
-        return RefreshIndicator(
-          onRefresh: () async =>
-              session?.reloadTasks() ?? widget.hub.ensure(widget.device),
-          child: ListView.builder(
-            // Always scrollable: a short list (one workspace, no tasks) must
-            // still accept the pull gesture for the refresh indicator.
-            physics: const AlwaysScrollableScrollPhysics(),
-            padding: zScreenPadding(context, top: 12, bottom: 32, horizontal: 12),
-            itemCount: rows.length,
-            itemBuilder: (context, i) => rows[i],
+        // The replace window: while a reload RPC is in flight the list is
+        // pointer-dead (stale-row taps would act on rows about to reshuffle).
+        return IgnorePointer(
+          ignoring: _reloading,
+          child: RefreshIndicator(
+            onRefresh: () async => session == null
+                ? widget.hub.ensure(widget.device)
+                : _reloadTasks(session),
+            child: ListView.builder(
+              // Always scrollable: a short list (one workspace, no tasks) must
+              // still accept the pull gesture for the refresh indicator.
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: zScreenPadding(
+                  context, top: 12, bottom: 32, horizontal: 12),
+              itemCount: rows.length,
+              itemBuilder: (context, i) => rows[i],
+            ),
           ),
         );
       },
@@ -1109,7 +1145,7 @@ class _TaskListPageState extends State<TaskListPage>
           onPressed: () {
             final s = _session;
             if (s != null) {
-              s.reloadTasks();
+              _reloadTasks(s);
             } else {
               widget.hub.ensure(widget.device);
             }
@@ -1941,7 +1977,7 @@ class _TaskListPageState extends State<TaskListPage>
           fgColor: archiveFg,
           onTap: () => _runOp(() async {
             await session.setTaskArchived(entry.sessionId, !archived);
-            await session.reloadTasks();
+            await _reloadTasks(session);
           }),
         ),
       if (!isDraft)
@@ -1956,7 +1992,7 @@ class _TaskListPageState extends State<TaskListPage>
           fgColor: ZInk.soft(context),
           onTap: () => _runOp(() async {
             await session.setTaskUnread(entry.sessionId, !unread);
-            await session.reloadTasks();
+            await _reloadTasks(session);
           }),
         ),
       SwipeAction(
@@ -2188,7 +2224,7 @@ class _TaskListPageState extends State<TaskListPage>
                   Navigator.of(sheetCtx).pop();
                   _runOp(() async {
                     await session.setTaskPinned(entry.sessionId, !pinned);
-                    await session.reloadTasks();
+                    await _reloadTasks(session);
                   });
                 },
               ),
@@ -2218,7 +2254,7 @@ class _TaskListPageState extends State<TaskListPage>
                   Navigator.of(sheetCtx).pop();
                   _runOp(() async {
                     await session.setTaskArchived(entry.sessionId, !archived);
-                    await session.reloadTasks();
+                    await _reloadTasks(session);
                   });
                 },
               ),
@@ -2241,7 +2277,7 @@ class _TaskListPageState extends State<TaskListPage>
                   Navigator.of(sheetCtx).pop();
                   _runOp(() async {
                     await session.setTaskUnread(entry.sessionId, !unread);
-                    await session.reloadTasks();
+                    await _reloadTasks(session);
                   });
                 },
               ),
@@ -2302,7 +2338,7 @@ class _TaskListPageState extends State<TaskListPage>
     if (title == null || title.isEmpty || title == entry.title) return;
     await _runOp(() async {
       await session.renameTask(entry.sessionId, title);
-      await session.reloadTasks();
+      await _reloadTasks(session);
     });
   }
 
@@ -2358,7 +2394,7 @@ class _TaskListPageState extends State<TaskListPage>
           await session.deleteSession(entry.sessionId);
         }
       }
-      await session.reloadTasks();
+      await _reloadTasks(session);
       if (_paneSessionId == entry.sessionId) {
         setState(() {
           _paneSessionId = null;
@@ -2431,6 +2467,19 @@ class _TaskListPageState extends State<TaskListPage>
       ),
     );
     widget.hub.scheduleResume(widget.device);
+  }
+
+  /// Unified reload entry: every [DeviceSession.reloadTasks] call on this
+  /// page goes through here so the replace window (the RPC round-trip)
+  /// flips [_reloading] in and out — the list bodies key their
+  /// IgnorePointer off it.
+  Future<void> _reloadTasks(DeviceSession session) async {
+    setState(() => _reloading = true);
+    try {
+      await session.reloadTasks();
+    } finally {
+      if (mounted) setState(() => _reloading = false);
+    }
   }
 
   Future<void> _runOp(Future<void> Function() op) async {
