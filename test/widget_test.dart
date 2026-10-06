@@ -11,6 +11,8 @@ import 'package:zgo/ui/devices_page.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
+import 'helpers/fake_device_session.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -75,6 +77,70 @@ void main() {
     await tester.tap(find.byTooltip('更多'));
     await tester.pumpAndSettle();
     expect(find.text('zcode.z.ai'), findsOneWidget);
+  });
+
+  testWidgets('connected device card hides the 上次使用 segment (B14)',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = DeviceStore();
+    await store.load();
+    final device = await store.addUrl(
+        'https://zcode.z.ai/remote/v4?sid=abc&hash=xyz&t=123&mid=m1&name=songsong&app_version=3.8.1');
+    // Set the stat so the segment WOULD render in the offline states.
+    await store.touch(device.id);
+
+    final theme = ThemeController();
+    final ui = UiSettings();
+    // true, like the e2e path test: with the switch off the hub's
+    // syncWith() tears down every session, including this installed fake.
+    final hub = DeviceSessionHub(nativeListEnabled: () => true);
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+    );
+    addTearDown(session.dispose);
+    hub.installForTesting(session); // fake defaults to DeviceStatus.connected
+    await tester.pumpWidget(wrap(DevicesPage(
+      store: store,
+      theme: theme,
+      ui: ui,
+      hub: hub,
+      scheduled: ScheduledStore(),
+      keepalive: KeepAliveController(),
+    )));
+    await tester.pumpAndSettle();
+
+    // While connected the live status answers "is it alive" — the
+    // wall-clock '上次使用' (last app-open moment) reads stale mid-session.
+    expect(find.textContaining('在线', findRichText: true), findsOneWidget);
+    expect(find.textContaining('上次使用', findRichText: true), findsNothing);
+    expect(find.textContaining('从未使用', findRichText: true), findsNothing);
+  });
+
+  testWidgets('offline device card keeps the 上次使用 segment (B14)',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = DeviceStore();
+    await store.load();
+    final device = await store.addUrl(
+        'https://zcode.z.ai/remote/v4?sid=abc&hash=xyz&t=123&mid=m1&name=songsong&app_version=3.8.1');
+    await store.touch(device.id);
+
+    final theme = ThemeController();
+    final ui = UiSettings();
+    final hub = DeviceSessionHub(nativeListEnabled: () => false);
+    await tester.pumpWidget(wrap(DevicesPage(
+      store: store,
+      theme: theme,
+      ui: ui,
+      hub: hub,
+      scheduled: ScheduledStore(),
+      keepalive: KeepAliveController(),
+    )));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('离线', findRichText: true), findsOneWidget);
+    expect(find.textContaining('上次使用', findRichText: true), findsOneWidget);
   });
 
   testWidgets('App boots', (WidgetTester tester) async {

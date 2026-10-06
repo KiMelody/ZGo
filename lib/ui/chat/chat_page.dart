@@ -4354,19 +4354,7 @@ class _AssistantBubble extends StatelessWidget {
                     ),
                   )
                 else ...[
-                  _FeedbackButton(
-                    icon: Icons.copy_outlined,
-                    active: false,
-                    onTap: () {
-                      Clipboard.setData(ClipboardData(text: text));
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(tr(context, 'chat.copied')),
-                          duration: const Duration(seconds: 1),
-                        ),
-                      );
-                    },
-                  ),
+                  _CopyFeedbackButton(text: text),
                   _FeedbackButton(
                     icon: Icons.thumb_up_alt_outlined,
                     active: feedback == 'like',
@@ -4438,6 +4426,53 @@ class _FeedbackButton extends StatelessWidget {
         color: active ? ZColors.sky500 : ZInk.ghost(context),
       ),
       onPressed: onTap,
+      visualDensity: VisualDensity.compact,
+    );
+  }
+}
+
+/// Assistant-copy button with the official web feedback: tap hard-switches
+/// copy → check (no transition, no toast) and reverts after 1200ms
+/// (measured on official 3.14.4 web, task 10-05
+/// evidence/web-copy-morph-findings.md). Re-tapping during the morph just
+/// restarts the window.
+class _CopyFeedbackButton extends StatefulWidget {
+  final String text;
+
+  const _CopyFeedbackButton({required this.text});
+
+  @override
+  State<_CopyFeedbackButton> createState() => _CopyFeedbackButtonState();
+}
+
+class _CopyFeedbackButtonState extends State<_CopyFeedbackButton> {
+  bool _copied = false;
+  Timer? _revertTimer;
+
+  @override
+  void dispose() {
+    _revertTimer?.cancel();
+    super.dispose();
+  }
+
+  void _copy() {
+    Clipboard.setData(ClipboardData(text: widget.text));
+    _revertTimer?.cancel();
+    _revertTimer = Timer(const Duration(milliseconds: 1200), () {
+      if (mounted) setState(() => _copied = false);
+    });
+    setState(() => _copied = true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      icon: Icon(
+        _copied ? Icons.check : Icons.copy_outlined,
+        size: 15,
+        color: ZInk.ghost(context),
+      ),
+      onPressed: _copy,
       visualDensity: VisualDensity.compact,
     );
   }
@@ -9244,6 +9279,10 @@ class _InputBarState extends State<_InputBar> {
                 controller: controller,
                 minLines: 1,
                 maxLines: 6,
+                // Empty+focused cursor sits on top of the placeholder text —
+                // hide it until there is input (rebuild rides _onText).
+                cursorColor:
+                    controller.text.isEmpty ? Colors.transparent : null,
                 style: ZType.body.copyWith(color: ZInk.solid(context)),
                 decoration: InputDecoration(
                   hintText: tr(

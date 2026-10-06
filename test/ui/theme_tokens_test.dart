@@ -116,4 +116,36 @@ void main() {
     expect(darkGlyph, ZColors.neutral300);
     expect(lightGlyph, ZColors.neutral500);
   });
+
+  testWidgets('FAB and slider themes ride the brand/ghost pair (B10/B11)',
+      (tester) async {
+    final dark = buildDarkTheme();
+    final light = buildLightTheme();
+
+    // FAB: brand sky fill + white glyph on both modes — the same pairing
+    // as the device-card running badge (the M3 default falls back to the
+    // text-color primary here, white-on-white).
+    expect(dark.floatingActionButtonTheme.backgroundColor, ZColors.sky500);
+    expect(dark.floatingActionButtonTheme.foregroundColor, Colors.white);
+    expect(light.floatingActionButtonTheme.backgroundColor, ZColors.sky500);
+    expect(light.floatingActionButtonTheme.foregroundColor, Colors.white);
+
+    // Slider: active track + thumb = brand sky; inactive track = the
+    // mode's ZInk.ghost so it stays visible on the page background (the
+    // M3 default picks the card color, ~1.3:1 against dark background).
+    expect(dark.sliderTheme.activeTrackColor, ZColors.sky500);
+    expect(dark.sliderTheme.thumbColor, ZColors.sky500);
+    expect(light.sliderTheme.activeTrackColor, ZColors.sky500);
+    expect(light.sliderTheme.thumbColor, ZColors.sky500);
+    final (darkGhost, lightGhost) = await capture(tester, ZInk.ghost);
+    expect(dark.sliderTheme.inactiveTrackColor, darkGhost);
+    expect(light.sliderTheme.inactiveTrackColor, lightGhost);
+    // Pin the ghost slots themselves so the context-free mirror in
+    // _base() cannot drift silently.
+    expect(darkGhost, ZColors.neutral200.withValues(alpha: 0.30));
+    expect(lightGhost, ZColors.neutral700.withValues(alpha: 0.40));
+    // Drag bubble rides the same sky as the active track.
+    expect(dark.sliderTheme.valueIndicatorColor, ZColors.sky500);
+    expect(light.sliderTheme.valueIndicatorColor, ZColors.sky500);
+  });
 }

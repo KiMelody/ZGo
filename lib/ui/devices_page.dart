@@ -756,19 +756,27 @@ class _DevicesPageState extends State<DevicesPage>
           : (tr(context, 'status.error'), ZInk.dangerTone(context)),
       _ => (tr(context, 'status.offline'), ZInk.ghost(context)),
     };
-    final lastUsed = device.lastUsedAt != null
-        ? trP(context, 'devices.lastUsed',
-            [relativeTime(context, device.lastUsedAt!)])
-        : tr(context, 'devices.neverUsed');
+    // B14: while connected, the live status segment (在线 / 任务进行中 N)
+    // already answers "is it alive" — '上次使用' is the moment the app last
+    // OPENED the device (local stat, not session activity), so showing it
+    // mid-session reads as stale. It rides only the disconnected states.
+    final connected = session?.status == DeviceStatus.connected;
+    final lastUsed = connected
+        ? null
+        : (device.lastUsedAt != null
+            ? trP(context, 'devices.lastUsed',
+                [relativeTime(context, device.lastUsedAt!)])
+            : tr(context, 'devices.neverUsed'));
     return Text.rich(
       TextSpan(
         children: [
           TextSpan(
               text: status, style: ZType.caption.copyWith(color: color)),
-          TextSpan(
-            text: ' · $lastUsed',
-            style: ZType.caption.copyWith(color: ZInk.ghost(context)),
-          ),
+          if (lastUsed != null)
+            TextSpan(
+              text: ' · $lastUsed',
+              style: ZType.caption.copyWith(color: ZInk.ghost(context)),
+            ),
         ],
       ),
       maxLines: 1,
