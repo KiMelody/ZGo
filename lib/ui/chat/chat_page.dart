@@ -2380,6 +2380,7 @@ class _ChatPageState extends State<ChatPage> {
                                 preview: _preview,
                                 confirmWindow: widget.turnFooterConfirmWindow,
                                 workspaceLabel: widget.workspaceLabel,
+                                theme: widget.theme,
                               ),
                             ],
                           );
@@ -2494,14 +2495,101 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
+  /// Workspace chip (folder icon + label) shared by the two header forms —
+  /// portrait renders it in the second header row, landscape in the compact
+  /// app bar (mock 方案 B keeps it visible on both).
+  Widget _workspaceChip(BuildContext context) {
+    final label = widget.workspaceLabel!;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: ZInk.tile(context),
+        borderRadius: BorderRadius.circular(ZRadius.field),
+        border: Border.all(color: ZInk.hairline(context)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.folder_outlined,
+            size: 13,
+            color: ZInk.muted(context),
+          ),
+          const SizedBox(width: 4),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 96),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: ZType.sub.copyWith(color: ZInk.muted(context)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Portrait second header row: task title + workspace chip + text 更多
+  /// (the landscape compact app bar carries the equivalents instead).
+  Widget _secondHeaderRow(BuildContext context, String? wsLabel) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 4, 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              widget.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: ZType.heading.copyWith(color: ZInk.solid(context)),
+            ),
+          ),
+          if (wsLabel != null) ...[
+            const SizedBox(width: 6),
+            _workspaceChip(context),
+          ],
+          PopupMenuButton<String>(
+            tooltip: tr(context, 'chat.more'),
+            onSelected: _onMoreMenu,
+            itemBuilder: _moreMenuItems,
+            position: PopupMenuPosition.under,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    tr(context, 'chat.more'),
+                    style: ZType.body.copyWith(color: ZColors.sky500),
+                  ),
+                  const Icon(
+                    Icons.keyboard_arrow_down,
+                    size: 16,
+                    color: ZColors.sky500,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = _state;
-    // Short viewport (landscape phones, folding half-open): the second
-    // header row drops its secondary workspace chip to keep the breadcrumb
-    // title readable without stealing message height (portrait phones are
-    // ~844 tall and never trigger).
+    // Short viewport (landscape phones, folding half-open; portrait phones
+    // are ~844 tall and never trigger): the header collapses to ONE 48px
+    // row — back + task title + workspace chip + ⋮ menu — and the second
+    // header row (caption + title + text 更多) is dropped entirely, so the
+    // message area clears the 40%-of-screen-height density line (mock
+    // 方案 B; probe-measured baseline was 37.4%).
     final short = MediaQuery.heightOf(context) < 480;
+    final wsLabel = (widget.workspaceLabel ?? '').isEmpty
+        ? null
+        : widget.workspaceLabel;
     // This build deliberately does NOT read the IME inset: the keyboard
     // animation delivers a fresh inset every frame (~300ms), and a dependency
     // here rebuilt the whole page per frame — app bar, row regrouping,
@@ -2517,7 +2605,27 @@ class _ChatPageState extends State<ChatPage> {
     final chat = Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: !widget.embedded,
-        title: Text(tr(context, 'chat.appBar')),
+        toolbarHeight: short ? 48 : null,
+        title: short
+            ? Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      widget.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: ZType.heading.copyWith(
+                        color: ZInk.solid(context),
+                      ),
+                    ),
+                  ),
+                  if (wsLabel != null) ...[
+                    const SizedBox(width: 6),
+                    _workspaceChip(context),
+                  ],
+                ],
+              )
+            : Text(tr(context, 'chat.appBar')),
         actions: [
           if (widget.theme != null)
             IconButton(
@@ -2529,6 +2637,16 @@ class _ChatPageState extends State<ChatPage> {
               tooltip: tr(context, 'settings.theme'),
               onPressed: widget.theme!.cycle,
             ),
+          // Landscape compact: the second row's text 更多 becomes the ⋮
+          // icon here (same menu).
+          if (short)
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.more_vert, size: 22),
+              tooltip: tr(context, 'chat.more'),
+              onSelected: _onMoreMenu,
+              itemBuilder: _moreMenuItems,
+              position: PopupMenuPosition.under,
+            ),
         ],
       ),
       body: SafeArea(
@@ -2536,89 +2654,15 @@ class _ChatPageState extends State<ChatPage> {
         bottom: false,
         child: Column(
           children: [
-            // Second header row: task title + workspace chip + 更多.
+            // Second header row: task title + workspace chip + 更多
+            // (portrait content; landscape carries all of it in the app
+            // bar). The slot itself stays occupied on short viewports —
+            // constant type, constant Column position (spec §8.1: a
+            // toggling child here shifts every later child's pairing).
             _contentCol(
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 4, 4),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        widget.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: ZType.heading.copyWith(color: ZInk.solid(context)),
-                      ),
-                    ),
-                    if (!short &&
-                        widget.workspaceLabel != null &&
-                        widget.workspaceLabel!.isNotEmpty) ...[
-                      const SizedBox(width: 6),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: ZInk.tile(context),
-                          borderRadius: BorderRadius.circular(ZRadius.field),
-                          border: Border.all(color: ZInk.hairline(context)),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.folder_outlined,
-                              size: 13,
-                              color: ZInk.muted(context),
-                            ),
-                            const SizedBox(width: 4),
-                            ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 96),
-                              child: Text(
-                                widget.workspaceLabel!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: ZType.sub.copyWith(
-                                  color: ZInk.muted(context),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                    PopupMenuButton<String>(
-                      tooltip: tr(context, 'chat.more'),
-                      onSelected: _onMoreMenu,
-                      itemBuilder: _moreMenuItems,
-                      position: PopupMenuPosition.under,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 6,
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              tr(context, 'chat.more'),
-                              style: ZType.body.copyWith(
-                                color: ZColors.sky500,
-                              ),
-                            ),
-                            const Icon(
-                              Icons.keyboard_arrow_down,
-                              size: 16,
-                              color: ZColors.sky500,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+              short
+                  ? const SizedBox.shrink()
+                  : _secondHeaderRow(context, wsLabel),
             ),
             if (_error != null)
               Material(
@@ -3109,6 +3153,8 @@ class _LoadingPlaceholderState extends State<_LoadingPlaceholder> {
 
 /// Banner driven by gateway link status: quiet when healthy, "reconnecting"
 /// while the relay link is down mid-chat (a send may pause until recovery).
+/// The kicked state has its own full-screen overlay further up the tree
+/// (see _kickedOverlay) — this banner stays hidden there.
 class _GatewayBanner extends StatelessWidget {
   final ChatGateway gateway;
 
@@ -3244,12 +3290,16 @@ String _localeOf(BuildContext context) =>
 /// [context] must be a page-lifetime context (a row's element), not the
 /// action sheet's — the sheet pops before the command round-trip. Navigator
 /// and ScaffoldMessenger are captured up front, so post-await use is safe.
+/// [theme] rides along so the forked page keeps the theme toggle (the
+/// source page's controller — the pushed page renders under the same
+/// controller-driven ThemeMode).
 Future<void> _forkToNewSession(
   BuildContext context, {
   required ChatGateway gateway,
   required String sessionId,
   required Map<String, dynamic> target,
   String? workspaceLabel,
+  ThemeController? theme,
 }) async {
   final navigator = Navigator.of(context);
   final messenger = ScaffoldMessenger.of(context);
@@ -3282,6 +3332,7 @@ Future<void> _forkToNewSession(
           sessionId: newId,
           title: draftTitle,
           workspaceLabel: workspaceLabel,
+          theme: theme,
         ),
       ),
     );
@@ -3477,6 +3528,10 @@ class _TurnGroupWidget extends StatefulWidget {
   /// the new session's page with the same chip (same workspace, fork parity).
   final String? workspaceLabel;
 
+  /// Source page's theme controller — the fork flow hands it to the pushed
+  /// page so the forked session keeps the theme toggle.
+  final ThemeController? theme;
+
   const _TurnGroupWidget({
     super.key,
     required this.rows,
@@ -3488,6 +3543,7 @@ class _TurnGroupWidget extends StatefulWidget {
     required this.preview,
     required this.confirmWindow,
     required this.workspaceLabel,
+    this.theme,
   });
 
   @override
@@ -3610,6 +3666,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
           preview: widget.preview,
           feed: widget.feed,
           workspaceLabel: workspaceLabel,
+          theme: widget.theme,
         ),
       );
     }
@@ -3653,6 +3710,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
             feed: widget.feed,
             turnFeedbackLocked: _feedbackLocked,
             workspaceLabel: workspaceLabel,
+            theme: widget.theme,
           ),
         );
       } else if (p.kind == 'rowGroup') {
@@ -3669,6 +3727,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
             preview: widget.preview,
             feed: widget.feed,
             workspaceLabel: workspaceLabel,
+            theme: widget.theme,
           ),
         );
       } else {
@@ -3683,6 +3742,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
             state: widget.state,
             preview: widget.preview,
             feed: widget.feed,
+            theme: widget.theme,
           ),
         );
       }
@@ -3731,6 +3791,9 @@ class _RowWidget extends StatelessWidget {
   /// session's page with the same chip (fork parity with the web panel).
   final String? workspaceLabel;
 
+  /// Source page's theme controller — rides the fork flow to the new page.
+  final ThemeController? theme;
+
   const _RowWidget({
     super.key,
     required this.row,
@@ -3743,6 +3806,7 @@ class _RowWidget extends StatelessWidget {
     this.feed,
     this.turnFeedbackLocked = false,
     this.workspaceLabel,
+    this.theme,
   });
 
   Map<String, dynamic> get _target => {
@@ -3797,6 +3861,7 @@ class _RowWidget extends StatelessWidget {
                   sessionId: sessionId,
                   target: _target,
                   workspaceLabel: workspaceLabel,
+                  theme: theme,
                 );
               },
             ),
@@ -3939,6 +4004,7 @@ class _RowWidget extends StatelessWidget {
         showFeedback: showFeedback,
         turnFeedbackLocked: turnFeedbackLocked,
         workspaceLabel: workspaceLabel,
+        theme: theme,
       ),
       'reasoning' => _ReasoningTile(
         text: row['text'] as String? ?? '',
@@ -4302,6 +4368,9 @@ class _AssistantBubble extends StatelessWidget {
   /// page (same workspace, fork parity with the web panel).
   final String? workspaceLabel;
 
+  /// Source page's theme controller — rides the fork flow to the new page.
+  final ThemeController? theme;
+
   const _AssistantBubble({
     required this.row,
     required this.gateway,
@@ -4311,6 +4380,7 @@ class _AssistantBubble extends StatelessWidget {
     this.showFeedback = true,
     this.turnFeedbackLocked = false,
     this.workspaceLabel,
+    this.theme,
   });
 
   void _setFeedback(String? value) {
@@ -4380,6 +4450,7 @@ class _AssistantBubble extends StatelessWidget {
                           'entityId': row['entityId'],
                       },
                       workspaceLabel: workspaceLabel,
+                      theme: theme,
                     ),
                   ),
                 ],
@@ -6528,6 +6599,9 @@ class _ToolGroupCard extends StatefulWidget {
   /// Fork parity: the source page's workspace chip label for the fork flow.
   final String? workspaceLabel;
 
+  /// Source page's theme controller — rides the fork flow to the new page.
+  final ThemeController? theme;
+
   const _ToolGroupCard({
     super.key,
     required this.rows,
@@ -6537,6 +6611,7 @@ class _ToolGroupCard extends StatefulWidget {
     required this.state,
     required this.preview,
     required this.workspaceLabel,
+    this.theme,
     this.feed,
   });
 
@@ -6630,6 +6705,7 @@ class _ToolGroupCardState extends State<_ToolGroupCard> {
                       preview: widget.preview,
                       feed: widget.feed,
                       workspaceLabel: widget.workspaceLabel,
+                      theme: widget.theme,
                     ),
                 ],
               ),
@@ -7885,8 +7961,12 @@ class _ModelModeSheet extends StatelessWidget {
                 style: ZType.sub.copyWith(color: ZInk.muted(context)),
               ),
             if (thoughtOption != null && thoughtOption.options.isNotEmpty) ...[
+              // Same wire discipline as the model header above: desktop
+              // config-option names are English ("Thought level"), the
+              // section title always rides the local lexicon (the chip
+              // labels below stay the desktop originals).
               Text(
-                thoughtOption.name,
+                tr(context, 'chat.sheet.thought'),
                 style: ZType.body.copyWith(color: ZInk.solid(context)),
               ),
               const SizedBox(height: 8),
@@ -9134,11 +9214,14 @@ class _InputBarState extends State<_InputBar> {
   void initState() {
     super.initState();
     widget.controller.addListener(_onText);
+    _inputFocus = FocusNode()..addListener(_onFocus);
   }
 
   @override
   void dispose() {
     widget.controller.removeListener(_onText);
+    _inputFocus.removeListener(_onFocus);
+    _inputFocus.dispose();
     super.dispose();
   }
 
@@ -9149,6 +9232,31 @@ class _InputBarState extends State<_InputBar> {
   /// Short-viewport toggle: the tool row starts collapsed (landscape phones
   /// / folding half-open) and the expand button reveals it temporarily.
   bool _toolsExpanded = false;
+
+  /// Landscape density (mock 方案 B): focusing the input reveals the tool
+  /// chips, blur/send takes them back; the ⇅ toggle stays as the manual
+  /// entry. Portrait never consults [_toolsExpanded] (toolsVisible is
+  /// unconditionally true there), so the listener is inert on tall
+  /// viewports.
+  late final FocusNode _inputFocus;
+
+  /// Mirrors the last build's short-viewport verdict — the focus listener
+  /// must not register a MediaQuery dependency (IME frame cost, spec §8.2).
+  bool _shortViewport = false;
+
+  void _onFocus() {
+    if (!mounted || !_shortViewport) return;
+    setState(() => _toolsExpanded = _inputFocus.hasFocus);
+  }
+
+  /// Send-side half of the landscape contract: a send reclaims the tool
+  /// row so the post-send transcript keeps the room.
+  void _sendAndCollapse() {
+    if (_shortViewport && _toolsExpanded) {
+      setState(() => _toolsExpanded = false);
+    }
+    onSend();
+  }
 
   bool get _hasInput =>
       widget.controller.text.trim().isNotEmpty || widget.hasAttachments;
@@ -9255,6 +9363,14 @@ class _InputBarState extends State<_InputBar> {
     // are ~844 tall and never trigger): collapse the tool row into an
     // expand toggle so the input line keeps the scarce vertical room.
     final short = MediaQuery.heightOf(context) < 480;
+    // Rotating portrait → landscape mid-typing: the input keeps its focus
+    // across the turn, but the focus listener only fires on focus *events*
+    // — adopt the focused state as the short-viewport verdict flips so the
+    // chips match the (still-focused) input.
+    if (short && !_shortViewport && _inputFocus.hasFocus) {
+      _toolsExpanded = true;
+    }
+    _shortViewport = short;
     final toolsVisible = !short || _toolsExpanded;
     // Horizontal insets are consumed once by the body-level SafeArea above
     // (aligned message flow and composer); this one only keeps its bottom
@@ -9277,6 +9393,7 @@ class _InputBarState extends State<_InputBar> {
             children: [
               TextField(
                 controller: controller,
+                focusNode: _inputFocus,
                 minLines: 1,
                 maxLines: 6,
                 // Empty+focused cursor sits on top of the placeholder text —
@@ -9381,11 +9498,14 @@ class _InputBarState extends State<_InputBar> {
                   const SizedBox(width: 4),
                   // The composer stays sendable while a turn
                   // runs — follow-ups queue mid-turn — with stop appearing
-                  // at the far right.
+                  // at the far right. Kicked never reaches this button: the
+                  // full-screen takeover overlay already blocks all input
+                  // (single button instance — the collapsed/expanded
+                  // landscape states share this row).
                   _SendButton(
                     enabled: _hasInput && !sending,
                     sending: sending,
-                    onSend: onSend,
+                    onSend: _sendAndCollapse,
                   ),
                   if (running) _StopButton(onStop: () => _stop(context)),
                 ],

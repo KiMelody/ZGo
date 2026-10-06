@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -40,6 +42,22 @@ Future<(DeviceStore, Device)> setupDevice() async {
   await store.addUrl(
       'https://zcode.z.ai/remote/v4?sid=abc&hash=xyz&t=123&mid=m1&name=songsong&app_version=3.8.1');
   return (store, store.devices.single);
+}
+
+/// Reload whose RPC round-trip the test controls — the replace-window
+/// (pointer-dead list) test holds the gate open mid-reload.
+class _GatedReloadSession extends FakeDeviceSession {
+  _GatedReloadSession({
+    required super.deviceId,
+    required super.params,
+    super.entries,
+    super.workspaces,
+  });
+
+  final Completer<void> gate = Completer<void>();
+
+  @override
+  Future<void> reloadTasks() => gate.future;
 }
 
 Widget wrap(Widget child) => MaterialApp(
@@ -362,6 +380,136 @@ void main() {
     expect(find.text('项目'), findsOneWidget);
   });
 
+  testWidgets('desktop sidebar workspace rows carry the group palette dot '
+      '(C2 parity)', (tester) async {
+    useDesktop(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 's1',
+          'title': '修复登录',
+          'phase': 'completedSuccess',
+          'lastActivityAt': DateTime.now().millisecondsSinceEpoch,
+        },
+        {
+          'sessionId': 's2',
+          'title': '另一个任务',
+          'phase': 'completedSuccess',
+          'lastActivityAt': DateTime.now().millisecondsSinceEpoch,
+        },
+      ],
+      workspaces: [
+        {'workspacePath': '/repo/app'},
+      ],
+      channelHandler: (c, m, a) async => m == 'listGroupedTaskViewStructure'
+          ? {
+              'groups': [
+                {
+                  'id': 'g1',
+                  'title': '重点任务组',
+                  'color': 'blue',
+                  'createdAt': 5,
+                },
+              ],
+              'members': [
+                {
+                  'groupId': 'g1',
+                  'taskId': 's1',
+                  'workspaceKey': null,
+                  'sortOrder': null,
+                  'addedAt': 3,
+                },
+              ],
+              'topLevelOrders': <dynamic>[],
+            }
+          : null,
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // The grouped task's sidebar row carries the group's palette dot; the
+    // ungrouped row stays plain. Same palette mapping as the mobile card.
+    Finder dotIn(String title) => find.descendant(
+          of: find.ancestor(of: find.text(title), matching: find.byType(Row)).first,
+          matching: find.byWidgetPredicate(
+            (w) =>
+                w is Container &&
+                w.decoration is BoxDecoration &&
+                (w.decoration! as BoxDecoration).shape == BoxShape.circle,
+          ),
+        );
+
+    final dot = tester.widget<Container>(dotIn('修复登录').first);
+    final deco = dot.decoration! as BoxDecoration;
+    expect(deco.color, ZColors.sky500);
+    expect(deco.shape, BoxShape.circle);
+    expect(dotIn('另一个任务'), findsNothing);
+  });
+
+  testWidgets('reload window: the list is pointer-dead until the reload RPC '
+      'returns (D1)', (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = _GatedReloadSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 's1',
+          'title': '修复登录',
+          'phase': 'completedSuccess',
+          'lastActivityAt': DateTime.now().millisecondsSinceEpoch,
+        },
+      ],
+      workspaces: [
+        {'workspacePath': '/repo/app'},
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    IgnorePointer listGate() => tester.widget<IgnorePointer>(
+        find.ancestor(
+            of: find.byType(RefreshIndicator), matching: find.byType(IgnorePointer)).first);
+    expect(listGate().ignoring, isFalse);
+
+    // Refresh button → the reload RPC hangs on the gate: the window is
+    // open and the list ignores pointers.
+    await tester.tap(find.byIcon(Icons.refresh));
+    await tester.pump();
+    expect(listGate().ignoring, isTrue);
+
+    // A row tap inside the window must not open the chat.
+    await tester.tap(find.text('修复登录'), warnIfMissed: false);
+    await tester.pump();
+    expect(find.byType(ChatPage), findsNothing);
+
+    // RPC returns → the gate lifts and the same row opens the chat.
+    session.gate.complete();
+    await tester.pumpAndSettle();
+    expect(listGate().ignoring, isFalse);
+    await tester.tap(find.text('修复登录'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byType(ChatPage), findsOneWidget);
+  });
+
   testWidgets(
       'dual-pane landscape consumes cutout insets once (853×384, left 45/top 40)',
       (tester) async {
@@ -427,7 +575,14 @@ void main() {
 
     await openSession();
     final fieldInset = tester.getTopLeft(find.byType(TextField).first).dx;
-    final titleInset = tester.getTopLeft(find.text('任务会话')).dx;
+    // C6 landscape compact header: the caption is gone on this surface;
+    // anchor on the pane app-bar title instead (scoped to AppBar — the same
+    // session title also exists as the sidebar tree row).
+    Finder paneTitle() => find.descendant(
+      of: find.byType(AppBar),
+      matching: find.text('修复登录'),
+    );
+    final titleInset = tester.getTopLeft(paneTitle()).dx;
 
     // Control surface: same size, zero insets.
     await pumpPane(cutout: false);
@@ -435,7 +590,7 @@ void main() {
     final navControl = tester.getTopLeft(find.text('搜索')).dx;
     await openSession();
     final fieldControl = tester.getTopLeft(find.byType(TextField).first).dx;
-    final titleControl = tester.getTopLeft(find.text('任务会话')).dx;
+    final titleControl = tester.getTopLeft(paneTitle()).dx;
 
     // Tree-vs-nav offset back to the inset-free geometry: the tree must not
     // be pushed right by the raw horizontal inset.
