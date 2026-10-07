@@ -267,6 +267,18 @@ abstract interface class ChatGateway
   /// callers must treat null as "don't render", never as an error.
   String? taskDisplayStatus(String sessionId);
 
+  /// Cross-terminal deletion tombstone (task 10-06 chat tombstone): true
+  /// once the live sessions-index of the active workspace dropped
+  /// [sessionId] after having listed it — another terminal deleted the
+  /// session. The chat page renders a tombstone banner and disables the
+  /// composer send; the messages stay read-only (no pop, no clearing).
+  bool isSessionDeleted(String sessionId);
+
+  /// Drops [sessionId] from the cross-terminal tombstone set. The chat
+  /// page calls this on dispose so a page-held tombstone does not outlive
+  /// its reader — the set is add-only otherwise.
+  void forgetDeletedSession(String sessionId);
+
   /// Entitlement/quota snapshot (usage-stats.getEntitlementSnapshot) via
   /// the session-wide [EntitlementPoller]: cached within the staleness
   /// window, [force] bypasses it. Never throws — failures arrive as an
@@ -401,6 +413,26 @@ class DeviceSession extends ChangeNotifier
   /// believes deleted but isn't is worse than a stale row.
   final Set<String> _locallyDeletedTaskIds = <String>{};
 
+  /// Cross-terminal deletion tombstones (task 10-06 chat tombstone):
+  /// session ids that VANISHED from the live sessions-index while this
+  /// session held the subscription — the desktop-side signal that another
+  /// terminal deleted the session (app-initiated deletes land in
+  /// [_locallyDeletedTaskIds] instead; the index-disappearance path also
+  /// records them here, harmless — the page for such a session is already
+  /// exiting). Consumed by the chat page through
+  /// [ChatGateway.isSessionDeleted]. Add-only in memory (session ids are
+  /// never reused); the open chat page drops its own id on dispose
+  /// ([forgetDeletedSession]).
+  final Set<String> _deletedSessionIds = <String>{};
+
+  /// Diff baseline of [recordVanishedSessions]: the session ids seen at
+  /// the previous ready frame, tagged with the workspace key they belong
+  /// to. Reset on every workspace open — a NEW subscription starts with a
+  /// fresh baseline, so a bridge swing's resubscribe (or a workspace
+  /// switch) can never diff against a foreign frame; mass vanishings
+  /// across subscriptions read as nothing.
+  ({String? key, Set<String> ids})? _indexDiffBase;
+
   /// Live-confirmed workspace homes (design 10-02 sticky home): task
   /// id → workspace key, written every time a live sessions-index
   /// snapshot arrives (membership IS the ground truth of a task's
@@ -458,6 +490,31 @@ class DeviceSession extends ChangeNotifier
       final key = TaskDirectory.liveKeyOf(entry, state.subscribedWorkspaceKey);
       if (key != null) _confirmedHomeKeys[entry.sessionId] = key;
     }
+  }
+
+  /// Records cross-terminal deletion tombstones from a live index frame
+  /// (task 10-06 chat tombstone): session ids present at the previous
+  /// ready frame of the SAME subscription + workspace that are gone from
+  /// the current one (a `session.removed` delta, or a resync snapshot
+  /// against the ids that state held before). Wired next to
+  /// [confirmLiveHomes] on every live frame — public so the fake session
+  /// can replay the same wiring (test/helpers/fake_device_session.dart).
+  ///
+  /// Conservative by design (宁可漏报不可误报 — a false tombstone bans
+  /// sends on a live session): only same-state frames are diffed; the
+  /// first ready frame of a (fresh or reset) baseline only establishes
+  /// it. Snapshots are treated as complete workspace listings — the
+  /// sessions-index is the desktop's own sidebar set (see spec
+  /// task-registry-semantics §2), so a same-state re-snapshot without an
+  /// id IS a deletion, not a paging boundary.
+  void recordVanishedSessions() {
+    final state = sessions;
+    if (state == null || !state.ready) return;
+    final current = state.sessions.keys.toSet();
+    final base = _indexDiffBase;
+    _indexDiffBase = (key: state.subscribedWorkspaceKey, ids: current);
+    if (base == null || base.key != state.subscribedWorkspaceKey) return;
+    _deletedSessionIds.addAll(base.ids.difference(current));
   }
 
   /// True while a workspace bridge + sessions-index open is in flight.
@@ -744,6 +801,11 @@ class DeviceSession extends ChangeNotifier
       final oldBridge = _bridge;
       final oldChats = List.of(_chatSubs.values);
       _sessionsSub = null;
+      // Fresh subscription = fresh tombstone diff baseline: the first
+      // ready frame of the new index only establishes it (a workspace
+      // switch must never read the previous workspace's ids as mass
+      // deletions; see [recordVanishedSessions]).
+      _indexDiffBase = null;
       _conversation = null;
       _chatSubs.clear();
       _bridge = bridge;
@@ -797,8 +859,11 @@ class DeviceSession extends ChangeNotifier
       sub.state.addListener(_onSessionsChanged);
       // A snapshot may have landed during the tombstone probe above —
       // before the listener attached. Confirm whatever is already there
-      // (a no-op while the index is still empty).
+      // (a no-op while the index is still empty) and baseline the
+      // tombstone diff against it, so a removal delta in the very first
+      // post-attach frame still finds its before-ids.
       confirmLiveHomes();
+      recordVanishedSessions();
       _error = null;
       onWorkspaceOpened?.call(key);
       notifyListeners();
@@ -822,6 +887,9 @@ class DeviceSession extends ChangeNotifier
     if (_disposed) return;
     final sub = _sessionsSub;
     if (sub != null && sub.state.ready) {
+      // Tombstones first: the notify below is what flips the chat page's
+      // banner, so the set must already hold the vanished ids.
+      recordVanishedSessions();
       confirmLiveHomes();
       // First snapshot landed — the list is alive again.
       _listWatchdog?.cancel();
@@ -1627,6 +1695,15 @@ class DeviceSession extends ChangeNotifier
       }
     }
     return null;
+  }
+
+  @override
+  bool isSessionDeleted(String sessionId) =>
+      _deletedSessionIds.contains(sessionId);
+
+  @override
+  void forgetDeletedSession(String sessionId) {
+    _deletedSessionIds.remove(sessionId);
   }
 
   /// Session-wide entitlement poller — the usage page and the chat quota

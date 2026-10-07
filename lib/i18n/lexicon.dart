@@ -177,6 +177,7 @@ const _zh = {
   'chat.kicked.title': '已被其他设备接管',
   'chat.kicked.body': '同一任务同时只允许一个终端连接，可在其他设备退出后重新连接。',
   'chat.kicked.reconnect': '重新连接',
+  'chat.banner.sessionDeleted': '会话已在其他位置删除',
   'chat.creating': '正在创建会话（首次可能需要预热）…',
   'chat.send.failed': '发送失败: \$0',
   'chat.op.failed': '操作失败: \$0',
@@ -1170,6 +1171,7 @@ const _en = {
   'chat.kicked.body':
       'Only one terminal may follow a task at a time. Reconnect after the other device exits.',
   'chat.kicked.reconnect': 'Reconnect',
+  'chat.banner.sessionDeleted': 'Session deleted elsewhere',
   'chat.creating': 'Creating the session (first run may warm up)…',
   'chat.send.failed': 'Send failed: \$0',
   'chat.op.failed': 'Operation failed: \$0',

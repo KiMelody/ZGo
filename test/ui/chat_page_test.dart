@@ -1553,6 +1553,79 @@ void main() {
     expect(buttonOf().onTap, isNotNull);
   });
 
+  group('cross-terminal deletion tombstone (10-06)', () {
+    Future<FakeChatGateway> pumpChat(WidgetTester tester,
+        {required FakeChatGateway gateway}) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi', 'state': 'done'},
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      return gateway;
+    }
+
+    InkWell sendButtonOf(WidgetTester tester) => tester.widget<InkWell>(
+          find
+              .ancestor(
+                of: find.byIcon(Icons.arrow_upward),
+                matching: find.byType(InkWell),
+              )
+              .first,
+        );
+
+    testWidgets('tombstoned id: banner shows and send greys out; forgetting '
+        'the id recovers the composer', (tester) async {
+      final gateway = await pumpChat(
+        tester,
+        gateway: FakeChatGateway()..deletedSessionIds.add('s1'),
+      );
+
+      // Banner + greyed send (input present, but tombstoned).
+      expect(find.text('会话已在其他位置删除'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), '继续');
+      await tester.pump();
+      expect(sendButtonOf(tester).onTap, isNull);
+
+      // The id leaving the set (production: never mid-life; the page
+      // re-reads on the gateway notify either way) recovers the composer.
+      gateway.deletedSessionIds.remove('s1');
+      gateway.notifyListeners();
+      await tester.pump();
+      expect(find.text('会话已在其他位置删除'), findsNothing);
+      expect(sendButtonOf(tester).onTap, isNotNull);
+    });
+
+    testWidgets('live session: no tombstone banner, send stays enabled',
+        (tester) async {
+      await pumpChat(tester, gateway: FakeChatGateway());
+
+      expect(find.text('会话已在其他位置删除'), findsNothing);
+      await tester.enterText(find.byType(TextField), '继续');
+      await tester.pump();
+      expect(sendButtonOf(tester).onTap, isNotNull);
+    });
+
+    testWidgets('dispose forgets the page-held tombstone id', (tester) async {
+      final gateway = await pumpChat(
+        tester,
+        gateway: FakeChatGateway()..deletedSessionIds.add('s1'),
+      );
+      expect(gateway.forgottenSessions, isEmpty);
+      expect(gateway.isSessionDeleted('s1'), isTrue);
+
+      // Unmount the page (dispose path) — the id must leave the set.
+      await tester.pumpWidget(wrap(const SizedBox.shrink()));
+      expect(gateway.forgottenSessions, ['s1']);
+      expect(gateway.isSessionDeleted('s1'), isFalse);
+    });
+  });
+
   testWidgets('更多 menu: official order and pin toggle flips label', (
     tester,
   ) async {
@@ -4260,8 +4333,9 @@ void main() {
     expect(find.byIcon(Icons.check), findsNothing);
   });
 
-  testWidgets('composer cursor is transparent while empty, theme default '
-      'once there is input', (tester) async {
+  testWidgets('composer cursor always rides the theme default (blinks in '
+      'empty state too — focus signal beats placeholder overlap, matching '
+      'the official web/desktop input)', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
       wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
@@ -4273,18 +4347,13 @@ void main() {
 
     final field = find.byType(TextField);
     expect(field, findsOneWidget); // the composer
-    // Empty composer: cursor hidden so it never overlaps the placeholder.
-    expect(tester.widget<TextField>(field).cursorColor, Colors.transparent);
+    // Empty composer: cursor must still be theme-resolved (null), never a
+    // conditional hide — an invisible cursor reads as "no focus".
+    expect(tester.widget<TextField>(field).cursorColor, isNull);
 
     await tester.enterText(field, '你好');
     await tester.pump();
-    // Any input restores the theme default (null → theme resolution).
     expect(tester.widget<TextField>(field).cursorColor, isNull);
-
-    // Back to empty → hidden again.
-    await tester.enterText(field, '');
-    await tester.pump();
-    expect(tester.widget<TextField>(field).cursorColor, Colors.transparent);
   });
 }
 
