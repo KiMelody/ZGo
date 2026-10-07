@@ -162,6 +162,24 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   @override
   String? error;
 
+  /// Cross-terminal deletion tombstones (10-06): the page reads this set
+  /// through [isSessionDeleted]. Explicit overrides — the loose
+  /// noSuchMethod fallback returns a Future, which a bool member cannot be.
+  final Set<String> deletedSessionIds = {};
+
+  /// Ids handed to [forgetDeletedSession] (the page's dispose recovery).
+  final List<String> forgottenSessions = [];
+
+  @override
+  bool isSessionDeleted(String sessionId) =>
+      deletedSessionIds.contains(sessionId);
+
+  @override
+  void forgetDeletedSession(String sessionId) {
+    forgottenSessions.add(sessionId);
+    deletedSessionIds.remove(sessionId);
+  }
+
   /// Every recorded call as (method, positionalArgs).
   final List<(String, List<Object?>)> calls = [];
 

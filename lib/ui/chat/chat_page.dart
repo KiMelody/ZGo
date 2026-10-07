@@ -24,6 +24,7 @@ import '../quota_reset_dialog.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
 import '../widgets/sheet_scaffold.dart';
+import 'confirm_gate.dart';
 import 'diff_view.dart';
 import 'file_preview_page.dart';
 import 'history_pager.dart';
@@ -579,6 +580,15 @@ class _ChatPageState extends State<ChatPage> {
 
   ConversationState? get _state => _handle?.state;
 
+  /// Cross-terminal deletion tombstone (task 10-06 chat tombstone): the
+  /// desktop's sessions-index dropped this session id — another terminal
+  /// deleted the session. The page stays READ-ONLY (the user may still
+  /// copy content out): banner + disabled send, no pop, no data clearing.
+  bool get _tombstoned {
+    final id = _sessionId;
+    return id != null && widget.gateway.isSessionDeleted(id);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -835,6 +845,10 @@ class _ChatPageState extends State<ChatPage> {
     try {
       widget.gateway.sendViewState();
     } catch (_) {}
+    // Tombstone memory recovery (10-06): the page held this id's tombstone
+    // reader — release it so the add-only set does not outlive the page.
+    final sessionId = _sessionId;
+    if (sessionId != null) widget.gateway.forgetDeletedSession(sessionId);
     _handle?.close();
     _feed.dispose();
     _inputController.dispose();
@@ -1065,6 +1079,10 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _send() async {
     final text = _inputController.text.trim();
     if ((text.isEmpty && _pendingFiles.isEmpty) || _sending) return;
+    // Tombstone (10-06): a session deleted elsewhere accepts no sends —
+    // the slash-bar shortcuts below route here directly, past the greyed
+    // button.
+    if (_tombstoned) return;
     HapticFeedback.lightImpact();
 
     // Slash commands (as in the web composer).
@@ -2679,6 +2697,31 @@ class _ChatPageState extends State<ChatPage> {
                   ),
                 ),
               ),
+            // Cross-terminal deletion tombstone (10-06): own
+            // gateway-animating builder — `chat` above is captured once per
+            // State.build, so only AnimatedBuilders re-run on the session's
+            // tombstone notify. The always-present slot keeps the Column
+            // child list structurally constant (spec §8.1 discipline); the
+            // message list above stays read-only either way.
+            AnimatedBuilder(
+              animation: widget.gateway,
+              builder: (context, _) => _tombstoned
+                  ? Material(
+                      color: ZColors.danger.withValues(alpha: 0.15),
+                      child: ListTile(
+                        dense: true,
+                        leading: Icon(
+                          Icons.delete_outline,
+                          color: ZInk.dangerTone(context),
+                        ),
+                        title: Text(
+                          tr(context, 'chat.banner.sessionDeleted'),
+                          style: ZType.sub,
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
             if (_showQuotaWarning)
               // Warning-only banner (PRD: the「使用重置券」action moved to
               // the usage sheet; switch model / view usage remain).
@@ -3556,7 +3599,16 @@ class _TurnGroupWidget extends StatefulWidget {
 class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
   bool _showChanges = true;
 
-  Timer? _terminalTimer;
+  /// Terminal-footer gate (F) — the hold window itself; the footer's
+  /// business flag stays in [_terminalConfirmed].
+  late final ConfirmGate _terminalGate = ConfirmGate(
+    window: widget.confirmWindow,
+    onConfirmed: () {
+      if (mounted && turnTerminalPhases.contains(_headerPhase ?? '')) {
+        setState(() => _terminalConfirmed = true);
+      }
+    },
+  );
 
   /// Whether the turn's terminal footer (terminal phase pill + feedback
   /// row) may render — see [_reconcileTerminal].
@@ -3579,7 +3631,7 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
 
   @override
   void dispose() {
-    _terminalTimer?.cancel();
+    _terminalGate.dispose();
     super.dispose();
   }
 
@@ -3610,18 +3662,14 @@ class _TurnGroupWidgetState extends State<_TurnGroupWidget> {
   void _reconcileTerminal() {
     final terminal = turnTerminalPhases.contains(_headerPhase ?? '');
     if (!terminal) {
-      _terminalTimer?.cancel();
-      _terminalTimer = null;
+      _terminalGate.observe(false);
       if (_terminalConfirmed) setState(() => _terminalConfirmed = false);
       return;
     }
-    if (_terminalConfirmed || _terminalTimer != null) return;
-    _terminalTimer = Timer(widget.confirmWindow, () {
-      _terminalTimer = null;
-      if (mounted && turnTerminalPhases.contains(_headerPhase ?? '')) {
-        setState(() => _terminalConfirmed = true);
-      }
-    });
+    // First-frame terminal (history / snapshot) was preset in initState —
+    // arm nothing, same as the old `_terminalConfirmed ||` guard did.
+    if (_terminalConfirmed) return;
+    _terminalGate.observe(true);
   }
 
   @override
@@ -5822,8 +5870,20 @@ class _SubagentSheetState extends State<_SubagentSheet> {
 
   bool _paging = false;
   bool _noMore = false;
-  Timer? _closeTimer;
   bool _seenRunning = false;
+
+  /// Auto-close window — armed by [_reconcileAutoClose] once every
+  /// subagent went terminal; the still-empty re-check lives in the
+  /// callback (the gate only decides the window elapsed).
+  late final ConfirmGate _closeGate = ConfirmGate(
+    window: widget.confirmWindow,
+    onConfirmed: () {
+      if (!mounted) return;
+      if (subagentsRunningView(widget.state, widget.feed).isEmpty) {
+        Navigator.of(context).pop();
+      }
+    },
+  );
 
   String get _sessionId =>
       widget.state.snapshot?['sessionId'] as String? ?? '';
@@ -5853,7 +5913,7 @@ class _SubagentSheetState extends State<_SubagentSheet> {
 
   @override
   void dispose() {
-    _closeTimer?.cancel();
+    _closeGate.dispose();
     // Symmetric release: every acquire made while the sheet lived is undone
     // here, early-exit or not.
     for (final id in _held) {
@@ -5864,21 +5924,15 @@ class _SubagentSheetState extends State<_SubagentSheet> {
   }
 
   /// All-terminal auto close (PRD: same 3s confirm semantics as the pill).
+  /// The "must have seen running first" rule stays here — the gate owns
+  /// only the hold window.
   void _reconcileAutoClose(List<Map<String, dynamic>> running) {
     if (running.isNotEmpty) {
       _seenRunning = true;
-      _closeTimer?.cancel();
-      _closeTimer = null;
+      _closeGate.observe(false);
       return;
     }
-    if (!_seenRunning || _closeTimer != null) return;
-    _closeTimer = Timer(widget.confirmWindow, () {
-      _closeTimer = null;
-      if (!mounted) return;
-      if (subagentsRunningView(widget.state, widget.feed).isEmpty) {
-        Navigator.of(context).pop();
-      }
-    });
+    if (_seenRunning) _closeGate.observe(true);
   }
 
   // ------------------------------------------------------------ paging
@@ -9261,6 +9315,14 @@ class _InputBarState extends State<_InputBar> {
   bool get _hasInput =>
       widget.controller.text.trim().isNotEmpty || widget.hasAttachments;
 
+  /// Cross-terminal deletion tombstone (10-06): the sessions-index dropped
+  /// this session — the send button greys out (the page keeps the messages
+  /// read-only).
+  bool get _sessionDeleted {
+    final sid = sessionId;
+    return sid != null && gateway.isSessionDeleted(sid);
+  }
+
   // Field forwarders so the build/helpers below read like the original
   // stateless widget.
   TextEditingController get controller => widget.controller;
@@ -9396,10 +9458,6 @@ class _InputBarState extends State<_InputBar> {
                 focusNode: _inputFocus,
                 minLines: 1,
                 maxLines: 6,
-                // Empty+focused cursor sits on top of the placeholder text —
-                // hide it until there is input (rebuild rides _onText).
-                cursorColor:
-                    controller.text.isEmpty ? Colors.transparent : null,
                 style: ZType.body.copyWith(color: ZInk.solid(context)),
                 decoration: InputDecoration(
                   hintText: tr(
@@ -9501,9 +9559,10 @@ class _InputBarState extends State<_InputBar> {
                   // at the far right. Kicked never reaches this button: the
                   // full-screen takeover overlay already blocks all input
                   // (single button instance — the collapsed/expanded
-                  // landscape states share this row).
+                  // landscape states share this row). A cross-terminal
+                  // deletion tombstone (10-06) greys the button instead.
                   _SendButton(
-                    enabled: _hasInput && !sending,
+                    enabled: _hasInput && !sending && !_sessionDeleted,
                     sending: sending,
                     onSend: _sendAndCollapse,
                   ),
@@ -9684,36 +9743,40 @@ class _SubagentPill extends StatefulWidget {
 }
 
 class _SubagentPillState extends State<_SubagentPill> {
-  /// Fires at the end of the destroy-confirm window to re-render (an
-  /// external notify usually won't arrive once everything is terminal).
-  Timer? _destroyTimer;
-
   bool _visible = false;
 
-  @override
-  void dispose() {
-    _destroyTimer?.cancel();
-    super.dispose();
-  }
-
-  /// Derived inside the AnimatedBuilder (its notifications are what drive
-  /// rebuilds); plain field writes only — the timer's own completion calls
-  /// setState.
-  void _reconcile(List<Map<String, dynamic>> running) {
-    if (running.isNotEmpty) {
-      _destroyTimer?.cancel();
-      _destroyTimer = null;
-      _visible = true;
-      return;
-    }
-    if (!_visible) return;
-    _destroyTimer ??= Timer(widget.confirmWindow, () {
-      _destroyTimer = null;
+  /// Fires at the end of the destroy-confirm window to re-render (an
+  /// external notify usually won't arrive once everything is terminal);
+  /// the still-empty re-check lives in the callback.
+  late final ConfirmGate _destroyGate = ConfirmGate(
+    window: widget.confirmWindow,
+    onConfirmed: () {
       if (!mounted) return;
       if (subagentsRunningView(widget.state, widget.feed).isEmpty) {
         setState(() => _visible = false);
       }
-    });
+    },
+  );
+
+  @override
+  void dispose() {
+    _destroyGate.dispose();
+    super.dispose();
+  }
+
+  /// Derived inside the AnimatedBuilder (its notifications are what drive
+  /// rebuilds); plain field writes only — observe is strictly idempotent
+  /// (same argument, zero behavior), the gate's own completion calls
+  /// setState.
+  void _reconcile(List<Map<String, dynamic>> running) {
+    if (running.isNotEmpty) {
+      _destroyGate.observe(false);
+      _visible = true;
+      return;
+    }
+    // `_visible` starts false: the initial empty view must not arm the
+    // destroy window (same as the old `if (!_visible) return`).
+    if (_visible) _destroyGate.observe(true);
   }
 
   @override

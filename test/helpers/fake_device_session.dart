@@ -35,9 +35,10 @@ class FakeDeviceSession extends DeviceSession {
         _active == null ? null : workspaceKeyOf(_active!);
     // Replay the production wiring (openWorkspace attaches the session's
     // live-frame listener to the subscribed index): every frame this fake
-    // delivers re-confirms the sticky home cache (design 10-02) — the
-    // seeded snapshot included.
-    sessions.addListener(confirmLiveHomes);
+    // delivers re-confirms the sticky home cache (design 10-02) AND
+    // records cross-terminal deletion tombstones (task 10-06) — the
+    // seeded snapshot included, same order as _onSessionsChanged.
+    sessions.addListener(_onLiveFrame);
     sessions.applyFrame({
       'toSeq': 1,
       'payload': {
@@ -45,6 +46,11 @@ class FakeDeviceSession extends DeviceSession {
         'snapshot': {'workspaceId': 'ws-1', 'sessions': entries},
       },
     }, onGap: () {});
+  }
+
+  void _onLiveFrame() {
+    recordVanishedSessions();
+    confirmLiveHomes();
   }
 
   late List<Map<String, dynamic>> _workspaces;
