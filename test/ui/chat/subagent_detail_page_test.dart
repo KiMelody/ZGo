@@ -7,6 +7,7 @@ import 'package:zgo/protocol/connection_params.dart';
 import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/ui/chat/subagent_detail_page.dart';
+import 'package:zgo/ui/chat/subagent_feed.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
@@ -34,7 +35,14 @@ class _FakeSubagentGateway extends FakeDeviceSession {
   /// holds the call open across the page teardown.
   Completer<dynamic>? holdRange;
 
+  /// When set, `subscribe` parks here too — the retry test holds the first
+  /// subscription open across the 15s timeout.
+  Completer<void>? holdSubscribe;
+
   final List<String> subscribed = [];
+
+  /// Session ids whose ChatHandle.close ran (pool release bookkeeping).
+  final List<String> closed = [];
   final List<(String, int?, int)> ranges = [];
   final List<(String, String)> cancelled = [];
 
@@ -49,6 +57,8 @@ class _FakeSubagentGateway extends FakeDeviceSession {
   @override
   Future<ChatHandle> subscribe(String sessionId) async {
     subscribed.add(sessionId);
+    final hold = holdSubscribe;
+    if (hold != null) await hold.future;
     final state = ConversationState();
     lastState = state;
     state.applyFrame({
@@ -68,7 +78,12 @@ class _FakeSubagentGateway extends FakeDeviceSession {
         },
       },
     }, onGap: () => fail('unexpected gap'));
-    return ChatHandle(state: state, close: () async {});
+    return ChatHandle(
+      state: state,
+      close: () async {
+        closed.add(sessionId);
+      },
+    );
   }
 
   Future<dynamic> rowsRange(
@@ -168,10 +183,12 @@ void main() {
   testWidgets('renders the child session timeline read-only', (tester) async {
     final gateway = _FakeSubagentGateway(rows: _childRows);
     addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
           gateway: gateway,
+          feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
           parentSessionId: 's1',
@@ -226,10 +243,12 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
           gateway: gateway,
+          feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
         ),
@@ -266,10 +285,12 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
           gateway: gateway,
+          feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
         ),
@@ -306,10 +327,12 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
           gateway: gateway,
+          feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
         ),
@@ -350,10 +373,12 @@ void main() {
   ) async {
     final gateway = _FakeSubagentGateway(rows: _childRows);
     addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
           gateway: gateway,
+          feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
           parentSessionId: 's1',
@@ -396,10 +421,12 @@ void main() {
       ],
     );
     addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
           gateway: gateway,
+          feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
         ),
@@ -489,10 +516,12 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
           gateway: gateway,
+          feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
         ),
@@ -528,5 +557,92 @@ void main() {
     await tester.pump();
     await tester.pumpAndSettle();
     expect(controller.position.pixels, 0);
+  });
+
+  testWidgets('joins the shared pool instead of opening a second '
+      'subscription (shared refcount)', (tester) async {
+    final gateway = _FakeSubagentGateway(rows: _childRows);
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    // A consumer (Agent tile / sheet) already holds the child subscription.
+    feed.acquire('sess_child_1');
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // The page renders through the pooled state…
+    expect(find.text('调研 Flutter 国内镜像可用性'), findsOneWidget);
+    // …and no second subscribe went out.
+    expect(gateway.subscribed, ['sess_child_1']);
+  });
+
+  testWidgets('closing the page releases the exclusive pooled subscription',
+      (tester) async {
+    final gateway = _FakeSubagentGateway(rows: _childRows);
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(gateway.subscribed, ['sess_child_1']);
+
+    await tester.pumpWidget(wrap(const SizedBox.shrink()));
+    await tester.pump();
+
+    // Last ref gone → the pooled subscription is closed with it.
+    expect(gateway.closed, ['sess_child_1']);
+    expect(feed.childState('sess_child_1'), isNull);
+  });
+
+  testWidgets('retry releases the stalled subscription and reopens it',
+      (tester) async {
+    final gateway = _FakeSubagentGateway(rows: _childRows);
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    gateway.holdSubscribe = Completer<void>();
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    // Stalled subscribe: spinner until the 15s ready timeout surfaces.
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 16));
+    expect(find.text('重试'), findsOneWidget);
+
+    await tester.tap(find.text('重试'));
+    // The retry's subscribe parks on the same gate — release both now.
+    gateway.holdSubscribe!.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // Reopen: a second subscribe went out and the transcript lands.
+    expect(gateway.subscribed.length, 2);
+    expect(find.text('调研 Flutter 国内镜像可用性'), findsOneWidget);
   });
 }

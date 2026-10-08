@@ -9,18 +9,25 @@ import '../ui_settings.dart';
 import 'diff_view.dart';
 import 'jump_to_bottom_button.dart';
 import 'markdown_view.dart';
+import 'subagent_feed.dart';
 import 'tool_row_semantics.dart';
 
 /// Read-only transcript of a subagent's child session (task 09-13 R3):
 /// the server treats `sess_subagent_agent_*` as a plain Conversation V4
-/// session, so this page subscribes directly to [childSessionId] and
-/// renders a simplified timeline.
+/// session, so this page renders a simplified timeline of [childSessionId]
+/// through the chat page's shared [SubagentFeed] pool (acquire/release
+/// refcount) — it never opens a private subscription, so Agent tile /
+/// sheet / this page share ONE `gateway.subscribe` per child.
 ///
 /// Read-only boundary (R4): no composer and nothing is ever sent to the
 /// child session — the only action is stopping the parent session's
 /// background work entry while the subagent still runs.
 class SubagentDetailPage extends StatefulWidget {
   final ChatGateway gateway;
+
+  /// Shared child-session subscription pool owned by the chat page; this
+  /// page only acquires/releases its reference.
+  final SubagentFeed feed;
 
   /// Child session id (`sess_subagent_agent_*`) to subscribe to.
   final String childSessionId;
@@ -39,6 +46,7 @@ class SubagentDetailPage extends StatefulWidget {
   const SubagentDetailPage({
     super.key,
     required this.gateway,
+    required this.feed,
     required this.childSessionId,
     this.title,
     this.subagentType,
@@ -52,7 +60,6 @@ class SubagentDetailPage extends StatefulWidget {
 }
 
 class _SubagentDetailPageState extends State<SubagentDetailPage> {
-  ChatHandle? _handle;
   String? _error;
   bool _loadingOlder = false;
   Timer? _readyTimeout;
@@ -69,14 +76,14 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
-    _subscribe();
+    widget.feed.acquire(widget.childSessionId);
+    _armReadyTimeout();
   }
 
   @override
   void dispose() {
     _readyTimeout?.cancel();
-    _handle?.state.removeListener(_followNewRows);
-    _handle?.close();
+    widget.feed.release(widget.childSessionId);
     _scrollController.dispose();
     super.dispose();
   }
@@ -105,11 +112,11 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
   /// the jump button to come back. Prepending older history ([_loadOlder])
   /// must never fire this. Like the chat page's follow pass, the pinned
   /// check runs on the posted frame — a delta landing mid-drag must not
-  /// yank the viewport.
-  void _followNewRows() {
+  /// yank the viewport. Runs at the top of the feed builder: the pool
+  /// notifies for every child frame, the row-count compare filters those
+  /// belonging to other children or non-growth updates.
+  void _followNewRows(ConversationState state) {
     if (!_positionedAtBottom || _loadingOlder) return;
-    final state = _handle?.state;
-    if (state == null) return;
     final grew = state.rows.length > _lastRowCount;
     _lastRowCount = state.rows.length;
     if (!grew) return;
@@ -135,18 +142,14 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
     );
   }
 
-  Future<void> _subscribe() async {
+  /// The pool's acquire failure is silent by contract, so the page keeps
+  /// its own degradation: if the shared subscription hasn't produced a
+  /// ready snapshot within 15s, surface an error with a retry.
+  void _armReadyTimeout() {
     _readyTimeout?.cancel();
-    // Retry path: drop the stalled subscription first so a fresh one (and a
-    // fresh forced snapshot) goes out instead of reusing the dead handle.
-    final stale = _handle;
-    _handle = null;
-    stale?.state.removeListener(_followNewRows);
-    await stale?.close();
-    if (mounted) setState(() => _error = null);
     _readyTimeout = Timer(const Duration(seconds: 15), () {
       if (!mounted || _error != null) return;
-      final state = _handle?.state;
+      final state = widget.feed.childState(widget.childSessionId);
       // A late-arriving snapshot is fine; anything else — the subscribe
       // still pending (state null) or acked without a snapshot — is the
       // stall we surface.
@@ -156,26 +159,22 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
       // Surface it so the user can retry instead of waiting silently.
       setState(() => _error = tr(context, 'chat.subscribe.timeout'));
     });
-    try {
-      final handle = await widget.gateway.subscribe(widget.childSessionId);
-      if (!mounted) {
-        await handle.close();
-        return;
-      }
-      setState(() {
-        _handle = handle;
-        _error = null;
-      });
-      handle.state.addListener(_followNewRows);
-    } catch (e) {
-      if (mounted) setState(() => _error = '$e');
-    }
+  }
+
+  /// Retry = release + acquire: refs hitting zero closes the stalled
+  /// subscription, re-acquiring reopens it (a resubscribe itself triggers
+  /// the fresh snapshot push — subscribe takes no snapshot parameter).
+  void _retry() {
+    widget.feed.release(widget.childSessionId);
+    widget.feed.acquire(widget.childSessionId);
+    if (mounted) setState(() => _error = null);
+    _armReadyTimeout();
   }
 
   // ------------------------------------------------------------ history
 
   Future<void> _loadOlder() async {
-    final state = _handle?.state;
+    final state = widget.feed.childState(widget.childSessionId);
     if (state == null || _loadingOlder) return;
     setState(() => _loadingOlder = true);
     try {
@@ -187,10 +186,13 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
         limit: 60,
       );
       // Subscription identity guard (HistoryPager.settle semantics): a
-      // resubscribe swapped the handle out from under this fetch — the page
+      // resubscribe swapped the state out from under this fetch — the page
       // belongs to a state nobody shows; drop it silently. (Map responses
       // only, as there — a bare List answer has no envelope to guard with.)
-      if (res is Map && state != _handle?.state) return;
+      if (res is Map &&
+          state != widget.feed.childState(widget.childSessionId)) {
+        return;
+      }
       if (!mounted) return;
       final page = parseRowsRangeResponse(res, state: state);
       // The rows are immutable log entries — an epoch drift does not
@@ -276,7 +278,6 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
 
   @override
   Widget build(BuildContext context) {
-    final handle = _handle;
     return Scaffold(
       appBar: AppBar(
         title: Text(
@@ -294,8 +295,16 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
             ),
         ],
       ),
-      body: _error != null
-          ? Material(
+      // The feed drives everything state-shaped: it re-notifies whenever any
+      // pooled child handle's state changes (and on subscribe completion), so
+      // the spinner → transcript transition fires from here. Rebuild surface
+      // cost accepted (same pattern as the Agent tile's child timeline).
+      body: AnimatedBuilder(
+        animation: widget.feed,
+        builder: (context, _) {
+          final state = widget.feed.childState(widget.childSessionId);
+          if (_error != null) {
+            return Material(
               color: ZColors.danger.withValues(alpha: 0.15),
               child: ListTile(
                 dense: true,
@@ -304,79 +313,76 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
                   style: ZType.sub,
                 ),
                 trailing: TextButton(
-                  onPressed: _subscribe,
+                  onPressed: _retry,
                   child: Text(tr(context, 'tasks.retry')),
                 ),
               ),
-            )
-          : handle == null || !handle.state.ready
-          ? const Center(child: CircularProgressIndicator())
-          : Stack(
-              children: [
-                RepaintBoundary(
-                  child: AnimatedBuilder(
-                    animation: handle.state,
-                    builder: (context, _) {
-                      final state = handle.state;
-                      final itemCount =
-                          state.rows.length + (state.canLoadOlder ? 1 : 0);
-                      if (!_positionedAtBottom) {
-                        // R1b: land on the newest content on the first frame
-                        // the list is actually mounted — the state listener
-                        // only fires on LATER updates and would miss the
-                        // initial snapshot.
-                        _positionedAtBottom = true;
-                        _lastRowCount = state.rows.length;
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (!mounted || !_scrollController.hasClients) {
-                            return;
-                          }
-                          _scrollController.jumpTo(
-                            _scrollController.position.maxScrollExtent,
-                          );
-                        });
-                      }
-                      return ListView.builder(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                        itemCount: itemCount,
-                        itemBuilder: (context, index) {
-                          if (state.canLoadOlder && index == 0) {
-                            return Center(
-                              child: TextButton.icon(
-                                onPressed: _loadingOlder ? null : _loadOlder,
-                                icon: _loadingOlder
-                                    ? const SizedBox(
-                                        width: 12,
-                                        height: 12,
-                                        child: CircularProgressIndicator(
-                                            strokeWidth: 1.5),
-                                      )
-                                    : const Icon(Icons.expand_less, size: 16),
-                                label: Text(tr(context, 'chat.loadOlder')),
-                              ),
-                            );
-                          }
-                          final row = state
-                              .rows[index - (state.canLoadOlder ? 1 : 0)];
-                          return SubagentTimelineRow(row: row);
-                        },
+            );
+          }
+          if (state == null || !state.ready) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          _followNewRows(state);
+          final itemCount = state.rows.length + (state.canLoadOlder ? 1 : 0);
+          if (!_positionedAtBottom) {
+            // R1b: land on the newest content on the first frame the list is
+            // actually mounted — the follow pass only fires on LATER updates
+            // and would miss the initial snapshot.
+            _positionedAtBottom = true;
+            _lastRowCount = state.rows.length;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted || !_scrollController.hasClients) {
+                return;
+              }
+              _scrollController.jumpTo(
+                _scrollController.position.maxScrollExtent,
+              );
+            });
+          }
+          return Stack(
+            children: [
+              RepaintBoundary(
+                child: ListView.builder(
+                  controller: _scrollController,
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                  itemCount: itemCount,
+                  itemBuilder: (context, index) {
+                    if (state.canLoadOlder && index == 0) {
+                      return Center(
+                        child: TextButton.icon(
+                          onPressed: _loadingOlder ? null : _loadOlder,
+                          icon: _loadingOlder
+                              ? const SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 1.5),
+                                )
+                              : const Icon(Icons.expand_less, size: 16),
+                          label: Text(tr(context, 'chat.loadOlder')),
+                        ),
                       );
-                    },
-                  ),
+                    }
+                    final row =
+                        state.rows[index - (state.canLoadOlder ? 1 : 0)];
+                    return SubagentTimelineRow(row: row);
+                  },
                 ),
-                // Jump-to-newest control, bottom-right; the stick detection
-                // in [_onScroll] drives its visibility.
-                Positioned(
-                  right: 16,
-                  bottom: 16,
-                  child: JumpToBottomButton(
-                    visible: !_stickToBottom,
-                    onPressed: _animateToBottom,
-                  ),
+              ),
+              // Jump-to-newest control, bottom-right; the stick detection
+              // in [_onScroll] drives its visibility.
+              Positioned(
+                right: 16,
+                bottom: 16,
+                child: JumpToBottomButton(
+                  visible: !_stickToBottom,
+                  onPressed: _animateToBottom,
                 ),
-              ],
-            ),
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 }

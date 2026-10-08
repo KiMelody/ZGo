@@ -10,6 +10,7 @@ import '../protocol/conversation.dart';
 import '../protocol/task_groups.dart';
 import '../state/device_session.dart';
 import '../state/device_store.dart';
+import '../state/task_directory.dart';
 import 'automations_page.dart';
 import 'chat/chat_page.dart';
 import 'desktop_settings_page.dart';
@@ -95,8 +96,9 @@ class _TaskListPageState extends State<TaskListPage>
   GroupedTaskView? _groupedView;
   DeviceSession? _groupedViewSession;
 
-  /// Per-task token-usage futures (3.12.3): one RPC per task per page
-  /// lifetime; a miss completes null and the sheet hides the row (R4).
+  /// Per-task token-usage futures (3.12.3): one RPC per task per reload
+  /// window ([_reloadTasks] clears the map, so a refresh re-issues the
+  /// query); a miss completes null and the sheet hides the row (R4).
   final Map<String, Future<TaskTokenUsage?>> _tokenUsage = {};
 
   /// Organize preferences persist across restarts (the mobile
@@ -253,37 +255,6 @@ class _TaskListPageState extends State<TaskListPage>
   // every workspace's tasks; the active workspace's live sessions-index
   // overrides it per task id. The page filters archived rows; notification
   // consumers keep them observable.
-
-  /// The workspace behind a directory key: the listed workspace whose
-  /// [workspaceKeyOf] matches, else a minimal scope built from the task
-  /// row's own origin fields (`workspacePath`/`workspaceIdentity` — relay
-  /// overview and sessions-index rows carry them). The fallback covers the
-  /// key divergence between the overview and the workspace list: without
-  /// it, opening a foreign task silently reused the active workspace's
-  /// scope and the server rejected every command (proto.sessionNotFound —
-  /// the "can see, can't act" dead page). Only fields the row actually
-  /// carries go into the map (path required — every scoped wire call needs
-  /// it); null means ownership is undeterminable and the caller must not
-  /// open the chat.
-  Map<String, dynamic>? _workspaceForKey(
-    DeviceSession session,
-    SessionEntry entry,
-    String? key,
-  ) {
-    for (final ws in session.workspaces) {
-      if (key != null && workspaceKeyOf(ws) == key) return ws;
-    }
-    // No directory anchor (archived rows are filtered out of allEntries,
-    // session-only rows never had one): the row's own origin fields still
-    // say where it belongs — cross-workspace rows keep their chip.
-    final path = entry.raw['workspacePath'];
-    if (path is! String || path.isEmpty) return null;
-    return {
-      'workspacePath': path,
-      if (entry.raw['workspaceIdentity'] != null)
-        'workspaceIdentity': entry.raw['workspaceIdentity'],
-    };
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -589,7 +560,7 @@ class _TaskListPageState extends State<TaskListPage>
           session,
           e,
           selected: e.sessionId == _paneSessionId,
-          workspace: _workspaceForKey(session, e, key),
+          workspace: TaskDirectory.workspaceForKey(session.workspaces, e, key),
         ),
     ];
   }
@@ -1012,7 +983,14 @@ class _TaskListPageState extends State<TaskListPage>
       animation: widget.hub,
       builder: (context, _) {
         final session = _session;
-        final banner = _ConnectionBanner(session: session, onWeb: _openRemote);
+        final banner = _ConnectionBanner(
+          session: session,
+          onRetry: () async {
+            final s = _session;
+            if (s != null) await _reloadTasks(s);
+          },
+          onWeb: _openRemote,
+        );
         // Lazy rows: widgets are cheap config
         // objects, ListView.builder only inflates what's near the viewport,
         // so collapse toggles never rebuild the whole list's elements.
@@ -1286,7 +1264,8 @@ class _TaskListPageState extends State<TaskListPage>
     // No activeWorkspace fallback here: a pinned task of a foreign workspace
     // must open under its OWN scope (the fallback-built map below), never
     // silently under whatever workspace happens to be active.
-    final ws = _workspaceForKey(session, entry, workspaceKey);
+    final ws =
+        TaskDirectory.workspaceForKey(session.workspaces, entry, workspaceKey);
     final subtitle = [
       if (ws != null) workspaceTitle(ws),
       relativeTimeShort(context, entry.lastActivityAt),
@@ -1418,7 +1397,8 @@ class _TaskListPageState extends State<TaskListPage>
     SessionEntry entry,
     String? workspaceKey,
   ) {
-    final ws = _workspaceForKey(session, entry, workspaceKey);
+    final ws =
+        TaskDirectory.workspaceForKey(session.workspaces, entry, workspaceKey);
     return _taskRow(
       context,
       session,
@@ -2052,8 +2032,9 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// Per-task token-usage cache accessor: the future is shared per task id,
-  /// so re-opening the sheet never re-issues the RPC.
+  /// Per-task token-usage cache accessor: the future is shared per task id
+  /// until the next [_reloadTasks], so re-opening the sheet between reloads
+  /// never re-issues the RPC.
   Future<TaskTokenUsage?> _tokenUsageOf(
     DeviceSession session,
     String taskId,
@@ -2126,7 +2107,7 @@ class _TaskListPageState extends State<TaskListPage>
         break;
       }
     }
-    final ws = _workspaceForKey(session, entry, wsKey);
+    final ws = TaskDirectory.workspaceForKey(session.workspaces, entry, wsKey);
     final sheetTitle = entry.title.trim().isEmpty
         ? tr(context, 'tasks.untitled')
         : entry.title;
@@ -2472,8 +2453,12 @@ class _TaskListPageState extends State<TaskListPage>
   /// Unified reload entry: every [DeviceSession.reloadTasks] call on this
   /// page goes through here so the replace window (the RPC round-trip)
   /// flips [_reloading] in and out — the list bodies key their
-  /// IgnorePointer off it.
+  /// IgnorePointer off it. Also drops the per-task token-usage futures: a
+  /// refresh must re-issue the query (a running task's numbers grow, and a
+  /// first-fetch miss deserves another chance) instead of pinning the
+  /// first answer for the page's lifetime.
   Future<void> _reloadTasks(DeviceSession session) async {
+    _tokenUsage.clear();
     setState(() => _reloading = true);
     try {
       await session.reloadTasks();
@@ -2640,9 +2625,17 @@ class _TaskListPageState extends State<TaskListPage>
 /// explanation copy; degraded states add retry + web fallback actions.
 class _ConnectionBanner extends StatelessWidget {
   final DeviceSession? session;
+
+  /// Retry rides the page's unified reload entry (token-cache drop +
+  /// replace window), not a bare `session.reloadTasks()`.
+  final Future<void> Function() onRetry;
   final Future<void> Function() onWeb;
 
-  const _ConnectionBanner({required this.session, required this.onWeb});
+  const _ConnectionBanner({
+    required this.session,
+    required this.onRetry,
+    required this.onWeb,
+  });
 
   /// Failure-state copy (`webRemoteControl.failure.*`): a
   /// well-known app-error/close-code reason maps to the same localized text
@@ -2740,12 +2733,7 @@ class _ConnectionBanner extends StatelessWidget {
                     children: [
                       Flexible(
                         child: FilledButton.tonal(
-                          onPressed: () {
-                            final s2 = session;
-                            if (s2 != null) {
-                              s2.reloadTasks();
-                            }
-                          },
+                          onPressed: onRetry,
                           child: Text(
                             tr(context, 'tasks.retry'),
                             style: ZType.sub,

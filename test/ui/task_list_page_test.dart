@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:zgo/protocol/channel_client.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/state/device_store.dart';
+import 'package:zgo/state/task_directory.dart';
 import 'package:zgo/ui/chat/chat_page.dart';
 import 'package:zgo/ui/task_list_page.dart';
 import 'package:zgo/ui/theme.dart';
@@ -1385,6 +1386,39 @@ void main() {
       expect(find.textContaining('Token 用量'), findsNothing);
       // The sheet itself still opens.
       expect(find.byType(BottomSheet), findsOneWidget);
+    });
+
+    testWidgets('a reload re-issues the usage query (cache invalidation)',
+        (tester) async {
+      var usage = <String, dynamic>{
+        'totalTokens': 123456,
+        'modelRequestCount': 12,
+      };
+      final session = await setupSheet(
+        tester,
+        channelHandler: (c, m, a) async =>
+            m == 'getTaskTokenUsage' ? usage : null,
+      );
+      expect(find.textContaining('12.3万'), findsOneWidget);
+
+      // Close the sheet, grow the desktop-side number, refresh the list:
+      // the reload must drop the cached future, not pin the first answer.
+      await tester.tapAt(const Offset(20, 30));
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+      usage = {'totalTokens': 234567, 'modelRequestCount': 24};
+      await tester.tap(find.byIcon(Icons.refresh));
+      await tester.pumpAndSettle();
+
+      // Re-open: a fresh RPC fires and the new value lands on the sheet.
+      await tester.longPress(find.text('修复登录'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('23.5万'), findsOneWidget);
+      expect(find.textContaining('24 次请求'), findsOneWidget);
+      expect(
+        session.channelCalls.where((c) => c.$2 == 'getTaskTokenUsage'),
+        hasLength(2),
+      );
     });
   });
 

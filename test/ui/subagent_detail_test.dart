@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zgo/state/device_session.dart' show ChatHandle;
 import 'package:zgo/ui/chat/subagent_detail_page.dart';
+import 'package:zgo/ui/chat/subagent_feed.dart';
 
 import '../helpers/recording_chat_gateway.dart';
 
@@ -20,10 +21,13 @@ class _StalledGateway extends RecordingChatGateway {
 void main() {
   testWidgets('subscribe stall surfaces timeout error with retry button',
       (tester) async {
+    final gateway = _StalledGateway();
+    final feed = SubagentFeed(gateway: gateway);
     await tester.pumpWidget(
       MaterialApp(
         home: SubagentDetailPage(
-          gateway: _StalledGateway(),
+          gateway: gateway,
+          feed: feed,
           childSessionId: 'sess_subagent_stalled',
           title: 'T',
         ),
