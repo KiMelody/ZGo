@@ -186,11 +186,18 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
         beforeRowId: state.oldestRowId,
         limit: 60,
       );
+      // Subscription identity guard (HistoryPager.settle semantics): a
+      // resubscribe swapped the handle out from under this fetch — the page
+      // belongs to a state nobody shows; drop it silently. (Map responses
+      // only, as there — a bare List answer has no envelope to guard with.)
+      if (res is Map && state != _handle?.state) return;
+      if (!mounted) return;
       final page = parseRowsRangeResponse(res, state: state);
-      // Drop the whole result when the epoch moved.
+      // The rows are immutable log entries — an epoch drift does not
+      // invalidate them (round 23, see HistoryPager.settle): toast as a
+      // trace, then apply the page anyway.
       if (!page.epochMatches) {
         if (mounted) _toast(tr(context, 'chat.loadOlder.stale'));
-        return;
       }
       final older = page.rows;
       if (older != null && older.isNotEmpty) {

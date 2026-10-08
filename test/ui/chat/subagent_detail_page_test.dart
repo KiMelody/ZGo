@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -27,6 +29,10 @@ class _FakeSubagentGateway extends FakeDeviceSession {
   final List<Map<String, dynamic>> rows;
   final int? totalCount;
   final Map<String, dynamic>? rangeResult;
+
+  /// When set, `rowsRange` answers park here — the in-flight-drop test
+  /// holds the call open across the page teardown.
+  Completer<dynamic>? holdRange;
 
   final List<String> subscribed = [];
   final List<(String, int?, int)> ranges = [];
@@ -71,6 +77,8 @@ class _FakeSubagentGateway extends FakeDeviceSession {
     int limit = 60,
   }) async {
     ranges.add((sessionId, beforeRowId, limit));
+    final hold = holdRange;
+    if (hold != null) return hold.future;
     return rangeResult;
   }
 
@@ -237,6 +245,104 @@ void main() {
 
     expect(gateway.ranges, [('sess_child_1', 1, 60)]);
     expect(find.text('更早的任务描述'), findsOneWidget);
+  });
+
+  testWidgets('an epoch-drifted older page still prepends with the stale '
+      'toast (round 23 generalized)', (tester) async {
+    final gateway = _FakeSubagentGateway(
+      rows: _childRows,
+      totalCount: _childRows.length + 40,
+      // The page was answered on a stale log epoch (the live subscription
+      // is on e1 — the child session streamed on).
+      rangeResult: const {
+        'hasMore': false,
+        'atLogEpoch': 'e2',
+        'rows': {
+          'window': [
+            {'rowId': 0, 'kind': 'userInput', 'text': '更早的任务描述'},
+          ],
+          'firstRowId': 0,
+        },
+      },
+    );
+    addTearDown(() => gateway.dispose());
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.text('加载更早消息'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(gateway.ranges, [('sess_child_1', 1, 60)]);
+    // The drifted page still lands (rows are immutable log entries)…
+    expect(find.text('更早的任务描述'), findsOneWidget);
+    // …and the drift leaves a toast trace.
+    expect(find.text('会话数据已刷新，请重试'), findsOneWidget);
+  });
+
+  testWidgets('an in-flight older page is dropped silently when the page '
+      'is torn down mid-fetch (state replaced / unmounted)', (tester) async {
+    final gateway = _FakeSubagentGateway(
+      rows: _childRows,
+      totalCount: _childRows.length + 40,
+      rangeResult: const {
+        'hasMore': false,
+        'atLogEpoch': 'e1',
+        'rows': {
+          'window': [
+            {'rowId': 0, 'kind': 'userInput', 'text': '更早的任务描述'},
+          ],
+          'firstRowId': 0,
+        },
+      },
+    );
+    addTearDown(() => gateway.dispose());
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // Hold the fetch open, then tear the page down (the resubscribe world:
+    // the handle — and its state — belong to nobody anymore).
+    gateway.holdRange = Completer<dynamic>();
+    await tester.tap(find.text('加载更早消息'));
+    await tester.pump();
+    final stateA = gateway.lastState!;
+    final rowsBefore = stateA.rows.length;
+    await tester.pumpWidget(wrap(const SizedBox.shrink()));
+    gateway.holdRange!.complete({
+      'hasMore': false,
+      'atLogEpoch': 'e1',
+      'rows': {
+        'window': [
+          {'rowId': 0, 'kind': 'userInput', 'text': '更早的任务描述'},
+        ],
+        'firstRowId': 0,
+      },
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // Silent drop: no prepend into the abandoned state, no toast.
+    expect(stateA.rows.length, rowsBefore,
+        reason: 'the page belongs to a state nobody shows');
+    expect(find.text('会话数据已刷新，请重试'), findsNothing);
   });
 
   testWidgets('stop confirms then cancels the parent background work', (

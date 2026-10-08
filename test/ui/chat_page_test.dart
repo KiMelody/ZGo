@@ -2201,6 +2201,171 @@ void main() {
     expect(find.text('已全部加载 · 共 3 个'), findsOneWidget);
   });
 
+  testWidgets('sheet applies an epoch-drifted older page and toasts stale '
+      '(round 23 generalized)', (tester) async {
+    final gateway = FakeChatGateway()
+      ..snapshotExtra = {
+        'subagents': {
+          'revision': 1,
+          'childSessionIds': ['sess_child_1', 'sess_child_9'],
+          'running': [
+            {
+              'childSessionId': 'sess_child_1',
+              'agentId': 'agent_1',
+              'subagentType': 'general-purpose',
+              'title': '实现加固',
+              'status': 'running',
+              'startedAt': 1789279676224,
+            },
+          ],
+        },
+      }
+      ..rowsRangeResults.addAll([
+        // The page was answered on the OLD log epoch; the live state has
+        // since advanced (streaming snapshot replay below).
+        {
+          'hasMore': false,
+          'atLogEpoch': 'e1',
+          'rows': {
+            'window': [
+              {
+                'rowId': 50,
+                'kind': 'subagent',
+                'childSessionId': 'sess_child_9',
+                'subagentType': 'general-purpose',
+                'status': 'stopped',
+                'summaryText': '用量统计采集',
+                'workId': 'agent_9',
+              },
+            ],
+          },
+        },
+      ]);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 100, 'kind': 'userInput', 'text': '开工', 'state': 'done'},
+      subagentRow(rowId: 101, status: 'running'),
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await openSubagentSheet(tester);
+
+    // The desktop advances the log epoch while streaming: a fresh snapshot
+    // replay (same content, new epoch) lands while the page sits queued.
+    gateway.state.applyFrame({
+      'toSeq': gateway.state.seq + 1,
+      'payload': {
+        'kind': 'snapshot',
+        'snapshot': {
+          'sessionId': 's1',
+          'logEpoch': 'e2',
+          'revision': 4,
+          'rows': {
+            'window': [
+              {
+                'rowId': 100,
+                'kind': 'userInput',
+                'text': '开工',
+                'state': 'done',
+              },
+              subagentRow(rowId: 101, status: 'running'),
+            ],
+            'totalCount': 2,
+          },
+          ...gateway.snapshotExtra,
+        },
+      },
+    }, onGap: () => fail('unexpected gap'));
+    await tester.pump();
+
+    await tester.tap(find.text('加载更早'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // The drifted page still lands (rows are immutable log entries)…
+    expect(find.text('已停止'), findsOneWidget);
+    expect(find.text('用量统计采集'), findsOneWidget);
+    expect(find.text('已全部加载 · 共 2 个'), findsOneWidget);
+    // …and the drift leaves a toast trace.
+    expect(find.text('会话数据已刷新，请重试'), findsOneWidget);
+  });
+
+  testWidgets('sheet drops the in-flight page silently when the sheet is '
+      'torn down mid-fetch (state replaced / unmounted)', (tester) async {
+    final transport = _SequencedRowsTransport();
+    final held = Completer<dynamic>();
+    transport.queue.add(held);
+    final gateway = _SequencedRowsGateway(transport)
+      ..snapshotExtra = {
+        'subagents': {
+          'revision': 1,
+          'childSessionIds': ['sess_child_1'],
+          'running': [
+            {
+              'childSessionId': 'sess_child_1',
+              'agentId': 'agent_1',
+              'subagentType': 'general-purpose',
+              'title': '实现加固',
+              'status': 'running',
+              'startedAt': 1789279676224,
+            },
+          ],
+        },
+      };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 100, 'kind': 'userInput', 'text': '开工', 'state': 'done'},
+      subagentRow(rowId: 101, status: 'running'),
+      subagentRow(
+        rowId: 60,
+        status: 'failed',
+        childSessionId: 'sess_child_2',
+        summaryText: '索引重建',
+      ),
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await openSubagentSheet(tester);
+    await tester.tap(find.text('加载更早'));
+    await tester.pump();
+    expect(transport.calls, [60], reason: 'fetch is parked on the held page');
+
+    // The sheet closes while the fetch hangs (the user navigates away /
+    // the host swaps state underneath) — the page belongs to nobody now.
+    await tester.tap(find.byTooltip('关闭'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    held.complete({
+      'hasMore': false,
+      'atLogEpoch': 'e1',
+      'rows': {
+        'window': [
+          {
+            'rowId': 50,
+            'kind': 'subagent',
+            'childSessionId': 'sess_child_9',
+            'subagentType': 'general-purpose',
+            'status': 'stopped',
+            'summaryText': '用量统计采集',
+            'workId': 'agent_9',
+          },
+        ],
+      },
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    // Silent: no toast fires from the dead sheet.
+    expect(find.text('会话数据已刷新，请重试'), findsNothing);
+    expect(find.text('用量统计采集'), findsNothing);
+  });
+
   testWidgets('sheet auto-closes after all-terminal holds past the confirm '
       'window', (tester) async {
     final gateway = _gatewayWithSubagentWork();

@@ -5943,6 +5943,7 @@ class _SubagentSheetState extends State<_SubagentSheet> {
   Future<void> _loadEarlier() async {
     if (_paging || _noMore || _sessionId.isEmpty) return;
     setState(() => _paging = true);
+    final state = widget.state;
     try {
       int? cursor = widget.state.oldestRowId;
       for (final r in _older) {
@@ -5954,6 +5955,13 @@ class _SubagentSheetState extends State<_SubagentSheet> {
         beforeRowId: cursor,
         limit: 60,
       );
+      // Subscription identity guard (HistoryPager.settle semantics): a
+      // resubscribe swapped the state out from under this fetch — its page
+      // belongs to a state nobody shows; drop it silently.
+      if (res is Map && state != widget.state) {
+        debugPrint('[sheet] drop page: state replaced (resubscribe)');
+        return;
+      }
       if (res is! Map) {
         _noMore = true;
         return;
@@ -5964,12 +5972,14 @@ class _SubagentSheetState extends State<_SubagentSheet> {
       // local (chat-conventions §7.3).
       final page = parseRowsRangeResponse(
         res,
-        state: widget.state,
+        state: state,
         sortOldestFirst: false,
       );
+      // The rows are immutable log entries — an epoch drift does not
+      // invalidate them (round 23, see HistoryPager.settle): toast as a
+      // trace, then apply the page anyway.
       if (!page.epochMatches) {
         if (mounted) _toast(tr(context, 'chat.loadOlder.stale'));
-        return;
       }
       final hasMore = page.hasMore;
       final rows = page.rows;
