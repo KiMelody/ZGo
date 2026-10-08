@@ -715,4 +715,80 @@ void main() {
       isEmpty,
     );
   });
+
+  // ---- workspaceForKey (row → workspace scope, moved from the page) -----
+  // The listed workspace whose key matches wins; a row the list doesn't
+  // know falls back to its own origin fields; without those the ownership
+  // is undeterminable (null = the caller must not open the chat).
+
+  test('workspaceForKey: the listed workspace matching the key wins', () {
+    const workspaces = [
+      {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+      {'workspacePath': '/repo/beta', 'workspaceIdentity': 'beta'},
+    ];
+    final entry = SessionEntry({
+      'sessionId': 's1',
+      'title': 'x',
+      'phase': 'idle',
+      'workspacePath': '/repo/beta',
+      'workspaceIdentity': 'beta',
+    });
+    final ws = TaskDirectory.workspaceForKey(workspaces, entry, 'beta');
+    expect(ws, same(workspaces[1]));
+  });
+
+  test('workspaceForKey: an unlisted row assembles its own origin scope', () {
+    // Cross-workspace row (key not in the workspace list): the row's own
+    // workspacePath (+ identity when present) still scope it — the
+    // "can see, can't act" fallback.
+    final entry = SessionEntry({
+      'sessionId': 's2',
+      'title': 'foreign',
+      'phase': 'running',
+      'workspacePath': '/repo/gamma',
+      'workspaceIdentity': 'gamma-id',
+    });
+    expect(
+      TaskDirectory.workspaceForKey(const [], entry, 'gamma-id'),
+      {'workspacePath': '/repo/gamma', 'workspaceIdentity': 'gamma-id'},
+    );
+    // Identity is optional — only the fields the row carries go in.
+    final pathOnly = SessionEntry({
+      'sessionId': 's3',
+      'title': 'foreign-path',
+      'phase': 'running',
+      'workspacePath': '/repo/delta',
+    });
+    expect(
+      TaskDirectory.workspaceForKey(const [], pathOnly, 'delta'),
+      {'workspacePath': '/repo/delta'},
+    );
+  });
+
+  test('workspaceForKey: no listed match and no origin path → null', () {
+    // Ownership undeterminable: the caller must not open the chat.
+    final entry = SessionEntry({
+      'sessionId': 's4',
+      'title': 'homeless',
+      'phase': 'idle',
+    });
+    expect(
+      TaskDirectory.workspaceForKey(
+        const [
+          {'workspacePath': '/repo/alpha'},
+        ],
+        entry,
+        null,
+      ),
+      isNull,
+    );
+    // An empty-string path is no path either.
+    final blank = SessionEntry({
+      'sessionId': 's5',
+      'title': 'blank-path',
+      'phase': 'idle',
+      'workspacePath': '',
+    });
+    expect(TaskDirectory.workspaceForKey(const [], blank, 'x'), isNull);
+  });
 }

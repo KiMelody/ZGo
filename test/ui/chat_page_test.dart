@@ -2612,6 +2612,57 @@ void main() {
     expect(find.text('输出'), findsOneWidget);
   });
 
+  testWidgets('agent expansion stays at the window over a grown pooled state',
+      (tester) async {
+    // The detail page's loadOlder prepends older rows into the POOLED child
+    // state; the inline timeline must keep rendering only the tail window
+    // (60 = snapshot/rowsRange window) — official parity, live-certified
+    // 2026-10-08 (the web inline shows parent-window mirror rows only).
+    final gateway = FakeChatGateway();
+    final child = ConversationState();
+    gateway.childStates['sess_child_1'] = child;
+    feedChildState(child, 'sess_child_1', [
+      for (var i = 1; i <= 80; i++)
+        {'rowId': i, 'kind': 'assistantText', 'text': 'row$i'},
+    ]);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '去调研'},
+      {
+        'rowId': 2,
+        'kind': 'toolCall',
+        'toolName': 'Agent',
+        'toolCallId': 'call_1',
+        'status': 'success',
+        'inputText':
+            '{"description":"调研通知层","prompt":"p","subagent_type":"Explore"}',
+      },
+      {
+        'rowId': 3,
+        'kind': 'subagent',
+        'parentToolCallId': 'call_1',
+        'childSessionId': 'sess_child_1',
+        'subagentType': 'Explore',
+        'status': 'success',
+        'summaryText': '调研通知层',
+        'workId': 'agent_1',
+      },
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.textContaining('已启动 · 调研通知层'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    // 80 rows in the pooled state, 60 in the inline window: the oldest 20
+    // stay detail-page-only.
+    expect(find.byType(SubagentTimelineRow), findsNWidgets(60));
+    expect(find.text('row1'), findsNothing);
+    expect(find.text('row21'), findsOneWidget);
+    expect(find.text('row80'), findsWidgets);
+  });
+
   testWidgets('turn terminal footer waits for the confirm window', (
     tester,
   ) async {

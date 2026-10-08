@@ -23,22 +23,6 @@ import 'quota_reset.dart';
 import 'quota_watch.dart' show QuotaWatchSource;
 import 'task_directory.dart';
 
-/// Workspace key:
-/// key = workspaceIdentity?.trim() || workspacePath.
-String? workspaceKeyOf(Map<String, dynamic> w) {
-  final identity = w['workspaceIdentity'];
-  if (identity is String && identity.trim().isNotEmpty) {
-    return identity.trim();
-  }
-  final path = w['workspacePath'];
-  if (path is String && path.isNotEmpty) return path;
-  for (final key in const ['workspaceKey', 'key', 'id']) {
-    final v = w[key];
-    if (v is String && v.isNotEmpty) return v;
-  }
-  return null;
-}
-
 String workspaceTitle(Map<String, dynamic> w) {
   final label = w['label'] as String?;
   if (label != null && label.isNotEmpty) return label;

@@ -1,5 +1,21 @@
 import '../protocol/conversation.dart';
 
+/// Workspace key:
+/// key = workspaceIdentity?.trim() || workspacePath.
+String? workspaceKeyOf(Map<String, dynamic> w) {
+  final identity = w['workspaceIdentity'];
+  if (identity is String && identity.trim().isNotEmpty) {
+    return identity.trim();
+  }
+  final path = w['workspacePath'];
+  if (path is String && path.isNotEmpty) return path;
+  for (final key in const ['workspaceKey', 'key', 'id']) {
+    final v = w[key];
+    if (v is String && v.isNotEmpty) return v;
+  }
+  return null;
+}
+
 /// Merged view of every task on one device — the one home of the
 /// 「relay 任务总览打底、live 会话索引按 Task id 胜出；同 id 多行（桌面
 /// 镜像行）按 updatedAt 择优、平级按 workspaceKey 字典序」rule (CONTEXT.md
@@ -174,6 +190,37 @@ class TaskDirectory {
     final path = task['workspacePath'];
     if (path is String && path.isNotEmpty) return path;
     return null;
+  }
+
+  /// The workspace behind a directory key: the listed workspace whose
+  /// [workspaceKeyOf] matches, else a minimal scope built from the task
+  /// row's own origin fields (`workspacePath`/`workspaceIdentity` — relay
+  /// overview and sessions-index rows carry them). The fallback covers the
+  /// key divergence between the overview and the workspace list: without
+  /// it, opening a foreign task silently reused the active workspace's
+  /// scope and the server rejected every command (proto.sessionNotFound —
+  /// the "can see, can't act" dead page). Only fields the row actually
+  /// carries go into the map (path required — every scoped wire call needs
+  /// it); null means ownership is undeterminable and the caller must not
+  /// open the chat.
+  static Map<String, dynamic>? workspaceForKey(
+    List<Map<String, dynamic>> workspaces,
+    SessionEntry entry,
+    String? key,
+  ) {
+    for (final ws in workspaces) {
+      if (key != null && workspaceKeyOf(ws) == key) return ws;
+    }
+    // No directory anchor (archived rows are filtered out of allEntries,
+    // session-only rows never had one): the row's own origin fields still
+    // say where it belongs — cross-workspace rows keep their chip.
+    final path = entry.raw['workspacePath'];
+    if (path is! String || path.isEmpty) return null;
+    return {
+      'workspacePath': path,
+      if (entry.raw['workspaceIdentity'] != null)
+        'workspaceIdentity': entry.raw['workspaceIdentity'],
+    };
   }
 
   /// Whether a duplicate relay row for one task id displaces the row already

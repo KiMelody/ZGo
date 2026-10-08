@@ -4721,8 +4721,9 @@ class _ToolCallTileState extends State<_ToolCallTile> {
 
     final agentPrompt = isAgentTool(row) ? promptOf(inputText) : null;
     final childSessionId = widget.subagent?['childSessionId'] as String?;
-    final canOpen =
-        widget.gateway != null && (childSessionId ?? '').isNotEmpty;
+    final canOpen = widget.gateway != null &&
+        widget.feed != null &&
+        (childSessionId ?? '').isNotEmpty;
 
     // Tool row: bold-ish first line (已写入 <file> / 终端 · cmd /
     // 探索 · N 文件) with +/- counts right-aligned; second line = directory
@@ -4761,6 +4762,7 @@ class _ToolCallTileState extends State<_ToolCallTile> {
               onTap: () => _openSubagentDetail(
                 context,
                 widget.gateway!,
+                feed: widget.feed!,
                 childSessionId: childSessionId,
                 title: widget.subagent?['summaryText'] as String?,
                 subagentType: widget.subagent?['subagentType'] as String?,
@@ -5111,6 +5113,14 @@ class _AgentChildTimelineState extends State<_AgentChildTimeline> {
             break;
           }
         }
+        // Window view only (60 = snapshot tail window / rowsRange page):
+        // the detail page's loadOlder prepends older rows into the
+        // pooled state, but the inline timeline stays at the window —
+        // official parity (the web's inline childToolCalls shows only
+        // the parent-window mirror rows; live-certified 2026-10-08).
+        final window = child.rows.length > 60
+            ? child.rows.skip(child.rows.length - 60)
+            : child.rows;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -5135,7 +5145,7 @@ class _AgentChildTimelineState extends State<_AgentChildTimeline> {
                   ],
                 ),
               ),
-            for (final row in child.rows) SubagentTimelineRow(row: row),
+            for (final row in window) SubagentTimelineRow(row: row),
           ],
         );
       },
@@ -5578,17 +5588,21 @@ class _SubagentTile extends StatelessWidget {
           rawStatus,
         ) ??
         rawStatus;
+    final pooledFeed = feed;
     return InkWell(
       // Whole tile opens the read-only child-session detail page.
-      onTap: () => _openSubagentDetail(
-        context,
-        gateway,
-        childSessionId: row['childSessionId'] as String?,
-        subagentType: row['subagentType'] as String?,
-        workId: row['workId'] as String?,
-        parentSessionId: sessionId,
-        running: status == 'running',
-      ),
+      onTap: pooledFeed == null
+          ? null
+          : () => _openSubagentDetail(
+                context,
+                gateway,
+                feed: pooledFeed,
+                childSessionId: row['childSessionId'] as String?,
+                subagentType: row['subagentType'] as String?,
+                workId: row['workId'] as String?,
+                parentSessionId: sessionId,
+                running: status == 'running',
+              ),
       child: Container(
         margin: const EdgeInsets.only(bottom: ZTile.seam),
         padding: const EdgeInsets.all(ZTile.headPadding),
@@ -5718,21 +5732,25 @@ class _GoalProcessPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (state.snapshot?['goal'] is! Map) return const SizedBox.shrink();
+    final pooledFeed = feed;
     return GoalPanel(
       state: state,
       feed: feed,
       onPauseGoal: (sid) => gateway.conversationCommands.pauseGoal(sid),
       onResumeGoal: (sid) => gateway.conversationCommands.resumeGoal(sid),
-      onOpenAgent: (agent) => _openSubagentDetail(
-        context,
-        gateway,
-        childSessionId: agent['childSessionId'] as String?,
-        title: agent['title'] as String?,
-        subagentType: agent['subagentType'] as String?,
-        workId: agent['agentId'] as String?,
-        parentSessionId: state.snapshot?['sessionId'] as String?,
-        running: true,
-      ),
+      onOpenAgent: pooledFeed == null
+          ? null
+          : (agent) => _openSubagentDetail(
+                context,
+                gateway,
+                feed: pooledFeed,
+                childSessionId: agent['childSessionId'] as String?,
+                title: agent['title'] as String?,
+                subagentType: agent['subagentType'] as String?,
+                workId: agent['agentId'] as String?,
+                parentSessionId: state.snapshot?['sessionId'] as String?,
+                running: true,
+              ),
     );
   }
 }
@@ -5804,10 +5822,13 @@ class _BackgroundWorksBar extends StatelessWidget {
 }
 
 /// Opens the read-only subagent child-session detail page (works bar row,
-/// subagent stream tile, goal panel running tile).
+/// subagent stream tile, goal panel running tile). [feed] is the chat
+/// page's shared child-subscription pool — the page joins it instead of
+/// opening a private subscription.
 void _openSubagentDetail(
   BuildContext context,
   ChatGateway gateway, {
+  required SubagentFeed feed,
   required String? childSessionId,
   String? title,
   String? subagentType,
@@ -5821,6 +5842,7 @@ void _openSubagentDetail(
     zRoute(
       (_) => SubagentDetailPage(
         gateway: gateway,
+        feed: feed,
         childSessionId: sid,
         title: title,
         subagentType: subagentType,
@@ -5945,7 +5967,7 @@ class _SubagentSheetState extends State<_SubagentSheet> {
     setState(() => _paging = true);
     final state = widget.state;
     try {
-      int? cursor = widget.state.oldestRowId;
+      int? cursor = state.oldestRowId;
       for (final r in _older) {
         final id = (r['rowId'] as num?)?.toInt();
         if (id != null && (cursor == null || id < cursor)) cursor = id;
@@ -6217,6 +6239,7 @@ class _SubagentSheetState extends State<_SubagentSheet> {
                     : () => _openSubagentDetail(
                           context,
                           widget.gateway,
+                          feed: widget.feed,
                           childSessionId: sid,
                           title: '${agent['title'] ?? ''}',
                           subagentType: agent['subagentType'] as String?,
@@ -6267,6 +6290,7 @@ class _SubagentSheetState extends State<_SubagentSheet> {
           : () => _openSubagentDetail(
                 context,
                 widget.gateway,
+                feed: widget.feed,
                 childSessionId: sid,
                 subagentType: row['subagentType'] as String?,
                 workId: row['workId'] as String?,
