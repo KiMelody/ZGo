@@ -1069,9 +1069,10 @@ String? forkSessionIdOf(dynamic ack) {
 // the conversationRowsRangeV4 response fallback chain that used to live
 // as three private copies (chat `_loadOlderSettled` / subagent-sheet
 // `_loadEarlier` / subagent-detail `_loadOlder`). Pure parsing only:
-// each caller keeps its own epoch policy (chat applies drifted pages
-// with a toast, round 23; sheet/detail drop them) and its own drop /
-// toast / cursor decisions.
+// each caller runs its own identity guard (state replaced by a
+// resubscribe → drop the page silently) and applies epoch-drifted pages
+// anyway behind a `chat.loadOlder.stale` toast (round 23 generalized
+// 2026-10-07), plus its own cursor decisions.
 
 /// Parsed [parseRowsRangeResponse] outcome. `rows` is already cast to
 /// `Map<String, dynamic>` (non-Map elements dropped); null means the
