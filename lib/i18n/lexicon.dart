@@ -507,6 +507,8 @@ const _zh = {
   // and pushDialog copy); the rest are self-authored and marked with 自拟.
   'chat.statusPanel.environment': 'Git 工具',
   'chat.statusPanel.clean': '干净',
+  'chat.statusPanel.collapse': '收起 Git 工具',
+  'chat.statusPanel.expand': '展开 Git 工具',
   'git.changes.label': '更改',
   'git.status.noBranch': '无分支',
   'git.head.detached': '游离 HEAD',
@@ -651,6 +653,8 @@ const _zh = {
   'settings.language.en': 'English',
   'settings.nativeList': '原生任务列表',
   'settings.nativeListHint': '原生显示设备在线状态与任务列表；关闭后仅用网页版',
+  'settings.gitPanel': '聊天页 Git 工具面板',
+  'settings.gitPanelHint': '关闭后聊天页不再显示 Git 状态卡片',
   'settings.data': '数据',
   'settings.usageStats': '使用统计',
   'settings.usageStatsHint': '仅保存在本机',
@@ -1714,6 +1718,8 @@ const _en = {
   // git.actionMenu.pushDialog.upToDate.
   'chat.statusPanel.environment': 'Git tools',
   'chat.statusPanel.clean': 'Clean',
+  'chat.statusPanel.collapse': 'Collapse Git tools',
+  'chat.statusPanel.expand': 'Expand Git tools',
   'git.changes.label': 'Changes',
   'git.status.noBranch': 'No branch',
   'git.head.detached': 'Detached HEAD',
@@ -1879,6 +1885,8 @@ const _en = {
   'settings.nativeList': 'Native task list',
   'settings.nativeListHint':
       'Native device status and task list; turn off to use the web version only',
+  'settings.gitPanel': 'Git tools panel in chat',
+  'settings.gitPanelHint': 'Hide the Git status card on chat pages',
   'settings.data': 'Data',
   'settings.usageStats': 'Usage statistics',
   'settings.usageStatsHint': 'Stored on this device only',

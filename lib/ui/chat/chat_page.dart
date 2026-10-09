@@ -10556,9 +10556,16 @@ class _InputBarState extends State<_InputBar> {
       right: false,
       top: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
+        // Short viewports: tighten the composer's vertical paddings (with
+        // the input's contentPadding below, part of the landscape density
+        // budget that keeps the message area usable).
+        padding: short
+            ? const EdgeInsets.fromLTRB(12, 2, 12, 5)
+            : const EdgeInsets.fromLTRB(12, 6, 12, 10),
         child: Container(
-          padding: const EdgeInsets.fromLTRB(6, 6, 6, 6),
+          padding: short
+              ? const EdgeInsets.fromLTRB(6, 2, 6, 2)
+              : const EdgeInsets.fromLTRB(6, 6, 6, 6),
           decoration: BoxDecoration(
             color: ZInk.card(context),
             borderRadius: BorderRadius.circular(ZRadius.tile),
@@ -10583,37 +10590,58 @@ class _InputBarState extends State<_InputBar> {
                   enabledBorder: InputBorder.none,
                   focusedBorder: InputBorder.none,
                   filled: false,
-                  contentPadding: const EdgeInsets.symmetric(
+                  contentPadding: EdgeInsets.symmetric(
                     horizontal: 10,
-                    vertical: 8,
+                    vertical: short ? 3 : 8,
                   ),
-                  // Short viewports: the collapse toggle lives here instead
-                  // of a dedicated toolbar row stealing scarce input height
-                  // (sole entry when collapsed, collapse entry when shown).
+                  // Short viewports: the tools toggle AND the send cluster
+                  // share the input line (true single-row composer); tool
+                  // chips drop to a second line only while expanded.
                   suffixIcon: short
-                      ? IconButton(
-                          icon: Icon(
-                            _toolsExpanded
-                                ? Icons.unfold_less
-                                : Icons.unfold_more,
-                            size: 20,
-                            color: ZInk.muted(context),
-                          ),
-                          tooltip: tr(
-                            context,
-                            _toolsExpanded
-                                ? 'chat.input.toolsCollapse'
-                                : 'chat.input.toolsExpand',
-                          ),
-                          onPressed: () => setState(
-                            () => _toolsExpanded = !_toolsExpanded,
-                          ),
+                      ? Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: Icon(
+                                _toolsExpanded
+                                    ? Icons.unfold_less
+                                    : Icons.unfold_more,
+                                size: 20,
+                                color: ZInk.muted(context),
+                              ),
+                              tooltip: tr(
+                                context,
+                                _toolsExpanded
+                                    ? 'chat.input.toolsCollapse'
+                                    : 'chat.input.toolsExpand',
+                              ),
+                              onPressed: () => setState(
+                                () => _toolsExpanded = !_toolsExpanded,
+                              ),
+                            ),
+                            _SendButton(
+                              enabled:
+                                  _hasInput && !sending && !_sessionDeleted,
+                              sending: sending,
+                              onSend: _sendAndCollapse,
+                            ),
+                            if (running)
+                              _StopButton(onStop: () => _stop(context)),
+                          ],
                         )
                       : null,
                 ),
                 textInputAction: TextInputAction.newline,
               ),
-              Row(
+              // Short viewports: compact visual density for the whole tool
+              // row (48dp icon buttons shrink ~8dp) — one Theme override
+              // instead of per-button tweaks.
+              Theme(
+                data: short
+                    ? Theme.of(context)
+                        .copyWith(visualDensity: VisualDensity.compact)
+                    : Theme.of(context),
+                child: Row(
                 children: [
                   // Short viewports keep the tools collapsed (toggle moved
                   // into the TextField suffixIcon), so the whole left cluster
@@ -10659,7 +10687,7 @@ class _InputBarState extends State<_InputBar> {
                         onTap: onBackgroundWorks!,
                       ),
                   ],
-                  const Spacer(),
+                  if (toolsVisible) const Spacer(),
                   if (toolsVisible && _usageRatio != null)
                     _UsageRing(ratio: _usageRatio!, onTap: onUsage),
                   if (toolsVisible && _modelPickerVisible)
@@ -10688,13 +10716,16 @@ class _InputBarState extends State<_InputBar> {
                   // (single button instance — the collapsed/expanded
                   // landscape states share this row). A cross-terminal
                   // deletion tombstone (10-06) greys the button instead.
-                  _SendButton(
-                    enabled: _hasInput && !sending && !_sessionDeleted,
-                    sending: sending,
-                    onSend: _sendAndCollapse,
-                  ),
-                  if (running) _StopButton(onStop: () => _stop(context)),
+                  if (!short)
+                    _SendButton(
+                      enabled: _hasInput && !sending && !_sessionDeleted,
+                      sending: sending,
+                      onSend: _sendAndCollapse,
+                    ),
+                  if (running && !short)
+                    _StopButton(onStop: () => _stop(context)),
                 ],
+                ),
               ),
             ],
           ),

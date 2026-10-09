@@ -69,6 +69,11 @@ void main() {
     testWidgets('notification switches toggle master and channels',
         (WidgetTester tester) async {
       SharedPreferences.setMockInitialValues({});
+      // Tall viewport: the channel rows sit below the fold at the default
+      // 600px once the git-panel switch occupies the general section.
+      tester.view.physicalSize = const Size(1000, 2000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
       final store = DeviceStore();
       final theme = ThemeController();
       final ui = UiSettings();

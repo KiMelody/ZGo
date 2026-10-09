@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:zgo/protocol/channel_client.dart';
 import 'package:zgo/protocol/git_service.dart';
@@ -107,9 +108,9 @@ Future<dynamic> _gitUnavailableHandler(String method, List<Object?> args) async 
   throw StateError('unexpected $method');
 }
 
-Widget _wrap(Widget child) => MaterialApp(
+Widget _wrap(Widget child, [UiSettings? settings]) => MaterialApp(
       builder: (context, c) =>
-          UiSettingsProvider(settings: UiSettings(), child: c!),
+          UiSettingsProvider(settings: settings ?? UiSettings(), child: c!),
       home: Scaffold(body: child),
     );
 
@@ -293,6 +294,97 @@ void main() {
       expect(find.text('Git 不可用'), findsOneWidget);
       expect(find.text('未检测到 git 可执行文件'), findsOneWidget);
       expect(find.text('更改'), findsNothing);
+    });
+
+    testWidgets('tapping the header collapses the rows and back',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = UiSettings();
+      final fake = _FakeGit(_repoHandler);
+      await tester.pumpWidget(
+          _wrap(GitStatusGroup(controller: _controller(fake)), settings));
+      await _flush(tester);
+      expect(fake.countOf('getRepositorySummary'), 1);
+
+      await tester.tap(find.text('Git 工具'));
+      await _flush(tester);
+      expect(settings.gitToolsCollapsed, isTrue);
+      expect(find.text('更改'), findsNothing);
+      expect(find.text('提交或推送'), findsNothing);
+      // Collapsed keeps the header with a compact stats summary.
+      expect(find.text('Git 工具'), findsOneWidget);
+      expect(find.textContaining('+8'), findsWidgets);
+
+      await tester.tap(find.text('Git 工具'));
+      await _flush(tester);
+      expect(settings.gitToolsCollapsed, isFalse);
+      expect(find.text('更改'), findsOneWidget);
+      expect(find.text('提交或推送'), findsOneWidget);
+      // Collapse cycling never re-issues the workspace read.
+      expect(fake.countOf('getRepositorySummary'), 1);
+    });
+
+    testWidgets('settings switch off hides the group and issues no reads',
+        (tester) async {
+      final settings = UiSettings()..gitToolsPanelEnabled = false;
+      final fake = _FakeGit(_repoHandler);
+      await tester.pumpWidget(
+          _wrap(GitStatusGroup(controller: _controller(fake)), settings));
+      await _flush(tester);
+
+      expect(find.text('Git 工具'), findsNothing);
+      expect(find.text('更改'), findsNothing);
+      expect(fake.countOf('getRepositorySummary'), 0);
+    });
+
+    testWidgets('short viewport shows the capsule: one line collapsed, '
+        'two lines expanded with sheet links, re-armed per landscape stint',
+        (tester) async {
+      // Landscape-phone shape: wide and short (<480 logical height).
+      tester.view.physicalSize = const Size(2400, 1080);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      SharedPreferences.setMockInitialValues({});
+      final settings = UiSettings();
+      final fake = _FakeGit(_repoHandler);
+      await tester.pumpWidget(
+          _wrap(GitStatusGroup(controller: _controller(fake)), settings));
+      await _flush(tester);
+
+      // Collapsed: single line, no inline rows, compact stats summary.
+      expect(find.text('更改'), findsNothing);
+      expect(find.textContaining('+8'), findsWidgets);
+      expect(settings.gitToolsCollapsed, isFalse); // untouched
+
+      // Expand: two lines with quick links (no inline status rows).
+      await tester.tap(find.text('Git 工具'));
+      await _flush(tester);
+      expect(find.text('更改'), findsOneWidget); // link on the second line
+      expect(find.text('main'), findsOneWidget);
+      expect(find.text('提交或推送'), findsOneWidget);
+      expect(fake.countOf('getRepositorySummary'), 1); // never re-issued
+
+      // The changes link opens the full-height review sheet.
+      await tester.tap(find.text('更改'));
+      await _flush(tester);
+      expect(find.byType(GitReviewPanel), findsOneWidget);
+      // Dismiss via a scrim tap (outside the 92%-height sheet).
+      await tester.tapAt(const Offset(20, 20));
+      await _flush(tester);
+
+      // Back on a portrait viewport the persisted preference rules: the
+      // card shows its inline rows.
+      tester.view.physicalSize = const Size(1080, 2400);
+      await tester.pump();
+      await _flush(tester);
+      expect(find.text('更改'), findsOneWidget);
+
+      // Re-entering landscape re-arms the one-line capsule.
+      tester.view.physicalSize = const Size(2400, 1080);
+      await tester.pump();
+      await _flush(tester);
+      expect(find.text('更改'), findsNothing);
+      expect(find.textContaining('+8'), findsWidgets);
     });
   });
 

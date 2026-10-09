@@ -495,14 +495,26 @@ void main() {
     'keyboard shrink keeps the pinned list on the newest row (09-20 真机: '
     'the viewport shrank, the offset stayed and the latest messages were '
     'cut off below the composer)', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.reset);
+      addTearDown(tester.view.resetDevicePixelRatio);
       final gateway = FakeChatGateway();
-      Widget page(double inset) => wrap(
+      // The keyboard's effect is simulated as the physical viewport
+      // shrinking (844 → 500), the same end state the real IME resize
+      // produces. Tree-injected MediaQuery(viewInsets:…) looked right but
+      // never shrank the list viewport in the test env (dim stayed put, no
+      // ScrollMetricsNotification ever fired), and an explicit MediaQuery
+      // without a size zeroes heightOf (the landscape branch would run
+      // instead of the portrait dance this test pins) — the fixed size
+      // keeps the portrait branch regardless of window height.
+      Widget page() => wrap(
         MediaQuery(
-          data: MediaQueryData(viewInsets: EdgeInsets.only(bottom: inset)),
+          data: const MediaQueryData(size: Size(390, 844)),
           child: ChatPage(gateway: gateway, sessionId: 's1', title: 't'),
         ),
       );
-      await tester.pumpWidget(page(0));
+      await tester.pumpWidget(page());
       gateway.feedSnapshot([
         for (var i = 0; i < 60; i++) ...[
           {'rowId': i * 2, 'kind': 'userInput', 'text': '问题 $i'},
@@ -521,6 +533,11 @@ void main() {
       ScrollController controller() =>
           tester.widget<ListView>(find.byType(ListView)).controller!;
       final pinned = controller();
+      // Steady state: pin to the bottom explicitly (the launch animation
+      // targets the SliverList's ESTIMATED max; its revision lands a frame
+      // later, and pinning is the baseline the shrink dance starts from).
+      pinned.jumpTo(pinned.position.maxScrollExtent);
+      await tester.pump();
       expect(
         pinned.position.pixels,
         closeTo(pinned.position.maxScrollExtent, 1),
@@ -529,8 +546,8 @@ void main() {
       // IME up: the viewport shrinks (maxScrollExtent grows), and a pinned
       // list must ride along to the newest row instead of keeping its old
       // offset while the content stays anchored to the viewport top.
-      await tester.pumpWidget(page(344));
-      await tester.pump();
+      tester.view.physicalSize = const Size(390, 500);
+      await tester.pumpWidget(page());
       await tester.pump();
       final shrunk = controller();
       expect(
@@ -542,14 +559,16 @@ void main() {
       // a pinned-state privilege.
       shrunk.jumpTo(shrunk.position.maxScrollExtent - 500);
       await tester.pump();
-      await tester.pumpWidget(page(0)); // keyboard collapses; clamp recovers
+      tester.view.physicalSize = const Size(390, 844); // keyboard collapses
+      await tester.pumpWidget(page());
       await tester.pump();
       final relaxed = controller();
       expect(
         relaxed.position.pixels,
         lessThan(relaxed.position.maxScrollExtent - 40),
       );
-      await tester.pumpWidget(page(344)); // IME up again, still unpinned
+      tester.view.physicalSize = const Size(390, 500);
+      await tester.pumpWidget(page()); // IME up again, still unpinned
       await tester.pump();
       final still = controller();
       expect(
