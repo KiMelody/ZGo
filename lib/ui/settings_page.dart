@@ -217,6 +217,13 @@ class _SettingsPageState extends State<SettingsPage> {
                   value: ui.nativeListEnabled,
                   onChanged: (v) => ui.setNativeListEnabled(v),
                 ),
+                SwitchListTile(
+                  secondary: const Icon(Icons.account_tree_outlined),
+                  title: Text(tr(context, 'settings.gitPanel')),
+                  subtitle: Text(tr(context, 'settings.gitPanelHint')),
+                  value: ui.gitToolsPanelEnabled,
+                  onChanged: (v) => ui.setGitToolsPanelEnabled(v),
+                ),
                 _header(context, tr(context, 'settings.notifications')),
                 SwitchListTile(
                   secondary: const Icon(Icons.notifications_outlined),

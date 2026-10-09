@@ -214,14 +214,85 @@ class GitStatusGroup extends StatefulWidget {
 }
 
 class _GitStatusGroupState extends State<GitStatusGroup> {
+  /// The settings object discovered through the provider, listened to so a
+  /// switch flip re-renders this mid-tree group live (pushed routes are not
+  /// rebuilt by the app root, unlike the home subtree).
+  UiSettings? _settings;
+
+  /// Guards the one-shot `ensureLoaded` (build runs it on first visible
+  /// frame; the panel must not issue git reads while the switch is off).
+  bool _loadRequested = false;
+
+  /// Short-viewport manual expand: landscape starts the group collapsed
+  /// (~176dp of rows would eat half the message area) regardless of the
+  /// persisted portrait preference; one tap opts back in — re-armed on
+  /// every portrait → landscape edge, so re-entering landscape always
+  /// starts collapsed. Portrait always follows the persisted setting.
+  bool _landscapeExpanded = false;
+
+  /// Previous frame's short-viewport verdict (edge detection).
+  bool _wasShortViewport = false;
+
+  /// Same density threshold the chat page uses for its landscape
+  /// adaptations (compact header, collapsed tool row).
+  static bool _isShortViewport(BuildContext context) =>
+      MediaQuery.heightOf(context) < 480;
+
+  bool get _collapsed {
+    final ui = _settings;
+    if (ui == null) return false;
+    if (ui.gitToolsCollapsed) return true;
+    return _isShortViewport(context) ? !_landscapeExpanded : false;
+  }
+
+  void _toggleCollapsed() {
+    final ui = _settings;
+    if (ui == null) return;
+    if (_isShortViewport(context)) {
+      setState(() => _landscapeExpanded = !_landscapeExpanded);
+    } else {
+      ui.setGitToolsCollapsed(!ui.gitToolsCollapsed);
+    }
+  }
+
   @override
-  void initState() {
-    super.initState();
-    unawaited(widget.controller.ensureLoaded());
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final ui = UiSettingsProvider.of(context);
+    if (!identical(ui, _settings)) {
+      _settings?.removeListener(_onSettingsChanged);
+      _settings = ui;
+      _settings?.addListener(_onSettingsChanged);
+    }
+  }
+
+  void _onSettingsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _settings?.removeListener(_onSettingsChanged);
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final ui = _settings;
+    if (!(ui?.gitToolsPanelEnabled ?? true)) {
+      _wasShortViewport = false;
+      return const SizedBox.shrink();
+    }
+    if (!_loadRequested) {
+      _loadRequested = true;
+      unawaited(widget.controller.ensureLoaded());
+    }
+    // Portrait → landscape edge re-arms the collapse (landscape's default);
+    // the reverse edge needs no work — portrait reads the persisted
+    // setting directly.
+    final short = _isShortViewport(context);
+    if (short && !_wasShortViewport) _landscapeExpanded = false;
+    _wasShortViewport = short;
     return AnimatedBuilder(
       animation: widget.controller,
       builder: (context, _) {
@@ -263,60 +334,194 @@ class _GitStatusGroupState extends State<GitStatusGroup> {
           );
         }
         if (!c.isRepository) return const SizedBox.shrink();
+        // Short viewport: an inline expanded card (~176dp) cannot fit —
+        // and the keyboard-clamped floating strip makes it look broken —
+        // so landscape gets a bare conversation row instead (tool-call row
+        // token, no card chrome): one line collapsed, two lines expanded
+        // (quick links), full detail always in the review sheet.
+        if (_isShortViewport(context)) {
+          return _landscapeRow(context, c);
+        }
         final stats = c.workspaceStats;
         final branch = c.repo?.branchName ?? c.branches.currentBranchName;
+        final collapsed = _collapsed;
         return _groupFrame(
           context,
           children: [
-            _groupHeader(context, c),
-            _GitStatusRow(
-              icon: Icons.edit_note_outlined,
-              label: tr(context, 'git.changes.label'),
-              trailing: _statsSpan(context, stats),
-              onTap: () => showGitReviewPanel(context, c),
+            _groupHeader(
+              context,
+              c,
+              collapsed: collapsed,
+              trailing: collapsed && stats.fileCount > 0
+                  ? _statsSpan(context, stats)
+                  : null,
+              onToggle: _toggleCollapsed,
             ),
-            _GitStatusRow(
-              icon: Icons.alt_route_outlined,
-              label: branch == null || branch.isEmpty
-                  ? tr(context, 'git.status.noBranch')
-                  : branch,
-              trailing: c.dirtyFileCount > 0
-                  ? Text(
-                      trP(context, 'git.branchSwitcher.currentDirty',
-                          ['${c.dirtyFileCount}']),
-                      style:
-                          ZType.caption.copyWith(color: ZInk.muted(context)),
-                    )
-                  : (stats.fileCount == 0
-                      ? Text(
-                          tr(context, 'chat.statusPanel.clean'),
-                          style: ZType.caption
-                              .copyWith(color: ZInk.muted(context)),
-                        )
-                      : null),
-              onTap: () => showGitBranchSwitcher(context, c),
-            ),
-            _GitStatusRow(
-              icon: Icons.upload_outlined,
-              label: tr(context, 'git.actionMenu.trigger'),
-              trailing: Icon(Icons.keyboard_arrow_right,
-                  size: 16, color: ZInk.ghost(context)),
-              onTap: () => _showCommitPushMenu(context, c),
-            ),
+            if (!collapsed) ...[
+              _GitStatusRow(
+                icon: Icons.edit_note_outlined,
+                label: tr(context, 'git.changes.label'),
+                trailing: _statsSpan(context, stats),
+                onTap: () => showGitReviewPanel(context, c),
+              ),
+              _GitStatusRow(
+                icon: Icons.alt_route_outlined,
+                label: branch == null || branch.isEmpty
+                    ? tr(context, 'git.status.noBranch')
+                    : branch,
+                trailing: c.dirtyFileCount > 0
+                    ? Text(
+                        trP(context, 'git.branchSwitcher.currentDirty',
+                            ['${c.dirtyFileCount}']),
+                        style: ZType.caption
+                            .copyWith(color: ZInk.muted(context)),
+                      )
+                    : (stats.fileCount == 0
+                        ? Text(
+                            tr(context, 'chat.statusPanel.clean'),
+                            style: ZType.caption
+                                .copyWith(color: ZInk.muted(context)),
+                          )
+                        : null),
+                onTap: () => showGitBranchSwitcher(context, c),
+              ),
+              _GitStatusRow(
+                icon: Icons.upload_outlined,
+                label: tr(context, 'git.actionMenu.trigger'),
+                trailing: Icon(Icons.keyboard_arrow_right,
+                    size: 16, color: ZInk.ghost(context)),
+                onTap: () => _showCommitPushMenu(context, c),
+              ),
+            ],
           ],
         );
       },
     );
   }
 
+  /// Landscape (short viewport) form: a bare conversation row carrying the
+  /// tool-call row token (`_ToolSummary` family — compact grid, caption
+  /// icon, no card chrome) so it reads as message content, not a panel.
+  /// Collapsed is one line (title + stats + chevron); expanded adds a second
+  /// line of quick links (changes review, branch switcher, commit/push) —
+  /// each opening its full-height sheet, immune to the keyboard-clamped
+  /// floating strip.
+  Widget _landscapeRow(BuildContext context, GitWorkspaceController c) {
+    final stats = c.workspaceStats;
+    final branch = c.repo?.branchName ?? c.branches.currentBranchName;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 4, 14, 0),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: _isShortViewport(context)
+                ? () => setState(() => _landscapeExpanded = !_landscapeExpanded)
+                : null,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  Icon(Icons.account_tree_outlined,
+                      size: 13, color: ZInk.faint(context)),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      tr(context, 'chat.statusPanel.environment'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: ZType.sub.copyWith(color: ZInk.muted(context)),
+                    ),
+                  ),
+                  if (stats.fileCount > 0) ...[
+                    const SizedBox(width: 8),
+                    _StatsText(
+                      stats: stats,
+                      style:
+                          ZType.caption.copyWith(color: ZInk.muted(context)),
+                    ),
+                  ],
+                  const SizedBox(width: 4),
+                  Icon(
+                    _landscapeExpanded
+                        ? Icons.expand_less
+                        : Icons.expand_more,
+                    size: 16,
+                    color: ZInk.faint(context),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_landscapeExpanded)
+            Padding(
+              padding: const EdgeInsets.only(left: 19, bottom: 4),
+              child: Row(
+                children: [
+                  _capsuleLink(context, Icons.edit_note_outlined,
+                      tr(context, 'git.changes.label'),
+                      () => showGitReviewPanel(context, c)),
+                  _capsuleDivider(context),
+                  _capsuleLink(
+                      context,
+                      Icons.alt_route_outlined,
+                      branch == null || branch.isEmpty
+                          ? tr(context, 'git.status.noBranch')
+                          : branch,
+                      () => showGitBranchSwitcher(context, c)),
+                  _capsuleDivider(context),
+                  _capsuleLink(context, Icons.upload_outlined,
+                      tr(context, 'git.actionMenu.trigger'),
+                      () => _showCommitPushMenu(context, c)),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _capsuleLink(
+    BuildContext context,
+    IconData icon,
+    String label,
+    VoidCallback onTap,
+  ) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(ZRadius.mini),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 13, color: ZInk.muted(context)),
+            const SizedBox(width: 6),
+            Text(label,
+                style: ZType.sub.copyWith(color: ZInk.muted(context))),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _capsuleDivider(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 3),
+        child: Text('·',
+            style: ZType.caption.copyWith(color: ZInk.ghost(context))),
+      );
+
   /// The rounded group frame shared by the normal and failure states.
+  /// Mirrors the status strip's other cards (goal banner, queue bar): same
+  /// outer margin and corner radius so the strip's edges line up.
   Widget _groupFrame(BuildContext context, {required List<Widget> children}) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+      margin: const EdgeInsets.fromLTRB(14, 4, 14, 0),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
         color: ZInk.tile(context),
-        borderRadius: BorderRadius.circular(ZRadius.field),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
         border: Border.all(color: ZInk.hairline(context)),
       ),
       child: Column(
@@ -327,11 +532,20 @@ class _GitStatusGroupState extends State<GitStatusGroup> {
     );
   }
 
-  Widget _groupHeader(BuildContext context, GitWorkspaceController c) {
-    return Row(
+  /// Header row of the group. With [onToggle] set (repository state only)
+  /// the title area collapses/expands the rows; the refresh button stays a
+  /// separate tap target either way. [trailing] carries the compact stats
+  /// summary shown while collapsed.
+  Widget _groupHeader(
+    BuildContext context,
+    GitWorkspaceController c, {
+    bool collapsed = false,
+    Widget? trailing,
+    VoidCallback? onToggle,
+  }) {
+    final title = Row(
       children: [
-        Icon(Icons.account_tree_outlined,
-            size: 14, color: ZInk.muted(context)),
+        Icon(Icons.account_tree_outlined, size: 14, color: ZInk.muted(context)),
         const SizedBox(width: 6),
         Expanded(
           child: Text(
@@ -339,6 +553,41 @@ class _GitStatusGroupState extends State<GitStatusGroup> {
             style: ZType.caption.copyWith(color: ZInk.muted(context)),
           ),
         ),
+        if (trailing != null) ...[trailing, const SizedBox(width: 6)],
+        if (onToggle != null)
+          // Arrow points where the content goes on tap (goal-panel
+          // convention): expanded → collapses down (⌄), collapsed →
+          // expands up (⌃).
+          Icon(
+            collapsed ? Icons.expand_less : Icons.expand_more,
+            size: 16,
+            color: ZInk.muted(context),
+          ),
+      ],
+    );
+    return Row(
+      children: [
+        if (onToggle != null)
+          Expanded(
+            child: Tooltip(
+              message: tr(
+                context,
+                collapsed
+                    ? 'chat.statusPanel.expand'
+                    : 'chat.statusPanel.collapse',
+              ),
+              child: InkWell(
+                onTap: onToggle,
+                borderRadius: BorderRadius.circular(ZRadius.field),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: title,
+                ),
+              ),
+            ),
+          )
+        else
+          Expanded(child: title),
         SizedBox(
           width: zTouchWidth,
           height: zTouchHeight,

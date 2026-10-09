@@ -24,6 +24,8 @@ class UiSettings extends ChangeNotifier {
   static const _newTaskModeKey = 'zgo_new_task_mode';
   static const _newTaskModelKey = 'zgo_new_task_model';
   static const _newTaskThoughtKey = 'zgo_new_task_thought';
+  static const _gitPanelKey = 'zgo_git_panel';
+  static const _gitCollapsedKey = 'zgo_git_tools_collapsed';
 
   String locale = 'zh-CN';
   bool nativeListEnabled = true;
@@ -53,6 +55,11 @@ class UiSettings extends ChangeNotifier {
   String newTaskModel = '';
   String newTaskThought = '';
 
+  /// Chat-page Git status card: master visibility switch and the persisted
+  /// collapsed state of the card's header (collapsed = header row only).
+  bool gitToolsPanelEnabled = true;
+  bool gitToolsCollapsed = false;
+
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
     locale = prefs.getString(_localeKey) ?? 'zh-CN';
@@ -74,6 +81,8 @@ class UiSettings extends ChangeNotifier {
     newTaskMode = prefs.getString(_newTaskModeKey) ?? '';
     newTaskModel = prefs.getString(_newTaskModelKey) ?? '';
     newTaskThought = prefs.getString(_newTaskThoughtKey) ?? '';
+    gitToolsPanelEnabled = prefs.getBool(_gitPanelKey) ?? true;
+    gitToolsCollapsed = prefs.getBool(_gitCollapsedKey) ?? false;
     notifyListeners();
   }
 
@@ -191,6 +200,20 @@ class UiSettings extends ChangeNotifier {
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_newTaskThoughtKey, value);
+  }
+
+  Future<void> setGitToolsPanelEnabled(bool value) async {
+    gitToolsPanelEnabled = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_gitPanelKey, value);
+  }
+
+  Future<void> setGitToolsCollapsed(bool value) async {
+    gitToolsCollapsed = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_gitCollapsedKey, value);
   }
 }
 
