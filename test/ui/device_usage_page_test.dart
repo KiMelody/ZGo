@@ -397,6 +397,14 @@ void main() {
   // ------------------------------------------ app usage card (R1/R2/R3)
 
   Map<String, dynamic> appUsagePayload() => {
+        'source': 'agent-db',
+        'summary': {
+          'totalTokens': 1200,
+          'peakDayTokens': 1200,
+          'longestSessionMs': 60000,
+          'currentStreakDays': 1,
+          'longestStreakDays': 1,
+        },
         'dailyModelUsage': [
           {
             'date': '2026-09-17',
@@ -404,6 +412,9 @@ void main() {
               {'modelId': 'glm-5.2', 'totalTokens': 1200},
             ],
           },
+        ],
+        'models': [
+          {'modelId': 'glm-5.2', 'totalTokens': 1200, 'share': 1.0},
         ],
       };
 
@@ -433,23 +444,45 @@ void main() {
     expect(ianaEtcTimeZone(const Duration(hours: -9, minutes: -30)), 'UTC');
   });
 
-  testWidgets('range tabs align with the official zod enum (no 90d) and '
+  testWidgets('range tabs are the two official options (all/90d absent) and '
       'the request carries an IANA timeZone', (tester) async {
     final session = appSession(appUsageAnswer: () async => appUsagePayload());
     addTearDown(session.dispose);
     await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
     await tester.pumpAndSettle();
 
+    // 90d is not in the zod enum; `all` is filtered out of the official
+    // buttons (design 取证决策 #1) — only the two localized tabs render.
     expect(find.text('90d'), findsNothing);
-    expect(find.text('7d'), findsOneWidget);
-    expect(find.text('30d'), findsOneWidget);
+    expect(find.text('全部'), findsNothing);
+    expect(find.text('全部时间'), findsNothing);
+    expect(find.text('近 7 日'), findsOneWidget);
+    expect(find.text('近 30 日'), findsOneWidget);
     final call =
         session.channelCalls.firstWhere((c) => c.$2 == 'getAppUsageSnapshot');
     final args = call.$3.first as Map;
     // Only whole-hour Etc/GMT names or the UTC fallback ever go out —
     // never the ambiguous bare abbreviation (Windows "CST").
     expect(args['timeZone'], anyOf(startsWith('Etc/GMT'), 'UTC'));
-    expect(args['range'], anyOf('7d', '30d', 'all'));
+    expect(args['range'], anyOf('7d', '30d'));
+    expect(args['range'], isNot(anyOf('all', '90d')));
+  });
+
+  testWidgets('switching to 近 30 日 re-requests with range 30d',
+      (tester) async {
+    final session = appSession(appUsageAnswer: () async => appUsagePayload());
+    addTearDown(session.dispose);
+    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('近 30 日'));
+    await tester.pumpAndSettle();
+
+    final ranges = session.channelCalls
+        .where((c) => c.$2 == 'getAppUsageSnapshot')
+        .map((c) => (c.$3.first as Map)['range'])
+        .toList();
+    expect(ranges, ['7d', '30d']);
   });
 
   testWidgets('app usage first-load failure renders the error state with '
@@ -471,7 +504,8 @@ void main() {
     await tester.tap(find.text('重试'));
     await tester.pumpAndSettle();
     expect(find.text('应用用量加载失败'), findsNothing);
-    expect(find.text('2026-09-17'), findsOneWidget);
+    // The new form renders chart cards; assert one of their titles loads.
+    expect(find.text('每日 Token 趋势图'), findsOneWidget);
   });
 
   testWidgets('app usage failure on a range switch keeps the stale chart '
@@ -484,15 +518,15 @@ void main() {
     addTearDown(session.dispose);
     await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
     await tester.pumpAndSettle();
-    expect(find.text('2026-09-17'), findsOneWidget);
+    expect(find.text('每日 Token 趋势图'), findsOneWidget);
 
     fail = true;
-    await tester.tap(find.text('30d'));
+    await tester.tap(find.text('近 30 日'));
     await tester.pumpAndSettle();
 
     // Stale chart stays; the failure surfaces as an error line, not the
     // empty copy.
-    expect(find.text('2026-09-17'), findsOneWidget);
+    expect(find.text('每日 Token 趋势图'), findsOneWidget);
     expect(find.text('应用用量加载失败'), findsOneWidget);
     expect(find.text('该时间范围内暂无用量'), findsNothing);
   });
@@ -513,5 +547,113 @@ void main() {
     final rect = tester.getRect(find.byType(Card).first);
     expect(rect.width, lessThanOrEqualTo(848));
     expect(rect.center.dx, closeTo(640, 0.5));
+  });
+
+  // ------------------------------------------ codingPlan card (D6)
+  //
+  // The card is presentation-only; the page owns the conditional display:
+  // an `EntitlementPhase.ok` view with a coding-plan provider id gates the
+  // fetch, and the two credential error shapes degrade to a hidden card
+  // with no error surface (entitlement phase precedent).
+
+  Map<String, dynamic> codingPlanEntitlement() => {
+        ...okPayloadWithProviderId(),
+        'provider': {
+          'id': 'account:zai-individual-coding-plan',
+          'name': 'BigModel',
+        },
+      };
+
+  Map<String, dynamic> codingPlanPayload() => {
+        'range': '7d',
+        'sourceProvider': 'zai',
+        'quota': {
+          'level': 'pro',
+          'limits': [
+            {
+              'type': 'TOKENS_LIMIT',
+              'unit': 3,
+              'number': 5,
+              'percentage': 10,
+              'nextResetTime': 1789452028646,
+            },
+            {'type': 'TOKENS_LIMIT', 'unit': 6, 'percentage': 30},
+            {'type': 'TIME_LIMIT', 'unit': 5, 'number': 1, 'percentage': 100},
+          ],
+        },
+        'activity': {
+          'summary': {
+            'totalTokens': 624000000,
+            'peakDailyTokens': 56000000,
+            'peakDailyTokensDate': '2026-10-07',
+            'totalUsageDurationMs': 65200000,
+            'currentStreakDays': 31,
+            'longestStreakDays': 31,
+            'favoriteModelName': 'GLM-5.2',
+          },
+        },
+        'modelUsage': {
+          'xTime': ['10-03', '10-04'],
+          'modelDataList': [
+            {'modelName': 'GLM-5.2', 'tokensUsage': [100, 200]},
+          ],
+        },
+      };
+
+  FakeDeviceSession codingPlanSession({
+    required Future<Object?> Function() codingPlanAnswer,
+  }) {
+    return FakeDeviceSession(
+      deviceId: 'd1',
+      params: paramsOf(),
+      channelHandler: (channel, method, args) async {
+        if (method == 'getEntitlementSnapshot') return codingPlanEntitlement();
+        if (method == 'getCodingPlanResetStatus') return null;
+        if (method == 'getAppUsageSnapshot') return {'dailyModelUsage': []};
+        if (method == 'getCodingPlanUsageSnapshot') return codingPlanAnswer();
+        return null;
+      },
+    );
+  }
+
+  testWidgets('codingPlan card renders the plan form on a successful '
+      'snapshot', (tester) async {
+    final session =
+        codingPlanSession(codingPlanAnswer: () async => codingPlanPayload());
+    addTearDown(session.dispose);
+    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('个人套餐'), findsOneWidget);
+    // Remaining semantics: clamp(100 - percentage) per the entitlement
+    // contract (entitlement-quota-semantics.md §1).
+    expect(find.text('90%'), findsOneWidget); // 100 - 10 (5h)
+    expect(find.text('70%'), findsOneWidget); // 100 - 30 (weekly)
+    expect(find.text('0%'), findsOneWidget); // 100 - 100 (monthly tools)
+    // Activity stats + usage-trend sections are present.
+    expect(find.text('累计使用时长'), findsOneWidget);
+    expect(find.text('常用模型'), findsOneWidget);
+    expect(find.text('用量趋势'), findsOneWidget);
+  });
+
+  testWidgets('codingPlan credential errors hide the card without an error '
+      'surface', (tester) async {
+    for (final error in [
+      StateError('no_bigmodel_api_key'),
+      StateError('zai_coding_plan_api_key_required'),
+      StateError('bigmodel_coding_plan_api_key_required'),
+    ]) {
+      final session =
+          codingPlanSession(codingPlanAnswer: () async => throw error);
+      addTearDown(session.dispose);
+      await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
+      await tester.pumpAndSettle();
+
+      expect(find.text('个人套餐'), findsNothing);
+      // Silent: no error card, no raw error code leaked into the UI.
+      expect(find.text('应用用量加载失败'), findsNothing);
+      expect(find.textContaining('no_bigmodel_api_key'), findsNothing);
+      expect(find.textContaining('coding_plan_api_key_required'), findsNothing);
+    }
   });
 }

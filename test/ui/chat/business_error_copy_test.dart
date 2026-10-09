@@ -53,6 +53,24 @@ void main() {
     expect(businessErrorCopy('code 4290', 'en-US'), isNull);
   });
 
+  // ---- D7 (F4 forensics): the 32xx family stays UNMAPPED ----
+  //
+  // The provider-code union is [3001,3002,3200,3201,3203..3215] (runtime
+  // @875474) but the official i18n table carries NO 32xx entries — those
+  // codes travel with the server's own msg and the official client passes
+  // it through. Negative lock: no invented copy, today and on refactors.
+  test('32xx provider codes have no official copy → raw passthrough', () {
+    for (final code in [
+      '3200', '3201', '3203', '3208', '3210', '3215',
+    ]) {
+      expect(
+        businessErrorCopy('provider business error $code: 服务端原始消息', 'zh-CN'),
+        isNull,
+        reason: 'code $code must not invent copy',
+      );
+    }
+  });
+
   // ---- C1 (10-05 D5/D1): task-mutation mappings ----
   //
   // Checked before the numeric provider codes (a taskId can carry digits

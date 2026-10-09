@@ -64,6 +64,19 @@ class ZColors {
   static const usageBlueLight = Color(0xFF0B7FFF); // --color-usage-chart-1
   static const usageOrangeLight = Color(0xFFE07B00); // --color-usage-chart-5
   static const usageGreenLight = Color(0xFF166B32); // confirmation-foreground
+
+  // Usage-parity charts (10-09, research/design-inputs.md §2). The
+  // heatmap level-4 base swaps color instead of deepening the mix; the
+  // chart palette's slots 1/4/5 reuse the existing tokens above
+  // (chart1 = usageBlue, chart4 = danger, chart5 = usageOrange).
+  static const usageHeatmap4Dark = Color(0xFF80BEFF); // --color-usage-heatmap-4 base, zai-dark
+  static const usageHeatmap4Light = Color(0xFF0066DD); // zai-light (= ask-foreground)
+  static const usageChart2 = Color(0xFF46BF72); // --color-usage-chart-2, zai-dark
+  static const usageChart3 = Color(0xFF7B5CE5); // --color-usage-chart-3, zai-dark
+  static const usageChart6 = Color(0xFF42C8C8); // --color-usage-chart-6, zai-dark
+  static const usageChart2Light = Color(0xFF1E8A3E); // zai-light
+  static const usageChart3Light = Color(0xFF9E77ED); // zai-light
+  static const usageChart6Light = Color(0xFF0AA7A7); // zai-light
   static const pillRunningBgLight = Color(0xFFEBF4FF); // --color-accent
   static const pillRunningFgLight = Color(0xFF0066DD); // ask-foreground
   // Success pill light pair (design.md §1c, interaction-confirmation
@@ -74,6 +87,14 @@ class ZColors {
   // Task-group color dot ('purple' group — live-probed desktop palette;
   // the other palette names map onto the brand/status tokens above).
   static const violet400 = Color(0xFFA78BFA);
+
+  // Off-peak queue idle-task pair (official `--color-idle-task` /
+  // `--color-idle-task-surface`, @318674634): violet-600 and violet-50,
+  // one value per theme (the CSS defines each once, so light and dark
+  // share them). oklch(54.1% .281 293.009) / oklch(96.9% .016 293.756)
+  // resolved to sRGB.
+  static const violet600 = Color(0xFF7F22FE);
+  static const violet50 = Color(0xFFF5F3FF);
 }
 
 /// Card-list spacing scale (usage / settings screens).
@@ -362,6 +383,15 @@ class ZInk {
       ? const Color(0x14FFFFFF)
       : const Color(0x140D0D0D);
 
+  /// Official `--color-card-border` (= `--color-border`, @319025183): the
+  /// stronger 10% hairline cards draw. Light #0d0d0d1a matches this
+  /// theme's own [buildLightTheme] border; dark #ffffff1a matches
+  /// [buildDarkTheme]. The light user bubble reads it (D4 — the tile
+  /// [hairline] at 8% left too little separation from the #f8f8f8 page).
+  static Color cardBorder(BuildContext c) => _dark(c)
+      ? const Color(0x1AFFFFFF)
+      : const Color(0x1A0D0D0D);
+
   /// Inline-code pill background (assistant markdown `code`).
   static Color codeInlineBg(BuildContext c) =>
       _dark(c) ? ZColors.neutral800 : ZColors.neutral200;
@@ -418,6 +448,48 @@ class ZInk {
       _dark(c) ? ZColors.usageOrange : ZColors.usageOrangeLight;
   static Color usageGreen(BuildContext c) =>
       _dark(c) ? ZColors.usageGreen : ZColors.usageGreenLight;
+
+  /// Token-activity heatmap intensity ladder (levels 0-4). Official
+  /// `--color-usage-heatmap-{0..4}` = `color-mix(in oklab, BASE X%, surface)`
+  /// (design-inputs.md §2.1: dark base #4099ff at 0/24/42/62%, light base
+  /// #0b7fff at 0/18/36/58%); rendered here as the base color at alpha X
+  /// over the card surface — the same overlay discipline as [barTrack].
+  /// Level 4 swaps the base (brighter blue dark, deeper blue light).
+  static Color usageHeatmap(BuildContext c, int level) {
+    final dark = _dark(c);
+    final i = level.clamp(0, 4);
+    const alphasDark = [0.0, 0.24, 0.42, 0.62, 0.78];
+    const alphasLight = [0.0, 0.18, 0.36, 0.58, 0.82];
+    final base = switch (i) {
+      4 => dark ? ZColors.usageHeatmap4Dark : ZColors.usageHeatmap4Light,
+      _ => dark ? ZColors.usageBlue : ZColors.usageBlueLight,
+    };
+    return base.withValues(alpha: dark ? alphasDark[i] : alphasLight[i]);
+  }
+
+  /// `--color-usage-chart-{1..6}` series palette for the trend curve and
+  /// model ring (design-inputs.md §2.3, [index] 0-5). Light deepens;
+  /// slots 1/4/5 alias the existing brand/usage tokens.
+  static Color usageChart(BuildContext c, int index) {
+    final dark = _dark(c);
+    const darks = [
+      ZColors.usageBlue,
+      ZColors.usageChart2,
+      ZColors.usageChart3,
+      ZColors.danger,
+      ZColors.usageOrange,
+      ZColors.usageChart6,
+    ];
+    const lights = [
+      ZColors.usageBlueLight,
+      ZColors.usageChart2Light,
+      ZColors.usageChart3Light,
+      ZColors.dangerLight,
+      ZColors.usageOrangeLight,
+      ZColors.usageChart6Light,
+    ];
+    return dark ? darks[index % 6] : lights[index % 6];
+  }
 
   /// Status-pill surfaces (solid [PhasePill] and the online
   /// marker): dark keeps the measured opaque pairs, light lifts the

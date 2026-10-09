@@ -80,6 +80,20 @@ class RelayClient {
   int _reconnectAttempt = 0;
   DateTime _lastPairStatusAckAt = DateTime.now();
 
+  /// Last pair status already reported via mobile-diagnostic. The heartbeat
+  /// re-enters [_applyPairStatus] on every `pair_status_ack` (every 10s in
+  /// steady state), so the diagnostic is transition-driven: report on change
+  /// only.
+  bool _pairStatusReported = false;
+  String? _lastReportedPairStatus;
+
+  /// Per-socket diagnostic gate. The relay hard-fails the auth handshake when
+  /// any data frame precedes it (live-verified 2026-10-09: a pre-auth
+  /// mobile-diagnostic turns the flow into `AUTH_FAILED` / hard close), so
+  /// diagnostics stay offline until this socket has seen its first pair
+  /// status. Reset on every [_connect].
+  bool _diagAuthOk = false;
+
   Timer? _heartbeatTimer;
   Timer? _waitingTimer;
   Timer? _reconnectTimer;
@@ -90,8 +104,17 @@ class RelayClient {
   void _log(String line) => onLog?.call(line);
 
   void _setState(RelayState s) {
+    final previous = _state.value;
     _state.value = s;
     _log('[relay] state -> $s');
+    // Transition-driven: a re-assert of the current state (e.g. `waiting`
+    // re-applied on every pair-status ack) is not a transition and must not
+    // re-report.
+    if (s == previous) return;
+    sendMobileDiagnostic('state-transition', {
+      'state': s.name,
+      'previousState': previous.name,
+    });
   }
 
   Future<void> start() async {
@@ -121,9 +144,13 @@ class RelayClient {
       return;
     }
     _socket = socket;
+    _diagAuthOk = false;
     _socketSub = socket.stream.listen(
       _handleRawMessage,
-      onError: (e) => _log('[relay] socket error: $e'),
+      onError: (e) {
+        _log('[relay] socket error: $e');
+        sendMobileDiagnostic('socket-error', {'failureMessage': '$e'});
+      },
       onDone: () =>
           _handleSocketClosed(socket.closeCode ?? 1006, socket.closeReason),
     );
@@ -183,6 +210,44 @@ class RelayClient {
     }
   }
 
+  /// Test seam (D3): when set, mobile-diagnostic payloads are delivered here
+  /// instead of the socket — lets tests pin the seven event shapes without a
+  /// live wire. Production leaves it null.
+  @visibleForTesting
+  void Function(Map<String, dynamic> payload)? debugDiagnosticSink;
+
+  /// mobile-diagnostic (G7): fire-and-forget telemetry to the desktop's
+  /// `logMobileDiagnostic` (pure log, no ack — renderer @273595704). It must
+  /// never ride [sendPayload]: that path queues while unpaired and would
+  /// replay a batch of stale transitions after a reconnect (design OQ3).
+  /// Dropped whenever the relay is not connected (no socket / disposed);
+  /// the web-environment fields (visibilityState / online /
+  /// hiddenDurationMs) are omitted — ZGo is a native client (OQ4). Any
+  /// failure is swallowed so diagnostics never perturb the main link.
+  void sendMobileDiagnostic(String event, [Map<String, dynamic>? fields]) {
+    try {
+      final payload = <String, dynamic>{
+        'zcode_type': 'mobile-diagnostic',
+        'event': event,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        ...?fields,
+      };
+      final sink = debugDiagnosticSink;
+      if (sink != null) {
+        sink(payload);
+        return;
+      }
+      if (_disposed || _socket == null || !_diagAuthOk) return;
+      _send({
+        'type': 'data',
+        'payload': payload,
+        'client_ts': DateTime.now().millisecondsSinceEpoch,
+      });
+    } catch (_) {
+      // Best-effort: encoding/send failures never surface.
+    }
+  }
+
   void _handleRawMessage(dynamic data) {
     Map<String, dynamic>? frame;
     try {
@@ -230,6 +295,17 @@ class RelayClient {
 
   void _applyPairStatus(String? status) {
     _lastPairStatusAckAt = DateTime.now();
+    // First pair status on this socket = auth handshake accepted by the
+    // relay; diagnostics may go on the wire from here on.
+    _diagAuthOk = true;
+    if (!_pairStatusReported || status != _lastReportedPairStatus) {
+      _pairStatusReported = true;
+      _lastReportedPairStatus = status;
+      sendMobileDiagnostic('pair-status', {
+        if (status != null) 'pairStatus': status,
+        'state': state.name,
+      });
+    }
     if (status == 'waiting') {
       if (_wasPaired) {
         _clearWaitingTimer();
@@ -245,6 +321,7 @@ class RelayClient {
             _reconnect();
           }
         });
+        sendMobileDiagnostic('recover-scheduled', {'state': state.name});
       } else {
         _setState(RelayState.waiting);
         _startWaitingTimer();
@@ -278,6 +355,12 @@ class RelayClient {
     _clearWaitingTimer();
     final mapped = relayCloseReason(code);
     _log('[relay] closed code=$code reason=$reason mapped=$mapped');
+    sendMobileDiagnostic('socket-close', {
+      'closeCode': code,
+      if (reason != null) 'closeReason': reason,
+      'wasClean': code == 1000,
+      'wasPaired': _wasPaired,
+    });
     if (_intentionallyClosed) return;
     if (_wasPaired || mapped == 'desktop-disconnected') {
       _scheduleReconnect();
@@ -343,6 +426,7 @@ class RelayClient {
 
   Future<void> _reconnect() async {
     _reconnectTimer?.cancel();
+    sendMobileDiagnostic('recover-start', {'state': state.name});
     // Go through `reconnecting` so listeners (bridge recovery) know the
     // connection dropped — the heartbeat-timeout path used to skip this and
     // bridges were never recovered after re-pairing.
@@ -363,6 +447,15 @@ class RelayClient {
     } catch (_) {}
     _handleSocketClosed(1006, 'debug-drop');
   }
+
+  /// Diagnostics: drives [_applyPairStatus] directly so tests can pin the
+  /// heartbeat dedup (repeated acks of the same status) without a live wire.
+  @visibleForTesting
+  void debugApplyPairStatus(String? status) => _applyPairStatus(status);
+
+  /// Diagnostics: whether the wire gate is open on the current socket.
+  @visibleForTesting
+  bool get debugDiagGateOpen => _diagAuthOk;
 
   Future<void> dispose() async {
     _disposed = true;

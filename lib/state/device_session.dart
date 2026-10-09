@@ -9,6 +9,7 @@ import '../protocol/channel_client.dart'
 import '../protocol/connection_params.dart';
 import '../protocol/conversation.dart';
 import '../protocol/file_service.dart';
+import '../protocol/git_service.dart';
 import '../protocol/method_probe.dart';
 import '../protocol/model_selection.dart' show parseModelSelectionCatalog;
 import '../protocol/off_peak.dart';
@@ -182,6 +183,12 @@ abstract interface class ChatGateway
   Future<dynamic> setTaskArchived(String sessionId, bool archived);
   Future<dynamic> setTaskUnread(String sessionId, bool unread);
 
+  /// Desktop-local native session log file path (`getTaskNativeSessionLogFile`
+  /// on the zcode-task channel, F2): `{provider, path, exists}` — the chat
+  /// 更多菜单「复制日志路径」data source. Throws when the bridge is down or the
+  /// desktop lacks the method; callers degrade (hide the entry / toast).
+  Future<dynamic> taskNativeSessionLogFile(String sessionId);
+
   /// Deletes a task (`zcode-task.deleteTask`). Callers confirm first.
   Future<dynamic> deleteTask(String sessionId);
 
@@ -215,8 +222,21 @@ abstract interface class ChatGateway
   Future<List<Map<String, dynamic>>> modelProviderCatalog();
 
   /// @-mention data sources (web chat.mention.* picker).
-  /// Files of the active workspace: {name, path, relativePath, type}.
-  Future<List<Map<String, dynamic>>> mentionFiles();
+  /// Workspace file SEARCH for the add-context panel / `@` file picker —
+  /// task 2's probed `searchWorkspaceFiles` path (falls back to the packed
+  /// listing on desktops without it). Rows are {name, path, relativePath,
+  /// type}. THROWS when the desktop serves neither method; callers treat
+  /// that as "file section unreachable" and hide it.
+  Future<List<Map<String, dynamic>>> searchWorkspaceFiles(
+    String query, {
+    int limit = 50,
+  });
+
+  /// Reachability verdict for the workspace file pickers (task 2's probe:
+  /// `searchWorkspaceFiles` with a limit-1 empty query, falling back to the
+  /// packed listing length). Never throws — any failure reads false, and the
+  /// caller hides the file section.
+  Future<bool> workspaceFilesReachable();
 
   /// Skills (id/name/description) — same data as the $ picker.
   Future<List<Map<String, dynamic>>> mentionSkills();
@@ -226,10 +246,6 @@ abstract interface class ChatGateway
 
   /// Open sessions of the active workspace (id/title).
   List<({String id, String title})> mentionSessions();
-
-  /// Skills synchronously from the last known list (mention picker reads
-  /// this without awaiting a fresh RPC).
-  List<Map<String, dynamic>> mentionSkillsSync();
 
   /// Workspace file reads for the preview surfaces (markdown local images,
   /// HTML preview assembly). Backed by the desktop `file` channel's
@@ -241,6 +257,11 @@ abstract interface class ChatGateway
       {int? maxBytes});
   Future<TextChunk> fileReadText(String workspacePath, String path,
       {int offset = 0, required int length});
+
+  /// Workspace Git operations (the desktop `git` channel's gitService) for
+  /// the chat status-panel Git group and the review panel. Method names are
+  /// probed at runtime with both naming sets — see [GitPort].
+  GitPort get git;
 
   /// Relay-overview display status (`idle|running|completed|error`) of one
   /// task, read from the relay task view keyed by taskId. The shell-
@@ -592,6 +613,10 @@ class DeviceSession extends ChangeNotifier
         '[session] connect failed after '
         '${sw.elapsedMilliseconds}ms: $e',
       );
+      _diag('failure', {
+        if (_failureReason != null) 'failureReason': _failureReason,
+        'failureMessage': '$e',
+      });
       _setStatus(DeviceStatus.error);
       _maybeScheduleRetry();
     } finally {
@@ -615,6 +640,7 @@ class DeviceSession extends ChangeNotifier
     _retryTimer = Timer(timings.retryBackoff, () {
       if (!_disposed && _status == DeviceStatus.error) connect();
     });
+    _diag('recover-scheduled', {'state': _status.name});
   }
 
   void _onRelayFailure(RelayFailure failure) {
@@ -626,6 +652,10 @@ class DeviceSession extends ChangeNotifier
       // Another terminal took over; stay quiet until the user acts.
       _retryTimer?.cancel();
     }
+    _diag('failure', {
+      'failureReason': failure.reason,
+      if (failure.message != null) 'failureMessage': failure.message,
+    });
     notifyListeners();
   }
 
@@ -683,6 +713,10 @@ class DeviceSession extends ChangeNotifier
         _error = e.message;
         _setStatus(DeviceStatus.error);
     }
+    _diag('failure', {
+      'failureReason': e.reason,
+      if (e.message != null) 'failureMessage': e.message,
+    });
     notifyListeners();
   }
 
@@ -716,9 +750,21 @@ class DeviceSession extends ChangeNotifier
     }
   }
 
+  /// mobile-diagnostic emitter (D3): the session state machine's reporting
+  /// line. [_client] may be null (or the link already closed) during early
+  /// transitions — the relay drops then. Void, never awaited, never throws.
+  void _diag(String event, [Map<String, dynamic>? fields]) {
+    _client?.sendMobileDiagnostic(event, fields);
+  }
+
   void _setStatus(DeviceStatus s) {
     if (_status == s) return;
+    final previous = _status;
     _status = s;
+    _diag('state-transition', {
+      'state': s.name,
+      'previousState': previous.name,
+    });
     notifyListeners();
   }
 
@@ -954,6 +1000,7 @@ class DeviceSession extends ChangeNotifier
     _lastStallRebuildAt = now;
     _rebuilding = true;
     _log('[session] link stalled ($reason); rebuilding connection');
+    _diag('recover-start', {'failureMessage': reason});
     unawaited(() async {
       await suspend();
       _rebuilding = false;
@@ -1383,9 +1430,33 @@ class DeviceSession extends ChangeNotifier
     (method, args) => callChannel(Channels.file, method, args),
   );
 
+  /// Workspace Git operations on the `git` channel (status-panel Git group,
+  /// review panel, branch/commit/push writes). Late final like the ports
+  /// above; written calls go through the caller's confirmation dialogs.
   @override
-  Future<dynamic> renameTask(String sessionId, String title) =>
-      taskCommands.rename(sessionId, title);
+  late final GitPort git = GitPort(
+    (method, args) => callChannel(Channels.git, method, args),
+  );
+
+  @override
+  Future<dynamic> renameTask(String sessionId, String title) async {
+    final res = await taskCommands.rename(sessionId, title);
+    // V4 双写（官方 renameTask 语义，10-08 static-forensics R2）：task-index
+    // 写成功后补发 V4 renameSession；V4 失败静默——官方同样只 warn「保留
+    // task-index 标题」，不回滚不误报。桥未开（任务列表冷重命名）时
+    // [conversationCommands] 直接 throw → 同样被吞；task-index 标题本就是
+    // 权威，偏差可接受（官方 task service 恒双写，受 remote 通道形态所限）。
+    try {
+      await conversationCommands.renameSession(sessionId, title);
+    } catch (e) {
+      debugPrint('[session] renameSession dual-write failed: $e');
+    }
+    return res;
+  }
+
+  @override
+  Future<dynamic> taskNativeSessionLogFile(String sessionId) =>
+      taskCommands.nativeSessionLogFile(sessionId);
 
   @override
   Future<dynamic> setTaskPinned(String sessionId, bool pinned) =>
@@ -1607,18 +1678,36 @@ class DeviceSession extends ChangeNotifier
   }
 
   @override
-  Future<List<Map<String, dynamic>>> mentionFiles() async {
+  Future<List<Map<String, dynamic>>> searchWorkspaceFiles(
+    String query, {
+    int limit = 50,
+  }) async {
     final root = workspacePath;
     if (root == null || root.isEmpty) return const [];
+    final rows = await fileService.searchWorkspaceFiles(
+      root,
+      query: query,
+      limit: limit,
+    );
+    return [
+      for (final e in rows)
+        {
+          'name': e.name,
+          'path': e.path,
+          'relativePath': e.relativePath,
+          'type': e.isDirectory ? 'directory' : 'file',
+        },
+    ];
+  }
+
+  @override
+  Future<bool> workspaceFilesReachable() async {
+    final root = workspacePath;
+    if (root == null || root.isEmpty) return false;
     try {
-      final res = await callChannel('file', 'listWorkspaceFiles', [
-        {'rootPath': root}
-      ]);
-      return res is List
-          ? res.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList()
-          : const [];
+      return await fileService.workspaceFilesReachable(root);
     } catch (_) {
-      return const [];
+      return false;
     }
   }
 
@@ -1657,17 +1746,6 @@ class DeviceSession extends ChangeNotifier
     final list = sessions?.list ?? const [];
     return [
       for (final e in list) (id: e.sessionId, title: e.title),
-    ];
-  }
-
-  @override
-  List<Map<String, dynamic>> mentionSkillsSync() {
-    return [
-      for (final s in (conversation?.lastSkills ?? const <SkillEntry>[]))
-        {
-          'name': s.name,
-          if (s.description != null) 'description': s.description,
-        },
     ];
   }
 

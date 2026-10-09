@@ -101,6 +101,8 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
   int get _resyncSeq => 0;
   String? get _resyncEpoch => null;
 
+  Map<String, dynamic> _requestScope() => _transport.scope;
+
   void _purgeFragments() {
     if (_disposed) return;
     final stale = <String>[];
@@ -140,7 +142,7 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
         ConversationTransport.channel,
         _subscribeMethod,
         [
-          {..._transport.scope, ..._subscribeArgs},
+          {..._requestScope(), ..._subscribeArgs},
         ],
         // The desktop may need to warm the session runtime before answering —
         // give the subscribe call generous room instead of timing out at the
@@ -203,7 +205,7 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
           ConversationTransport.channel,
           _unsubscribeMethod,
           [
-            {..._transport.scope, 'subscriptionId': oldId, ..._unsubscribeArgs},
+            {..._requestScope(), 'subscriptionId': oldId, ..._unsubscribeArgs},
           ],
         );
       } catch (_) {}
@@ -283,7 +285,7 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
         _resyncMethod,
         [
           {
-            ..._transport.scope,
+            ..._requestScope(),
             'subscriptionId': id,
             ..._resyncArgs,
             if (_resyncEpoch != null)
@@ -313,7 +315,7 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
           ConversationTransport.channel,
           _unsubscribeMethod,
           [
-            {..._transport.scope, 'subscriptionId': id, ..._unsubscribeArgs},
+            {..._requestScope(), 'subscriptionId': id, ..._unsubscribeArgs},
           ],
         );
       } catch (_) {}
@@ -341,7 +343,12 @@ class ConversationSubscription extends _SubscriptionBase<ConversationState> {
   @override
   String get _resyncMethod => 'resyncConversationV4';
   @override
-  Map<String, dynamic> get _subscribeArgs => {'sessionId': sessionId};
+  Map<String, dynamic> get _subscribeArgs => {
+    'sessionId': sessionId,
+    // Official conversationSubscribe body (renderer @270820092) carries the
+    // key only when the client declared the capability in clientHello.
+    if (_transport.workflowRunDeltas) 'workflowRunDeltas': true,
+  };
   @override
   Map<String, dynamic> get _unsubscribeArgs => const {};
   @override

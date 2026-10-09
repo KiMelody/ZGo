@@ -85,6 +85,34 @@ void main() {
     expect(methods, ['deleteTask', 'listArchivedTasks']);
   });
 
+  test('nativeSessionLogFile: confirmed method, task-scoped payload; '
+      'a desktop without it rethrows (UI degrades to no-path)', () async {
+    final calls = <(String, List<Object?>)>[];
+    final port = TaskCommandsPort(
+      (method, args) async {
+        calls.add((method, args));
+        return const {'provider': 'zcode', 'path': '/home/.zcode/log.jsonl'};
+      },
+      scope: (_) => {'workspacePath': '/repo'},
+    );
+    final res = await port.nativeSessionLogFile('s1') as Map;
+    expect(res['path'], '/home/.zcode/log.jsonl');
+    expect(calls.single.$1, 'getTaskNativeSessionLogFile');
+    expect(calls.single.$2.single, {
+      'workspacePath': '/repo',
+      'taskId': 's1',
+    });
+
+    final missing = TaskCommandsPort(
+      (method, args) async =>
+          throw ChannelRpcError('no such method: $method', null),
+    );
+    expect(
+      () => missing.nativeSessionLogFile('s1'),
+      throwsA(isA<ChannelRpcError>()),
+    );
+  });
+
   test('every candidate missing → first error rethrown', () async {
     final port = TaskCommandsPort(
       (method, args) async =>

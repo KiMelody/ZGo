@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'
+    show MethodChannel, SystemChannels, Uint8List;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zgo/protocol/conversation.dart';
@@ -146,46 +148,56 @@ Widget wrap(Widget child) => MaterialApp(
   home: child,
 );
 
-/// Gateway seeded with one running subagent (`subagents.running[]` entry +
-/// its `kind=='subagent'` works entry, live-probed 2026-09-13) plus one
-/// plain bash work — the pill reads the former, the works bar the latter.
-FakeChatGateway _gatewayWithSubagentWork() => FakeChatGateway()
-  ..snapshotExtra = {
-    'subagents': {
-      'revision': 1,
-      'childSessionIds': ['sess_child_1'],
-      'running': [
+/// Snapshot for one running subagent (`subagents.running[]` entry + its
+/// `kind=='subagent'` works entry, live-probed 2026-09-13), optionally plus a
+/// plain bash work. The composer button counts all three kinds, so the
+/// auto-close/destroy gates (aggregate running count) must not be fed the
+/// bash work unless a test wants it.
+Map<String, dynamic> _subagentWorkSnapshot({bool withBash = false}) => {
+      'subagents': {
+        'revision': 1,
+        'childSessionIds': ['sess_child_1'],
+        'running': [
+          {
+            'childSessionId': 'sess_child_1',
+            'agentId': 'agent_1',
+            'toolCallId': 'call_1',
+            'subagentType': 'general-purpose',
+            'title': '实现加固',
+            'status': 'running',
+            'startedAt': 1789279676224,
+          },
+        ],
+      },
+      'backgroundWorks': [
+        if (withBash)
+          {
+            'workId': 'bash_1',
+            'kind': 'bash',
+            'title': 'Download Flutter SDK',
+            'status': 'running',
+            'cancellable': true,
+          },
         {
-          'childSessionId': 'sess_child_1',
-          'agentId': 'agent_1',
-          'toolCallId': 'call_1',
-          'subagentType': 'general-purpose',
+          'workId': 'agent_1',
+          'kind': 'subagent',
           'title': '实现加固',
           'status': 'running',
           'startedAt': 1789279676224,
+          'cancellable': true,
+          'anchorRowId': null,
+          'childSessionId': 'sess_child_1',
         },
       ],
-    },
-    'backgroundWorks': [
-      {
-        'workId': 'bash_1',
-        'kind': 'bash',
-        'title': 'Download Flutter SDK',
-        'status': 'running',
-        'cancellable': true,
-      },
-      {
-        'workId': 'agent_1',
-        'kind': 'subagent',
-        'title': '实现加固',
-        'status': 'running',
-        'startedAt': 1789279676224,
-        'cancellable': true,
-        'anchorRowId': null,
-        'childSessionId': 'sess_child_1',
-      },
-    ],
-  };
+    };
+
+FakeChatGateway _gatewayWithSubagentWork() =>
+    FakeChatGateway()..snapshotExtra = _subagentWorkSnapshot(withBash: true);
+
+/// Subagent-only variant (no live bash work): the sheet/pill aggregate gate
+/// reaches zero once the subagent goes terminal.
+FakeChatGateway _gatewayWithSubagentOnlyWork() =>
+    FakeChatGateway()..snapshotExtra = _subagentWorkSnapshot();
 
 Future<void> _pumpWithRunningSubagent(
   WidgetTester tester,
@@ -967,7 +979,7 @@ void main() {
       tester.view.resetDevicePixelRatio();
     });
     final gateway = FakeChatGateway();
-    gateway.mentionFilesResult = [
+    gateway.searchWorkspaceFilesResult = [
       {
         'name': 'chat_page.dart',
         'relativePath': 'lib/ui/chat/chat_page.dart',
@@ -1004,7 +1016,10 @@ void main() {
     }
 
     final tf = tester.widget<TextField>(find.byType(TextField).first);
-    expect(tf.controller!.text, '看一下 @lib/ui/chat/chat_page.dart ');
+    expect(
+      tf.controller!.text,
+      '看一下 [chat_page.dart](./lib/ui/chat/chat_page.dart) ',
+    );
   });
 
   testWidgets('draft mode: first send issues createSession with firstText '
@@ -1112,6 +1127,68 @@ void main() {
         .toList()
         .single;
     expect(call.$2, ['s1', '继续', null]);
+  });
+
+  testWidgets('attachment upload failure: snack retry action re-runs _send '
+      '(regression: canRetry must NOT read _sending — inside the catch it '
+      'is still true, the finally resets it only after)', (tester) async {
+    final transport = _AttachRecordingTransport();
+    final gateway = _AttachGateway(transport);
+    // file_picker method-channel fake: one small file, data inline.
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('miguelruivo.flutter.plugins.filepicker'),
+      (call) async => call.method == 'any'
+          ? [
+              {
+                'name': 'a.txt',
+                'size': 3,
+                'bytes': Uint8List.fromList([1, 2, 3]),
+              },
+            ]
+          : null,
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('miguelruivo.flutter.plugins.filepicker'),
+        null,
+      );
+    });
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    // `＋` opens the add-context panel; 附件 hands back the attach action,
+    // which re-runs the file picker (D4).
+    await tester.tap(find.byIcon(Icons.add_circle_outline));
+    for (var i = 0; i < 6; i++) {
+      await tester.pump(const Duration(milliseconds: 150));
+    }
+    await tester.tap(find.text('附件'));
+    await tester.pumpAndSettle();
+    expect(find.text('a.txt'), findsOneWidget); // pending bar chip
+
+    // Empty text + pending files is a valid send (the :1139 guard allows
+    // it, the composer's send button counts attachments as input).
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pumpAndSettle();
+
+    // First attempt died in the upload — before sendTextOrQueue; the snack
+    // carries the retry action because the files are still pending.
+    expect(transport.attachmentPutCalls, 1);
+    expect(transport.sendCalls, 0);
+    expect(find.text('重试'), findsOneWidget);
+
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+
+    // Retry re-uploads and then sends; the pending bar drains.
+    expect(transport.attachmentPutCalls, 2);
+    expect(transport.sendCalls, 1);
+    expect(find.text('a.txt'), findsNothing);
   });
 
   testWidgets('running keeps send beside stop so follow-ups can queue',
@@ -1754,29 +1831,77 @@ void main() {
     expect(opacity(), 0);
   });
 
-  testWidgets('running subagent shows the composer pill; the works bar keeps '
-      'only the bash row', (tester) async {
+  testWidgets('single background-tasks button carries the three-kind total; '
+      'the works bar is retired', (tester) async {
     final gateway = _gatewayWithSubagentWork();
     await _pumpWithRunningSubagent(tester, gateway);
 
-    // Pill sits right of the mode chip: agent glyph + running count.
-    expect(find.byTooltip('子智能体'), findsOneWidget);
+    // One button right of the mode chip: two live kinds (bash + subagent)
+    // → the official mixed tooltip; the badge is the three-kind total.
+    expect(find.byTooltip('打开运行中的终端与智能体'), findsOneWidget);
     expect(
       find.descendant(
-        of: find.byTooltip('子智能体'),
-        matching: find.text('1'),
+        of: find.byTooltip('打开运行中的终端与智能体'),
+        matching: find.text('2'),
+      ),
+      findsOneWidget,
+    );
+    // Official ariaLabel template, per-kind counts interpolated.
+    expect(
+      find.byWidgetPredicate(
+        (w) =>
+            w is Semantics &&
+            w.properties.label ==
+                '打开运行中的后台任务：Bash 1 个，工作流 0 个，子智能体 1 个，共 2 个',
       ),
       findsOneWidget,
     );
 
-    // Works bar: only the bash count line remains (subagent entries left
-    // the bar — they live in the pill + management sheet now).
-    expect(find.textContaining('后台任务 1 个运行中'), findsOneWidget);
-    expect(find.byTooltip('取消此后台任务'), findsOneWidget);
+    // The retired works bar left the message flow with its 3 i18n keys.
+    expect(find.textContaining('后台任务 1 个运行中'), findsNothing);
+    expect(find.byTooltip('取消此后台任务'), findsNothing);
     expect(find.text('实现加固 · 正在读取 a.dart'), findsNothing);
 
     // goal=null: the goal panel stays hidden.
     expect(find.text('目标'), findsNothing);
+  });
+
+  testWidgets('background-tasks button switches tooltip per kind shape',
+      (tester) async {
+    Future<void> pumpWorks(List<Map<String, dynamic>> works) async {
+      // Unmount any previous page first: pumpWidget reuses the State when the
+      // widget type matches, which would keep the old gateway's live state.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      final gateway = FakeChatGateway()
+        ..snapshotExtra = {'backgroundWorks': works};
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    Map<String, dynamic> work(String kind) => {
+      'workId': '${kind}_1',
+      'kind': kind,
+      'title': kind,
+      'status': 'running',
+      'cancellable': true,
+    };
+
+    await pumpWorks([work('bash')]);
+    expect(find.byTooltip('运行中的终端'), findsOneWidget);
+    expect(find.byTooltip('打开运行中的终端与智能体'), findsNothing);
+
+    await pumpWorks([work('workflow')]);
+    expect(find.byTooltip('打开运行中的工作流'), findsOneWidget);
+
+    await pumpWorks([work('bash'), work('workflow')]);
+    expect(find.byTooltip('打开运行中的终端与智能体'), findsOneWidget);
   });
 
   testWidgets('agent tool call renders launch state and opens the detail page', (
@@ -1973,8 +2098,17 @@ void main() {
 
   /// Opens the management sheet from the composer pill (finite pumps: the
   /// pill's breathing dot and sheet spinners never let pumpAndSettle settle).
+  /// Opens the management sheet from the single background-tasks button.
+  /// The button's tooltip varies with the live kind mix (terminal/agent/
+  /// workflow/mixed), so match the official aria Semantics label instead.
   Future<void> openSubagentSheet(WidgetTester tester) async {
-    await tester.tap(find.byTooltip('子智能体'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (w) =>
+            w is Semantics &&
+            (w.properties.label ?? '').startsWith('打开运行中的后台任务'),
+      ),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
   }
@@ -2079,7 +2213,7 @@ void main() {
     // The sheet's dispose released its acquire (refcount 0 → async close).
     expect(gateway.closedSessions, contains('sess_child_1'));
     // The pill is untouched by the sheet close.
-    expect(find.byTooltip('子智能体'), findsOneWidget);
+    expect(find.byTooltip('打开运行中的终端与智能体'), findsOneWidget);
   });
 
   testWidgets('inputStreaming child shows the 准备执行… tail in the sheet', (
@@ -2368,7 +2502,7 @@ void main() {
 
   testWidgets('sheet auto-closes after all-terminal holds past the confirm '
       'window', (tester) async {
-    final gateway = _gatewayWithSubagentWork();
+    final gateway = _gatewayWithSubagentOnlyWork();
     await tester.pumpWidget(
       wrap(ChatPage(
         gateway: gateway,
@@ -2382,25 +2516,25 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     await openSubagentSheet(tester);
-    expect(find.text('子智能体'), findsOneWidget); // sheet header
+    expect(find.text('运行中的后台任务'), findsOneWidget); // sheet header
 
     // Everything goes terminal: the running section empties immediately,
     // but the sheet itself holds through the confirm window…
     upsertRows(gateway, [subagentRow(rowId: 3, status: 'success')]);
     await tester.pump();
-    expect(find.text('子智能体'), findsOneWidget); // header still up
+    expect(find.text('运行中的后台任务'), findsOneWidget); // header still up
     expect(find.text('详情'), findsNothing); // running section emptied
 
-    // …then it closes itself (and the pill dies with it).
+    // …then it closes itself (and the composer button dies with it).
     await tester.pump(const Duration(milliseconds: 150));
     await tester.pump(const Duration(milliseconds: 350));
-    expect(find.text('子智能体'), findsNothing);
-    expect(find.byTooltip('子智能体'), findsNothing);
+    expect(find.text('运行中的后台任务'), findsNothing);
+    expect(find.byTooltip('打开运行中的智能体'), findsNothing);
   });
 
   testWidgets('pill is destroyed after all-terminal holds past the confirm '
       'window', (tester) async {
-    final gateway = _gatewayWithSubagentWork();
+    final gateway = _gatewayWithSubagentOnlyWork();
     await tester.pumpWidget(
       wrap(ChatPage(
         gateway: gateway,
@@ -2412,16 +2546,130 @@ void main() {
     gateway.feedSnapshot([subagentRow(rowId: 3, status: 'running')]);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
-    expect(find.byTooltip('子智能体'), findsOneWidget);
+    expect(find.byTooltip('打开运行中的智能体'), findsOneWidget);
 
-    // All terminal: the pill survives the anti-replay window…
+    // All terminal: the button survives the anti-replay window…
     upsertRows(gateway, [subagentRow(rowId: 3, status: 'success')]);
     await tester.pump();
-    expect(find.byTooltip('子智能体'), findsOneWidget);
+    expect(find.byTooltip('打开运行中的智能体'), findsOneWidget);
 
     // …and is destroyed once the window has passed.
     await tester.pump(const Duration(milliseconds: 200));
-    expect(find.byTooltip('子智能体'), findsNothing);
+    expect(find.byTooltip('打开运行中的智能体'), findsNothing);
+  });
+
+  testWidgets('management sheet renders 终端/工作流/子智能体 partitions',
+      (tester) async {
+    final gateway = FakeChatGateway()
+      ..snapshotExtra = {
+        'subagents': {
+          'revision': 1,
+          'childSessionIds': ['sess_child_1'],
+          'running': [
+            {
+              'childSessionId': 'sess_child_1',
+              'agentId': 'agent_1',
+              'subagentType': 'general-purpose',
+              'title': '实现加固',
+              'status': 'running',
+              'startedAt': 1789279676224,
+            },
+          ],
+        },
+        'backgroundWorks': [
+          {
+            'workId': 'bash_1',
+            'kind': 'bash',
+            'title': 'Download Flutter SDK',
+            'status': 'running',
+            'cancellable': true,
+          },
+          {
+            'workId': 'wf_1',
+            'kind': 'workflow',
+            'title': '审计依赖',
+            'status': 'running',
+            'cancellable': true,
+          },
+          {
+            'workId': 'agent_1',
+            'kind': 'subagent',
+            'title': '实现加固',
+            'status': 'running',
+            'childSessionId': 'sess_child_1',
+          },
+        ],
+        // The workflow row's progress joins the background work to its run
+        // (best-effort via workId → runId: the wire carries no explicit link).
+        'workflowRuns': {
+          'revision': 4,
+          'runs': [
+            {
+              'runId': 'wf_1',
+              'status': 'running',
+              'usage': {'spentTokens': 0, 'nodesUsed': 2},
+              'lastEventSequence': 7,
+              'actors': [
+                {'siteId': 's', 'ordinal': 0, 'status': 'running'},
+              ],
+              'nodes': [
+                {'siteId': 's', 'ordinal': 0, 'phase': 'settled'},
+                {'siteId': 's', 'ordinal': 1, 'phase': 'executing'},
+              ],
+            },
+          ],
+        },
+      };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      subagentRow(rowId: 9, status: 'running'),
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await openSubagentSheet(tester);
+
+    // Three partition labels, each with its running count.
+    expect(find.text('终端 · 1'), findsOneWidget);
+    expect(find.text('工作流 · 1'), findsOneWidget);
+    expect(find.text('子智能体 · 1'), findsOneWidget);
+    // One row per partition.
+    expect(find.text('Download Flutter SDK'), findsOneWidget);
+    expect(find.text('审计依赖'), findsOneWidget);
+    expect(find.text('实现加固'), findsOneWidget);
+    // workflowRuns mirror → progress line (nodesSettled/nodesTotal · actors).
+    expect(find.text('1/2 节点 · 1 个智能体'), findsOneWidget);
+    // The retired works bar is not part of the management surface.
+    expect(find.textContaining('后台任务 1 个运行中'), findsNothing);
+  });
+
+  testWidgets('slash bar folds subagents in as @name entries', (tester) async {
+    final gateway = FakeChatGateway()
+      ..mentionSubagentsResult = [
+        {'name': 'explore', 'description': '调研代码'},
+      ];
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '/exp');
+    await tester.pump();
+
+    // The shared capability list renders the subagent entry with its `@`
+    // sigil (official `/` panel mixes commands/skills/subagents).
+    expect(find.text('@explore'), findsOneWidget);
+    await tester.tap(find.text('@explore'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final tf = tester.widget<TextField>(find.byType(TextField).first);
+    expect(tf.controller!.text, '@explore ');
   });
 
   testWidgets('a replayed running subagent inside the hysteresis window '
@@ -2440,7 +2688,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 200));
     // Terminal from the start: no pill, even after the confirm window.
-    expect(find.byTooltip('子智能体'), findsNothing);
+    expect(find.byTooltip('打开运行中的终端与智能体'), findsNothing);
 
     // Bridge-recovery replay: subagents.running (+ the matching works
     // entry) reports the finished subagent as running again. The hysteresis
@@ -2448,7 +2696,7 @@ void main() {
     pushRunningReplay(gateway);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 200));
-    expect(find.byTooltip('子智能体'), findsNothing);
+    expect(find.byTooltip('打开运行中的终端与智能体'), findsNothing);
     // The expiry side (persisted running believed after the window) is
     // covered by the SubagentFeed unit test — Future.delayed cannot advance
     // real time inside testWidgets.
@@ -3060,8 +3308,8 @@ void main() {
   // ------------------- edit & resend dialog + keyboard overflow
   // (PRD internal-task R1/R2)
 
-  testWidgets('edit-resend dialog button shows the localized label from '
-      'both the pencil and the long-press entry', (tester) async {
+  testWidgets('edit-resend goes inline: pencil and long-press entries both '
+      'swap the bubble for the edit card (D1)', (tester) async {
     tester.view.devicePixelRatio = 1.0;
     tester.view.physicalSize = const Size(390, 844);
     addTearDown(tester.view.reset);
@@ -3074,16 +3322,24 @@ void main() {
     ]);
     await tester.pumpAndSettle();
 
-    // Pencil beside the bubble.
+    // Pencil beside the bubble → the card replaces the bubble IN PLACE
+    // (no dialog route), prefilled with the original text.
     await tester.tap(find.byIcon(Icons.edit_outlined));
     await tester.pumpAndSettle();
+    final editField = find.byKey(const ValueKey('inline-edit-input'));
+    expect(editField, findsOneWidget);
+    expect(find.text('帮我修复登录'), findsOneWidget);
     // R1 regression: the button must read the table copy, never the raw
     // (dotted) key.
     expect(find.widgetWithText(FilledButton, '编辑并重发'), findsOneWidget);
     expect(find.text('chat.action.edit.resend'), findsNothing);
+    expect(gateway.calls.where((c) => c.$1 == 'editUserQuery'), isEmpty);
 
+    // 取消 returns the bubble without sending anything.
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
+    expect(editField, findsNothing);
+    expect(gateway.calls.where((c) => c.$1 == 'editUserQuery'), isEmpty);
 
     // Long-press bottom sheet entry. The bubble is a SelectableText — its
     // long-press selection would win the gesture arena, so press the bubble
@@ -3094,7 +3350,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('编辑并重发'));
     await tester.pumpAndSettle();
-    expect(find.widgetWithText(FilledButton, '编辑并重发'), findsOneWidget);
+    expect(editField, findsOneWidget);
   });
 
   testWidgets('pending questions card under the keyboard: the status strip '
@@ -4518,6 +4774,157 @@ void main() {
     expect(find.byType(ChatPage), findsOneWidget);
   });
 
+  // ---- selection side chat (parity-reference D2) ----
+
+  /// One turn so the long-press action sheet renders (fork-test viewport).
+  Future<FakeChatGateway> pumpSideChatSource(
+    WidgetTester tester, {
+    String? workspaceLabel,
+  }) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(
+        ChatPage(
+          gateway: gateway,
+          sessionId: 's1',
+          title: 't',
+          workspaceLabel: workspaceLabel,
+        ),
+      ),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录', 'state': 'done'},
+      {'rowId': 2, 'kind': 'assistantText', 'text': '已修复'},
+    ]);
+    await tester.pumpAndSettle();
+    return gateway;
+  }
+
+  /// Long-press just outside the first bubble's text — the row's
+  /// GestureDetector owns the press there (SelectableText would win on the
+  /// text) — then the action sheet is up.
+  Future<void> openRowActions(WidgetTester tester) async {
+    final textTopLeft = tester.getTopLeft(find.text('帮我修复登录'));
+    await tester.longPressAt(textTopLeft - const Offset(8, 4));
+    await tester.pumpAndSettle();
+  }
+
+  /// The direct-ask dialog's TextField (the composer has one too, so scope
+  /// to the dialog).
+  Finder askField() => find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.byType(TextField),
+      );
+
+  testWidgets('action sheet 「在辅助对话中提问」 asks, creates with the typed '
+      'firstInput and pushes the acked session', (tester) async {
+    final gateway = await pumpSideChatSource(tester, workspaceLabel: 'ZLinker');
+    gateway.createSelectionSideSessionResults.add('sess_side');
+
+    await openRowActions(tester);
+    await tester.tap(find.text('在辅助对话中提问'));
+    await tester.pumpAndSettle();
+
+    // The direct-ask dialog is up (title + input + confirm).
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(askField(), findsOneWidget);
+    await tester.enterText(askField(), '  为什么要这样  ');
+    await tester.tap(find.text('提问'));
+    await tester.pumpAndSettle();
+
+    // Wire: the trimmed firstText rode the command; no modelSelection from
+    // the UI.
+    final call = gateway.calls
+        .firstWhere((c) => c.$1 == 'createSelectionSideSession');
+    expect(call.$2[0], 's1');
+    expect(call.$2[1], '为什么要这样');
+    expect(call.$2[2], isNull);
+
+    // Ack landed on the pushed page (the landing IS the feedback).
+    expect(gateway.subscribedSessions, contains('sess_side'));
+    final pushed = tester.widget<ChatPage>(find.byType(ChatPage).last);
+    expect(pushed.sessionId, 'sess_side');
+    expect(pushed.gateway, same(gateway));
+    expect(pushed.workspaceLabel, 'ZLinker');
+    // The pushed page's title is the official side-chat tab copy.
+    expect(find.text('辅助对话'), findsOneWidget);
+  });
+
+  testWidgets('empty ask input creates nothing and stays put (no silent '
+      'first message)', (tester) async {
+    final gateway = await pumpSideChatSource(tester);
+
+    await openRowActions(tester);
+    await tester.tap(find.text('在辅助对话中提问'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('提问'));
+    await tester.pumpAndSettle();
+
+    expect(
+      gateway.calls.where((c) => c.$1 == 'createSelectionSideSession'),
+      isEmpty,
+    );
+    expect(find.byType(ChatPage), findsOneWidget);
+  });
+
+  testWidgets('cancelling the ask dialog creates nothing', (tester) async {
+    final gateway = await pumpSideChatSource(tester);
+
+    await openRowActions(tester);
+    await tester.tap(find.text('在辅助对话中提问'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    expect(
+      gateway.calls.where((c) => c.$1 == 'createSelectionSideSession'),
+      isEmpty,
+    );
+    expect(find.byType(ChatPage), findsOneWidget);
+  });
+
+  testWidgets('a thrown side-chat creation surfaces the guard copy, no '
+      'navigation', (tester) async {
+    final gateway = await pumpSideChatSource(tester);
+    gateway.createSelectionSideSessionResults.add(
+      StateError(
+        'createSelectionSideSession rejected: '
+        'guard.selectionSideChatRestrictedCommand '
+        'selection_side_chat 不允许执行 createSelectionSideSession',
+      ),
+    );
+
+    await openRowActions(tester);
+    await tester.tap(find.text('在辅助对话中提问'));
+    await tester.pumpAndSettle();
+    await tester.enterText(askField(), '问题');
+    await tester.tap(find.text('提问'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('辅助对话中不支持此操作'), findsOneWidget);
+    expect(find.byType(ChatPage), findsOneWidget);
+    expect(gateway.subscribedSessions, isNot(contains('sess_side')));
+  });
+
+  testWidgets('the row actions still fork as before (side-chat entry is '
+      'additive, not a fork replacement)', (tester) async {
+    final gateway = await pumpSideChatSource(tester);
+    gateway.forkAssistantResults.add(forkAck());
+
+    await openRowActions(tester);
+    await tester.tap(find.text('分叉对话'));
+    await tester.pumpAndSettle();
+
+    expect(gateway.subscribedSessions, contains('sess_fork'));
+    expect(
+      gateway.calls.where((c) => c.$1 == 'createSelectionSideSession'),
+      isEmpty,
+    );
+  });
+
   testWidgets('assistant copy feedback morphs copy → check with no toast, '
       'reverts after 1200ms; re-tap restarts the window', (tester) async {
     final gateway = FakeChatGateway();
@@ -4570,6 +4977,388 @@ void main() {
     await tester.enterText(field, '你好');
     await tester.pump();
     expect(tester.widget<TextField>(field).cursorColor, isNull);
+  });
+
+  // ------------------- parity chat actions (10-08-parity-chat-actions)
+
+  group('inline edit-resend (D1)', () {
+    Future<_EditGateway> pumpEditable(tester) async {
+      final gateway = _EditGateway();
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': '原始消息', 'state': 'done'},
+      ]);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.edit_outlined));
+      await tester.pumpAndSettle();
+      return gateway;
+    }
+
+    testWidgets('rewind toggle ON → workspaceMode:"rewind" on the wire, '
+        'editor closes', (tester) async {
+      final gateway = await pumpEditable(tester);
+
+      await tester.enterText(
+        find.byKey(const ValueKey('inline-edit-input')),
+        '改后的消息',
+      );
+      await tester.tap(chipOf('对话 + 文件重置'));
+      await tester.pump();
+      await tester.tap(find.widgetWithText(FilledButton, '编辑并重发'));
+      await tester.pumpAndSettle();
+
+      final edit = gateway.transport.edits.single;
+      expect(edit.sessionId, 's1');
+      expect(edit.target, {'rowId': 1});
+      expect(edit.newText, '改后的消息');
+      expect(edit.workspaceMode, 'rewind');
+      // Success closes the editor.
+      expect(find.byKey(const ValueKey('inline-edit-input')), findsNothing);
+    });
+
+    testWidgets('rewind toggle OFF → the field stays OFF the wire '
+        '(preserve is the desktop default)', (tester) async {
+      final gateway = await pumpEditable(tester);
+
+      await tester.enterText(
+        find.byKey(const ValueKey('inline-edit-input')),
+        '保留对话',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, '编辑并重发'));
+      await tester.pumpAndSettle();
+
+      expect(gateway.transport.edits.single.workspaceMode, isNull);
+      expect(gateway.transport.edits.single.newText, '保留对话');
+    });
+
+    testWidgets('running session: the rewind chip is disabled but a '
+        'preserve edit still sends', (tester) async {
+      final gateway = _EditGateway();
+      gateway.snapshotExtra = {
+        'control': {'phase': 'running'},
+      };
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': '原始消息', 'state': 'done'},
+      ]);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.edit_outlined));
+      await tester.pumpAndSettle();
+
+      final chip = tester.widget<FilterChip>(chipOf('对话 + 文件重置'));
+      expect(chip.onSelected, isNull); // grey state
+
+      await tester.enterText(
+        find.byKey(const ValueKey('inline-edit-input')),
+        '运行中编辑',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, '编辑并重发'));
+      await tester.pumpAndSettle();
+
+      expect(gateway.transport.edits.single.workspaceMode, isNull);
+    });
+
+    testWidgets('a thrown edit keeps the editor open for retry and snacks '
+        'the failure copy', (tester) async {
+      final gateway = await pumpEditable(tester);
+      gateway.transport.error = StateError('not connected');
+
+      await tester.enterText(
+        find.byKey(const ValueKey('inline-edit-input')),
+        '失败的编辑',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, '编辑并重发'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('编辑失败'), findsOneWidget);
+      expect(find.byKey(const ValueKey('inline-edit-input')), findsOneWidget);
+    });
+  });
+
+  group('hook runs entry (D4)', () {
+    testWidgets('a turn with hookInvocation rows renders the webhook button '
+        'and the read-only sheet lists executions', (tester) async {
+      final gateway = FakeChatGateway();
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+        {
+          'rowId': 2,
+          'kind': 'assistantText',
+          'text': 'done',
+          'state': 'done',
+        },
+        {
+          'rowId': 3,
+          'kind': 'turnHeader',
+          'state': 'completedSuccess',
+          'activeMs': 1000,
+        },
+        {
+          'rowId': 4,
+          'kind': 'hookInvocation',
+          'hookEventName': 'PostToolUse',
+          'executions': [
+            {
+              'hookRunId': 'h1',
+              'state': 'completed',
+              'outcome': 'success',
+              'sourceKind': 'user',
+              'displayName': 'format-check',
+              'durationMs': 1234,
+            },
+          ],
+        },
+      ]);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.webhook));
+      await tester.pumpAndSettle();
+
+      expect(find.text('钩子'), findsOneWidget);
+      expect(find.text('PostToolUse'), findsOneWidget);
+      expect(find.text('用户 · format-check · 已完成'), findsOneWidget);
+    });
+
+    testWidgets('a hookless turn renders no webhook button', (tester) async {
+      final gateway = FakeChatGateway();
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+        {'rowId': 2, 'kind': 'assistantText', 'text': 'done'},
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.webhook), findsNothing);
+    });
+  });
+
+  group('sensitive input masking (D8)', () {
+    testWidgets('payload sensitive → the free-text input is obscured',
+        (tester) async {
+      final gateway = FakeChatGateway();
+      gateway.snapshotExtra = {
+        'pendingInteractions': [
+          {
+            'interactionId': 'i1',
+            'payload': {
+              'kind': 'userInput',
+              'freeText': true,
+              'sensitive': true,
+            },
+          },
+        ],
+      };
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      ]);
+      await tester.pumpAndSettle();
+
+      // The interaction card's input (not the composer) is obscured.
+      Finder replyField() => find.byWidgetPredicate(
+        (w) => w is TextField && w.decoration?.hintText == '输入回复…',
+      );
+      expect(replyField(), findsOneWidget);
+      expect(tester.widget<TextField>(replyField()).obscureText, isTrue);
+    });
+
+    testWidgets('non-sensitive payload keeps plain input', (tester) async {
+      final gateway = FakeChatGateway();
+      gateway.snapshotExtra = {
+        'pendingInteractions': [
+          {
+            'interactionId': 'i1',
+            'payload': {'kind': 'userInput', 'freeText': true},
+          },
+        ],
+      };
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      ]);
+      await tester.pumpAndSettle();
+
+      Finder replyField() => find.byWidgetPredicate(
+        (w) => w is TextField && w.decoration?.hintText == '输入回复…',
+      );
+      expect(replyField(), findsOneWidget);
+      expect(tester.widget<TextField>(replyField()).obscureText, isFalse);
+    });
+  });
+
+  group('anchored interactions (D9)', () {
+    Future<FakeChatGateway> pumpAnchored(
+      WidgetTester tester, {
+      required Object? anchorRowId,
+    }) async {
+      final gateway = FakeChatGateway();
+      gateway.snapshotExtra = {
+        'pendingInteractions': [
+          {
+            'interactionId': 'i1',
+            'anchorRowId': anchorRowId,
+            'payload': {
+              'kind': 'permission',
+              'toolName': 'Bash',
+              'summary': 'rm -rf build',
+              'options': [
+                {'optionId': 'o1', 'kind': 'allowOnce'},
+              ],
+            },
+          },
+        ],
+      };
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+        {'rowId': 2, 'kind': 'assistantText', 'text': 'done'},
+      ]);
+      await tester.pumpAndSettle();
+      return gateway;
+    }
+
+    testWidgets('anchor inside the window renders exactly ONE card '
+        '(bottom strip excluded)', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.reset);
+      await pumpAnchored(tester, anchorRowId: 1);
+
+      expect(find.textContaining('权限请求'), findsOneWidget);
+      // Anchored → renders in the stream, right after the turn group near
+      // the TOP half of the screen — not in the bottom status strip.
+      expect(
+        tester.getTopLeft(find.textContaining('权限请求')).dy,
+        lessThan(844 / 2),
+      );
+    });
+
+    testWidgets('anchor outside the window stays in the bottom strip',
+        (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.reset);
+      await pumpAnchored(tester, anchorRowId: 999);
+
+      expect(find.textContaining('权限请求'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.textContaining('权限请求')).dy,
+        greaterThan(844 / 2),
+      );
+    });
+  });
+
+  group('copy task path (D2)', () {
+    testWidgets('复制任务路径 copies the desktop session-file path formula',
+        (tester) async {
+      String? clipboard;
+      TestWidgetsFlutterBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (message) async {
+            if (message.method == 'Clipboard.setData') {
+              clipboard =
+                  (message.arguments as Map)['text'] as String?;
+            }
+            return null;
+          });
+      addTearDown(() {
+        TestWidgetsFlutterBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null);
+      });
+
+      final gateway = FakeChatGateway();
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      ]);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('更多'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('复制任务路径'));
+      await tester.pumpAndSettle();
+
+      expect(clipboard, '/repo/app/s1.zcode-session');
+    });
+  });
+
+  group('git panel wiring (D2/D3)', () {
+    testWidgets('the status group renders in a repository workspace and the '
+        'message capsule falls back to the turn summary', (tester) async {
+      final gateway = FakeChatGateway()
+        ..gitCallHandler = (method, args) async => switch (method) {
+              'getRepositorySummary' => <String, Object?>{
+                  'isRepository': true,
+                  'branchName': 'main',
+                  'isDirty': true,
+                  'headRefType': 'branch',
+                },
+              'refresh' => <String, Object?>{'summary': <String, Object?>{}},
+              'getChanges' => <Object?>[],
+              'getLocalBranches' => <String, Object?>{
+                  'headRefType': 'branch',
+                  'currentBranchName': 'main',
+                  'branches': [
+                    {'name': 'main', 'isCurrent': true},
+                  ],
+                },
+              'getIdentity' =>
+                <String, Object?>{'userName': 'Ada', 'userEmail': 'a@b.c'},
+              _ => <String, Object?>{},
+            };
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+        {'rowId': 2, 'kind': 'assistantText', 'text': 'done'},
+        {
+          'rowId': 3,
+          'kind': 'turnHeader',
+          'state': 'completedSuccess',
+          'fileChanges': {'files': 1, 'additions': 10, 'deletions': 3},
+        },
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Git 工具'), findsOneWidget);
+      expect(find.text('提交或推送'), findsOneWidget);
+      // No workspace changes → the capsule shows the turn's own summary.
+      expect(find.textContaining('+10'), findsWidgets);
+    });
+
+    testWidgets('a non-repository workspace hides the whole Git group',
+        (tester) async {
+      final gateway = FakeChatGateway()
+        ..gitCallHandler = (method, args) async =>
+            <String, Object?>{'kind': 'not-repository', 'isGitAvailable': true};
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Git 工具'), findsNothing);
+      expect(find.text('提交或推送'), findsNothing);
+    });
   });
 }
 
@@ -4657,6 +5446,96 @@ class _SequencedRowsGateway extends FakeChatGateway {
   _SequencedRowsGateway(this.transport);
 
   final _SequencedRowsTransport transport;
+
+  @override
+  ConversationTransport get conversationCommands => transport;
+}
+
+/// Records the inline edit send (D1): named args never ride noSuchMethod's
+/// positional recording, so the wire shape assertions use a real override.
+class _EditRecordingTransport implements ConversationTransport {
+  final List<
+      ({
+        String sessionId,
+        Map<String, dynamic> target,
+        String newText,
+        String? workspaceMode,
+      })>
+  edits = [];
+
+  Object? error;
+
+  @override
+  Future<dynamic> editUserQuery(
+    String sessionId,
+    Map<String, dynamic> target,
+    String newText, {
+    String? workspaceMode,
+  }) async {
+    edits.add((
+      sessionId: sessionId,
+      target: target,
+      newText: newText,
+      workspaceMode: workspaceMode,
+    ));
+    final err = error;
+    if (err != null) throw err;
+    return const {'status': 'accepted'};
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      Future.value(const {'status': 'accepted'});
+}
+
+class _EditGateway extends FakeChatGateway {
+  final transport = _EditRecordingTransport();
+
+  @override
+  ConversationTransport get conversationCommands => transport;
+}
+
+/// Records the attachment upload retry (D6): the FIRST attachmentPut throws
+/// (media-budget style), later ones succeed; sendTextOrQueue counts sends.
+class _AttachRecordingTransport implements ConversationTransport {
+  int attachmentPutCalls = 0;
+  int sendCalls = 0;
+
+  @override
+  Future<Map<String, dynamic>> attachmentPut(
+    String sessionId, {
+    required String fileName,
+    required String mime,
+    required Uint8List bytes,
+    void Function(double progress)? onProgress,
+  }) async {
+    attachmentPutCalls++;
+    if (attachmentPutCalls == 1) {
+      throw Exception('MEDIA_BUDGET_CURRENT_ATTACHMENT_TOO_LARGE: a.txt');
+    }
+    return {'ref': 'r1', 'fileName': fileName, 'mime': mime, 'bytes': 1};
+  }
+
+  @override
+  Future<SendTextResult> sendTextOrQueue(
+    String sessionId,
+    String text, {
+    List<Map<String, dynamic>>? attachments,
+    String? heldQueueDisposition,
+  }) async {
+    sendCalls++;
+    return SendTextSent(const {'status': 'accepted'});
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      Future.value(const {'status': 'accepted'});
+}
+
+class _AttachGateway extends FakeChatGateway {
+  _AttachGateway(this.transport);
+
+  final _AttachRecordingTransport transport;
 
   @override
   ConversationTransport get conversationCommands => transport;

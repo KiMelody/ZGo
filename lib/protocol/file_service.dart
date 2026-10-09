@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'channel_client.dart';
 import 'method_probe.dart';
 
 /// Typed results of the desktop fileService (`file` channel). Field names
@@ -30,6 +31,22 @@ class TextChunk {
   /// certifies the pagination field ("hasMore semantics").
   final bool? hasMore;
   const TextChunk({required this.text, this.hasMore});
+}
+
+/// One workspace file row of the search panel's file tab
+/// (`{name, path, relativePath, type: file|directory}`, renderer `Vv`
+/// parse @313271506).
+class WorkspaceFileEntry {
+  final String name;
+  final String path;
+  final String relativePath;
+  final bool isDirectory;
+  const WorkspaceFileEntry({
+    required this.name,
+    required this.path,
+    required this.relativePath,
+    required this.isDirectory,
+  });
 }
 
 /// Workspace file reads for the preview surfaces (markdown images, HTML
@@ -70,6 +87,12 @@ class FileServicePort {
     'readMedia',
   ];
   static const _textCandidates = ['readTextFile', 'readText', 'readFileText'];
+  // Workspace file listing (the ⌘K file tab). Names are renderer-side
+  // evidence (createFileService @270609580-@270610091) — the runtime
+  // zcode.cjs does NOT carry them, so a runtime miss proves nothing.
+  static const _searchFilesCandidates = ['searchWorkspaceFiles'];
+  static const _listLengthCandidates = ['listWorkspaceFilesLength'];
+  static const _listRangeCandidates = ['listWorkspaceFilesRange'];
 
   // Wire payload is `{path}` only — workspacePath certified ignored;
   // the parameter is kept for API stability only.
@@ -165,5 +188,206 @@ class FileServicePort {
       text: text,
       hasMore: res['truncated'] is bool ? res['truncated'] as bool : null,
     );
+  }
+
+  // ------------------------------------------------ workspace file listing
+  //
+  // The search panel's file tab (renderer @313272117 `UEe`/`Vv` isomorph).
+  // Primary method `searchWorkspaceFiles`; desktops without it fall back to
+  // listing the whole tree (`listWorkspaceFilesLength` + paged
+  // `listWorkspaceFilesRange`) and filtering locally. rootPath is the
+  // workspace ABSOLUTE path — the certified scope rule above applies.
+
+  /// Cheap reachability verdict for the file tab: the search method probed
+  /// with a limit-1 empty query, falling to the length method (one count,
+  /// no data). Any failure → false (the tab hides, the "all" tab degrades).
+  Future<bool> workspaceFilesReachable(String rootPath) async {
+    try {
+      await _probe.run(
+        'searchWorkspaceFiles',
+        _searchFilesCandidates,
+        argsOf: (_) => <Object?>[
+          {'rootPath': rootPath, 'query': '', 'limit': 1},
+        ],
+      );
+      return true;
+    } on ChannelRpcError catch (e) {
+      if (!MethodProbe.missingMethod(e.message)) return false;
+    } catch (_) {
+      return false;
+    }
+    try {
+      await _probe.run(
+        'listWorkspaceFilesLength',
+        _listLengthCandidates,
+        argsOf: (_) => <Object?>[{'rootPath': rootPath}],
+      );
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Workspace file search: `searchWorkspaceFiles({rootPath, query, limit})`
+  /// when the desktop serves it, else the packed full listing filtered
+  /// locally (contains, case-insensitive). All candidates miss → the probe
+  /// error propagates and the caller hides the file tab.
+  Future<List<WorkspaceFileEntry>> searchWorkspaceFiles(
+    String rootPath, {
+    String query = '',
+    int limit = 100,
+  }) async {
+    try {
+      final res = await _probe.run(
+        'searchWorkspaceFiles',
+        _searchFilesCandidates,
+        argsOf: (_) => <Object?>[
+          {'rootPath': rootPath, 'query': query, 'limit': limit},
+        ],
+      );
+      return _parseFileEntries(res, rootPath: rootPath, limit: limit);
+    } on ChannelRpcError catch (e) {
+      if (!MethodProbe.missingMethod(e.message)) rethrow;
+      final all = await _listAllFiles(rootPath);
+      final needle = query.trim().toLowerCase();
+      final hits = needle.isEmpty
+          ? all
+          : all
+              .where((f) => f.relativePath.toLowerCase().contains(needle))
+              .toList();
+      return hits.length > limit ? hits.sublist(0, limit) : hits;
+    }
+  }
+
+  /// The whole tree as `{path, relativePath, type}` rows. The packed string
+  /// is walked once per root and cached for the port's lifetime — every
+  /// keystroke in the fallback mode must not re-walk the workspace
+  /// (staleness window = the holding page's lifetime, accepted).
+  List<WorkspaceFileEntry>? _listedCache;
+  String? _listedCacheRoot;
+
+  Future<List<WorkspaceFileEntry>> _listAllFiles(String rootPath) async {
+    if (_listedCache != null && _listedCacheRoot == rootPath) {
+      return _listedCache!;
+    }
+    final lengthRes = await _probe.run(
+      'listWorkspaceFilesLength',
+      _listLengthCandidates,
+      argsOf: (_) => <Object?>[{'rootPath': rootPath}],
+    );
+    final total = lengthRes is num ? lengthRes.toInt() : 0;
+    // Page size 4 MiB of packed characters per range call (the renderer
+    // pages `REe=4e6`, @313271364); 1 MiB keeps each RPC payload modest.
+    const pageChars = 1 << 20;
+    final packed = StringBuffer();
+    for (var offset = 0; offset < total; offset += pageChars) {
+      final res = await _probe.run(
+        'listWorkspaceFilesRange',
+        _listRangeCandidates,
+        argsOf: (_) => <Object?>[
+          {
+            'rootPath': rootPath,
+            'offset': offset,
+            'length': pageChars,
+          },
+        ],
+      );
+      if (res is String) packed.write(res);
+    }
+    final rows = _parsePackedFiles(packed.toString(), rootPath);
+    _listedCache = rows;
+    _listedCacheRoot = rootPath;
+    return rows;
+  }
+
+  /// Parses a searchWorkspaceFiles answer (array of entry maps) into typed
+  /// rows; malformed entries are dropped, never thrown.
+  List<WorkspaceFileEntry> _parseFileEntries(
+    dynamic res, {
+    required String rootPath,
+    required int limit,
+  }) {
+    if (res is! List) return const [];
+    final rows = <WorkspaceFileEntry>[];
+    for (final e in res) {
+      if (e is! Map) continue;
+      final relativePath = '${e['relativePath'] ?? e['path'] ?? ''}';
+      if (relativePath.isEmpty) continue;
+      rows.add(_entryFromRelativePath(
+        relativePath,
+        rootPath: rootPath,
+        type: '${e['type'] ?? ''}',
+        name: '${e['name'] ?? ''}',
+        path: e['path'] is String ? e['path'] as String : null,
+      ));
+      if (rows.length >= limit) break;
+    }
+    return rows;
+  }
+
+  /// Packed-string parser, renderer `Vv` @313271506 verbatim: records are
+  /// `\n`-separated, each `type TAB escapedRelativePath` (TAB field
+  /// separator; escapes `\\` → `\\`, TAB → `\t`, LF → `\n`).
+  static List<WorkspaceFileEntry> _parsePackedFiles(
+    String packed,
+    String rootPath,
+  ) {
+    if (packed.isEmpty) return const [];
+    final rows = <WorkspaceFileEntry>[];
+    for (final record in packed.split('\n')) {
+      if (record.isEmpty) continue;
+      final tab = record.indexOf('\t');
+      if (tab == -1) continue;
+      final relativePath = _unescapePackedPath(record.substring(tab + 1));
+      if (relativePath.isEmpty) continue;
+      rows.add(_entryFromRelativePath(
+        relativePath,
+        rootPath: rootPath,
+        type: record.substring(0, tab),
+      ));
+    }
+    return rows;
+  }
+
+  static WorkspaceFileEntry _entryFromRelativePath(
+    String relativePath, {
+    required String rootPath,
+    required String type,
+    String? name,
+    String? path,
+  }) {
+    final isWindowsRoot = rootPath.contains('\\');
+    final native = isWindowsRoot
+        ? relativePath.replaceAll('/', '\\')
+        : relativePath;
+    final root = rootPath.endsWith('/') || rootPath.endsWith('\\')
+        ? rootPath
+        : '$rootPath${isWindowsRoot ? '\\' : '/'}';
+    final lastSlash = relativePath.lastIndexOf('/');
+    final bareName =
+        lastSlash == -1 ? relativePath : relativePath.substring(lastSlash + 1);
+    return WorkspaceFileEntry(
+      name: name != null && name.isNotEmpty ? name : bareName,
+      path: path ?? '$root$native',
+      relativePath: relativePath,
+      isDirectory: type == 'directory',
+    );
+  }
+
+  /// Renderer `VEe` @313271478: `\t` → TAB, `\n` → LF, `\\` → `\`, any
+  /// other escape keeps the escaped char itself.
+  static String _unescapePackedPath(String escaped) {
+    if (!escaped.contains('\\')) return escaped;
+    final out = StringBuffer();
+    for (var i = 0; i < escaped.length; i++) {
+      final ch = escaped[i];
+      if (ch == r'\' && i + 1 < escaped.length) {
+        final next = escaped[++i];
+        out.write(next == 't' ? '\t' : next == 'n' ? '\n' : next);
+      } else {
+        out.write(ch);
+      }
+    }
+    return out.toString();
   }
 }

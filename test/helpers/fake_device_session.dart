@@ -93,6 +93,11 @@ class FakeDeviceSession extends DeviceSession {
   @override
   Map<String, dynamic>? get activeWorkspace => _active;
 
+  /// Like production: the active workspace's absolute path (the file
+  /// channel ports and the search page's file probe read it).
+  @override
+  String? get workspacePath => _active?['workspacePath'] as String?;
+
   /// Seeded failure reason (app-error / close-code mapping).
   @override
   String? failureReason;

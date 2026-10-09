@@ -72,4 +72,31 @@ void main() {
             'remote workspace is not in the current window', 'zh-CN'),
         isNull);
   });
+
+  test('side-chat guard reasonCode maps to friendly copy, and wins over the '
+      'Bad state: wrapper', () {
+    // The protocol throws V4SelectionSideChatRestrictedCommandError for the
+    // LKa command set inside a selection_side_chat; the thrown StateError
+    // wraps the reasonCode in `Bad state: …`, which would otherwise take the
+    // not-connected branch.
+    expect(
+      commandErrorCopy('guard.selectionSideChatRestrictedCommand', 'zh-CN'),
+      '辅助对话中不支持此操作',
+    );
+    expect(
+      commandErrorCopy(
+          'Bad state: retryTurn rejected: '
+          'guard.selectionSideChatRestrictedCommand '
+          'selection_side_chat 不允许执行 retryTurn',
+          'zh-CN'),
+      '辅助对话中不支持此操作',
+      reason: 'the guard branch must precede the bad-state branch',
+    );
+    expect(
+      commandErrorCopy('guard.selectionSideChatRestrictedCommand', 'en-US'),
+      "This action isn't available in a side conversation",
+    );
+    // Unrelated reasonCodes still pass through untouched.
+    expect(commandErrorCopy('model_locked', 'zh-CN'), isNull);
+  });
 }

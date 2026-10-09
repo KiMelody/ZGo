@@ -93,4 +93,15 @@ class TaskCommandsPort {
   /// Archived tasks of this workspace (the archive view's data source).
   /// Workspace-level scope — the empty taskId, not any single task's owner.
   Future<dynamic> listArchived() => call('listArchivedTasks', [scopeOf('')]);
+
+  /// Native session log file path of one task (`getTaskNativeSessionLogFile`,
+  /// desktop ZCodeTaskService — 3.14.4 bundle @270902091; the path lives
+  /// desktop-side only: `ZCODE_LOG_DIR || ~/.zcode/cli/log` +
+  /// `zcode-<date>.jsonl`). Answer shape `{provider, path, exists}` — the UI
+  /// treats a miss / rejection as "no log path" and hides the copy entry.
+  Future<dynamic> nativeSessionLogFile(String taskId) => _probe.run(
+    'nativeSessionLogFile',
+    const ['getTaskNativeSessionLogFile'],
+    argsOf: (method) => <Object?>[_payload(taskId)],
+  );
 }

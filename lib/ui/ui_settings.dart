@@ -278,12 +278,17 @@ String relativeTimeShort(BuildContext context, int ms) {
 }
 
 /// Compact token count (chat capacity line, task token row): zh renders
-/// 万 with one decimal (19.4万), en the k/M scale (194k); trailing `.0` is
-/// dropped on both.
+/// 万 with one decimal (19.4万) — 亿 above 1e8, plain below 1e4 (matching
+/// the official compact formatter's 62.4 亿 / 0 plain forms); en the k/M
+/// scale (194k); trailing `.0` is dropped on both.
 String compactTokens(BuildContext context, int n) {
   final english =
       (UiSettingsProvider.of(context)?.locale ?? 'zh-CN').startsWith('en');
-  if (!english) return '${_trimZero(n / 10000)}万';
+  if (!english) {
+    if (n >= 100000000) return '${_trimZero(n / 100000000)}亿';
+    if (n >= 10000) return '${_trimZero(n / 10000)}万';
+    return '$n';
+  }
   if (n >= 1000000) return '${_trimZero(n / 1000000)}M';
   if (n >= 1000) return '${_trimZero(n / 1000)}k';
   return '$n';
@@ -293,4 +298,28 @@ String compactTokens(BuildContext context, int n) {
 String _trimZero(double v) {
   final s = v.toStringAsFixed(1);
   return s.endsWith('.0') ? s.substring(0, s.length - 2) : s;
+}
+
+/// Usage-duration breakdown (official `Own(ms)`): total minutes read as
+/// (days, hours, minutes) — never seconds. Pure, unit-tested.
+(int days, int hours, int minutes) usageDurationParts(int ms) {
+  final totalMinutes = Duration(milliseconds: ms).inMinutes;
+  return (
+    totalMinutes ~/ 1440,
+    (totalMinutes % 1440) ~/ 60,
+    totalMinutes % 60,
+  );
+}
+
+/// Usage-duration text (`N 天 N 小时 N 分钟`, zero parts dropped;
+/// all-zero renders 0 分钟 like the official formatter).
+String usageDuration(BuildContext context, int ms) {
+  final (days, hours, minutes) = usageDurationParts(ms);
+  final parts = [
+    if (days > 0) trP(context, 'usage.duration.days', ['$days']),
+    if (hours > 0) trP(context, 'usage.duration.hours', ['$hours']),
+    if (minutes > 0) trP(context, 'usage.duration.minutes', ['$minutes']),
+  ];
+  if (parts.isEmpty) return trP(context, 'usage.duration.minutes', ['0']);
+  return parts.join(' ');
 }

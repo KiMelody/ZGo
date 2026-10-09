@@ -97,6 +97,12 @@ const List<Exemption> exemptions = [
         '(the en branch renders k/M); sat inside the excluded table file '
         'before the lexicon split',
   ),
+  Exemption(
+    file: 'lib/ui/ui_settings.dart',
+    literal: r'${_trimZero(n / 100000000)}亿',
+    reason: 'compactTokens zh-branch 亿 tier (>=1e8, official compact form '
+        '"62.4 亿" on the usage stat cards), locale-branched in code',
+  ),
 ];
 
 /// Han ideographs plus CJK punctuation and compatibility forms.

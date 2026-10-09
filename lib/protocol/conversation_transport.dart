@@ -28,12 +28,30 @@ class ConversationTransport {
   final String appVersion;
 
   /// Desktop version gate (>=3.12.3, `params.atLeast(3, 12, 3)` at the
-  /// RemoteClient): only then does clientHello carry
-  /// `capabilities: {workspaceHookReviewUi: true}` — the strict hello
-  /// schema of older desktops is untested against unknown fields, so the
-  /// key is omitted entirely (not sent as false). The same gate also
-  /// decides replayable-queue availability ([replayableQueue]).
+  /// RemoteClient) that also decides whether clientHello carries a
+  /// `capabilities` map at all. The strict hello schema of older desktops
+  /// is untested against unknown fields, so pre-3.12.3 desktops receive no
+  /// `capabilities` key (never `false` values). For 3.12.3+ the official
+  /// schema actually accepts TWO keys —
+  /// `{workspaceHookReviewUi, workflowRunDeltas}` (`e.object({…}).strict()
+  /// .optional()`, renderer @270331886); the old note claiming "exactly one
+  /// key" is obsolete. The same gate also decides replayable-queue
+  /// availability ([replayableQueue]).
   final bool workspaceHookReviewUi;
+
+  /// Sticky downgrade latch: a 3.12.3+ desktop that rejects the
+  /// `workflowRunDeltas` capability ([handshake] retries the clientHello
+  /// once without it) disables the key for the transport's lifetime —
+  /// connections always win over the feature (never brick the link).
+  bool _workflowRunDeltasDegraded = false;
+
+  /// Whether the wire carries the `workflowRunDeltas` capability: true on
+  /// desktops that accept clientHello capabilities (>=[workspaceHookReviewUi]
+  /// gate) and not yet downgraded. Read by [ConversationSubscription] to
+  /// decide the conversationSubscribe body key (official @270820092).
+  bool get workflowRunDeltas =>
+      workspaceHookReviewUi && !_workflowRunDeltasDegraded;
+
   final void Function(String line)? onLog;
 
   /// Link-failure ledger hooks for the send paths ([sendCommand] /
@@ -83,6 +101,11 @@ class ConversationTransport {
     _handshakeFuture = null;
     connectionId = null;
     _prep = null;
+    // The rebuilt bridge re-negotiates capabilities from scratch: a downgrade
+    // attributed to the dead bridge's desktop must not stick for the
+    // transport's lifetime (the hello retry is one-shot, so re-arming the key
+    // cannot loop).
+    _workflowRunDeltasDegraded = false;
   }
 
   /// Internal: exposed for the subscription files split out of this
@@ -106,19 +129,46 @@ class ConversationTransport {
           if (hello is Map) {
             connectionId = hello['connectionId'] as String?;
           }
-          await channels.call(channel, 'initializeConversationV4', [
-            {
-              'kind': 'clientHello',
-              'protocolVersion': 3,
-              'clientId': clientId,
-              'clientKind': 'mobileApp',
-              'appVersion': appVersion,
-              // 3.12.3+ strict schema: capabilities holds exactly this one
-              // key — anything else rejects the whole hello.
-              if (workspaceHookReviewUi)
-                'capabilities': {'workspaceHookReviewUi': true},
-            },
-          ]);
+          final clientHello = <String, dynamic>{
+            'kind': 'clientHello',
+            'protocolVersion': 3,
+            'clientId': clientId,
+            'clientKind': 'mobileApp',
+            'appVersion': appVersion,
+          };
+          // 3.12.3+ strict schema: the capabilities map accepts
+          // workspaceHookReviewUi + workflowRunDeltas (two keys). Pre-3.12.3
+          // desktops get no capabilities key at all.
+          Map<String, dynamic> capabilities() => {
+            if (workspaceHookReviewUi) 'workspaceHookReviewUi': true,
+            if (workflowRunDeltas) 'workflowRunDeltas': true,
+          };
+          var caps = capabilities();
+          if (caps.isNotEmpty) clientHello['capabilities'] = caps;
+          try {
+            await channels.call(channel, 'initializeConversationV4', [
+              clientHello,
+            ]);
+          } on ChannelRpcError catch (e) {
+            // The desktop rejected the clientHello. When the
+            // workflowRunDeltas capability was aboard, attribute the
+            // rejection to it and retry ONCE without the key — the
+            // connection is worth more than the feature (never brick the
+            // link). Anything else propagates unchanged.
+            if (!workflowRunDeltas) rethrow;
+            _workflowRunDeltasDegraded = true;
+            log('[v4] hello rejected (${e.message}); retrying without '
+                'workflowRunDeltas');
+            caps = capabilities();
+            if (caps.isEmpty) {
+              clientHello.remove('capabilities');
+            } else {
+              clientHello['capabilities'] = caps;
+            }
+            await channels.call(channel, 'initializeConversationV4', [
+              clientHello,
+            ]);
+          }
           _handshaken = true;
         }().catchError((e) {
           _handshakeFuture = null;
@@ -358,16 +408,33 @@ class ConversationTransport {
   }
 
   /// Creates a selection-side (auxiliary) chat attached to [parentSessionId]
-  /// (command `createSelectionSideSession` with an empty payload — "ask in
-  /// side chat"). Returns the new sessionId.
+  /// (command `createSelectionSideSession` — "ask in side chat"). Returns the
+  /// new sessionId.
+  ///
+  /// The payload schema is `{firstInput?: {text, modelSelection?}}` (one
+  /// optional direct-ask input — runtime @1440615 neighbouring schema; the
+  /// side chat's selection history is derived server-side from the current
+  /// turn, never sent). [firstText] null/blank omits `firstInput` entirely
+  /// (the official "create empty, wait for the user" shape); a non-blank
+  /// [firstText] sends it, optionally with [modelSelection]. The schema's
+  /// `text` is `trim().min(1)`, so a blank text is never sent as a payload.
   Future<String> createSelectionSideSession(
     String parentSessionId, {
+    String? firstText,
+    Map<String, dynamic>? modelSelection,
     Duration timeout = const Duration(seconds: 60),
   }) async {
+    final text = firstText?.trim();
     final res = await sendCommand(
       parentSessionId,
       'createSelectionSideSession',
-      {},
+      {
+        if (text != null && text.isNotEmpty)
+          'firstInput': {
+            'text': text,
+            if (modelSelection != null) 'modelSelection': modelSelection,
+          },
+      },
       timeout: timeout,
     );
     final map = res is Map ? res.cast<String, dynamic>() : null;
@@ -566,13 +633,20 @@ class ConversationTransport {
     Map<String, dynamic> target,
   ) => sendCommand(sessionId, 'forkAssistant', {'target': target});
 
+  /// `workspaceMode` is the 3.14+ edit-rewind switch (F1: wire enum
+  /// `["preserve","rewind"]`, desktop执行侧 `workspaceMode ?? "preserve"`):
+  /// **preserve is the wire default — omit the field** so old desktops see
+  /// the exact legacy payload; only 'rewind' goes on the wire.
   Future<dynamic> editUserQuery(
     String sessionId,
     Map<String, dynamic> target,
-    String newText,
-  ) => sendCommand(sessionId, 'editUserQuery', {
+    String newText, {
+    String? workspaceMode,
+  }) => sendCommand(sessionId, 'editUserQuery', {
     'target': target,
     'newText': newText,
+    if (workspaceMode != null && workspaceMode != 'preserve')
+      'workspaceMode': workspaceMode,
   });
 
   Future<dynamic> applyFileRewind(
