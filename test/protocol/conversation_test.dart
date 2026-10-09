@@ -1170,7 +1170,10 @@ void main() {
   });
 
   group('clientHello capabilities', () {
-    Future<Map<Object?, Object?>> handshakeHello(bool gate) async {
+    Future<List<(String, String, List<Object?>)>> handshakeCalls(
+      bool gate, {
+      List<String>? logs,
+    }) async {
       final calls = <(String, String, List<Object?>)>[];
       final transport = ConversationTransport(
         session: _FakeBridgeSession(
@@ -1183,29 +1186,563 @@ void main() {
         ),
         scope: {'workspacePath': '/repo'},
         workspaceHookReviewUi: gate,
+        onLog: logs?.add,
       );
       await transport.handshake();
-      return calls
-          .firstWhere((c) => c.$2 == 'initializeConversationV4')
-          .$3
-          .single as Map;
+      return calls;
     }
 
-    test('gate on: capabilities declares exactly workspaceHookReviewUi', () async {
-      final hello = await handshakeHello(true);
+    Map<Object?, Object?> helloOf(List<(String, String, List<Object?>)> calls) =>
+        calls
+            .firstWhere((c) => c.$2 == 'initializeConversationV4')
+            .$3
+            .single as Map<Object?, Object?>;
+
+    test('gate on: capabilities declares both official keys', () async {
+      final hello = helloOf(await handshakeCalls(true));
       expect(hello['kind'], 'clientHello');
       expect(hello['protocolVersion'], 3);
       expect(hello['clientKind'], 'mobileApp');
-      // 3.12.3 strict schema: the whole capabilities map must equal this —
-      // any extra key rejects the hello server-side.
+      // Renderer @270331886: the strict schema accepts workspaceHookReviewUi
+      // + workflowRunDeltas — the old "exactly one key" note was obsolete.
       expect(hello['capabilities'], {
         'workspaceHookReviewUi': true,
+        'workflowRunDeltas': true,
       });
     });
 
     test('gate off (<3.12.3): no capabilities key at all', () async {
-      final hello = await handshakeHello(false);
+      final hello = helloOf(await handshakeCalls(false));
       expect(hello.containsKey('capabilities'), isFalse);
+    });
+
+    test('hello rejection drops workflowRunDeltas and retries once',
+        () async {
+      final calls = <(String, String, List<Object?>)>[];
+      final logs = <String>[];
+      final hellos = <Map>[];
+      final transport = ConversationTransport(
+        session: _FakeBridgeSession(
+          _respondingChannelClient((channel, method, args) {
+            calls.add((channel, method, args));
+            if (method == 'helloConversationV4') {
+              return {'connectionId': 'c1'};
+            }
+            if (method == 'initializeConversationV4') {
+              final body = args.single as Map;
+              hellos.add(body);
+              final caps = body['capabilities'];
+              if (caps is Map && caps['workflowRunDeltas'] == true) {
+                throw ChannelRpcError('invalid clientHello', null);
+              }
+              return const {};
+            }
+            return const {};
+          }),
+        ),
+        scope: {'workspacePath': '/repo'},
+        workspaceHookReviewUi: true,
+        onLog: logs.add,
+      );
+
+      await transport.handshake();
+
+      expect(hellos, hasLength(2), reason: 'one downgrade retry');
+      expect((hellos[0]['capabilities'] as Map)['workflowRunDeltas'], isTrue);
+      expect(hellos[1]['capabilities'], {'workspaceHookReviewUi': true});
+      expect(logs.join('\n'), contains('retrying without workflowRunDeltas'));
+      // Sticky latch: the capability is off for this transport.
+      expect(transport.workflowRunDeltas, isFalse);
+    });
+
+    test('bridge recovery re-arms the cap: next hello carries the key again',
+        () async {
+      // First bridge's desktop rejects workflowRunDeltas (transient).
+      var rejectDeltas = true;
+      final hellos = <Map>[];
+      final session = _FakeBridgeSession(
+        _respondingChannelClient((channel, method, args) {
+          if (method == 'helloConversationV4') return {'connectionId': 'c1'};
+          if (method == 'initializeConversationV4') {
+            final body = args.single as Map;
+            hellos.add(body);
+            final caps = body['capabilities'];
+            if (rejectDeltas &&
+                caps is Map &&
+                caps['workflowRunDeltas'] == true) {
+              throw ChannelRpcError('invalid clientHello', null);
+            }
+            return const {};
+          }
+          return const {};
+        }),
+      );
+      final transport = ConversationTransport(
+        session: session,
+        scope: {'workspacePath': '/repo'},
+        workspaceHookReviewUi: true,
+      );
+
+      await transport.handshake();
+      expect(transport.workflowRunDeltas, isFalse);
+      expect(
+        (hellos.last['capabilities'] as Map).containsKey('workflowRunDeltas'),
+        isFalse,
+      );
+
+      // The rebuilt bridge's desktop accepts the capability: the recovery
+      // resets the latch so the next hello re-negotiates it.
+      rejectDeltas = false;
+      session.recovered.value++;
+
+      await transport.handshake();
+      expect(transport.workflowRunDeltas, isTrue);
+      expect((hellos.last['capabilities'] as Map)['workflowRunDeltas'], isTrue);
+    });
+
+    test('dial rejects twice: the retry failure propagates', () async {
+      var attempts = 0;
+      final transport = ConversationTransport(
+        session: _FakeBridgeSession(
+          _respondingChannelClient((channel, method, args) {
+            if (method == 'helloConversationV4') return {'connectionId': 'c1'};
+            if (method == 'initializeConversationV4') {
+              attempts++;
+              throw ChannelRpcError('nope', null);
+            }
+            return const {};
+          }),
+        ),
+        scope: {'workspacePath': '/repo'},
+        workspaceHookReviewUi: true,
+      );
+      await expectLater(transport.handshake(), throwsA(isA<ChannelRpcError>()));
+      expect(attempts, 2);
+    });
+  });
+
+  group('conversationSubscribe workflowRunDeltas body', () {
+    Future<Map<Object?, Object?>> subscribeBody({
+      required bool gate,
+      List<(String, String, List<Object?>)>? calls,
+    }) async {
+      calls ??= [];
+      final transport = ConversationTransport(
+        session: _FakeBridgeSession(
+          _respondingChannelClient((channel, method, args) {
+            calls!.add((channel, method, args));
+            if (method == 'helloConversationV4') {
+              return {'connectionId': 'c1'};
+            }
+            if (method == 'subscribeConversationV4') {
+              return {
+                'ack': {'subscriptionId': 'sub-1'},
+              };
+            }
+            return const {};
+          }),
+        ),
+        scope: {'workspacePath': '/repo'},
+        workspaceHookReviewUi: gate,
+      );
+      final sub = await transport.subscribe('s1');
+      await sub.dispose();
+      return calls
+          .firstWhere((c) => c.$2 == 'subscribeConversationV4')
+          .$3
+          .single as Map<Object?, Object?>;
+    }
+
+    test('gate on: subscribe body carries the key (official @270820092)',
+        () async {
+      final body = await subscribeBody(gate: true);
+      expect(body['sessionId'], 's1');
+      expect(body['workflowRunDeltas'], isTrue);
+    });
+
+    test('gate off: subscribe body omits the key', () async {
+      final body = await subscribeBody(gate: false);
+      expect(body.containsKey('workflowRunDeltas'), isFalse);
+    });
+
+    test('after a hello downgrade the subscribe body also drops it', () async {
+      final calls = <(String, String, List<Object?>)>[];
+      final transport = ConversationTransport(
+        session: _FakeBridgeSession(
+          _respondingChannelClient((channel, method, args) {
+            calls.add((channel, method, args));
+            if (method == 'helloConversationV4') {
+              return {'connectionId': 'c1'};
+            }
+            if (method == 'initializeConversationV4') {
+              final body = args.single as Map;
+              final caps = body['capabilities'];
+              if (caps is Map && caps['workflowRunDeltas'] == true) {
+                throw ChannelRpcError('invalid clientHello', null);
+              }
+              return const {};
+            }
+            if (method == 'subscribeConversationV4') {
+              return {
+                'ack': {'subscriptionId': 'sub-1'},
+              };
+            }
+            return const {};
+          }),
+        ),
+        scope: {'workspacePath': '/repo'},
+        workspaceHookReviewUi: true,
+      );
+      final sub = await transport.subscribe('s1');
+      await sub.dispose();
+      final body = calls
+          .firstWhere((c) => c.$2 == 'subscribeConversationV4')
+          .$3
+          .single as Map<Object?, Object?>;
+      expect(body.containsKey('workflowRunDeltas'), isFalse);
+    });
+  });
+
+  group('workflowRuns snapshot and delta merge', () {
+    Map<String, dynamic> header() => {
+      'runId': 'r1',
+      'status': 'running',
+      'usage': {'spentTokens': 0},
+      'lastEventSequence': 1,
+    };
+
+    test('snapshot parses {revision, runs[]} into the typed mirror', () {
+      final state = ConversationState();
+      _injectSnapshot(state, snapshot: {
+        'workflowRuns': {
+          'revision': 7,
+          'runs': [
+            {...header(), 'actors': [], 'nodes': []},
+          ],
+        },
+      });
+      expect(state.workflowRuns.revision, 7);
+      expect(state.workflowRuns.runs, hasLength(1));
+      final run = state.workflowRuns.views.single;
+      expect(run.runId, 'r1');
+      expect(run.status, 'running');
+      expect(run.nodesTotal, 0);
+    });
+
+    test('snapshot without workflowRuns resets to empty', () {
+      final state = ConversationState();
+      _injectSnapshot(state, snapshot: {
+        'workflowRuns': {
+          'revision': 7,
+          'runs': [header()],
+        },
+      });
+      _injectSnapshot(state, seq: 6);
+      expect(state.workflowRuns.isEmpty, isTrue);
+      expect(state.workflowRuns.revision, 0);
+    });
+
+    test('typed view: actors count + settled nodes', () {
+      final view = WorkflowRun({
+        ...header(),
+        'actors': [
+          {'siteId': 'a', 'ordinal': 0},
+          {'siteId': 'b', 'ordinal': 0},
+        ],
+        'nodes': [
+          {'siteId': 'a', 'ordinal': 0, 'phase': 'settled'},
+          {'siteId': 'a', 'ordinal': 1, 'outcome': 'ok'},
+          {'siteId': 'a', 'ordinal': 2, 'phase': 'executing'},
+        ],
+      });
+      expect(view.actorsCount, 2);
+      expect(view.nodesTotal, 3);
+      expect(view.nodesSettled, 2);
+    });
+
+    test('updated: run patch merge + cleared', () {
+      var s = WorkflowRuns(revision: 3, runs: <Map<String, dynamic>>[
+        {...header(), 'nodes': <Object?>[]},
+      ]);
+      s = applyWorkflowRunDelta(s, {
+        'op': 'workflowRun.updated',
+        'runId': 'r1',
+        'revision': 4,
+        'run': {'status': 'completed'},
+        'cleared': ['lastEventSequence'],
+      });
+      expect(s.revision, 4);
+      expect(s.runs.single['status'], 'completed');
+      expect(s.runs.single.containsKey('lastEventSequence'), isFalse);
+    });
+
+    test('updated: actors/nodes upsert by siteId\\0ordinal, tail-append', () {
+      var s = WorkflowRuns(revision: 1, runs: <Map<String, dynamic>>[
+        {
+          ...header(),
+          'actors': [
+            {'siteId': 'a', 'ordinal': 0, 'status': 'running'},
+          ],
+          'nodes': <Object?>[],
+        },
+      ]);
+      s = applyWorkflowRunDelta(s, {
+        'op': 'workflowRun.updated',
+        'runId': 'r1',
+        'revision': 2,
+        'actors': [
+          {'siteId': 'a', 'ordinal': 0, 'status': 'completed'},
+          {'siteId': 'b', 'ordinal': 0, 'status': 'running'},
+        ],
+      });
+      final actors = s.runs.single['actors'] as List;
+      expect(actors, hasLength(2));
+      expect(actors[0]['status'], 'completed', reason: 'same key overwritten');
+      expect(actors[1]['siteId'], 'b', reason: 'new key appended');
+    });
+
+    test('updated: removedActors filter before upsert', () {
+      var s = WorkflowRuns(revision: 1, runs: <Map<String, dynamic>>[
+        {
+          ...header(),
+          'actors': [
+            {'siteId': 'a', 'ordinal': 0},
+            {'siteId': 'b', 'ordinal': 0},
+          ],
+          'nodes': <Object?>[],
+        },
+      ]);
+      s = applyWorkflowRunDelta(s, {
+        'op': 'workflowRun.updated',
+        'runId': 'r1',
+        'revision': 2,
+        'removedActors': [
+          {'siteId': 'b', 'ordinal': 0},
+        ],
+      });
+      final actors = s.runs.single['actors'] as List;
+      expect(actors, hasLength(1));
+      expect(actors.single['siteId'], 'a');
+    });
+
+    test('updated: a new run only inserts on a complete header', () {
+      final incomplete = applyWorkflowRunDelta(
+        const WorkflowRuns(revision: 1),
+        {
+          'op': 'workflowRun.updated',
+          'runId': 'r2',
+          'revision': 2,
+          'run': {'runId': 'r2'},
+        },
+      );
+      expect(incomplete.runs, isEmpty);
+      expect(incomplete.revision, 2, reason: 'revision still advances');
+
+      final complete = applyWorkflowRunDelta(
+        incomplete,
+        {
+          'op': 'workflowRun.updated',
+          'runId': 'r2',
+          'revision': 3,
+          'run': {
+            'runId': 'r2',
+            'status': 'pending',
+            'usage': <String, Object?>{},
+            'lastEventSequence': 0,
+          },
+        },
+      );
+      expect(complete.runs, hasLength(1));
+      expect(complete.runs.single['runId'], 'r2');
+      expect(complete.runs.single['actors'], isEmpty);
+      expect(complete.runs.single['nodes'], isEmpty);
+    });
+
+    test('updated: a lagging revision is dropped (identity preserved)', () {
+      final state = WorkflowRuns(revision: 5, runs: <Map<String, dynamic>>[
+        header(),
+      ]);
+      final result = applyWorkflowRunDelta(state, {
+        'op': 'workflowRun.updated',
+        'runId': 'r1',
+        'revision': 4,
+        'run': {'status': 'errored'},
+      });
+      expect(identical(result, state), isTrue);
+      expect(result.runs.single['status'], 'running');
+    });
+
+    test('removed: filters the run by runId; absent is a no-op', () {
+      final state = WorkflowRuns(revision: 1, runs: <Map<String, dynamic>>[
+        header(),
+      ]);
+      final removed = applyWorkflowRunDelta(state, {
+        'op': 'workflowRun.removed',
+        'runId': 'r1',
+        'revision': 2,
+      });
+      expect(removed.runs, isEmpty);
+      expect(removed.revision, 2);
+      final again = applyWorkflowRunDelta(removed, {
+        'op': 'workflowRun.removed',
+        'runId': 'r1',
+        'revision': 3,
+      });
+      expect(again.revision, 3);
+      expect(again.runs, isEmpty);
+    });
+
+    test('coalesce: same-runId updates fold into one', () {
+      final out = coalesceWorkflowRunDeltas([
+        {
+          'op': 'workflowRun.updated',
+          'runId': 'r1',
+          'revision': 1,
+          'run': {'status': 'running'},
+        },
+        {
+          'op': 'workflowRun.updated',
+          'runId': 'r1',
+          'revision': 2,
+          'run': {'status': 'completed'},
+        },
+        {
+          'op': 'workflowRun.updated',
+          'runId': 'r2',
+          'revision': 2,
+          'run': {'status': 'running'},
+        },
+      ]);
+      expect(out, hasLength(2));
+      final r1 = out.firstWhere((d) => d['runId'] == 'r1');
+      expect((r1['run'] as Map)['status'], 'completed');
+      expect(r1['revision'], 2);
+      expect(out.last['runId'], 'r2');
+    });
+
+    test('coalesce: removed swallows earlier same-runId updates', () {
+      final out = coalesceWorkflowRunDeltas([
+        {
+          'op': 'workflowRun.updated',
+          'runId': 'r1',
+          'revision': 1,
+          'run': {'status': 'running'},
+        },
+        {
+          'op': 'workflowRun.removed',
+          'runId': 'r1',
+          'revision': 2,
+        },
+      ]);
+      expect(out, hasLength(1));
+      expect(out.single['op'], 'workflowRun.removed');
+    });
+
+    test('coalesce: a workflowRuns state.updated is a barrier', () {
+      final out = coalesceWorkflowRunDeltas([
+        {
+          'op': 'workflowRun.updated',
+          'runId': 'r1',
+          'revision': 1,
+          'run': {'status': 'running'},
+        },
+        {
+          'op': 'state.updated',
+          'patch': {'workflowRuns': {'revision': 5, 'runs': <Object?>[]}},
+        },
+        {
+          'op': 'workflowRun.updated',
+          'runId': 'r1',
+          'revision': 6,
+          'run': {'status': 'completed'},
+        },
+      ]);
+      expect(out.where((d) => d['op'] == 'workflowRun.updated'), hasLength(2),
+          reason: 'the barrier blocks folding across itself');
+    });
+
+    test('applyFrame: deltas mutate the mirror after a snapshot', () {
+      final state = ConversationState();
+      _injectSnapshot(state, seq: 1, snapshot: {
+        'workflowRuns': {
+          'revision': 1,
+          'runs': [
+            {...header(), 'nodes': <Object?>[]},
+          ],
+        },
+      });
+      state.applyFrame({
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {
+              'op': 'workflowRun.updated',
+              'runId': 'r1',
+              'revision': 2,
+              'run': {'status': 'completed'},
+            },
+          ],
+        },
+        'fromSeq': 1,
+        'toSeq': 2,
+      }, onGap: () => fail('unexpected gap'));
+      expect(state.workflowRuns.runs.single['status'], 'completed');
+      expect(state.workflowRuns.revision, 2);
+
+      state.applyFrame({
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {
+              'op': 'workflowRun.removed',
+              'runId': 'r1',
+              'revision': 3,
+            },
+          ],
+        },
+        'fromSeq': 2,
+        'toSeq': 3,
+      }, onGap: () => fail('unexpected gap'));
+      expect(state.workflowRuns.isEmpty, isTrue);
+    });
+
+    test('applyFrame: state.updated patch replaces the whole family', () {
+      final state = ConversationState();
+      _injectSnapshot(state, seq: 1, snapshot: {
+        'workflowRuns': {
+          'revision': 1,
+          'runs': [header()],
+        },
+      });
+      state.applyFrame({
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {
+              'op': 'state.updated',
+              'patch': {
+                'workflowRuns': {
+                  'revision': 9,
+                  'runs': [
+                    {
+                      'runId': 'r9',
+                      'status': 'running',
+                      'usage': <String, Object?>{},
+                      'lastEventSequence': 9,
+                      'actors': <Object?>[],
+                      'nodes': <Object?>[],
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+        'fromSeq': 1,
+        'toSeq': 2,
+      }, onGap: () => fail('unexpected gap'));
+      expect(state.workflowRuns.revision, 9);
+      expect(state.workflowRuns.runs.single['runId'], 'r9');
     });
   });
 
@@ -1575,6 +2112,13 @@ class _ManualChannels {
   /// Every call handed to [ChannelClient] (parked or auto-answered) —
   /// [count] reads this so answered calls still count.
   final sent = <String>[];
+
+  /// Event listeners by event name (reqEventListen requests), so tests can
+  /// fire dynamic frames at a subscription ([fire]).
+  final listeners = <String, int>{};
+
+  /// Every call's `(method, args)` (event listens excluded).
+  final sentArgs = <(String, Object?)>[];
   late final ChannelClient client;
 
   _ManualChannels() {
@@ -1584,7 +2128,12 @@ class _ManualChannels {
       final header = decodeValue(reader) as List;
       final method = '${header[3]}';
       final id = header[1] as int;
+      if ((header[0] as num).toInt() == ChannelClient.reqEventListen) {
+        listeners[method] = id;
+        return;
+      }
       sent.add(method);
+      sentArgs.add((method, decodeValue(reader)));
       switch (method) {
         case 'helloConversationV4':
           _reply(c, id, {'connectionId': 'conn-test'});
@@ -1621,6 +2170,17 @@ class _ManualChannels {
   }
 
   int count(String method) => sent.where((m) => m == method).length;
+
+  /// Fires a dynamic-frame event at the [event] listener — the wire path
+  /// `onDynamic*Frame` payloads ride.
+  void fire(String event, Object? data) {
+    final id = listeners[event];
+    if (id == null) fail('no event listener registered for $event');
+    final w = ValueWriter();
+    encodeValue(w, [ChannelClient.resEventFire, id]);
+    encodeValue(w, data);
+    client.handleMessage(w.toBytes());
+  }
 }
 
 /// Parked-command channel for retry-timing tests: handshake answers

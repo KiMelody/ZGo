@@ -1,10 +1,16 @@
 import 'package:flutter/material.dart';
 
+import '../protocol/usage_stats.dart';
 import '../state/device_session.dart';
 import '../state/entitlement_poller.dart';
 import '../state/quota_reset.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
+import 'usage/coding_plan_usage_card.dart';
+import 'usage/usage_heatmap.dart';
+import 'usage/usage_model_ring.dart';
+import 'usage/usage_stat_grid.dart';
+import 'usage/usage_trend_chart.dart';
 
 /// IANA `Etc/GMT` zone name for the device's UTC offset, for the
 /// `getAppUsageSnapshot {timeZone}` argument: the desktop resolves it via
@@ -39,9 +45,11 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
   EntitlementView? _view;
 
   /// App-usage snapshot (`getAppUsageSnapshot {range, timeZone}`) — the
-  /// local-session-based estimation tab of the web settings usage page.
+  /// local-session-based estimation tab of the web settings usage page,
+  /// parsed into the typed protocol carriers (stats / heatmap / trend /
+  /// ring all read this one response).
   String _appRange = '7d';
-  Map<String, dynamic>? _appUsage;
+  AppUsageSnapshot? _appUsage;
   bool _appLoading = false;
 
   /// Last app-usage load failure (`null` = ok). Kept separate from
@@ -49,8 +57,22 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
   /// instead of rendering it as「暂无用量」(misleading: failure ≠ no data).
   String? _appError;
 
-  // The zod enum is `all|7d|30d` — anything else is rejected.
-  static const _appRanges = ['7d', '30d', 'all'];
+  /// codingPlan usage snapshot (`getCodingPlanUsageSnapshot`) — silently
+  /// absent until a successful fetch: the two credential error shapes
+  /// (`no_bigmodel_api_key`, `*_coding_plan_api_key_required`) and any
+  /// other failure hide the card instead of surfacing an error (design D6).
+  CodingPlanUsageSnapshot? _codingPlan;
+
+  /// Range × provider the current [_codingPlan] was fetched for — skips
+  /// duplicate fetches on the refresh paths that ride both loaders.
+  String? _codingPlanKey;
+
+  // The zod enum is `all|7d|30d`, but the official renderer explicitly
+  // filters `all` out of the buttons (`c7` = filter(e => e !== 'all')) —
+  // only 近 7 日 / 近 30 日 render; the whole-history view lives in the
+  // 52-week heatmap (design.md 取证决策 #1). 90d is not in the enum at
+  // all (server answers -32602).
+  static const _appRanges = ['7d', '30d'];
 
   @override
   void initState() {
@@ -80,7 +102,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
       );
       if (mounted) {
         setState(() {
-          _appUsage = res is Map ? res.cast<String, dynamic>() : {};
+          _appUsage = parseAppUsageSnapshot(res);
           _appLoading = false;
         });
       }
@@ -93,6 +115,71 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
         });
       }
     }
+    await _loadCodingPlan();
+  }
+
+  /// codingPlan usage fetch — gated on the entitlement view reporting a
+  /// coding-plan connection (the `account:(zai|bigmodel)-*` id shape
+  /// [DeviceSession.parsePlanAccess] matches); args reuse the same
+  /// `{preferredProviderId, accountAccess}` pair the entitlement wire
+  /// sends. Failures degrade to a hidden card, never an error surface.
+  Future<void> _loadCodingPlan() async {
+    if (!mounted) return;
+    final view = _view;
+    if (view == null) return;
+    if (view.phase != EntitlementPhase.ok) {
+      _clearCodingPlan();
+      return;
+    }
+    final providerId = view.resetScopeProviderId;
+    final plan =
+        providerId == null ? null : DeviceSession.parsePlanAccess(providerId);
+    if (plan == null) {
+      _clearCodingPlan();
+      return;
+    }
+    final key = '$_appRange|${plan['providerId']}';
+    if (_codingPlanKey == key && _codingPlan != null) return;
+    try {
+      final res = await widget.session.callChannel(
+        'usage-stats',
+        'getCodingPlanUsageSnapshot',
+        [
+          {
+            'range': _appRange,
+            'preferredProviderId': plan['providerId'],
+            'accountAccess': plan['accountAccess'],
+            'timeZone': ianaEtcTimeZone(DateTime.now().timeZoneOffset),
+          },
+        ],
+      );
+      if (!mounted) return;
+      setState(() {
+        _codingPlan = parseCodingPlanUsageSnapshot(res);
+        _codingPlanKey = key;
+      });
+    } catch (e) {
+      // The two credential error shapes are the normal「未配置 BigModel」
+      // state (design D6), not a fault — stay silent for those; only
+      // unexpected failures log.
+      final message = e.toString();
+      if (!message.contains('no_bigmodel_api_key') &&
+          !message.contains('_coding_plan_api_key_required')) {
+        debugPrint('[usage] coding plan snapshot failed: $e');
+      }
+      _clearCodingPlan();
+    }
+  }
+
+  /// Drops a previously rendered codingPlan card: a failed fetch, an
+  /// entitlement degradation, or a provider switch must not leave the
+  /// stale card on screen (the page owns the conditional display).
+  void _clearCodingPlan() {
+    if (!mounted || (_codingPlan == null && _codingPlanKey == null)) return;
+    setState(() {
+      _codingPlan = null;
+      _codingPlanKey = null;
+    });
   }
 
   /// Entitlement via the session-wide poller: opening reuses the cache
@@ -106,6 +193,9 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
     if (!mounted) return;
     setState(() => _view = view);
     await _reset.refresh(force: force);
+    // Always reconcile the coding-plan card: a non-ok phase now clears a
+    // previously rendered card instead of leaving it stale.
+    await _loadCodingPlan();
   }
 
   QuotaResetController get _reset => widget.session.quotaResetController;
@@ -217,113 +307,120 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
         await _load();
         await _loadAppUsage();
       },
-      child: ListView(
+      // Bounded card list: a plain scroll column (not a lazy ListView) so
+      // every card is built up front — the app-usage block alone is taller
+      // than the viewport, and a lazy sliver would leave the entitlement
+      // cards below it unbuilt.
+      child: SingleChildScrollView(
         padding: zScreenPadding(context, bottom: ZSpacing.screen),
-        children: [
-          _appUsageCard(context),
-          const SizedBox(height: ZSpacing.cardGap),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: ZColors.sky500.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(ZRadius.tile),
-                    ),
-                    child: const Icon(Icons.bolt, color: ZColors.sky500),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          context_ is Map
-                              ? '${context_['displayName'] ?? '-'}'
-                              : '-',
-                          style: ZType.heading,
-                        ),
-                        Text(
-                          [
-                            if (provider is Map) '${provider['name'] ?? ''}',
-                            if (quota is Map && quota['level'] != null)
-                              '${quota['level']}',
-                          ].join(' · '),
-                          style: ZType.sub.copyWith(color: ZInk.faint(context)),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: ZSpacing.cardGap),
-          if (remaining is Map && remaining['isShow'] == true)
-            _remainingCard(remaining.cast<String, dynamic>()),
-          if ((quota is Map && quota['limits'] is List) ||
-              mcpAggregate != null) ...[
+        physics: const AlwaysScrollableScrollPhysics(),
+        child: Column(
+          children: [
+            _appUsageBlock(context),
             const SizedBox(height: ZSpacing.cardGap),
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                child: Row(
                   children: [
-                    Text(tr(context, 'usageRpc.limits'),
-                        style: ZType.bodyStrong),
-                    const SizedBox(height: 8),
-                    if (quota is Map && quota['limits'] is List)
-                      for (final limit in quota['limits'] as List)
-                        if (limit is Map)
-                          _LimitRow(
-                              limit: limit.cast<String, dynamic>()),
-                    if (mcpAggregate != null)
-                      _LimitRow(
-                        limit: mcpAggregate,
-                        label: tr(context, 'usageRpc.serverMcp'),
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: ZColors.sky500.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(ZRadius.tile),
                       ),
+                      child: const Icon(Icons.bolt, color: ZColors.sky500),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            context_ is Map
+                                ? '${context_['displayName'] ?? '-'}'
+                                : '-',
+                            style: ZType.heading,
+                          ),
+                          Text(
+                            [
+                              if (provider is Map) '${provider['name'] ?? ''}',
+                              if (quota is Map && quota['level'] != null)
+                                '${quota['level']}',
+                            ].join(' · '),
+                            style:
+                                ZType.sub.copyWith(color: ZInk.faint(context)),
+                          ),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
             ),
-          ],
-          if (subscription is Map &&
-              subscription['details'] is List &&
-              (subscription['details'] as List).isNotEmpty) ...[
             const SizedBox(height: ZSpacing.cardGap),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(tr(context, 'usageRpc.subscription'),
-                        style: ZType.bodyStrong),
-                    const SizedBox(height: 8),
-                    for (final d in subscription['details'] as List)
-                      if (d is Map) ...[
-                        _kv(tr(context, 'usageRpc.product'),
-                            '${d['productName'] ?? '-'}'),
-                        _kv(tr(context, 'usageRpc.billing'),
-                            '${d['billingCycle'] ?? '-'}'),
-                        _kv(tr(context, 'usageRpc.renew'),
-                            '${d['renewTime'] ?? '-'}'),
-                        _kv(tr(context, 'usageRpc.expire'),
-                            '${d['expireTime'] ?? '-'}'),
-                      ],
-                  ],
+            if (remaining is Map && remaining['isShow'] == true)
+              _remainingCard(remaining.cast<String, dynamic>()),
+            if ((quota is Map && quota['limits'] is List) ||
+                mcpAggregate != null) ...[
+              const SizedBox(height: ZSpacing.cardGap),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(tr(context, 'usageRpc.limits'),
+                          style: ZType.bodyStrong),
+                      const SizedBox(height: 8),
+                      if (quota is Map && quota['limits'] is List)
+                        for (final limit in quota['limits'] as List)
+                          if (limit is Map)
+                            _LimitRow(limit: limit.cast<String, dynamic>()),
+                      if (mcpAggregate != null)
+                        _LimitRow(
+                          limit: mcpAggregate,
+                          label: tr(context, 'usageRpc.serverMcp'),
+                        ),
+                    ],
+                  ),
                 ),
               ),
-            ),
+            ],
+            if (subscription is Map &&
+                subscription['details'] is List &&
+                (subscription['details'] as List).isNotEmpty) ...[
+              const SizedBox(height: ZSpacing.cardGap),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(tr(context, 'usageRpc.subscription'),
+                          style: ZType.bodyStrong),
+                      const SizedBox(height: 8),
+                      for (final d in subscription['details'] as List)
+                        if (d is Map) ...[
+                          _kv(tr(context, 'usageRpc.product'),
+                              '${d['productName'] ?? '-'}'),
+                          _kv(tr(context, 'usageRpc.billing'),
+                              '${d['billingCycle'] ?? '-'}'),
+                          _kv(tr(context, 'usageRpc.renew'),
+                              '${d['renewTime'] ?? '-'}'),
+                          _kv(tr(context, 'usageRpc.expire'),
+                              '${d['expireTime'] ?? '-'}'),
+                        ],
+                    ],
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: ZSpacing.cardGap),
+            _resetCard(),
           ],
-          const SizedBox(height: ZSpacing.cardGap),
-          _resetCard(),
-        ],
+        ),
       ),
     );
   }
@@ -588,210 +685,218 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
     );
   }
 
-  /// 应用用量: dailyModelUsage stacked bars (per-day totals with model
-  /// breakdown), web `settings.usage.tab.appUsage`.
-  Widget _appUsageCard(BuildContext context) {
-    final daily = _appUsage?['dailyModelUsage'];
-    final days = daily is List ? daily.whereType<Map>().toList() : <Map>[];
-    double maxTotal = 0;
-    final rows = <(String, double, Map<String, double>)>[];
-    for (final d in days) {
-      final models = <String, double>{};
-      final list = d['models'];
-      var total = 0.0;
-      if (list is List) {
-        for (final m in list.whereType<Map>()) {
-          final tokens = ((m['totalTokens'] as num?) ?? 0).toDouble();
-          final id = '${m['modelId'] ?? '?'}';
-          models[id] = (models[id] ?? 0) + tokens;
-          total += tokens;
-        }
+  /// 应用用量 block — the official assembly order (design-inputs §2.5):
+  /// stats → heatmap → range header → trend → ring, with the codingPlan
+  /// card appended once its snapshot landed. Shared failure semantics
+  /// (inherited from the old single card): no snapshot yet → spinner /
+  /// error card; a failed range switch keeps every previous card visible
+  /// and surfaces a retryable error line (failure ≠ no data).
+  Widget _appUsageBlock(BuildContext context) {
+    final snapshot = _appUsage;
+    if (snapshot == null) {
+      if (_appLoading) {
+        return const Card(
+          child: Padding(
+            padding: EdgeInsets.all(16),
+            child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+          ),
+        );
       }
-      if (total > maxTotal) maxTotal = total;
-      rows.add(('${d['date'] ?? ''}', total, models));
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(tr(context, 'usageRpc.appUsageFailed'),
+                  style: ZType.sub.copyWith(color: ZInk.dangerTone(context))),
+              TextButton.icon(
+                icon: const Icon(Icons.refresh, size: 16),
+                onPressed: _loadAppUsage,
+                label: Text(tr(context, 'tasks.retry')),
+              ),
+            ],
+          ),
+        ),
+      );
     }
-    final modelIds = <String>{for (final r in rows) for (final k in r.$3.keys) k}.toList()..sort();
+    return Column(
+      children: [
+        _statsCard(context, snapshot),
+        const SizedBox(height: ZSpacing.cardGap),
+        UsageHeatmapCard(heatmap: snapshot.heatmap),
+        const SizedBox(height: ZSpacing.cardGap),
+        _rangeHeader(context),
+        const SizedBox(height: ZSpacing.cardGap),
+        _trendCard(context, snapshot),
+        const SizedBox(height: ZSpacing.cardGap),
+        _ringCard(context, snapshot),
+        if (_codingPlan != null) ...[
+          const SizedBox(height: ZSpacing.cardGap),
+          CodingPlanUsageCard(snapshot: _codingPlan!),
+        ],
+      ],
+    );
+  }
+
+  /// D2: the five summary stat cells (official `s7` row — value on top,
+  /// label below, `--` when the summary block is missing entirely; a
+  /// backup-source zero renders as its real zero value).
+  Widget _statsCard(BuildContext context, AppUsageSnapshot snapshot) {
+    final summary = snapshot.summary;
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(ZSpacing.card),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(tr(context, 'usageRpc.appUsage'),
-                      style: ZType.bodyStrong),
-                ),
-                for (final r in _appRanges)
-                  InkWell(
-                    borderRadius: BorderRadius.circular(ZRadius.mini),
-                    onTap: () {
-                      if (_appRange == r || _appLoading) return;
-                      setState(() => _appRange = r);
-                      _loadAppUsage();
-                    },
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
-                      child: Text(
-                        r == 'all' ? tr(context, 'usageRpc.rangeAll') : r,
-                        style: ZType.caption.copyWith(
-                          color: _appRange == r
-                              ? ZColors.sky500
-                              : ZInk.muted(context),
-                          fontWeight: _appRange == r
-                              ? FontWeight.w600
-                              : FontWeight.w400,
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(tr(context, 'usageRpc.appUsageHint'),
-                style: ZType.caption.copyWith(color: ZInk.faint(context))),
-            const SizedBox(height: 10),
-            if (_appLoading)
-              const Padding(
-                padding: EdgeInsets.all(16),
-                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-              )
-            else if (rows.isEmpty && _appError != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(tr(context, 'usageRpc.appUsageFailed'),
-                        style: ZType.sub.copyWith(
-                            color: ZInk.dangerTone(context))),
-                    TextButton.icon(
-                      icon: const Icon(Icons.refresh, size: 16),
-                      onPressed: _loadAppUsage,
-                      label: Text(tr(context, 'tasks.retry')),
-                    ),
-                  ],
-                ),
-              )
-            else if (rows.isEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(tr(context, 'usageRpc.appUsageEmpty'),
-                    style: ZType.sub.copyWith(color: ZInk.faint(context))),
-              )
-            else ...[
-              for (final (date, total, models) in rows)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(date,
-                              style: ZType.caption.copyWith(
-                                  color: ZInk.muted(context),
-                              )),
-                          Text(_fmtTokens(total),
-                              style: ZType.caption),
-                        ],
-                      ),
-                      const SizedBox(height: 2),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(ZRadius.mini),
-                        child: SizedBox(
-                          height: 5,
-                          child: Row(
-                            children: [
-                              for (final id in modelIds)
-                                if ((models[id] ?? 0) > 0 && maxTotal > 0)
-                                  Expanded(
-                                    flex:
-                                        ((models[id]! / maxTotal) * 100)
-                                            .round()
-                                            .clamp(1, 100),
-                                    child: Container(
-                                        color:
-                                            _modelColor(id, modelIds)),
-                                  ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 10,
-                runSpacing: 4,
-                children: [
-                  for (final id in modelIds)
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                              color: _modelColor(id, modelIds),
-                              shape: BoxShape.circle),
-                        ),
-                        const SizedBox(width: 4),
-                        Text(id,
-                            style: ZType.caption.copyWith(
-                                color: ZInk.muted(context),
-                            )),
-                      ],
-                    ),
-                ],
-              ),
-              // Stale-chart failure banner: the range switch above failed
-              // but the previous chart stays (PRD: failure ≠ no data).
-              if (_appError != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(tr(context, 'usageRpc.appUsageFailed'),
-                            style: ZType.caption.copyWith(
-                                color: ZInk.dangerTone(context))),
-                      ),
-                      TextButton.icon(
-                        icon: const Icon(Icons.refresh, size: 16),
-                        onPressed: _loadAppUsage,
-                        label: Text(tr(context, 'tasks.retry')),
-                      ),
-                    ],
-                  ),
-                ),
+            // Backup source (`bigmodel-monitor`): official estimationHint.
+            if (snapshot.isMonitorSource) ...[
+              Text(tr(context, 'usageRpc.appUsageHint'),
+                  style: ZType.caption.copyWith(color: ZInk.faint(context))),
+              const SizedBox(height: 8),
             ],
+            UsageStatGrid(items: [
+              (
+                summary == null
+                    ? '--'
+                    : compactTokens(context, summary.totalTokens),
+                tr(context, 'usage.stat.totalTokens'),
+              ),
+              (
+                summary == null
+                    ? '--'
+                    : compactTokens(context, summary.peakDayTokens),
+                tr(context, 'usage.stat.peakTokens'),
+              ),
+              (
+                summary == null
+                    ? '--'
+                    : usageDuration(context, summary.longestSessionMs),
+                tr(context, 'usage.stat.longestSession'),
+              ),
+              (
+                summary == null
+                    ? '--'
+                    : trP(context, 'usage.duration.days',
+                        ['${summary.currentStreakDays}']),
+                tr(context, 'usage.stat.currentStreak'),
+              ),
+              (
+                summary == null
+                    ? '--'
+                    : trP(context, 'usage.duration.days',
+                        ['${summary.longestStreakDays}']),
+                tr(context, 'usage.stat.longestStreak'),
+              ),
+            ]),
           ],
         ),
       ),
     );
   }
 
-  static Color _modelColor(String id, List<String> ids) {
-    const palette = [
-      ZColors.sky500,
-      ZColors.success,
-      ZColors.warning,
-      ZColors.danger,
-      ZColors.neutral500,
-    ];
-    final i = ids.indexOf(id);
-    return palette[i % palette.length];
+  /// 「时间范围」header + the two official range buttons (近 7 日 / 近 30 日;
+  /// `all` is filtered out by the official renderer, design 取证决策 #1),
+  /// plus the stale-chart failure banner for a failed range switch.
+  Widget _rangeHeader(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(tr(context, 'usageRpc.appUsageRangeTitle'),
+            style: ZType.bodyStrong),
+        const SizedBox(height: 4),
+        Row(
+          children: [
+            for (final r in _appRanges)
+              InkWell(
+                borderRadius: BorderRadius.circular(ZRadius.mini),
+                onTap: () {
+                  if (_appRange == r || _appLoading) return;
+                  setState(() => _appRange = r);
+                  _loadAppUsage();
+                },
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  child: Text(
+                    switch (r) {
+                      '7d' => tr(context, 'usageRpc.range7d'),
+                      _ => tr(context, 'usageRpc.range30d'),
+                    },
+                    style: ZType.caption.copyWith(
+                      color:
+                          _appRange == r ? ZColors.sky500 : ZInk.muted(context),
+                      fontWeight:
+                          _appRange == r ? FontWeight.w600 : FontWeight.w400,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+        if (_appError != null) ...[
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: Text(tr(context, 'usageRpc.appUsageFailed'),
+                    style: ZType.caption
+                        .copyWith(color: ZInk.dangerTone(context))),
+              ),
+              TextButton.icon(
+                icon: const Icon(Icons.refresh, size: 16),
+                onPressed: _loadAppUsage,
+                label: Text(tr(context, 'tasks.retry')),
+              ),
+            ],
+          ),
+        ],
+      ],
+    );
   }
 
-  static String _fmtTokens(double n) {
-    if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
-    if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}k';
-    return n.round().toString();
+  /// D4: 「每日 Token 趋势图」— multi-model curves + legend, replacing the
+  /// retired stacked bars (same `dailyModelUsage` source).
+  Widget _trendCard(BuildContext context, AppUsageSnapshot snapshot) {
+    final (dates, series) =
+        buildTrendSeries(snapshot.models, snapshot.dailyModelUsage);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(ZSpacing.card),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(tr(context, 'usage.trend.title'), style: ZType.bodyStrong),
+            const SizedBox(height: 4),
+            Text(
+              trP(context, 'usage.trend.description', ['${dates.length}']),
+              style: ZType.caption.copyWith(color: ZInk.faint(context)),
+            ),
+            const SizedBox(height: 10),
+            UsageLineChart(xLabels: dates, series: series),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// D5: 「模型用量」donut + share list.
+  Widget _ringCard(BuildContext context, AppUsageSnapshot snapshot) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(ZSpacing.card),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(tr(context, 'usage.modelChart.title'),
+                style: ZType.bodyStrong),
+            const SizedBox(height: 10),
+            UsageModelRing(models: snapshot.models),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _kv(String label, String value) {

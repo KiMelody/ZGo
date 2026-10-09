@@ -269,6 +269,47 @@ void main() {
 
     expect(find.text('#3 已暂停'), findsOneWidget); // official paused badge
     expect(find.text('排队第 3 位'), findsNothing);
+    // Official idle-task pill: pause icon in violet-600 on violet-50.
+    final pause = tester.widget<Icon>(find.byIcon(Icons.pause));
+    expect(pause.color, ZColors.violet600);
+    expect(pause.size, 16);
+    final pill = tester.widget<Container>(find
+        .ancestor(of: find.byIcon(Icons.pause), matching: find.byType(Container))
+        .first);
+    expect((pill.decoration! as BoxDecoration).color, ZColors.violet50);
+    expect((pill.decoration! as BoxDecoration).borderRadius,
+        BorderRadius.circular(ZRadius.field));
+  });
+
+  testWidgets('queued badge uses the official moon icon + idle-task pill',
+      (tester) async {
+    final (store, hub) = await setupDevice();
+    final host = FakeOffPeakHost(DeviceStatus.connected, tasks: [
+      {
+        'offPeakTaskId': 't1',
+        'title': '排队任务',
+        'prompt': 'p',
+        'status': 'queued',
+        'queuePosition': 2,
+      },
+    ]);
+    await tester.pumpWidget(wrap(OffPeakPage(
+      store: store, hub: hub, device: store.devices.first, hostOverride: host,
+    )));
+    await tester.pumpAndSettle();
+
+    expect(find.text('排队第 2 位'), findsOneWidget); // 排队位置徽标
+    final moon =
+        tester.widget<Icon>(find.byIcon(Icons.dark_mode_outlined));
+    expect(moon.color, ZColors.violet600);
+    final pill = tester.widget<Container>(find
+        .ancestor(
+            of: find.byIcon(Icons.dark_mode_outlined),
+            matching: find.byType(Container))
+        .first);
+    final deco = pill.decoration! as BoxDecoration;
+    expect(deco.color, ZColors.violet50);
+    expect(deco.borderRadius, BorderRadius.circular(ZRadius.field));
   });
 
   testWidgets('pause action shows the official queue hint',

@@ -148,4 +148,17 @@ void main() {
     expect(dark.sliderTheme.valueIndicatorColor, ZColors.sky500);
     expect(light.sliderTheme.valueIndicatorColor, ZColors.sky500);
   });
+
+  testWidgets('off-peak violet + card-border tokens (D1/D4)', (tester) async {
+    // D4: the light user bubble reads the official 10% card border (the
+    // weaker 8% tile hairline was the pre-closeout value).
+    final (darkBorder, lightBorder) = await capture(tester, ZInk.cardBorder);
+    expect(lightBorder, const Color(0x1A0D0D0D)); // --color-border light
+    expect(darkBorder, const Color(0x1AFFFFFF)); // dark theme outline pair
+
+    // D1: official idle-task pair (violet-600 / violet-50, resolved from
+    // oklch 54.1% .281 293.009 / 96.9% .016 293.756).
+    expect(ZColors.violet600, const Color(0xFF7F22FE));
+    expect(ZColors.violet50, const Color(0xFFF5F3FF));
+  });
 }

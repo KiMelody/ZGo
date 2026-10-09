@@ -157,4 +157,177 @@ void main() {
     expect(chunked.text, 'abc');
     expect(chunked.hasMore, isTrue);
   });
+
+  group('workspace file listing (search panel file tab, design D7)', () {
+    test('searchWorkspaceFiles answers typed rows; payload is the exact '
+        '{rootPath, query, limit} shape', () async {
+      final payloads = <Map<String, Object?>>[];
+      final port = FileServicePort((method, args) async {
+        payloads.add((args.single as Map).cast<String, Object?>());
+        return [
+          {
+            'name': 'a.dart',
+            'path': '/repo/lib/a.dart',
+            'relativePath': 'lib/a.dart',
+            'type': 'file',
+          },
+          {
+            'path': '/repo/lib',
+            'relativePath': 'lib',
+            'type': 'directory',
+          },
+          {'relativePath': ''}, // malformed → dropped
+        ];
+      });
+
+      final rows = await port.searchWorkspaceFiles('/repo', query: 'a', limit: 50);
+      expect(payloads.single, {'rootPath': '/repo', 'query': 'a', 'limit': 50});
+      expect(payloads.single.containsKey('workspacePath'), isFalse);
+      expect(rows, hasLength(2));
+      expect(rows[0].name, 'a.dart');
+      expect(rows[0].relativePath, 'lib/a.dart');
+      expect(rows[0].path, '/repo/lib/a.dart');
+      expect(rows[0].isDirectory, isFalse);
+      expect(rows[1].isDirectory, isTrue);
+    });
+
+    test('limit truncates the search answer', () async {
+      final port = FileServicePort((method, args) async {
+        return [
+          for (var i = 0; i < 10; i++)
+            {'relativePath': 'f$i.dart', 'type': 'file'},
+        ];
+      });
+      final rows = await port.searchWorkspaceFiles('/repo', limit: 3);
+      expect(rows, hasLength(3));
+    });
+
+    test('search miss falls back to length + paged range, packed parsed '
+        'and cached for the port lifetime', () async {
+      final calls = <String>[];
+      final ranges = <Map<String, Object?>>[];
+      final port = FileServicePort((method, args) async {
+        calls.add(method);
+        if (method == 'searchWorkspaceFiles') {
+          throw ChannelRpcError('no such method: $method', null);
+        }
+        if (method == 'listWorkspaceFilesLength') return 2500000;
+        if (method == 'listWorkspaceFilesRange') {
+          final m = (args.single as Map).cast<String, Object?>();
+          ranges.add(m);
+          // Renderer slices the packed string: past the end → ''.
+          return (m['offset'] as int) == 0
+              ? 'file\tlib/a.dart\nfile\tlib/b.dart'
+              : '';
+        }
+        throw StateError('unexpected $method');
+      });
+
+      final rows = await port.searchWorkspaceFiles('/repo', query: 'b.dart');
+      // 1 search miss + 1 length + 3 range pages (2.5M chars @ 1 MiB).
+      expect(calls, [
+        'searchWorkspaceFiles',
+        'listWorkspaceFilesLength',
+        'listWorkspaceFilesRange',
+        'listWorkspaceFilesRange',
+        'listWorkspaceFilesRange',
+      ]);
+      expect(ranges, hasLength(3));
+      expect(ranges[0], {'rootPath': '/repo', 'offset': 0, 'length': 1 << 20});
+      expect(ranges[1]['offset'], 1 << 20);
+      expect(ranges[2]['offset'], 2 << 20);
+
+      expect(rows, hasLength(1), reason: 'contains filter on relativePath');
+      expect(rows.single.relativePath, 'lib/b.dart');
+
+      // Second query: the packed walk is cached — only the search method
+      // re-probes (a miss never caches in MethodProbe), no re-walk.
+      calls.clear();
+      final again = await port.searchWorkspaceFiles('/repo', query: 'a.dart');
+      expect(calls, ['searchWorkspaceFiles']);
+      expect(again.single.relativePath, 'lib/a.dart');
+    });
+
+    test('packed parser: escapes, name fallback, windows root separators',
+        () async {
+      final port = FileServicePort((method, args) async {
+        if (method == 'searchWorkspaceFiles') {
+          throw ChannelRpcError('no such method: $method', null);
+        }
+        if (method == 'listWorkspaceFilesLength') return 100;
+        // Wire truth (renderer `Vv` @313272002): the first TAB field is the
+        // word `directory` or anything else (→ file); the path is `VEe`-
+        // escaped (`\t` inside a path rides as the two-char escape).
+        return 'directory\tlib/src\nfile\tlib/src/a.dart\nfile\tweird\\tname.txt';
+      });
+
+      final rows = await port.searchWorkspaceFiles(r'C:\repo', query: '');
+      expect(rows.map((r) => r.relativePath).toList(), [
+        'lib/src',
+        'lib/src/a.dart',
+        'weird\tname.txt',
+      ]);
+      expect(
+        rows[1].path,
+        r'C:\repo\lib\src\a.dart',
+        reason: 'windows root → native separators, absolute join',
+      );
+      expect(
+        rows.map((r) => r.name).toList(),
+        ['src', 'a.dart', 'weird\tname.txt'],
+        reason: 'name falls back to the last path segment',
+      );
+      expect(rows.first.isDirectory, isTrue);
+      expect(rows[1].isDirectory, isFalse);
+    });
+
+    test('workspaceFilesReachable: search hit → true (and cached direct); '
+        'search miss + length hit → true; all miss → false; validation '
+        'error → false', () async {
+      Future<bool> reachableOf(
+        Future<dynamic> Function(String method) responder,
+      ) async {
+        final port =
+            FileServicePort((method, args) => responder(method));
+        return port.workspaceFilesReachable('/repo');
+      }
+
+      expect(
+        await reachableOf((m) async =>
+            m == 'searchWorkspaceFiles' ? <dynamic>[] : throw StateError('x')),
+        isTrue,
+      );
+      expect(
+        await reachableOf((m) async {
+          if (m == 'searchWorkspaceFiles') {
+            throw ChannelRpcError('no such method: $m', null);
+          }
+          if (m == 'listWorkspaceFilesLength') return 12;
+          throw ChannelRpcError('no such method: $m', null);
+        }),
+        isTrue,
+      );
+      expect(
+        await reachableOf((m) async =>
+            throw ChannelRpcError('no such method: $m', null)),
+        isFalse,
+      );
+      expect(
+        await reachableOf((m) async =>
+            throw ChannelRpcError('validation failed: bad rootPath', null)),
+        isFalse,
+        reason: 'a real failure must not open the tab',
+      );
+    });
+
+    test('reachability probe payload carries limit-1 empty query', () async {
+      final payloads = <Map<String, Object?>>[];
+      final port = FileServicePort((method, args) async {
+        payloads.add((args.single as Map).cast<String, Object?>());
+        return <dynamic>[];
+      });
+      await port.workspaceFilesReachable('/repo');
+      expect(payloads.single, {'rootPath': '/repo', 'query': '', 'limit': 1});
+    });
+  });
 }

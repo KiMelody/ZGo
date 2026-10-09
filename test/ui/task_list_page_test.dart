@@ -10,6 +10,7 @@ import 'package:zgo/state/device_store.dart';
 import 'package:zgo/state/task_directory.dart';
 import 'package:zgo/ui/chat/chat_page.dart';
 import 'package:zgo/ui/task_list_page.dart';
+import 'package:zgo/ui/task_search_page.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 import 'package:zgo/ui/widgets/swipe_actions.dart';
@@ -711,8 +712,8 @@ void main() {
     expect(find.text('选择左侧任务查看会话'), findsNothing);
   });
 
-  testWidgets('desktop search nav opens command palette and picks a slash',
-      (tester) async {
+  testWidgets('desktop search nav opens the unified search page (actions '
+      'tab) and picks a slash', (tester) async {
     useDesktop(tester);
     final (store, device) = await setupDevice();
     final session = FakeDeviceSession(
@@ -734,12 +735,16 @@ void main() {
     await tester.tap(find.text('搜索'));
     await tester.pumpAndSettle();
 
+    // D6: the command sheet is retired — the sidebar entry pushes the
+    // unified search page, landing on the actions tab.
+    expect(find.byType(TaskSearchPage), findsOneWidget);
     expect(find.text('/compact'), findsOneWidget);
     await tester.tap(find.text('/compact'));
     await tester.pumpAndSettle();
 
     expect(find.byType(ChatPage), findsOneWidget);
-    expect(find.text('/compact'), findsWidgets);
+    // The action pre-fills a NEW chat with the insert text (`/name `).
+    expect(find.textContaining('/compact'), findsWidgets);
   });
 
   testWidgets('767 stays single column, 768 goes dual-pane', (tester) async {
@@ -2313,6 +2318,121 @@ void main() {
         findsOneWidget,
         reason: 'archived row keeps its workspace chip via raw fallback',
       );
+    });
+  });
+
+  group('default group title fallback (D5, official B3)', () {
+    Future<FakeDeviceSession> pumpGrouped(
+      WidgetTester tester, {
+      required String groupId,
+      required String title,
+    }) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 's2',
+            'title': '组内任务',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+        ],
+        channelHandler: (c, m, a) async => m == 'listGroupedTaskViewStructure'
+            ? {
+                'groups': [
+                  {'id': groupId, 'title': title, 'color': 'blue', 'createdAt': 5},
+                ],
+                'members': [
+                  {
+                    'groupId': groupId,
+                    'taskId': 's2',
+                    'workspaceKey': 'app-id',
+                    'sortOrder': null,
+                    'addedAt': 3,
+                  },
+                ],
+                'topLevelOrders': [
+                  {'type': 'group', 'groupId': groupId, 'sortOrder': 4},
+                ],
+              }
+            : null,
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.tap(find.byTooltip('整理任务'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('按时间线'));
+      await tester.pumpAndSettle();
+      return session;
+    }
+
+    testWidgets('empty wire title of the cron default group localizes',
+        (tester) async {
+      await pumpGrouped(
+        tester,
+        groupId: 'zcode-default-group-cron',
+        title: '',
+      );
+      expect(find.text('定时任务'), findsOneWidget);
+      expect(find.text('组内任务'), findsOneWidget);
+    });
+
+    testWidgets('id-equal wire title falls back too; off-peak group maps '
+        'to its own lexicon key', (tester) async {
+      await pumpGrouped(
+        tester,
+        groupId: 'zcode-default-group-off-peak',
+        title: 'zcode-default-group-off-peak',
+      );
+      expect(find.text('闲时任务'), findsOneWidget);
+    });
+
+    testWidgets('named groups keep their wire title untouched',
+        (tester) async {
+      await pumpGrouped(tester, groupId: 'g1', title: '自定义组');
+      expect(find.text('自定义组'), findsOneWidget);
+    });
+  });
+
+  group('mobile search entry (D6)', () {
+    testWidgets('the header search button opens the unified search page',
+        (tester) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: const [],
+        workspaces: [
+          {'workspacePath': '/repo/app'},
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.search));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TaskSearchPage), findsOneWidget);
+      // Lands on the 全部 tab with the search hint visible.
+      expect(find.text('搜索任务、命令与文件'), findsOneWidget);
     });
   });
 }

@@ -11,8 +11,8 @@ import 'package:flutter/material.dart';
 /// horizontal padding; this scaffold only owns the four behaviours above.
 ///
 /// Already-compliant sheets with custom structures (AutomationSheet,
-/// _FetchModelsSheet, _UsageSheet, _SubagentSheet, mention_sheet) stay on
-/// their own skeletons by design.
+/// _FetchModelsSheet, _UsageSheet, _BackgroundWorksSheet, mention_sheet) stay
+/// on their own skeletons by design.
 Widget zSheetScaffold(
   BuildContext context, {
   double maxHeightFactor = 0.85,

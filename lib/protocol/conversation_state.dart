@@ -168,7 +168,23 @@ class SessionEntry {
       'unreadAt': task['unreadAt'],
       'workspacePath': task['workspacePath'],
       'workspaceIdentity': task['workspaceIdentity'],
+      // Task-meta error object (hzi: `{code?, message, traceId?, taskId?,
+      // attribution?}`, runtime @805550) — pass-through for the Copy TraceID
+      // surface; [lastErrorTraceId] does the defensive read.
+      'lastError': task['lastError'],
     });
+  }
+
+  /// Error TraceID of the row's `lastError` meta, null when absent — the
+  /// only wire carrier traceId has (F7: the conversation snapshot's status
+  /// lastError is a strict schema WITHOUT traceId). Callers treat null as
+  /// "don't render", never as an error.
+  String? get lastErrorTraceId {
+    final err = raw['lastError'];
+    if (err is! Map) return null;
+    final traceId = err['traceId'];
+    if (traceId is! String || traceId.isEmpty) return null;
+    return traceId;
   }
 }
 
@@ -272,6 +288,407 @@ class SessionsIndexState extends ChangeNotifier {
 }
 
 
+/// Workflow-run family mirror for one conversation: the session snapshot
+/// `workflowRuns: {revision, runs[]}` plus the `workflowRun.updated` /
+/// `workflowRun.removed` delta ops (capability `workflowRunDeltas`; without
+/// the capability the snapshot carries the full list).
+///
+/// Semantics are the official runtime's — `applyWorkflowRunUpdated`
+/// (`$Zt` @1090914), `applyWorkflowRunRemoved` (`qZt` @1091603),
+/// `coalesceConversationDeltas` (`sQe` @1109227) and
+/// `mergeWorkflowRunUpdates` (`Ehr` @1093700). Runs stay raw maps (wire
+/// pass-through); [WorkflowRun] is the typed read view the UI consumes.
+class WorkflowRuns {
+  /// Monotonic wire revision: `max` over every applied delta
+  /// (official `Math.max(state.revision, delta.revision)`).
+  final int revision;
+
+  /// Raw run maps in wire order.
+  final List<Map<String, dynamic>> runs;
+
+  const WorkflowRuns({this.revision = 0, this.runs = const []});
+
+  bool get isEmpty => runs.isEmpty;
+  bool get isNotEmpty => runs.isNotEmpty;
+
+  List<WorkflowRun> get views => [for (final r in runs) WorkflowRun(r)];
+
+  WorkflowRun? byRunId(String runId) {
+    for (final r in runs) {
+      if ('${r['runId'] ?? ''}' == runId) return WorkflowRun(r);
+    }
+    return null;
+  }
+
+  /// Official `QRt` (@315497351) keys the by-toolCallId map on `toolCallId`;
+  /// runs without one are not addressable from a tool card.
+  WorkflowRun? byToolCallId(String toolCallId) {
+    for (final r in runs) {
+      if ('${r['toolCallId'] ?? ''}' == toolCallId) return WorkflowRun(r);
+    }
+    return null;
+  }
+}
+
+/// Typed read view over one raw workflow run (wire schema renderer
+/// @269852039).
+class WorkflowRun {
+  final Map<String, dynamic> raw;
+
+  WorkflowRun(this.raw);
+
+  String get runId => '${raw['runId'] ?? ''}';
+  String get status => '${raw['status'] ?? ''}';
+  String? get stopReason => raw['stopReason'] as String?;
+
+  String? get toolCallId {
+    final id = raw['toolCallId'];
+    return id is String && id.isNotEmpty ? id : null;
+  }
+
+  bool get resumable => raw['resumable'] == true;
+
+  int get actorsCount {
+    final actors = raw['actors'];
+    return actors is List ? actors.length : 0;
+  }
+
+  List<Map<String, dynamic>> get nodes => [
+    if (raw['nodes'] is List)
+      for (final n in raw['nodes'] as List)
+        if (n is Map) n.cast<String, dynamic>(),
+  ];
+
+  int get nodesTotal => nodes.length;
+
+  /// Nodes that reached a terminal phase (outcome set or phase `settled`) —
+  /// the official progress numerator. Exact official `iu` projection is not
+  /// re-derived here (bundle-resident); real-device shape check pending
+  /// (PRD acceptance).
+  int get nodesSettled {
+    var settled = 0;
+    for (final n in nodes) {
+      if (n['outcome'] != null || n['phase'] == 'settled') settled++;
+    }
+    return settled;
+  }
+}
+
+/// Official `workflowRunEntryKey` (`Oz` @1088066): `siteId\0ordinal`.
+String workflowRunEntryKey(Map entry) =>
+    '${entry['siteId']}\u0000${entry['ordinal']}';
+
+/// Official `isCompleteWorkflowRunHeader` (`jQi` @1088732): every required
+/// run key present. Required set = the run schema's mandatory keys minus
+/// actors/nodes (renderer @269852039: runId / status / usage /
+/// lastEventSequence).
+const _workflowRunRequiredKeys = <String>[
+  'runId',
+  'status',
+  'usage',
+  'lastEventSequence',
+];
+
+bool _isCompleteWorkflowRunHeader(Object? run) {
+  if (run is! Map) return false;
+  for (final key in _workflowRunRequiredKeys) {
+    if (run[key] == null) return false;
+  }
+  return true;
+}
+
+int _revisionOf(Object? value) => (value as num?)?.toInt() ?? 0;
+
+/// Official `whr` removeWorkflowRunEntries: filter out entries whose
+/// `siteId\0ordinal` key appears in [removed]; empty/none removed returns
+/// the input list unchanged (reference equality preserved, official).
+List<Map<String, dynamic>> _removeEntries(
+  List<Map<String, dynamic>> entries,
+  Object? removed,
+) {
+  if (removed is! List || removed.isEmpty) return entries;
+  final keys = <String>{
+    for (final r in removed)
+      if (r is Map) workflowRunEntryKey(r),
+  };
+  final kept = [
+    for (final e in entries)
+      if (!keys.contains(workflowRunEntryKey(e))) e,
+  ];
+  return kept.length == entries.length ? entries : kept;
+}
+
+/// Official `UZt` upsertWorkflowRunEntries: same-key overwrite in place,
+/// new keys appended in order.
+List<Map<String, dynamic>> _upsertEntries(
+  List<Map<String, dynamic>> entries,
+  List<Map<String, dynamic>> items,
+) {
+  final out = List<Map<String, dynamic>>.of(entries);
+  final index = <String, int>{};
+  for (var i = 0; i < out.length; i++) {
+    index[workflowRunEntryKey(out[i])] = i;
+  }
+  for (final item in items) {
+    final key = workflowRunEntryKey(item);
+    final at = index[key];
+    if (at == null) {
+      index[key] = out.length;
+      out.add(item);
+    } else {
+      out[at] = item;
+    }
+  }
+  return out;
+}
+
+List<Map<String, dynamic>> _entries(Object? value) => [
+  if (value is List)
+    for (final e in value)
+      if (e is Map) e.cast<String, dynamic>(),
+];
+
+List<String> _stringList(Object? value) =>
+    [if (value is List) for (final e in value) '$e'];
+
+/// Official `mergeRemovedRefs` (`khr` @1092914): union deduped by
+/// `siteId\0ordinal`; both absent or empty → null.
+List<Map<String, dynamic>>? _mergeRemovedRefs(Object? a, Object? b) {
+  final first = _entries(a);
+  final second = _entries(b);
+  if (first.isEmpty && second.isEmpty) return null;
+  final seen = <String>{};
+  final out = <Map<String, dynamic>>[];
+  for (final e in [...first, ...second]) {
+    if (seen.add(workflowRunEntryKey(e))) out.add(e);
+  }
+  return out.isEmpty ? null : out;
+}
+
+/// Official `mergeEntryLists` (`xhr` @1093087): drop [removed] then upsert
+/// [items]; both absent → null.
+List<Map<String, dynamic>>? _mergeEntryLists(
+  Object? base,
+  Object? items,
+  Object? removed,
+) {
+  if (base == null && items == null) return null;
+  final filtered = _removeEntries(_entries(base), removed);
+  final merged = _upsertEntries(filtered, _entries(items));
+  return merged.isEmpty ? null : merged;
+}
+
+/// Official `workflowRunUpdateWithinWireBounds` (`Chr` @1092071): the
+/// per-update entry lists stay within maxActors (1024) / maxNodes (1024).
+bool _withinWorkflowRunBounds(Map<String, dynamic> delta) {
+  const maxActors = 1024;
+  const maxNodes = 1024;
+  final actors = _entries(delta['actors']).length;
+  final removedActors = _entries(delta['removedActors']).length;
+  final nodes = _entries(delta['nodes']).length;
+  final removedNodes = _entries(delta['removedNodes']).length;
+  return actors <= maxActors &&
+      removedActors <= maxActors &&
+      nodes <= maxNodes &&
+      removedNodes <= maxNodes;
+}
+
+/// Official `mergeWorkflowRunUpdates` (`Ehr` @1092251): folds two
+/// `workflowRun.updated` deltas into one. Run patches merge (second wins),
+/// `cleared` is the union, removed refs union, actors/nodes are
+/// filtered-then-upserted, revision is the max. The result may omit empty
+/// members exactly like the official builder.
+Map<String, dynamic> mergeWorkflowRunUpdates(
+  Map<String, dynamic> first,
+  Map<String, dynamic> second,
+) {
+  final run = <String, dynamic>{};
+  if (first['run'] is Map) run.addAll((first['run'] as Map).cast<String, dynamic>());
+  if (second['run'] is Map) {
+    run.addAll((second['run'] as Map).cast<String, dynamic>());
+  }
+  for (final key in _stringList(second['cleared'])) {
+    run.remove(key);
+  }
+  final cleared = <String>[];
+  for (final key in _stringList(first['cleared'])) {
+    if (run[key] == null && !cleared.contains(key)) cleared.add(key);
+  }
+  for (final key in _stringList(second['cleared'])) {
+    if (!cleared.contains(key)) cleared.add(key);
+  }
+  final removedActors = _mergeRemovedRefs(
+    first['removedActors'],
+    second['removedActors'],
+  );
+  final removedNodes = _mergeRemovedRefs(
+    first['removedNodes'],
+    second['removedNodes'],
+  );
+  final actors = _mergeEntryLists(
+    first['actors'],
+    second['actors'],
+    second['removedActors'],
+  );
+  final nodes = _mergeEntryLists(
+    first['nodes'],
+    second['nodes'],
+    second['removedNodes'],
+  );
+  final revisionA = _revisionOf(first['revision']);
+  final revisionB = _revisionOf(second['revision']);
+  return {
+    'op': 'workflowRun.updated',
+    'runId': second['runId'] ?? first['runId'],
+    'revision': revisionA > revisionB ? revisionA : revisionB,
+    if (run.isNotEmpty) 'run': run,
+    if (cleared.isNotEmpty) 'cleared': cleared,
+    if (removedActors != null) 'removedActors': removedActors,
+    if (removedNodes != null) 'removedNodes': removedNodes,
+    if (actors != null) 'actors': actors,
+    if (nodes != null) 'nodes': nodes,
+  };
+}
+
+/// Applies ONE workflow-run delta to [state] (official `$Zt`/`qZt`).
+///
+/// A delta whose revision lags the current one is dropped unchanged
+/// (design D2 stale-drop; the server's revision is monotonic). A removed
+/// run that isn't present returns [state] itself when the revision did not
+/// move — object identity is the "no change" signal the caller can trust.
+WorkflowRuns applyWorkflowRunDelta(
+  WorkflowRuns state,
+  Map<String, dynamic> delta,
+) {
+  final revision = _revisionOf(delta['revision']);
+  if (revision < state.revision) return state;
+  final maxRevision = revision > state.revision ? revision : state.revision;
+  switch (delta['op']) {
+    case 'workflowRun.updated':
+      return _applyWorkflowRunUpdated(state, delta, maxRevision);
+    case 'workflowRun.removed':
+      final runId = '${delta['runId']}';
+      final kept = [
+        for (final r in state.runs)
+          if ('${r['runId']}' != runId) r,
+      ];
+      if (kept.length == state.runs.length) {
+        return maxRevision == state.revision
+            ? state
+            : WorkflowRuns(revision: maxRevision, runs: state.runs);
+      }
+      return WorkflowRuns(revision: maxRevision, runs: kept);
+  }
+  return state;
+}
+
+WorkflowRuns _applyWorkflowRunUpdated(
+  WorkflowRuns state,
+  Map<String, dynamic> delta,
+  int maxRevision,
+) {
+  final runs = List<Map<String, dynamic>>.of(state.runs);
+  final runId = '${delta['runId']}';
+  final index = runs.indexWhere((r) => '${r['runId']}' == runId);
+  if (index < 0) {
+    // A missing run may only be inserted by a complete header; otherwise
+    // only the revision advances (official jQi branch).
+    if (!_isCompleteWorkflowRunHeader(delta['run'])) {
+      return maxRevision == state.revision
+          ? state
+          : WorkflowRuns(revision: maxRevision, runs: runs);
+    }
+    final header = (delta['run'] as Map).cast<String, dynamic>();
+    runs.add({
+      ...header,
+      'actors': _entries(delta['actors']),
+      'nodes': _entries(delta['nodes']),
+    });
+    return WorkflowRuns(revision: maxRevision, runs: runs);
+  }
+  final existing = runs[index];
+  final merged = <String, dynamic>{...existing};
+  final patch = delta['run'];
+  if (patch is Map) {
+    for (final entry in patch.entries) {
+      merged['${entry.key}'] = entry.value;
+    }
+  }
+  for (final key in _stringList(delta['cleared'])) {
+    merged.remove(key);
+  }
+  final existingActors = _entries(existing['actors']);
+  var actors = _removeEntries(existingActors, delta['removedActors']);
+  final addedActors = _entries(delta['actors']);
+  if (addedActors.isNotEmpty) actors = _upsertEntries(actors, addedActors);
+  if (!identical(actors, existingActors)) merged['actors'] = actors;
+  final existingNodes = _entries(existing['nodes']);
+  var nodes = _removeEntries(existingNodes, delta['removedNodes']);
+  final addedNodes = _entries(delta['nodes']);
+  if (addedNodes.isNotEmpty) nodes = _upsertEntries(nodes, addedNodes);
+  if (!identical(nodes, existingNodes)) merged['nodes'] = nodes;
+  runs[index] = merged;
+  return WorkflowRuns(revision: maxRevision, runs: runs);
+}
+
+bool _workflowRunBarrier(Map<String, dynamic> delta, String runId) {
+  if (delta['op'] == 'state.updated') {
+    final patch = delta['patch'];
+    return patch is Map && patch['workflowRuns'] != null;
+  }
+  return delta['op'] == 'workflowRun.removed' && '${delta['runId']}' == runId;
+}
+
+/// Official `coalesceConversationDeltas` (`sQe` @1109227), restricted to the
+/// workflow-run family: a `workflowRun.removed` swallows earlier
+/// `workflowRun.updated` deltas of the same runId back to the last barrier,
+/// and a `workflowRun.updated` folds into the nearest previous same-run
+/// update when the merge stays within wire bounds. Every other op passes
+/// through in order untouched. Barrier = a same-runId
+/// `workflowRun.removed` or a `state.updated` patch carrying `workflowRuns`.
+List<Map<String, dynamic>> coalesceWorkflowRunDeltas(
+  List<Map<String, dynamic>> deltas,
+) {
+  final out = <Map<String, dynamic>>[];
+  for (final delta in deltas) {
+    final op = delta['op'];
+    if (op == 'workflowRun.removed') {
+      final runId = '${delta['runId']}';
+      for (var i = out.length - 1; i >= 0; i--) {
+        final prev = out[i];
+        if (_workflowRunBarrier(prev, runId)) break;
+        if (prev['op'] == 'workflowRun.updated' &&
+            '${prev['runId']}' == runId) {
+          out.removeAt(i);
+        }
+      }
+      out.add(delta);
+      continue;
+    }
+    if (op == 'workflowRun.updated') {
+      final runId = '${delta['runId']}';
+      var merged = false;
+      for (var i = out.length - 1; i >= 0; i--) {
+        final prev = out[i];
+        if (_workflowRunBarrier(prev, runId)) break;
+        if (prev['op'] == 'workflowRun.updated' &&
+            '${prev['runId']}' == runId) {
+          final combined = mergeWorkflowRunUpdates(prev, delta);
+          if (_withinWorkflowRunBounds(combined)) {
+            out[i] = combined;
+            merged = true;
+          }
+          break;
+        }
+      }
+      if (!merged) out.add(delta);
+      continue;
+    }
+    out.add(delta);
+  }
+  return out;
+}
+
 /// Conversation snapshot + row state, from the `fke()`/`pke()` delta
 /// application.
 class ConversationState extends ChangeNotifier {
@@ -307,6 +724,12 @@ class ConversationState extends ChangeNotifier {
   /// builds fall back to the totalCount heuristic).
   bool? hasMore;
 
+  /// Workflow-run family: snapshot `workflowRuns` + the
+  /// `workflowRun.updated`/`workflowRun.removed` deltas. Every snapshot
+  /// rebuilds it (with the `workflowRunDeltas` capability the snapshot may
+  /// omit the full list; without it the snapshot always carries all runs).
+  WorkflowRuns workflowRuns = const WorkflowRuns();
+
   void applyFrame(
     Map<String, dynamic> frame, {
     required void Function() onGap,
@@ -326,14 +749,35 @@ class ConversationState extends ChangeNotifier {
       }
       final deltas = payload['deltas'];
       if (deltas is List) {
-        for (final d in deltas) {
-          if (d is Map) _applyDelta(d.cast<String, dynamic>());
+        final typed = [
+          for (final d in deltas)
+            if (d is Map) d.cast<String, dynamic>(),
+        ];
+        // Workflow-run deltas fold before application (official sQe
+        // compression: same-runId updates/removals collapse).
+        for (final d in coalesceWorkflowRunDeltas(typed)) {
+          _applyDelta(d);
         }
       }
       seq = toSeq;
     }
     ready = true;
     notifyListeners();
+  }
+
+  /// Parses a `workflowRuns` snapshot member (`{revision, runs[]}`) into the
+  /// typed mirror; anything else resets to empty (snapshot is authoritative).
+  static WorkflowRuns _parseWorkflowRuns(Object? raw) {
+    if (raw is! Map) return const WorkflowRuns();
+    final runs = raw['runs'];
+    return WorkflowRuns(
+      revision: (raw['revision'] as num?)?.toInt() ?? 0,
+      runs: [
+        if (runs is List)
+          for (final r in runs)
+            if (r is Map) r.cast<String, dynamic>(),
+      ],
+    );
   }
 
   void _applySnapshot(Map<String, dynamic> snap, int toSeq) {
@@ -407,6 +851,7 @@ class ConversationState extends ChangeNotifier {
       oldestSignal = declaredFirstRowId;
     }
     firstRowId = oldestSignal;
+    workflowRuns = _parseWorkflowRuns(snapshot?['workflowRuns']);
   }
 
   void _applyDelta(Map<String, dynamic> delta) {
@@ -455,18 +900,27 @@ class ConversationState extends ChangeNotifier {
       case 'state.updated':
         final patch = delta['patch'];
         if (patch is Map) {
+          final typedPatch = patch.cast<String, dynamic>();
           if (snapshot != null) {
-            snapshot = {...snapshot!, ...patch.cast<String, dynamic>()};
+            snapshot = {...snapshot!, ...typedPatch};
+            // A patch carrying `workflowRuns` replaces the whole family
+            // (that member is the delta-coalescing barrier, official r0r);
+            // refresh the typed mirror from it.
+            if (typedPatch['workflowRuns'] is Map) {
+              workflowRuns = _parseWorkflowRuns(typedPatch['workflowRuns']);
+            }
           } else {
             // Patch arrived before the initial snapshot — buffer and
             // merge when the snapshot lands (otherwise config/queue/
-            // control updates are silently lost).
-            _pendingPatch = {
-              ...?_pendingPatch,
-              ...patch.cast<String, dynamic>(),
-            };
+            // control updates are silently lost). The workflowRuns member
+            // is picked up by [_applySnapshot]'s parse.
+            _pendingPatch = {...?_pendingPatch, ...typedPatch};
           }
         }
+        break;
+      case 'workflowRun.updated':
+      case 'workflowRun.removed':
+        workflowRuns = applyWorkflowRunDelta(workflowRuns, delta);
         break;
     }
   }

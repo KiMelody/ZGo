@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/protocol/file_service.dart';
+import 'package:zgo/protocol/git_service.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/state/entitlement_poller.dart';
 import 'package:zgo/state/quota_reset.dart';
@@ -100,6 +101,36 @@ class RecordingConversationTransport implements ConversationTransport {
       return next;
     }
     return const {'status': 'accepted'};
+  }
+
+  /// Programmed `createSelectionSideSession` answers, dequeued front-per-call
+  /// (empty → the default `sess_side`). Entries are sessionId strings; an
+  /// Exception entry is thrown (the rejected/guard shape arrives as a thrown
+  /// StateError). The recorded call carries
+  /// `[parentSessionId, firstText, modelSelection]` — the side-chat UI tests
+  /// assert the direct-ask wire shape here.
+  final List<Object?> createSelectionSideSessionResults = [];
+
+  @override
+  Future<String> createSelectionSideSession(
+    String parentSessionId, {
+    String? firstText,
+    Map<String, dynamic>? modelSelection,
+    Duration timeout = const Duration(seconds: 60),
+  }) async {
+    _accept('createSelectionSideSession', [
+      parentSessionId,
+      firstText,
+      modelSelection,
+    ]);
+    if (createSelectionSideSessionResults.isNotEmpty) {
+      final next = createSelectionSideSessionResults.removeAt(0);
+      if (next is String) return next;
+      // Anything non-String is the failure cue (a thrown StateError — an
+      // Error, not an Exception — or any other object).
+      throw next ?? StateError('createSelectionSideSession: null answer');
+    }
+    return 'sess_side';
   }
 
   @override
@@ -249,6 +280,12 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   /// transport's field) — fork-jump tests program at the ack level.
   List<Object?> get forkAssistantResults => _commands.forkAssistantResults;
 
+  /// Programmed [ConversationTransport.createSelectionSideSession] answers
+  /// (see the transport's field) — side-chat tests program sessionId strings
+  /// (or Exceptions) here.
+  List<Object?> get createSelectionSideSessionResults =>
+      _commands.createSelectionSideSessionResults;
+
   /// Records (method, args) and returns the default `accepted` ack.
   dynamic _accept(String method, [List<Object?> args = const []]) {
     calls.add((method, args));
@@ -372,14 +409,9 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
     if (err != null) throw err;
   }
 
-  List<Map<String, dynamic>> mentionFilesResult = const [];
   List<Map<String, dynamic>> mentionSubagentsResult = const [];
   List<Map<String, dynamic>> mentionSkillsResult = const [];
   List<({String id, String title})> mentionSessionsResult = const [];
-
-  @override
-  Future<List<Map<String, dynamic>>> mentionFiles() async =>
-      mentionFilesResult;
 
   @override
   Future<List<Map<String, dynamic>>> mentionSkills() async =>
@@ -393,8 +425,31 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   List<({String id, String title})> mentionSessions() =>
       mentionSessionsResult;
 
+  /// Programmed [ChatGateway.searchWorkspaceFiles] answer; a non-null
+  /// [searchWorkspaceFilesError] is thrown (the unreachable verdict the
+  /// add-context panel hides the file section on).
+  List<Map<String, dynamic>> searchWorkspaceFilesResult = const [];
+  Object? searchWorkspaceFilesError;
+
   @override
-  List<Map<String, dynamic>> mentionSkillsSync() => mentionSkillsResult;
+  Future<List<Map<String, dynamic>>> searchWorkspaceFiles(
+    String query, {
+    int limit = 50,
+  }) async {
+    _accept('searchWorkspaceFiles', [query, limit]);
+    final err = searchWorkspaceFilesError;
+    if (err != null) throw err;
+    return searchWorkspaceFilesResult;
+  }
+
+  /// Programmed [ChatGateway.workspaceFilesReachable] verdict.
+  bool workspaceFilesReachableResult = true;
+
+  @override
+  Future<bool> workspaceFilesReachable() async {
+    _accept('workspaceFilesReachable', const []);
+    return workspaceFilesReachableResult;
+  }
 
   /// Programmed file-service answers (file-preview tests); defaults are
   /// inert (file stat / zero bytes / empty text).
@@ -421,6 +476,34 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
     _accept('fileReadText', [workspacePath, path, offset, length]);
     return fileReadTextResult;
   }
+
+  /// Optional per-method handler for the git port; null falls back to the
+  /// inert defaults below (not-repository verdict → the Git group hides).
+  Object? Function(String method, List<Object?> args)? gitCallHandler;
+
+  /// Every (method, args) the git port sent — the Git group tests assert the
+  /// probed candidate name and the write calls here.
+  final List<(String, List<Object?>)> gitCalls = [];
+
+  @override
+  late final GitPort git = GitPort((method, args) async {
+    gitCalls.add((method, args));
+    final handler = gitCallHandler;
+    if (handler != null) return handler(method, args);
+    return switch (method) {
+      'getRepositorySummary' ||
+      'getWorkspaceRepositoryInfo' =>
+        <String, Object?>{'kind': 'not-repository', 'isGitAvailable': true},
+      'getChanges' || 'getStatus' => <Object?>[],
+      'getLocalBranches' || 'listLocalBranches' => <String, Object?>{
+          'branches': <Object?>[],
+          'currentBranchName': null,
+        },
+      'refresh' => <String, Object?>{'summary': null},
+      'getIdentity' => <String, Object?>{'userName': null, 'userEmail': null},
+      _ => <String, Object?>{},
+    };
+  });
 
   /// Programmed [ChatGateway.taskDisplayStatus] answers keyed by sessionId
   /// (shell-session error card tests); unlisted ids = lookup miss → null.

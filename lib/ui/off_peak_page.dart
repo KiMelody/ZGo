@@ -188,6 +188,10 @@ class _OffPeakPageState extends State<OffPeakPage>
           title: task.title.isEmpty
               ? tr(context, 'op.viewResult')
               : task.title,
+          offPeakHost: deviceSession,
+          // Already stacked on the off-peak page: the card's action pops
+          // back to it (design D2).
+          onOpenOffPeak: () => Navigator.of(context).maybePop(),
         ),
       ));
       return;
@@ -569,43 +573,23 @@ class _OffPeakPageState extends State<OffPeakPage>
                         ),
                       ),
                       const SizedBox(width: 8),
-                      // 暂停位置徽标 (#{position} 已暂停).
+                      // 排队/暂停位置徽标: official idle-task pill — moon/pause
+                      // icon + violet-600 text on a violet-50 solid pill
+                      // (`rounded-[8px] bg-idle-task-surface py-0.5 pl-1 pr-2
+                      // text-idle-task`, renderer @316072410 / colors
+                      // @318674634).
                       if (task.paused && task.queuePosition != null)
-                        Container(
-                          margin: const EdgeInsets.only(right: 8),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: ZColors.neutral500.withValues(alpha: 0.14),
-                            borderRadius: BorderRadius.circular(ZRadius.field),
-                          ),
-                          child: Text(
+                        _queueBadge(
+                            context,
+                            Icons.pause,
                             trP(context, 'op.badge.paused',
-                                ['${task.queuePosition}']),
-                            style: ZType.caption.copyWith(
-                                fontWeight: FontWeight.w600,
-                                color: ZColors.neutral500,
-                            ),
-                          ),
-                        ),
-                      // 排队位置徽标 (排队第 N 位).
+                                ['${task.queuePosition}'])),
                       if (task.queued && task.queuePosition != null)
-                        Container(
-                          margin: const EdgeInsets.only(right: 8),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: ZColors.sky500.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(ZRadius.field),
-                          ),
-                          child: Text(
-                            trP(context, 'op.queue', ['${task.queuePosition}']),
-                            style: ZType.caption.copyWith(
-                                fontWeight: FontWeight.w600,
-                                color: ZColors.sky500,
-                            ),
-                          ),
-                        ),
+                        _queueBadge(
+                            context,
+                            Icons.dark_mode_outlined,
+                            trP(context, 'op.queue',
+                                ['${task.queuePosition}'])),
                       Text(statusLabel,
                           style: ZType.caption.copyWith(
                               fontWeight: FontWeight.w500,
@@ -731,6 +715,38 @@ class _OffPeakPageState extends State<OffPeakPage>
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Official idle-task queue pill (off-peak row badge): moon/pause icon in
+  /// `--color-idle-task` (violet-600) over a `--color-idle-task-surface`
+  /// (violet-50) 8px-radius solid pill. The value pair is theme-independent
+  /// (the CSS defines each token once, @318663380/318663558).
+  Widget _queueBadge(BuildContext context, IconData icon, String label) {
+    return Container(
+      margin: const EdgeInsets.only(right: 8),
+      padding: const EdgeInsets.only(left: 4, right: 8, top: 2, bottom: 2),
+      decoration: BoxDecoration(
+        color: ZColors.violet50,
+        borderRadius: BorderRadius.circular(ZRadius.field),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 20,
+            height: 20,
+            child: Icon(icon, size: 16, color: ZColors.violet600),
+          ),
+          Text(
+            label,
+            style: ZType.caption.copyWith(
+              fontWeight: FontWeight.w500,
+              color: ZColors.violet600,
+            ),
+          ),
+        ],
       ),
     );
   }

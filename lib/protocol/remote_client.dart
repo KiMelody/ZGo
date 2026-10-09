@@ -439,6 +439,13 @@ class RemoteClient {
     });
   }
 
+  /// mobile-diagnostic (G7): fire-and-forget telemetry for the session
+  /// state machine. Delegates to [RelayClient.sendMobileDiagnostic] — the
+  /// relay owns the connected/unpaired gate, so this is a no-op when the
+  /// link is down. Never queued, never awaited, never surfaces an error.
+  void sendMobileDiagnostic(String event, [Map<String, dynamic>? fields]) =>
+      relay.sendMobileDiagnostic(event, fields);
+
   /// workspace-reconnect-request.
   Future<Map<String, dynamic>> reconnectWorkspace(String workspaceKey) async {
     final id = _reqId('workspace-reconnect');

@@ -20,6 +20,7 @@ import 'new_task_defaults_page.dart';
 import 'off_peak_page.dart';
 import 'phase_pill.dart';
 import 'remote_page.dart';
+import 'task_search_page.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 import 'widgets/device_name.dart';
@@ -430,7 +431,9 @@ class _TaskListPageState extends State<TaskListPage>
               icon: Icons.search,
               label: tr(context, 'tasks.search'),
               shortcut: 'Ctrl+K',
-              onTap: () => _openCommandSearch(),
+              // D6: the command-search sheet retired — the sidebar entry
+              // opens the unified search page on the actions tab.
+              onTap: () => _openTaskSearch(TaskSearchTab.actions),
             ),
             _sidebarNavItem(
               context,
@@ -753,6 +756,8 @@ class _TaskListPageState extends State<TaskListPage>
           ? workspaceTitle(session.activeWorkspace!)
           : null,
       onOpenUsage: () => _openUsage(session),
+      offPeakHost: session,
+      onOpenOffPeak: () => _openOffPeak(session),
     );
   }
 
@@ -762,96 +767,43 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  Future<void> _openCommandSearch() async {
+  /// Off-peak tasks page — the chat queue card's "去到闲时任务" action (D2).
+  void _openOffPeak(DeviceSession session) {
+    Navigator.of(context).push(
+      zRoute((_) => OffPeakPage(
+            store: widget.store,
+            hub: widget.hub,
+            device: widget.device,
+          )),
+    );
+  }
+
+  /// Opens the unified search page (D6): three sources — actions
+  /// (commands + skills, contains-matched, select pre-fills a new chat),
+  /// tasks (directory filter with snippets) and files (probed; the page
+  /// hides the tab itself when the desktop serves neither method).
+  void _openTaskSearch([TaskSearchTab initialTab = TaskSearchTab.all]) {
     final session = _session;
     if (session == null || session.status != DeviceStatus.connected) return;
-    WorkspacePrep? prep;
-    try {
-      prep = await session.prepareWorkspace();
-    } catch (_) {}
-    if (!mounted) return;
-    final commands = prep?.slashCommands ?? const <SlashCommand>[];
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (sheetCtx) {
-        final query = ValueNotifier('');
-        return SafeArea(
-          child: Padding(
-            padding: EdgeInsets.only(
-              bottom: MediaQuery.viewInsetsOf(sheetCtx).bottom,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                  child: TextField(
-                    autofocus: true,
-                    decoration: InputDecoration(
-                      hintText: tr(sheetCtx, 'tasks.commandSearch'),
-                      prefixIcon: const Icon(Icons.search, size: 20),
-                    ),
-                    onChanged: (v) => query.value = v,
-                  ),
-                ),
-                Flexible(
-                  child: ValueListenableBuilder<String>(
-                    valueListenable: query,
-                    builder: (context, q, _) {
-                      final needle = q.trim().toLowerCase();
-                      final filtered = commands.where((c) {
-                        if (needle.isEmpty) return true;
-                        return c.name.toLowerCase().contains(needle) ||
-                            c.description.toLowerCase().contains(needle);
-                      }).toList();
-                      if (filtered.isEmpty) {
-                        return Padding(
-                          padding: const EdgeInsets.all(24),
-                          child: Text(
-                            tr(sheetCtx, 'tasks.commandSearch.empty'),
-                            style: ZType.body.copyWith(
-                              color: ZInk.faint(sheetCtx),
-                            ),
-                          ),
-                        );
-                      }
-                      return ListView.builder(
-                        shrinkWrap: true,
-                        itemCount: filtered.length,
-                        itemBuilder: (_, i) {
-                          final c = filtered[i];
-                          final label = c.name.startsWith('/')
-                              ? c.name
-                              : '/${c.name}';
-                          return ListTile(
-                            title: Text(label),
-                            subtitle: c.description.isNotEmpty
-                                ? Text(
-                                    c.description,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                  )
-                                : null,
-                            onTap: () {
-                              Navigator.of(sheetCtx).pop();
-                              _openChat(
-                                title: tr(this.context, 'tasks.new'),
-                                initialComposerText: label,
-                              );
-                            },
-                          );
-                        },
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
+    Navigator.of(context).push(
+      zRoute(
+        (_) => TaskSearchPage(
+          session: session,
+          initialTab: initialTab,
+          onOpenTask: (entry, ws) {
+            final title = entry.title.trim().isEmpty
+                ? tr(context, 'tasks.untitled')
+                : entry.title;
+            _openWorkspaceTask(session, ws, entry, title);
+          },
+          onOpenCommand: (item) {
+            _openChat(
+              title: tr(context, 'tasks.new'),
+              initialComposerText: item.insert,
+            );
+          },
+        ),
+      ),
     );
   }
 
@@ -1128,6 +1080,15 @@ class _TaskListPageState extends State<TaskListPage>
               widget.hub.ensure(widget.device);
             }
           },
+        ),
+        // 搜索 (D6): the touchscreen entry — the official mobile home has
+        // none; fourth sibling of the collapse / tidy / refresh row.
+        IconButton(
+          tooltip: tr(context, 'tasks.search'),
+          icon: const Icon(Icons.search),
+          iconSize: 20,
+          color: ZInk.muted(context),
+          onPressed: _openTaskSearch,
         ),
       ],
     );
@@ -1474,7 +1435,7 @@ class _TaskListPageState extends State<TaskListPage>
           const SizedBox(width: 6),
           Expanded(
             child: Text(
-              group.title,
+              _groupTitle(context, group),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: ZType.bodyStrong.copyWith(
@@ -1486,6 +1447,24 @@ class _TaskListPageState extends State<TaskListPage>
         ],
       ),
     );
+  }
+
+  /// Default-group title fallback (official `B3` @317021084): the cron /
+  /// off-peak default groups (ids `zcode-default-group-cron` /
+  /// `zcode-default-group-off-peak`, runtime @947235) resolve an empty or
+  /// id-equal wire title through the lexicon — the wire title of a default
+  /// group is not guaranteed localized, and the desktop itself falls back
+  /// by id. Named groups render their wire title untouched.
+  String _groupTitle(BuildContext context, TaskGroupInfo group) {
+    if (group.title.isEmpty || group.title == group.id) {
+      if (group.id == 'zcode-default-group-cron') {
+        return tr(context, 'taskGroup.cronGroupName');
+      }
+      if (group.id == 'zcode-default-group-off-peak') {
+        return tr(context, 'offPeak.sidebar.groupTitle');
+      }
+    }
+    return group.title;
   }
 
   /// Desktop task-group palette (7 colors on the web; live frames observed
@@ -2163,6 +2142,25 @@ class _TaskListPageState extends State<TaskListPage>
                 ),
               ),
               _tokenUsageLine(sheetCtx, session, entry),
+              // Error TraceID copy (D5, F7): the task-meta `lastError` is
+              // the only wire carrier traceId has — the conversation
+              // snapshot's status lastError has no such field. Defensive:
+              // renders only when the row actually carries one.
+              if (entry.lastErrorTraceId case final traceId?)
+                ListTile(
+                  leading: const Icon(Icons.tag_outlined),
+                  title: Text(tr(sheetCtx, 'tasks.action.copyTraceId')),
+                  onTap: () {
+                    Navigator.of(sheetCtx).pop();
+                    Clipboard.setData(ClipboardData(text: traceId));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(tr(context, 'tasks.traceIdCopied')),
+                        duration: const Duration(seconds: 1),
+                      ),
+                    );
+                  },
+                ),
               ListTile(
                 leading: const Icon(Icons.stop_circle_outlined),
                 title: Text(tr(sheetCtx, 'tasks.stop')),
@@ -2424,6 +2422,8 @@ class _TaskListPageState extends State<TaskListPage>
               ? workspaceTitle(session.activeWorkspace!)
               : null,
           onOpenUsage: () => _openUsage(session),
+          offPeakHost: session,
+          onOpenOffPeak: () => _openOffPeak(session),
         ),
       ),
     );

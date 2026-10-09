@@ -18,6 +18,7 @@ import 'state/scheduled_store.dart';
 import 'ui/chat/chat_page.dart';
 import 'ui/device_usage_page.dart';
 import 'ui/devices_page.dart';
+import 'ui/off_peak_page.dart';
 import 'ui/quota_reset_dialog.dart';
 import 'ui/remote_page.dart';
 import 'ui/task_list_page.dart';
@@ -295,6 +296,20 @@ class _ZGoAppState extends State<ZGoApp>
     );
   }
 
+  /// Off-peak tasks page — the chat queue card's action (D2), reachable
+  /// from a notification-opened chat as well as the task list.
+  void _openOffPeak(Device device) {
+    final context = _navigatorKey.currentContext;
+    if (context == null || !context.mounted) return;
+    Navigator.of(context).push(
+      zRoute((_) => OffPeakPage(
+            store: _store,
+            hub: _hub,
+            device: device,
+          )),
+    );
+  }
+
   /// Notification tap → the producing conversation: native chat page when
   /// the protocol link is up (no WebView suspend), WebView deep link as
   /// fallback for devices without a native session. Quota-watch notices
@@ -322,6 +337,8 @@ class _ZGoAppState extends State<ZGoApp>
           sessionId: sessionId,
           title: title ?? deviceDisplayName(context, device.label),
           theme: _theme,
+          offPeakHost: session,
+          onOpenOffPeak: () => _openOffPeak(device),
         ),
       ));
       return;

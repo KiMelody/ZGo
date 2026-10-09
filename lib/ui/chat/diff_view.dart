@@ -131,6 +131,71 @@ DiffLine _classify(String line) {
   return DiffLine(DiffLineType.context, line);
 }
 
+/// Adapter from a raw unified-diff patch (the desktop `git.getDiff` answer,
+/// `git diff --no-ext-diff --no-color` output) to [DiffData] — the shape
+/// [DiffView] renders. Pure: no context, no RPC.
+///
+/// Line mapping:
+/// - `@@` hunk headers → context (a visible section marker);
+/// - `+++` / `---` file headers, `diff --git`, `index …`, mode/rename/merge
+///   metadata and `Binary files` markers → dropped (not content);
+/// - `+…` → added, `-…` → removed, anything else (including the leading-space
+///   context lines) → context.
+///
+/// [additions]/[deletions] default to the line counts; the review panel passes
+/// the change row's own counters so the badge matches the file row.
+DiffData unifiedDiffToDiffData(
+  String patch, {
+  String? filePath,
+  int? additions,
+  int? deletions,
+}) {
+  final lines = <DiffLine>[];
+  for (final raw in patch.split('\n')) {
+    if (raw.startsWith('@@')) {
+      lines.add(DiffLine(DiffLineType.context, raw));
+      continue;
+    }
+    if (raw.startsWith('diff --git ') ||
+        raw.startsWith('index ') ||
+        raw.startsWith('new file mode ') ||
+        raw.startsWith('deleted file mode ') ||
+        raw.startsWith('old mode ') ||
+        raw.startsWith('new mode ') ||
+        raw.startsWith('similarity index ') ||
+        raw.startsWith('dissimilarity index ') ||
+        raw.startsWith('rename from ') ||
+        raw.startsWith('rename to ') ||
+        raw.startsWith('copy from ') ||
+        raw.startsWith('copy to ') ||
+        raw.startsWith('Binary files ') ||
+        raw.startsWith('GIT binary patch') ||
+        raw.startsWith('+++ ') ||
+        raw.startsWith('--- ')) {
+      continue;
+    }
+    if (raw.startsWith('+')) {
+      lines.add(DiffLine(DiffLineType.added, raw));
+    } else if (raw.startsWith('-')) {
+      lines.add(DiffLine(DiffLineType.removed, raw));
+    } else {
+      lines.add(DiffLine(DiffLineType.context, raw));
+    }
+  }
+  // A trailing empty line from split() is not content.
+  if (lines.isNotEmpty &&
+      lines.last.type == DiffLineType.context &&
+      lines.last.text.isEmpty) {
+    lines.removeLast();
+  }
+  return DiffData(
+    filePath: filePath,
+    lines: lines,
+    additions: additions,
+    deletions: deletions,
+  );
+}
+
 /// Side-by-side-ish stacked diff: old text lines removed, new added,
 /// with a small shared-prefix context (simple LCS-free heuristic).
 List<DiffLine> _buildLines(String oldText, String newText) {
