@@ -782,6 +782,7 @@ class ConversationState extends ChangeNotifier {
 
   void _applySnapshot(Map<String, dynamic> snap, int toSeq) {
     _detectConfigRevert(snap);
+    _optimisticStop = false; // authority spoke — recalibrate the projection
     snapshot = snap;
     _usageEvent = null;
     if (_pendingPatch != null) {
@@ -901,6 +902,11 @@ class ConversationState extends ChangeNotifier {
         final patch = delta['patch'];
         if (patch is Map) {
           final typedPatch = patch.cast<String, dynamic>();
+          // A patch carrying `control` is an authoritative control write:
+          // recalibrate the optimistic stop projection (canStop back to
+          // true = stop rejected / a new turn already started — the
+          // button returns).
+          if (typedPatch['control'] is Map) _optimisticStop = false;
           if (snapshot != null) {
             snapshot = {...snapshot!, ...typedPatch};
             // A patch carrying `workflowRuns` replaces the whole family
@@ -1077,6 +1083,44 @@ class ConversationState extends ChangeNotifier {
   bool get canStop => control?['canStop'] == true;
 
   bool get isRunning => phase == 'running' || phase == 'prewarming';
+
+  /// Official schema: `idle | stoppable | stopping` (bundle protocol
+  /// schema, edit-resend research A-2). The official web never consumes
+  /// it — ZGo uses it only as a stop-command re-entrancy guard, never as
+  /// UI state.
+  String get stopState => control?['stopState'] as String? ?? '';
+
+  /// Locally-projected stop (official `resultSource:'optimistic_projection'`,
+  /// bundle @~1427647): armed by [optimisticStop], cleared by the next
+  /// authoritative control write ([_applySnapshot] or a `state.updated`
+  /// patch carrying `control`).
+  bool _optimisticStop = false;
+
+  /// Whether an optimistic stop is still awaiting authoritative
+  /// calibration (stop-command re-entrancy guard).
+  bool get stopProjected => _optimisticStop;
+
+  /// Stop-button visibility = official `cn = en && !nn` (@~1423479): the
+  /// optimistic projection forces it off until authority recalibrates
+  /// (canStop back to true restores it); desktops without the `canStop`
+  /// key (pre-3.15) fall back to [isRunning].
+  bool get effectiveCanStop {
+    if (_optimisticStop) return false;
+    final c = control;
+    if (c == null) return false;
+    return c.containsKey('canStop') ? canStop : isRunning;
+  }
+
+  /// Optimistic stop projection: the stop button hides at once (official
+  /// click behavior) without waiting for the authoritative frame. If the
+  /// authority still reports canStop=true (stop rejected / a new turn
+  /// already started), the next control write clears the flag and the
+  /// button returns.
+  void optimisticStop() {
+    if (_optimisticStop) return;
+    _optimisticStop = true;
+    notifyListeners();
+  }
 
   /// Session config: {provider, model, thought, thoughtLevels, followupMode,
   /// mode}.

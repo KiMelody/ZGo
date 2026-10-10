@@ -3069,7 +3069,6 @@ class _ChatPageState extends State<ChatPage> {
                     subagentConfirmWindow: widget.turnFooterConfirmWindow,
                     onSend: _send,
                     onAddMenu: _openAddContextMenu,
-                    onSkills: _openSkillsPicker,
                     onModelSheet: _showModelSheet,
                     onUsage: _showUsageSheet,
                     onBackgroundWorks: _showBackgroundWorksSheet,
@@ -4144,75 +4143,84 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
     );
   }
 
-  /// One running row: spinner + title + elapsed, live action tail, then the
-  /// 详情/停止 action row (mock .run-item).
+  /// One running row (mock .run-item, official-aligned + user revisions):
+  /// static agent glyph + 2-line title + live action tail + elapsed, the
+  /// WHOLE row opens the detail page; a red icon-only stop button owns the
+  /// right-most column (gesture-arena inner win = the official overlay's
+  /// stopPropagation), still behind the confirm dialog.
   Widget _buildRunItem(BuildContext context, Map<String, dynamic> agent) {
     final title = '${agent['title'] ?? agent['subagentType'] ?? ''}';
     final sid = '${agent['childSessionId'] ?? ''}';
     final tail = subagentActionText(context, widget.feed.childState(sid));
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const SizedBox(
-                width: 12,
-                height: 12,
-                child: CircularProgressIndicator(strokeWidth: 1.5),
+    return InkWell(
+      onTap: sid.isEmpty
+          ? null
+          : () => openSubagentDetail(
+                context,
+                widget.gateway,
+                feed: widget.feed,
+                childSessionId: sid,
+                title: '${agent['title'] ?? ''}',
+                subagentType: agent['subagentType'] as String?,
+                workId: '${agent['agentId'] ?? agent['workId'] ?? ''}',
+                parentSessionId: _sessionId,
+                running: true,
+                confirmWindow: widget.confirmWindow,
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: ZType.body.copyWith(color: ZInk.solid(context)),
-                ),
-              ),
-              _SheetElapsed(startedAt: agent['startedAt'] as num?),
-            ],
-          ),
-          if (tail != null)
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
             Padding(
-              padding: const EdgeInsets.only(left: 20, top: 2),
-              child: Text(
-                tail,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: ZType.caption.copyWith(color: ZInk.soft(context)),
+              padding: const EdgeInsets.only(top: 2),
+              child: Icon(
+                Icons.smart_toy_outlined,
+                size: 17,
+                color: ZInk.muted(context),
               ),
             ),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              _SheetActionButton(
-                label: tr(context, 'chat.subagentSheet.detail'),
-                onTap: sid.isEmpty
-                    ? null
-                    : () => openSubagentDetail(
-                          context,
-                          widget.gateway,
-                          feed: widget.feed,
-                          childSessionId: sid,
-                          title: '${agent['title'] ?? ''}',
-                          subagentType: agent['subagentType'] as String?,
-                          workId: '${agent['agentId'] ?? agent['workId'] ?? ''}',
-                          parentSessionId: _sessionId,
-                          running: true,
-                          confirmWindow: widget.confirmWindow,
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: ZType.body.copyWith(color: ZInk.solid(context)),
+                  ),
+                  if (tail != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        tail,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ZType.caption.copyWith(
+                          color: ZInk.soft(context),
                         ),
+                      ),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: _SheetElapsed(startedAt: agent['startedAt'] as num?),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              _SheetActionButton(
-                label: tr(context, 'chat.agents.stop'),
-                danger: true,
-                onTap: () => _confirmStop(agent),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              tooltip: tr(context, 'chat.agents.stop'),
+              icon: Icon(
+                Icons.stop_circle_outlined,
+                color: ZInk.dangerTone(context),
               ),
-            ],
-          ),
-        ],
+              onPressed: () => _confirmStop(agent),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -4312,40 +4320,6 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
 
 /// Compact ghost/danger action button of the management sheet (mock
 /// .btn-ghost / .btn-stop).
-class _SheetActionButton extends StatelessWidget {
-  final String label;
-  final VoidCallback? onTap;
-  final bool danger;
-
-  const _SheetActionButton({
-    required this.label,
-    required this.onTap,
-    this.danger = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final color = danger ? ZInk.dangerTone(context) : ZInk.soft(context);
-    return OutlinedButton(
-      style: OutlinedButton.styleFrom(
-        visualDensity: VisualDensity.compact,
-        foregroundColor: color,
-        side: BorderSide(
-          color: danger ? ZColors.danger.withValues(alpha: 0.45) : ZInk.hairline(context),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        minimumSize: Size.zero,
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(ZRadius.field),
-        ),
-      ),
-      onPressed: onTap,
-      child: Text(label, style: ZType.caption.copyWith(color: color)),
-    );
-  }
-}
-
 /// Elapsed mm:ss of a running sheet row (1s cadence — the mock shows
 /// second-precision durations).
 class _SheetElapsed extends StatefulWidget {
@@ -6988,9 +6962,6 @@ class _InputBar extends StatefulWidget {
   /// Opens the add-context panel (official ＋ / `chat.composer.actionMenu`);
   /// 附件/目标/工作流/文件/会话/插件 sections live there (design D4).
   final VoidCallback onAddMenu;
-
-  /// Opens the `$` skill picker (activated as a tools-row entry).
-  final VoidCallback onSkills;
   final VoidCallback onModelSheet;
   final VoidCallback onUsage;
 
@@ -7012,7 +6983,6 @@ class _InputBar extends StatefulWidget {
     required this.subagentConfirmWindow,
     required this.onSend,
     required this.onAddMenu,
-    required this.onSkills,
     required this.onModelSheet,
     required this.onUsage,
     this.onBackgroundWorks,
@@ -7095,7 +7065,6 @@ class _InputBarState extends State<_InputBar> {
   String? get sessionId => widget.sessionId;
   VoidCallback get onSend => widget.onSend;
   VoidCallback get onAddMenu => widget.onAddMenu;
-  VoidCallback get onSkills => widget.onSkills;
   VoidCallback get onModelSheet => widget.onModelSheet;
   VoidCallback get onUsage => widget.onUsage;
   VoidCallback? get onBackgroundWorks => widget.onBackgroundWorks;
@@ -7175,7 +7144,11 @@ class _InputBarState extends State<_InputBar> {
 
   @override
   Widget build(BuildContext context) {
-    final running = state?.isRunning ?? false;
+    // Official stop/send swap (bundle @~1423479, `cn = en && !nn`): the
+    // right slot is the stop button only while the composer is empty and
+    // the desktop reports canStop (pre-3.15: falls back to isRunning);
+    // with input the send button owns the slot.
+    final showStop = !_hasInput && (state?.effectiveCanStop ?? false);
     // The hint swaps once messages are queued, so typing more
     // keeps appending to the queue instead of looking like a fresh message.
     final queued = state?.queueItems.isNotEmpty ?? false;
@@ -7265,14 +7238,18 @@ class _InputBarState extends State<_InputBar> {
                                 () => _toolsExpanded = !_toolsExpanded,
                               ),
                             ),
-                            _SendButton(
-                              enabled:
-                                  _hasInput && !sending && !_sessionDeleted,
-                              sending: sending,
-                              onSend: _sendAndCollapse,
-                            ),
-                            if (running)
-                              _StopButton(onStop: () => _stop(context)),
+                            // Same swap as the wide row below: stop owns
+                            // the slot on an empty composer, send takes
+                            // it back once there is input.
+                            if (showStop)
+                              _StopButton(onStop: () => _stop(context))
+                            else
+                              _SendButton(
+                                enabled:
+                                    _hasInput && !sending && !_sessionDeleted,
+                                sending: sending,
+                                onSend: _sendAndCollapse,
+                              ),
                           ],
                         )
                       : null,
@@ -7293,7 +7270,12 @@ class _InputBarState extends State<_InputBar> {
                   // into the TextField suffixIcon), so the whole left cluster
                   // is gated on visibility; the send cluster stays put.
                   if (toolsVisible) ...[
+                    // Same 40dp layout width in both viewport modes
+                    // (short mode's compact Theme below would do it
+                    // anyway): keeps the left cluster's visual rhythm at
+                    // 16dp, matching the send/stop side.
                     IconButton(
+                      visualDensity: VisualDensity.compact,
                       icon: Icon(
                         Icons.add_circle_outline,
                         size: 20,
@@ -7301,18 +7283,6 @@ class _InputBarState extends State<_InputBar> {
                       ),
                       tooltip: tr(context, 'chat.composer.actionMenu'),
                       onPressed: sending ? null : onAddMenu,
-                    ),
-                    // `$` skill picker entry (the former dead onSkills
-                    // callback wired up; skills are also reachable by typing
-                    // `$` into the composer).
-                    IconButton(
-                      icon: Icon(
-                        Icons.auto_awesome_outlined,
-                        size: 18,
-                        color: ZInk.muted(context),
-                      ),
-                      tooltip: tr(context, 'chat.composer.skillShortcut'),
-                      onPressed: sending ? null : onSkills,
                     ),
                     _ControlChip(
                       label: tr(context, 'chat.mode.$_modeValue'),
@@ -7337,39 +7307,51 @@ class _InputBarState extends State<_InputBar> {
                   if (toolsVisible && _usageRatio != null)
                     _UsageRing(ratio: _usageRatio!, onTap: onUsage),
                   if (toolsVisible && _modelPickerVisible)
-                    _ControlChip(
-                      label: _modelLabel.isEmpty
-                          ? tr(context, 'chat.composer.modelPlaceholder')
-                          : _modelLabel,
-                      icon: Icons.memory_outlined,
-                      onTap: onModelSheet,
-                      showLabel: wide,
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        maxWidth: _kControlChipMaxWidth,
+                      ),
+                      child: _ControlChip(
+                        label: _modelLabel.isEmpty
+                            ? tr(context, 'chat.composer.modelPlaceholder')
+                            : _modelLabel,
+                        icon: Icons.memory_outlined,
+                        onTap: onModelSheet,
+                        showLabel: wide,
+                      ),
                     ),
                   if (toolsVisible && _thoughtPickerVisible)
-                    _ControlChip(
-                      label: _thoughtLabel.isEmpty
-                          ? tr(context, 'chat.composer.thoughtPlaceholder')
-                          : _thoughtLabel,
-                      icon: Icons.psychology_alt_outlined,
-                      onTap: () => _pickThought(context),
-                      showLabel: wide,
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        maxWidth: _kControlChipMaxWidth,
+                      ),
+                      child: _ControlChip(
+                        label: _thoughtLabel.isEmpty
+                            ? tr(context, 'chat.composer.thoughtPlaceholder')
+                            : _thoughtLabel,
+                        icon: Icons.psychology_alt_outlined,
+                        onTap: () => _pickThought(context),
+                        showLabel: wide,
+                      ),
                     ),
-                  const SizedBox(width: 4),
                   // The composer stays sendable while a turn
-                  // runs — follow-ups queue mid-turn — with stop appearing
-                  // at the far right. Kicked never reaches this button: the
-                  // full-screen takeover overlay already blocks all input
-                  // (single button instance — the collapsed/expanded
+                  // runs — follow-ups queue mid-turn — with the official
+                  // swap at the right edge: an empty composer shows stop
+                  // (canStop), input shows send (bundle @~1423479; no
+                  // side-by-side pair). Kicked never reaches this button:
+                  // the full-screen takeover overlay already blocks all
+                  // input (single button instance — the collapsed/expanded
                   // landscape states share this row). A cross-terminal
                   // deletion tombstone (10-06) greys the button instead.
                   if (!short)
-                    _SendButton(
-                      enabled: _hasInput && !sending && !_sessionDeleted,
-                      sending: sending,
-                      onSend: _sendAndCollapse,
-                    ),
-                  if (running && !short)
-                    _StopButton(onStop: () => _stop(context)),
+                    showStop
+                        ? _StopButton(onStop: () => _stop(context))
+                        : _SendButton(
+                            enabled:
+                                _hasInput && !sending && !_sessionDeleted,
+                            sending: sending,
+                            onSend: _sendAndCollapse,
+                          ),
                 ],
                 ),
               ),
@@ -7457,9 +7439,29 @@ class _InputBarState extends State<_InputBar> {
   void _stop(BuildContext context) {
     final sid = sessionId;
     if (sid == null) return;
+    final st = state;
+    // Re-entrancy guard (official web has no stopping UI, research A-2):
+    // taps while the wire reports `stopping` or the local optimistic
+    // projection is still un-calibrated send nothing.
+    if (st != null && (st.stopProjected || st.stopState == 'stopping')) {
+      return;
+    }
+    // Optimistic projection (official click behavior, bundle @~1427647):
+    // hide the stop button immediately; the next authoritative control
+    // frame recalibrates (canStop back to true restores it).
+    st?.optimisticStop();
     gateway.conversationCommands.stop(sid);
   }
 }
+
+/// Label-chip width cap (R5, 10-10): server-controlled labels (model /
+/// thought option names) are ellipsized past this so the label-mode (≥640)
+/// tool row closes its worst-case budget — fixed clusters (~287dp) + two
+/// capped chips + the bounded pill stay under the 604dp row at 640. The
+/// chips stay rigid in the row (no Flexible shares): loose flex shares
+/// leave unused share as trailing space after the stop button, detaching
+/// the right cluster from the row edge even when nothing overflows.
+const double _kControlChipMaxWidth = 150;
 
 class _ControlChip extends StatelessWidget {
   final String label;
@@ -7504,11 +7506,16 @@ class _ControlChip extends StatelessWidget {
           children: [
             Icon(icon, size: 12, color: ZInk.muted(context)),
             const SizedBox(width: 4),
-            Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: ZType.caption.copyWith(color: ZInk.soft(context)),
+            // Loose so the built-in ellipsis engages whenever a caller caps
+            // the chip (_kControlChipMaxWidth); inert at intrinsic width.
+            Flexible(
+              fit: FlexFit.loose,
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: ZType.caption.copyWith(color: ZInk.soft(context)),
+              ),
             ),
           ],
         ),

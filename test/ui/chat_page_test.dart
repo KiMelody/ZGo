@@ -1210,7 +1210,8 @@ void main() {
     expect(find.text('a.txt'), findsNothing);
   });
 
-  testWidgets('running keeps send beside stop so follow-ups can queue',
+  testWidgets('official swap: empty composer + running shows stop, typing '
+      'brings the send back (pre-3.15 fallback: no canStop key)',
       (tester) async {
     final gateway = FakeChatGateway();
     gateway.snapshotExtra = {
@@ -1224,12 +1225,17 @@ void main() {
     ]);
     await tester.pumpAndSettle();
 
-    // Stop sits at the far right, send stays available.
+    // Empty composer: the slot is the stop button, no send beside it
+    // (bundle cn = en && !nn; no canStop key → isRunning fallback).
     expect(find.byIcon(Icons.stop), findsOneWidget);
-    expect(find.byIcon(Icons.arrow_upward), findsOneWidget);
+    expect(find.byIcon(Icons.arrow_upward), findsNothing);
 
     await tester.enterText(find.byType(TextField), '排队消息 A');
     await tester.pump();
+    // With input the send button owns the slot; follow-ups still queue.
+    expect(find.byIcon(Icons.arrow_upward), findsOneWidget);
+    expect(find.byIcon(Icons.stop), findsNothing);
+
     await tester.tap(find.byIcon(Icons.arrow_upward));
     await tester.pumpAndSettle();
     final call = gateway.calls
@@ -1237,6 +1243,67 @@ void main() {
         .toList()
         .single;
     expect(call.$2[1], '排队消息 A');
+  });
+
+  testWidgets('stop tap projects optimistically: button vanishes at once '
+      'and a double tap sends exactly one stop command', (tester) async {
+    final gateway = FakeChatGateway();
+    gateway.snapshotExtra = {
+      'control': {'phase': 'running', 'canStop': true},
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(Icons.stop), findsOneWidget);
+    // Same-frame double tap: the first projects optimistically, the
+    // second is eaten by the re-entrancy guard.
+    await tester.tap(find.byIcon(Icons.stop));
+    await tester.tap(find.byIcon(Icons.stop));
+    await tester.pump();
+    expect(find.byIcon(Icons.stop), findsNothing);
+    expect(
+      gateway.calls.where((c) => c.$1 == 'stop'),
+      hasLength(1),
+    );
+
+    // Optimistic false-kill convergence (A2): an authoritative frame that
+    // still reports canStop=true restores the button.
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.stop), findsOneWidget);
+  });
+
+  testWidgets('stopState=stopping drops taps silently (no command, no '
+      'invented UI form)', (tester) async {
+    final gateway = FakeChatGateway();
+    gateway.snapshotExtra = {
+      'control': {
+        'phase': 'running',
+        'canStop': true,
+        'stopState': 'stopping',
+      },
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    // Official web has no stopping form: the plain canStop button remains.
+    expect(find.byIcon(Icons.stop), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.stop));
+    await tester.pumpAndSettle();
+    expect(gateway.calls.where((c) => c.$1 == 'stop'), isEmpty);
+    expect(find.byIcon(Icons.stop), findsOneWidget);
   });
 
   testWidgets('kicked gateway shows the takeover overlay', (tester) async {
@@ -2146,11 +2213,12 @@ void main() {
       hasLength(1),
     );
 
-    // Running section: title + 详情/停止 actions. No child toolCall yet →
-    // no tail line.
+    // Running section (official-aligned form): 2-line title row with the
+    // whole row opening the detail page, red icon-only stop in its own
+    // right column; no child toolCall yet → no tail line.
     expect(find.text('实现加固'), findsOneWidget);
-    expect(find.text('详情'), findsOneWidget);
-    expect(find.text('停止'), findsOneWidget);
+    expect(find.text('详情'), findsNothing); // text buttons retired (D5)
+    expect(find.byTooltip('停止'), findsOneWidget);
     expect(find.text('终端 · flutter test'), findsNothing);
 
     // Child tool progress streams into the live tail.
@@ -2166,8 +2234,8 @@ void main() {
     await tester.pump();
     expect(find.text('终端 · flutter test'), findsOneWidget);
 
-    // 详情 opens the read-only child-session detail page.
-    await tester.tap(find.text('详情'));
+    // The whole running row opens the read-only child-session detail page.
+    await tester.tap(find.text('实现加固'));
     await tester.pump(); // route push + subscribe microtask
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pump(const Duration(milliseconds: 100));
@@ -2182,7 +2250,8 @@ void main() {
 
     await openSubagentSheet(tester);
 
-    await tester.tap(find.text('停止'));
+    // Icon-only stop button (own right column) opens the confirm dialog.
+    await tester.tap(find.byTooltip('停止'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 200));
     expect(find.text('确定停止这个子智能体吗？'), findsOneWidget);
@@ -2197,7 +2266,7 @@ void main() {
     );
 
     // Reopen the confirm dialog and go through with it.
-    await tester.tap(find.text('停止'));
+    await tester.tap(find.byTooltip('停止'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 200));
     await tester.tap(find.widgetWithText(FilledButton, '停止'));
@@ -2542,7 +2611,7 @@ void main() {
     upsertRows(gateway, [subagentRow(rowId: 3, status: 'success')]);
     await tester.pump();
     expect(find.text('运行中的后台任务'), findsOneWidget); // header still up
-    expect(find.text('详情'), findsNothing); // running section emptied
+    expect(find.text('实现加固'), findsNothing); // running section emptied
 
     // …then it closes itself (and the composer button dies with it).
     await tester.pump(const Duration(milliseconds: 150));
