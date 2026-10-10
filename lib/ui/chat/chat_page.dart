@@ -4144,75 +4144,84 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
     );
   }
 
-  /// One running row: spinner + title + elapsed, live action tail, then the
-  /// 详情/停止 action row (mock .run-item).
+  /// One running row (mock .run-item, official-aligned + user revisions):
+  /// static agent glyph + 2-line title + live action tail + elapsed, the
+  /// WHOLE row opens the detail page; a red icon-only stop button owns the
+  /// right-most column (gesture-arena inner win = the official overlay's
+  /// stopPropagation), still behind the confirm dialog.
   Widget _buildRunItem(BuildContext context, Map<String, dynamic> agent) {
     final title = '${agent['title'] ?? agent['subagentType'] ?? ''}';
     final sid = '${agent['childSessionId'] ?? ''}';
     final tail = subagentActionText(context, widget.feed.childState(sid));
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const SizedBox(
-                width: 12,
-                height: 12,
-                child: CircularProgressIndicator(strokeWidth: 1.5),
+    return InkWell(
+      onTap: sid.isEmpty
+          ? null
+          : () => openSubagentDetail(
+                context,
+                widget.gateway,
+                feed: widget.feed,
+                childSessionId: sid,
+                title: '${agent['title'] ?? ''}',
+                subagentType: agent['subagentType'] as String?,
+                workId: '${agent['agentId'] ?? agent['workId'] ?? ''}',
+                parentSessionId: _sessionId,
+                running: true,
+                confirmWindow: widget.confirmWindow,
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: ZType.body.copyWith(color: ZInk.solid(context)),
-                ),
-              ),
-              _SheetElapsed(startedAt: agent['startedAt'] as num?),
-            ],
-          ),
-          if (tail != null)
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
             Padding(
-              padding: const EdgeInsets.only(left: 20, top: 2),
-              child: Text(
-                tail,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: ZType.caption.copyWith(color: ZInk.soft(context)),
+              padding: const EdgeInsets.only(top: 2),
+              child: Icon(
+                Icons.smart_toy_outlined,
+                size: 17,
+                color: ZInk.muted(context),
               ),
             ),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              _SheetActionButton(
-                label: tr(context, 'chat.subagentSheet.detail'),
-                onTap: sid.isEmpty
-                    ? null
-                    : () => openSubagentDetail(
-                          context,
-                          widget.gateway,
-                          feed: widget.feed,
-                          childSessionId: sid,
-                          title: '${agent['title'] ?? ''}',
-                          subagentType: agent['subagentType'] as String?,
-                          workId: '${agent['agentId'] ?? agent['workId'] ?? ''}',
-                          parentSessionId: _sessionId,
-                          running: true,
-                          confirmWindow: widget.confirmWindow,
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: ZType.body.copyWith(color: ZInk.solid(context)),
+                  ),
+                  if (tail != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        tail,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ZType.caption.copyWith(
+                          color: ZInk.soft(context),
                         ),
+                      ),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: _SheetElapsed(startedAt: agent['startedAt'] as num?),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              _SheetActionButton(
-                label: tr(context, 'chat.agents.stop'),
-                danger: true,
-                onTap: () => _confirmStop(agent),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              tooltip: tr(context, 'chat.agents.stop'),
+              icon: Icon(
+                Icons.stop_circle_outlined,
+                color: ZInk.dangerTone(context),
               ),
-            ],
-          ),
-        ],
+              onPressed: () => _confirmStop(agent),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -4312,40 +4321,6 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
 
 /// Compact ghost/danger action button of the management sheet (mock
 /// .btn-ghost / .btn-stop).
-class _SheetActionButton extends StatelessWidget {
-  final String label;
-  final VoidCallback? onTap;
-  final bool danger;
-
-  const _SheetActionButton({
-    required this.label,
-    required this.onTap,
-    this.danger = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final color = danger ? ZInk.dangerTone(context) : ZInk.soft(context);
-    return OutlinedButton(
-      style: OutlinedButton.styleFrom(
-        visualDensity: VisualDensity.compact,
-        foregroundColor: color,
-        side: BorderSide(
-          color: danger ? ZColors.danger.withValues(alpha: 0.45) : ZInk.hairline(context),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        minimumSize: Size.zero,
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(ZRadius.field),
-        ),
-      ),
-      onPressed: onTap,
-      child: Text(label, style: ZType.caption.copyWith(color: color)),
-    );
-  }
-}
-
 /// Elapsed mm:ss of a running sheet row (1s cadence — the mock shows
 /// second-precision durations).
 class _SheetElapsed extends StatefulWidget {
