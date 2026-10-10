@@ -61,6 +61,7 @@ app.*.map.json
 
 #ai
 .zcode
+.zcodeignore
 .trellis
 .gitattributes
 
