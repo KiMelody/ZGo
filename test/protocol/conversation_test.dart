@@ -561,6 +561,138 @@ void main() {
     });
   });
 
+  group('stop state parity (canStop authority + optimistic projection, '
+      '10-11)', () {
+    late ConversationState state;
+
+    setUp(() {
+      state = ConversationState();
+    });
+
+    /// Applies a `state.updated` patch on top of the current seq.
+    void applyPatch(Map<String, dynamic> patch) {
+      state.applyFrame({
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {'op': 'state.updated', 'patch': patch},
+          ],
+        },
+        'fromSeq': state.seq,
+        'toSeq': state.seq + 1,
+      }, onGap: () => fail('unexpected gap'));
+    }
+
+    test('effectiveCanStop reads the authoritative canStop over the phase',
+        () {
+      _injectSnapshot(state, snapshot: {
+        'control': {'phase': 'running', 'canStop': true},
+      });
+      expect(state.effectiveCanStop, isTrue);
+
+      _injectSnapshot(state, snapshot: {
+        'control': {'phase': 'running', 'canStop': false},
+      });
+      expect(state.effectiveCanStop, isFalse);
+    });
+
+    test('canStop key missing (pre-3.15 desktop) falls back to isRunning',
+        () {
+      _injectSnapshot(state, snapshot: {
+        'control': {'phase': 'running'},
+      });
+      expect(state.effectiveCanStop, isTrue);
+
+      _injectSnapshot(state, snapshot: {
+        'control': {'phase': 'draft'},
+      });
+      expect(state.effectiveCanStop, isFalse);
+    });
+
+    test('no control at all is not stoppable', () {
+      _injectSnapshot(state);
+      expect(state.effectiveCanStop, isFalse);
+    });
+
+    test('stopState reads the wire value; missing key → empty string', () {
+      _injectSnapshot(state, snapshot: {
+        'control': {'phase': 'running', 'stopState': 'stopping'},
+      });
+      expect(state.stopState, 'stopping');
+
+      _injectSnapshot(state, snapshot: {
+        'control': {'phase': 'running'},
+      });
+      expect(state.stopState, '');
+    });
+
+    test('optimistic projection flips effectiveCanStop off at once; only '
+        'an authoritative control write recalibrates it', () {
+      _injectSnapshot(state, snapshot: {
+        'control': {'phase': 'running', 'canStop': true},
+      });
+      state.optimisticStop();
+      expect(state.stopProjected, isTrue);
+      expect(state.effectiveCanStop, isFalse);
+
+      // A patch WITHOUT a control member says nothing about stop — the
+      // projection stays alive (queue/config traffic must not resurrect
+      // the button).
+      applyPatch({'revision': 9, 'config': {'model': 'm'}});
+      expect(state.stopProjected, isTrue);
+      expect(state.effectiveCanStop, isFalse);
+
+      // Authority with canStop=false (stop accepted): projection cleared,
+      // still not stoppable.
+      applyPatch({
+        'control': {'phase': 'running', 'canStop': false},
+      });
+      expect(state.stopProjected, isFalse);
+      expect(state.effectiveCanStop, isFalse);
+    });
+
+    test('optimistic false-kill converges: authority canStop=true restores '
+        'the button (A2)', () {
+      _injectSnapshot(state, snapshot: {
+        'control': {'phase': 'running', 'canStop': true},
+      });
+      state.optimisticStop();
+      expect(state.effectiveCanStop, isFalse);
+
+      applyPatch({
+        'control': {'phase': 'running', 'canStop': true},
+      });
+      expect(state.stopProjected, isFalse);
+      expect(state.effectiveCanStop, isTrue);
+    });
+
+    test('a fresh snapshot also clears the projection', () {
+      _injectSnapshot(state, snapshot: {
+        'control': {'phase': 'running', 'canStop': true},
+      });
+      state.optimisticStop();
+      expect(state.effectiveCanStop, isFalse);
+
+      _injectSnapshot(state, seq: 6, snapshot: {
+        'control': {'phase': 'running', 'canStop': true},
+      });
+      expect(state.stopProjected, isFalse);
+      expect(state.effectiveCanStop, isTrue);
+    });
+
+    test('optimisticStop is idempotent: one projection, one notification',
+        () {
+      _injectSnapshot(state, snapshot: {
+        'control': {'phase': 'running', 'canStop': true},
+      });
+      var notifications = 0;
+      state.addListener(() => notifications++);
+      state.optimisticStop();
+      state.optimisticStop();
+      expect(notifications, 1);
+    });
+  });
+
   group('pendingInteractions wire forms', () {
     late ConversationState state;
 
