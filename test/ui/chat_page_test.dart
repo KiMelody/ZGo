@@ -2835,6 +2835,18 @@ void main() {
     final child = ConversationState();
     gateway.childStates['sess_child_1'] = child;
     feedChildState(child, 'sess_child_1', [
+      // Spawn-time model switch the desktop logs into the child log —
+      // the inline window drops it (acceptance fix: the model is the
+      // detail page's subtitle, not a transcript row).
+      {
+        'rowId': 0,
+        'kind': 'timelineMarker',
+        'marker': {
+          'type': 'modelChange',
+          'fromModel': 'glm-5.2',
+          'toModel': 'glm-5.2-air',
+        },
+      },
       {'rowId': 1, 'kind': 'userInput', 'text': '子任务提示'},
       {'rowId': 2, 'kind': 'assistantText', 'text': '子会话结论：完成'},
     ]);
@@ -2877,6 +2889,7 @@ void main() {
     expect(find.text('子任务提示'), findsOneWidget);
     expect(find.textContaining('子会话结论'), findsWidgets);
     expect(find.text('输出'), findsOneWidget);
+    expect(find.textContaining('模型已切换'), findsNothing); // marker dropped
   });
 
   testWidgets('agent expansion stays at the window over a grown pooled state',
@@ -2923,10 +2936,10 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     // 80 rows in the pooled state, 60 in the inline window: the oldest 20
-    // stay detail-page-only.
-    expect(find.byType(SubagentTimelineRow), findsNWidgets(60));
+    // stay detail-page-only. Boundary asserted by text (the shared ChatRow
+    // also renders the page's own rows, so a type count is brittle).
     expect(find.text('row1'), findsNothing);
-    expect(find.text('row21'), findsOneWidget);
+    expect(find.text('row21'), findsOneWidget); // oldest in-window row
     expect(find.text('row80'), findsWidgets);
   });
 

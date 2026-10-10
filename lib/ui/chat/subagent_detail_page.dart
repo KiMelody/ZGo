@@ -6,22 +6,23 @@ import '../../protocol/conversation.dart';
 import '../../state/device_session.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
-import 'diff_view.dart';
 import 'jump_to_bottom_button.dart';
-import 'markdown_view.dart';
 import 'subagent_feed.dart';
-import 'tool_row_semantics.dart';
+import 'timeline.dart';
 
 /// Read-only transcript of a subagent's child session (task 09-13 R3):
 /// the server treats `sess_subagent_agent_*` as a plain Conversation V4
-/// session, so this page renders a simplified timeline of [childSessionId]
-/// through the chat page's shared [SubagentFeed] pool (acquire/release
-/// refcount) — it never opens a private subscription, so Agent tile /
-/// sheet / this page share ONE `gateway.subscribe` per child.
+/// session, so this page renders [childSessionId] through the main chat's
+/// shared renderer ([ChatTurnGroup]/[ChatRow] — official parity: the web's
+/// subagent pane reuses the conversation renderer readOnly) via the chat
+/// page's shared [SubagentFeed] pool (acquire/release refcount) — it never
+/// opens a private subscription, so Agent tile / sheet / this page share
+/// ONE `gateway.subscribe` per child.
 ///
 /// Read-only boundary (R4): no composer and nothing is ever sent to the
-/// child session — the only action is stopping the parent session's
-/// background work entry while the subagent still runs.
+/// child session — every send-shaped affordance the shared renderer has is
+/// gated off via its `readOnly` flag; the only write is stopping the
+/// parent session's background work entry while the subagent runs.
 class SubagentDetailPage extends StatefulWidget {
   final ChatGateway gateway;
 
@@ -43,6 +44,16 @@ class SubagentDetailPage extends StatefulWidget {
   final String? workId;
   final bool running;
 
+  /// Terminal-footer confirm window for the shared timeline render (D3
+  /// pre-wiring): entry points that know the chat page's
+  /// `turnFooterConfirmWindow` pass it through; everything else leaves it
+  /// null and [effectiveConfirmWindow] falls back to the chat default.
+  final Duration? confirmWindow;
+
+  /// [confirmWindow] fallback — the chat page's own default window.
+  Duration get effectiveConfirmWindow =>
+      confirmWindow ?? const Duration(seconds: 3);
+
   const SubagentDetailPage({
     super.key,
     required this.gateway,
@@ -53,6 +64,7 @@ class SubagentDetailPage extends StatefulWidget {
     this.parentSessionId,
     this.workId,
     this.running = false,
+    this.confirmWindow,
   });
 
   @override
@@ -71,6 +83,10 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
   bool _stickToBottom = true;
   bool _positionedAtBottom = false;
   int _lastRowCount = 0;
+
+  /// Workspace file-preview plumbing for the shared renderer (tappable
+  /// file names in tool cards). One instance per page, like the chat page.
+  late final ChatPreview _preview = ChatPreview(widget.gateway);
 
   @override
   void initState() {
@@ -114,7 +130,9 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
   /// check runs on the posted frame — a delta landing mid-drag must not
   /// yank the viewport. Runs at the top of the feed builder: the pool
   /// notifies for every child frame, the row-count compare filters those
-  /// belonging to other children or non-growth updates.
+  /// belonging to other children or non-growth updates. The count stays
+  /// TOTAL rows (not turn groups): groups derive from rows one-way, so the
+  /// monotonic growth semantics survive the shared-renderer switch.
   void _followNewRows(ConversationState state) {
     if (!_positionedAtBottom || _loadingOlder) return;
     final grew = state.rows.length > _lastRowCount;
@@ -276,14 +294,60 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
     return tr(context, 'chat.agents.detailTitle');
   }
 
+  /// Model subtitle under the AppBar title (design D4): the official web's
+  /// provider display rule via [chatModelLabel]. Localized AnimatedBuilder
+  /// so feed notifications repaint the subtitle without rebuilding the
+  /// scaffold; not-ready / empty label renders nothing (no placeholder).
+  Widget _modelSubtitle(BuildContext context) {
+    return AnimatedBuilder(
+      animation: widget.feed,
+      builder: (context, _) {
+        final state = widget.feed.childState(widget.childSessionId);
+        final label =
+            state == null || !state.ready ? '' : chatModelLabel(state);
+        if (label.isEmpty) return const SizedBox.shrink();
+        return Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: ZType.caption.copyWith(
+            color: ZInk.muted(context),
+            fontFamily: 'monospace',
+          ),
+        );
+      },
+    );
+  }
+
+  /// Minimal onAction for the shared renderer: everything send-shaped is
+  /// readOnly-gated, so this wrapper only ever carries read paths — run
+  /// the future, surface failures as a toast (the page has no busy strip).
+  Future<void> _runAction(
+    String label,
+    Future<dynamic> Function() action,
+  ) async {
+    try {
+      await action();
+    } catch (e) {
+      _toast('$e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          _pageTitle(context),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+        title: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _pageTitle(context),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            _modelSubtitle(context),
+          ],
         ),
         actions: [
           if (widget.running)
@@ -323,7 +387,13 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
             return const Center(child: CircularProgressIndicator());
           }
           _followNewRows(state);
-          final itemCount = state.rows.length + (state.canLoadOlder ? 1 : 0);
+          // Shared-renderer switch (D3): rows go through the main chat's
+          // turn grouping — one ChatTurnGroup per turn, readOnly so every
+          // send-shaped affordance stays hidden. childSessionRows drops
+          // the spawn-time modelChange marker: the subtitle below the
+          // title IS the model display (acceptance fix).
+          final groups = groupChatRows(childSessionRows(state.rows));
+          final itemCount = groups.length + (state.canLoadOlder ? 1 : 0);
           if (!_positionedAtBottom) {
             // R1b: land on the newest content on the first frame the list is
             // actually mounted — the follow pass only fires on LATER updates
@@ -363,9 +433,21 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
                         ),
                       );
                     }
-                    final row =
-                        state.rows[index - (state.canLoadOlder ? 1 : 0)];
-                    return SubagentTimelineRow(row: row);
+                    final group =
+                        groups[index - (state.canLoadOlder ? 1 : 0)];
+                    return ChatTurnGroup(
+                      key: ValueKey('turn-${group.first['rowId']}'),
+                      rows: group,
+                      gateway: widget.gateway,
+                      sessionId: widget.childSessionId,
+                      onAction: _runAction,
+                      state: state,
+                      feed: widget.feed,
+                      preview: _preview,
+                      confirmWindow: widget.effectiveConfirmWindow,
+                      workspaceLabel: null,
+                      readOnly: true,
+                    );
                   },
                 ),
               ),
@@ -383,182 +465,6 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
           );
         },
       ),
-    );
-  }
-}
-
-/// Simplified read-only timeline row: assistant markdown, collapsible
-/// reasoning, compact tool summaries (+ diff), plain task block; anything
-/// else (turnHeader, timelineMarker, nested subagent rows…) renders as a
-/// light divider. Shared by this page's list and the chat page's inline
-/// Agent expansion (task internal-task).
-class SubagentTimelineRow extends StatelessWidget {
-  final Map<String, dynamic> row;
-
-  const SubagentTimelineRow({super.key, required this.row});
-
-  @override
-  Widget build(BuildContext context) {
-    switch (row['kind']) {
-      case 'assistantText':
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          child: AppMarkdown(row['text'] as String? ?? ''),
-        );
-      case 'reasoning':
-        return _ReasoningStrip(
-          text: row['text'] as String? ?? '',
-          streaming: row['state'] == 'streaming',
-        );
-      case 'toolCall':
-        return _ToolSummary(row: row);
-      case 'userInput':
-        // The subagent's task prompt: plain read-only block.
-        return Container(
-          margin: const EdgeInsets.symmetric(vertical: 6),
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: ZInk.tile(context),
-            borderRadius: BorderRadius.circular(ZRadius.tile),
-          ),
-          child: Text(
-            row['text'] as String? ?? '',
-            style: ZType.body.copyWith(color: ZInk.soft(context)),
-          ),
-        );
-      default:
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          child: Divider(height: 1, color: ZInk.hairline(context)),
-        );
-    }
-  }
-}
-
-class _ReasoningStrip extends StatelessWidget {
-  final String text;
-  final bool streaming;
-
-  const _ReasoningStrip({required this.text, this.streaming = false});
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: ZInk.tile(context),
-      clipBehavior: Clip.antiAlias,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(ZRadius.tile),
-        side: BorderSide(color: ZInk.hairline(context)),
-      ),
-      child: ExpansionTile(
-        dense: true,
-        tilePadding: const EdgeInsets.symmetric(horizontal: 12),
-        title: Row(
-          children: [
-            Icon(
-              Icons.psychology_outlined,
-              size: 14,
-              color: streaming ? ZColors.sky400 : ZInk.faint(context),
-            ),
-            const SizedBox(width: 6),
-            Text(
-              streaming
-                  ? tr(context, 'chat.reasoning.thinking')
-                  : tr(context, 'chat.reasoning'),
-              style: ZType.sub.copyWith(color: ZInk.muted(context)),
-            ),
-          ],
-        ),
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            child: AppMarkdown(text, bodyStyle: ZType.sub),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Compact tool row (chat page `_ToolCallTile` collapse pattern, task 09-23
-/// R2): collapsed shows only the status icon + the per-tool summary
-/// (from [toolRowSemantics] — the old second name·preview summary is
-/// converged, Q6a) + diff +/- counts; the diff renders inside the expansion,
-/// so a file edit no longer floods the timeline.
-class _ToolSummary extends StatelessWidget {
-  final Map<String, dynamic> row;
-
-  const _ToolSummary({required this.row});
-
-  @override
-  Widget build(BuildContext context) {
-    final summary = toolRowSemantics(
-      row,
-      locale: UiSettingsProvider.of(context)?.locale ?? 'zh-CN',
-    );
-    final color = switch (row['status'] as String? ?? '') {
-      'running' || 'inputStreaming' || 'pendingApproval' => ZColors.sky400,
-      'success' => ZInk.successTone(context),
-      'error' => ZInk.dangerTone(context),
-      'cancelled' => ZInk.warningTone(context),
-      _ => ZInk.faint(context),
-    };
-    final diff = extractDiff(row);
-    final title = Expanded(
-      child: Text(
-        summary.title,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: ZType.sub.copyWith(
-          color: ZInk.muted(context),
-          fontFamily: 'monospace',
-        ),
-      ),
-    );
-    final counts = [
-      if (summary.additions > 0)
-        Padding(
-          padding: const EdgeInsets.only(left: 8),
-          child: Text(
-            '+${summary.additions}',
-            style: ZType.caption.copyWith(color: ZInk.successTone(context)),
-          ),
-        ),
-      if (summary.deletions > 0)
-        Padding(
-          padding: const EdgeInsets.only(left: 4),
-          child: Text(
-            '-${summary.deletions}',
-            style: ZType.caption.copyWith(color: ZInk.dangerTone(context)),
-          ),
-        ),
-    ];
-    final leading = Icon(summary.icon, size: 13, color: color);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: diff == null
-          // No diff → nothing to expand: static summary row (title fills the
-          // remaining width, so the Expanded must sit in THIS row).
-          ? Row(children: [leading, const SizedBox(width: 6), title, ...counts])
-          : ListTileTheme.merge(
-              // Keep the collapsed row on the same compact grid as the
-              // plain (no-diff) rows.
-              horizontalTitleGap: 6,
-              minLeadingWidth: 13,
-              child: ExpansionTile(
-                dense: true,
-                minTileHeight: ZTile.headHeight,
-                tilePadding: EdgeInsets.zero,
-                leading: leading,
-                title: Row(children: [title, ...counts]),
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: DiffView(diff: diff),
-                  ),
-                ],
-              ),
-            ),
     );
   }
 }

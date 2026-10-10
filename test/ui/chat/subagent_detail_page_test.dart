@@ -21,6 +21,7 @@ class _FakeSubagentGateway extends FakeDeviceSession {
     required this.rows,
     this.totalCount,
     this.rangeResult,
+    this.config,
   }) : super(deviceId: 'd1', params: _params);
 
   static final _params = RemoteConnectionParams.parse(
@@ -30,6 +31,9 @@ class _FakeSubagentGateway extends FakeDeviceSession {
   final List<Map<String, dynamic>> rows;
   final int? totalCount;
   final Map<String, dynamic>? rangeResult;
+
+  /// Session config merged into the child snapshot (model-subtitle tests).
+  final Map<String, dynamic>? config;
 
   /// When set, `rowsRange` answers park here — the in-flight-drop test
   /// holds the call open across the page teardown.
@@ -75,6 +79,7 @@ class _FakeSubagentGateway extends FakeDeviceSession {
             if (rows.isNotEmpty)
               'firstRowId': (rows.first['rowId'] as num?)?.toInt(),
           },
+          if (config != null) 'config': config,
         },
       },
     }, onGap: () => fail('unexpected gap'));
@@ -223,6 +228,131 @@ void main() {
     expect(find.textContaining('+b'), findsWidgets);
     // read-only boundary: no composer anywhere on the page
     expect(find.byType(TextField), findsNothing);
+    // read-only boundary (D2): the shared renderer's send-shaped
+    // affordances stay hidden — feedback row and the file-changes undo.
+    expect(find.byIcon(Icons.thumb_up_alt_outlined), findsNothing);
+    expect(find.text('撤销'), findsNothing);
+  });
+
+  testWidgets('model subtitle renders under the title once the child '
+      'snapshot carries config (official provider: bare id)', (tester) async {
+    final gateway = _FakeSubagentGateway(
+      rows: _childRows,
+      config: const {
+        'provider': 'account:zai-individual-coding-plan',
+        'model': 'GLM-5.3-Flash',
+      },
+    );
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('实现加固'), findsOneWidget);
+    expect(find.text('GLM-5.3-Flash'), findsOneWidget); // the subtitle line
+  });
+
+  testWidgets('model subtitle stays hidden while not ready and without '
+      'config; third-party provider prefixes (D4)', (tester) async {
+    // Stalled subscribe: spinner state — the subtitle must not appear even
+    // though config WILL land, then appear once the snapshot does.
+    final gateway = _FakeSubagentGateway(
+      rows: _childRows,
+      config: const {'provider': 'openrouter', 'model': 'gpt-5.2'},
+    );
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    gateway.holdSubscribe = Completer<void>();
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.text('openrouter/gpt-5.2'), findsNothing); // not ready yet
+
+    gateway.holdSubscribe!.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    // Third-party provider → prefixed label (user rule: 官方不带，非官方带).
+    expect(find.text('openrouter/gpt-5.2'), findsOneWidget);
+
+    // And a config-less snapshot renders no subtitle at all.
+    final bare = _FakeSubagentGateway(rows: _childRows);
+    addTearDown(() => bare.dispose());
+    final bareFeed = SubagentFeed(gateway: bare);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: bare,
+          feed: bareFeed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('实现加固'), findsOneWidget);
+    expect(find.text('openrouter/gpt-5.2'), findsNothing);
+  });
+
+  testWidgets('spawn-time modelChange marker is dropped from the transcript '
+      'and feeds the subtitle when config is absent (acceptance fix)', (
+    tester,
+  ) async {
+    final gateway = _FakeSubagentGateway(
+      rows: const [
+        {
+          'rowId': 1,
+          'kind': 'timelineMarker',
+          'marker': {
+            'type': 'modelChange',
+            'fromModel': 'glm-5.2',
+            'toModel': 'glm-5.2-air',
+          },
+        },
+        {'rowId': 2, 'kind': 'userInput', 'text': '调研 Flutter 国内镜像可用性'},
+        {'rowId': 3, 'kind': 'assistantText', 'text': '已完成'},
+      ],
+    );
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // The marker never renders — the model display is the subtitle.
+    expect(find.textContaining('模型已切换'), findsNothing);
+    expect(find.text('调研 Flutter 国内镜像可用性'), findsOneWidget);
+    // No config in this snapshot: the subtitle falls back to the marker's
+    // toModel (bare id — no provider to prefix).
+    expect(find.text('glm-5.2-air'), findsOneWidget);
   });
 
   testWidgets('load older triggers rowsRange on the child session', (
