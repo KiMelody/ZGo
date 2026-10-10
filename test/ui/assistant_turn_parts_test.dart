@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zgo/ui/chat/chat_page.dart';
+import 'package:zgo/ui/chat/timeline.dart';
 
 void main() {
   Map<String, dynamic> tool(String name, {String status = 'completed'}) => {
