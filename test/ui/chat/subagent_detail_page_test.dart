@@ -21,6 +21,7 @@ class _FakeSubagentGateway extends FakeDeviceSession {
     required this.rows,
     this.totalCount,
     this.rangeResult,
+    this.config,
   }) : super(deviceId: 'd1', params: _params);
 
   static final _params = RemoteConnectionParams.parse(
@@ -30,6 +31,9 @@ class _FakeSubagentGateway extends FakeDeviceSession {
   final List<Map<String, dynamic>> rows;
   final int? totalCount;
   final Map<String, dynamic>? rangeResult;
+
+  /// Session config merged into the child snapshot (model-subtitle tests).
+  final Map<String, dynamic>? config;
 
   /// When set, `rowsRange` answers park here — the in-flight-drop test
   /// holds the call open across the page teardown.
@@ -75,6 +79,7 @@ class _FakeSubagentGateway extends FakeDeviceSession {
             if (rows.isNotEmpty)
               'firstRowId': (rows.first['rowId'] as num?)?.toInt(),
           },
+          if (config != null) 'config': config,
         },
       },
     }, onGap: () => fail('unexpected gap'));
@@ -165,6 +170,21 @@ void _appendRow(_FakeSubagentGateway gateway, Map<String, dynamic> row) {
   }, onGap: () => fail('unexpected gap'));
 }
 
+/// Upserts rows onto the child state (terminal-frame shape, same op the
+/// desktop sends when a turn finishes).
+void _upsertRows(_FakeSubagentGateway gateway, List<Map<String, dynamic>> rows) {
+  final state = gateway.lastState!;
+  state.applyFrame({
+    'toSeq': state.seq + 1,
+    'payload': {
+      'kind': 'deltas',
+      'deltas': [
+        for (final row in rows) {'op': 'row.upserted', 'row': row},
+      ],
+    },
+  }, onGap: () => fail('unexpected gap'));
+}
+
 /// The jump-to-bottom button stays mounted (cross-fade); its visibility is
 /// the animated opacity.
 double jumpButtonOpacity(WidgetTester tester) {
@@ -223,11 +243,135 @@ void main() {
     expect(find.textContaining('+b'), findsWidgets);
     // read-only boundary: no composer anywhere on the page
     expect(find.byType(TextField), findsNothing);
+    // read-only boundary (D2): the shared renderer's send-shaped
+    // affordances stay hidden — feedback row and the file-changes undo.
+    expect(find.byIcon(Icons.thumb_up_alt_outlined), findsNothing);
+    expect(find.text('撤销'), findsNothing);
   });
 
-  testWidgets('load older triggers rowsRange on the child session', (
+  testWidgets('model subtitle renders under the title once the child '
+      'snapshot carries config (official provider: bare id)', (tester) async {
+    final gateway = _FakeSubagentGateway(
+      rows: _childRows,
+      config: const {
+        'provider': 'account:zai-individual-coding-plan',
+        'model': 'GLM-5.3-Flash',
+      },
+    );
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('实现加固'), findsOneWidget);
+    expect(find.text('GLM-5.3-Flash'), findsOneWidget); // the subtitle line
+  });
+
+  testWidgets('model subtitle stays hidden while not ready and without '
+      'config; third-party provider prefixes (D4)', (tester) async {
+    // Stalled subscribe: spinner state — the subtitle must not appear even
+    // though config WILL land, then appear once the snapshot does.
+    final gateway = _FakeSubagentGateway(
+      rows: _childRows,
+      config: const {'provider': 'openrouter', 'model': 'gpt-5.2'},
+    );
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    gateway.holdSubscribe = Completer<void>();
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.text('openrouter/gpt-5.2'), findsNothing); // not ready yet
+
+    gateway.holdSubscribe!.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    // Third-party provider → prefixed label (user rule: 官方不带，非官方带).
+    expect(find.text('openrouter/gpt-5.2'), findsOneWidget);
+
+    // And a config-less snapshot renders no subtitle at all.
+    final bare = _FakeSubagentGateway(rows: _childRows);
+    addTearDown(() => bare.dispose());
+    final bareFeed = SubagentFeed(gateway: bare);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: bare,
+          feed: bareFeed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('实现加固'), findsOneWidget);
+    expect(find.text('openrouter/gpt-5.2'), findsNothing);
+  });
+
+  testWidgets('spawn-time modelChange marker is dropped from the transcript '
+      'and feeds the subtitle when config is absent (acceptance fix)', (
     tester,
   ) async {
+    final gateway = _FakeSubagentGateway(
+      rows: const [
+        {
+          'rowId': 1,
+          'kind': 'timelineMarker',
+          'marker': {
+            'type': 'modelChange',
+            'fromModel': 'glm-5.2',
+            'toModel': 'glm-5.2-air',
+          },
+        },
+        {'rowId': 2, 'kind': 'userInput', 'text': '调研 Flutter 国内镜像可用性'},
+        {'rowId': 3, 'kind': 'assistantText', 'text': '已完成'},
+      ],
+    );
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // The marker never renders — the model display is the subtitle.
+    expect(find.textContaining('模型已切换'), findsNothing);
+    expect(find.text('调研 Flutter 国内镜像可用性'), findsOneWidget);
+    // No config in this snapshot: the subtitle falls back to the marker's
+    // toModel (bare id — no provider to prefix).
+    expect(find.text('glm-5.2-air'), findsOneWidget);
+  });
+
+  testWidgets('open auto-fill: a truncated window pulls one older page '
+      'without a tap (chat-page parity), exactly once', (tester) async {
     final gateway = _FakeSubagentGateway(
       rows: _childRows,
       totalCount: _childRows.length + 40, // older rows exist past the window
@@ -257,17 +401,16 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    expect(find.text('加载更早消息'), findsOneWidget);
-    await tester.tap(find.text('加载更早消息'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-
+    // The auto-fill fetched with the oldest held row as cursor…
     expect(gateway.ranges, [('sess_child_1', 1, 60)]);
+    // …the page landed without any interaction…
     expect(find.text('更早的任务描述'), findsOneWidget);
+    // …and the exhausted gate closed: no button, no further loads.
+    expect(find.text('加载更早消息'), findsNothing);
   });
 
-  testWidgets('an epoch-drifted older page still prepends with the stale '
-      'toast (round 23 generalized)', (tester) async {
+  testWidgets('an epoch-drifted auto-fill page still prepends with the '
+      'stale toast (round 23 generalized)', (tester) async {
     final gateway = _FakeSubagentGateway(
       rows: _childRows,
       totalCount: _childRows.length + 40,
@@ -299,10 +442,6 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    await tester.tap(find.text('加载更早消息'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-
     expect(gateway.ranges, [('sess_child_1', 1, 60)]);
     // The drifted page still lands (rows are immutable log entries)…
     expect(find.text('更早的任务描述'), findsOneWidget);
@@ -310,8 +449,10 @@ void main() {
     expect(find.text('会话数据已刷新，请重试'), findsOneWidget);
   });
 
-  testWidgets('an in-flight older page is dropped silently when the page '
-      'is torn down mid-fetch (state replaced / unmounted)', (tester) async {
+  testWidgets('an in-flight auto-fill page is dropped silently when the '
+      'page is torn down mid-fetch (state replaced / unmounted)', (
+    tester,
+  ) async {
     final gateway = _FakeSubagentGateway(
       rows: _childRows,
       totalCount: _childRows.length + 40,
@@ -328,6 +469,8 @@ void main() {
     );
     addTearDown(() => gateway.dispose());
     final feed = SubagentFeed(gateway: gateway);
+    // Hold the fetch BEFORE opening — the auto-fill is the in-flight fetch.
+    gateway.holdRange = Completer<dynamic>();
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
@@ -340,14 +483,11 @@ void main() {
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
-
-    // Hold the fetch open, then tear the page down (the resubscribe world:
-    // the handle — and its state — belong to nobody anymore).
-    gateway.holdRange = Completer<dynamic>();
-    await tester.tap(find.text('加载更早消息'));
-    await tester.pump();
     final stateA = gateway.lastState!;
     final rowsBefore = stateA.rows.length;
+
+    // Tear the page down (the resubscribe world: the handle — and its
+    // state — belong to nobody anymore), then let the fetch land.
     await tester.pumpWidget(wrap(const SizedBox.shrink()));
     gateway.holdRange!.complete({
       'hasMore': false,
@@ -408,6 +548,73 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(gateway.cancelled, [('s1', 'agent_1')]);
+  });
+
+  testWidgets('stop button flips live with the child session turnHeader '
+      'instead of the entry snapshot (design D3)', (tester) async {
+    final gateway = _FakeSubagentGateway(rows: const [
+      {'rowId': 1, 'kind': 'userInput', 'text': '调研 Flutter 国内镜像可用性'},
+      {'rowId': 2, 'kind': 'turnHeader', 'state': 'running'},
+    ]);
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+          parentSessionId: 's1',
+          workId: 'agent_1',
+          running: true,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byTooltip('停止'), findsOneWidget);
+
+    // The child session finishes while the page stays open: the last
+    // turnHeader goes terminal → the button disappears without re-entry
+    // (gap-matrix debt: the entry-time snapshot used to pin it).
+    _upsertRows(gateway, const [
+      {
+        'rowId': 2,
+        'kind': 'turnHeader',
+        'state': 'completedSuccess',
+        'activeMs': 42000,
+      },
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byTooltip('停止'), findsNothing);
+  });
+
+  testWidgets('a ready child session overrides a stale not-running entry '
+      'snapshot for the stop button (derivation is live both ways)', (
+    tester,
+  ) async {
+    final gateway = _FakeSubagentGateway(rows: const [
+      {'rowId': 1, 'kind': 'userInput', 'text': '调研 Flutter 国内镜像可用性'},
+      {'rowId': 2, 'kind': 'turnHeader', 'state': 'running'},
+    ]);
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+          running: false, // stale entry view (e.g. opened from history)
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byTooltip('停止'), findsOneWidget);
   });
 
   testWidgets('opens pinned to the newest row and follows streamed rows '
@@ -489,14 +696,14 @@ void main() {
     expect(jumpButtonOpacity(tester), 0);
   });
 
-  testWidgets('prepending older history unsticks the pinned state '
-      '(no stale jump-button / follow yank)', (tester) async {
+  testWidgets('a pinned prepend returns the reader to the bottom; a '
+      'reading reader is never yanked by streamed rows', (tester) async {
     // Check-finding regression shape: a tail window that does not fill the
-    // viewport (max = 0, stick = true, load-older visible). Prepending
-    // only grows maxScrollExtent — pixels stays 0, so no scroll
-    // notification fires — the pinned cache must be recomputed, not
-    // trusted: the jump button has to appear, and a streamed row must not
-    // yank the reader (now far from the bottom) down.
+    // viewport (max = 0, stick = true, load-older visible). The open
+    // auto-fill prepends 60 rows while the reader is PINNED (design D2:
+    // 贴底态退化回底) — the reader lands at the new bottom, not stranded at
+    // pixels 0 with a stale pinned cache. Scrolling away then re-arms the
+    // stick cache, and a streamed row must not yank a READING reader down.
     final gateway = _FakeSubagentGateway(
       rows: const [
         {'rowId': 61, 'kind': 'assistantText', 'text': '尾部短输出'},
@@ -529,26 +736,28 @@ void main() {
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
-
-    // Flat list: pinned at the bottom, button hidden.
-    expect(jumpButtonOpacity(tester), 0);
-
-    await tester.tap(find.text('加载更早消息'));
     await tester.pumpAndSettle();
 
+    // Pinned prepend: the follow pass carries the reader to the new bottom.
     final controller =
         tester.widget<ListView>(find.byType(ListView)).controller!;
-    // Viewport unchanged (pixels 0) but now far from the bottom.
-    expect(controller.position.pixels, 0);
+    expect(
+      controller.position.pixels,
+      moreOrLessEquals(controller.position.maxScrollExtent),
+    );
+    // No stale jump button at the bottom.
+    expect(jumpButtonOpacity(tester), 0);
+
+    // The reader scrolls away: stick re-arms and a streamed row must NOT
+    // yank them (now genuinely far from the bottom) down.
+    await tester.drag(find.byType(ListView), const Offset(0, 240));
+    await tester.pump(const Duration(milliseconds: 300));
     expect(
       controller.position.pixels,
       lessThan(controller.position.maxScrollExtent - 40),
     );
-    // Recomputed stick: the jump button fades in despite no scroll event.
     expect(jumpButtonOpacity(tester), 1);
 
-    // A streamed row must not follow: the stale "pinned" state would have
-    // yanked the reader from the top of the history to the bottom.
     _appendRow(gateway, {
       'rowId': 63,
       'kind': 'assistantText',
@@ -556,7 +765,121 @@ void main() {
     });
     await tester.pump();
     await tester.pumpAndSettle();
-    expect(controller.position.pixels, 0);
+    expect(
+      controller.position.pixels,
+      lessThan(controller.position.maxScrollExtent - 40),
+    );
+  });
+
+  testWidgets('dragging into the top window prefetches the next page '
+      '(chat-page threshold, no tap)', (tester) async {
+    final gateway = _FakeSubagentGateway(
+      rows: [
+        for (var i = 1; i <= 12; i++)
+          {'rowId': i, 'kind': 'assistantText', 'text': '第 $i 段输出' * 20},
+      ],
+      totalCount: 100, // older pages keep existing past the first fetch
+      rangeResult: const {
+        'hasMore': true,
+        'atLogEpoch': 'e1',
+        'rows': {
+          'window': [
+            {'rowId': 0, 'kind': 'assistantText', 'text': '更早一段输出'},
+          ],
+          'firstRowId': 0,
+        },
+      },
+    );
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // The open auto-fill consumed exactly one page.
+    expect(gateway.ranges.length, 1);
+
+    // A drag toward the top enters max(64, 2×viewport) of the top with the
+    // finger still down: the prefetch fires from the drag frames, and the
+    // drag-held page lands on ScrollEnd (no tap anywhere).
+    await tester.drag(find.byType(ListView), const Offset(0, 4000));
+    await tester.pumpAndSettle();
+
+    expect(gateway.ranges.length, 2);
+    expect(find.textContaining('更早一段输出'), findsOneWidget);
+  });
+
+  testWidgets('a horizontal sibling scroll (expanded diff card) never '
+      'drives the history loader (identity routing)', (tester) async {
+    final gateway = _FakeSubagentGateway(
+      rows: [
+        const {'rowId': 1, 'kind': 'userInput', 'text': '调研 Flutter 国内镜像可用性'},
+        {
+          'rowId': 2,
+          'kind': 'toolCall',
+          'toolName': 'Edit',
+          'status': 'success',
+          'input': {
+            'filePath': 'lib/a.dart',
+            'old_string': '旧内容 ${'x' * 200}',
+            'new_string': '新内容 ${'y' * 200}',
+          },
+          'inputText': '{"filePath": "lib/a.dart"}',
+        },
+      ],
+      totalCount: 10,
+      rangeResult: const {
+        'hasMore': true,
+        'atLogEpoch': 'e1',
+        'rows': {
+          'window': [
+            {'rowId': 0, 'kind': 'userInput', 'text': '更早的任务描述'},
+          ],
+          'firstRowId': 0,
+        },
+      },
+    );
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(gateway.ranges.length, 1); // auto-fill only
+
+    // Expand the diff card, then drag its horizontal viewport (a real
+    // bubbling ScrollUpdate from a NON-list position — exactly what the
+    // shared renderer's diff/code cards emit).
+    await tester.tap(find.textContaining('已写入'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    final horizontal = find.byWidgetPredicate(
+      (w) => w is SingleChildScrollView && w.scrollDirection == Axis.horizontal,
+    );
+    expect(horizontal, findsOneWidget);
+    await tester.drag(horizontal, const Offset(-300, 0));
+    await tester.pumpAndSettle();
+
+    // The notification bubbled, but the identity guard routed it out: no
+    // second fetch.
+    expect(gateway.ranges.length, 1);
   });
 
   testWidgets('joins the shared pool instead of opening a second '

@@ -4201,6 +4201,7 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
                           workId: '${agent['agentId'] ?? agent['workId'] ?? ''}',
                           parentSessionId: _sessionId,
                           running: true,
+                          confirmWindow: widget.confirmWindow,
                         ),
               ),
               const SizedBox(width: 8),
@@ -4250,6 +4251,7 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
                 subagentType: row['subagentType'] as String?,
                 workId: row['workId'] as String?,
                 parentSessionId: _sessionId,
+                confirmWindow: widget.confirmWindow,
               ),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 9),
@@ -4808,17 +4810,20 @@ class _PendingFilesBar extends StatelessWidget {
 
 /// One pending-interaction card — the shared builder for BOTH surfaces
 /// (bottom strip and anchored-in-stream, D9) so resolve/snooze wiring stays
-/// single-sourced.
+/// single-sourced. [readOnly] (design D2, subagent detail page) keeps the
+/// question + options display while hiding every answering affordance.
 Widget _interactionCardFor({
   required ConversationState state,
   required ChatGateway gateway,
   required Map<String, dynamic> interaction,
+  bool readOnly = false,
 }) {
   final sessionId = state.snapshot?['sessionId'] as String? ?? '';
   if ((interaction['payload'] as Map?)?['kind'] == 'workspaceHookReview') {
     final payload = interaction['payload'];
     return _HookReviewCard(
       interaction: interaction,
+      readOnly: readOnly,
       onTrust: (reviewItemIds) => gateway.conversationCommands
           .respondWorkspaceHookReview(
             sessionId,
@@ -4831,6 +4836,7 @@ Widget _interactionCardFor({
   }
   return _InteractionCard(
     interaction: interaction,
+    readOnly: readOnly,
     onResolve: ({optionId, freeText, action, content}) =>
         gateway.conversationCommands.resolveInteraction(
           sessionId,
@@ -4897,10 +4903,17 @@ class _InteractionCard extends StatefulWidget {
   /// desktop setting「提问自动继续」).
   final Future<void> Function()? onSnooze;
 
+  /// Read-only boundary (design D2): question + options stay visible as
+  /// plain display (option affordances greyed out); the answering inputs
+  /// (free-text row, questions' custom answers + submit) and snooze hide —
+  /// child-session questions are answered via the parent conversation.
+  final bool readOnly;
+
   const _InteractionCard({
     required this.interaction,
     required this.onResolve,
     this.onSnooze,
+    this.readOnly = false,
   });
 
   @override
@@ -5023,7 +5036,8 @@ class _InteractionCardState extends State<_InteractionCard> {
                         ),
                         minimumSize: Size.zero,
                       ),
-                      onPressed: _busy
+                      // Read-only (D2): options stay on display, greyed out.
+                      onPressed: widget.readOnly || _busy
                           ? null
                           : () => _resolve(optionId: '${option['optionId']}'),
                       child: Text(
@@ -5038,10 +5052,11 @@ class _InteractionCardState extends State<_InteractionCard> {
               questions: questions.cast<Map>(),
               busy: _busy,
               sensitive: sensitive,
+              readOnly: widget.readOnly,
               onResolve: (content) =>
                   _resolve(content: content, action: 'accept'),
             ),
-          if (freeText && !hasQuestions)
+          if (freeText && !hasQuestions && !widget.readOnly)
             Row(
               children: [
                 Expanded(
@@ -5065,7 +5080,7 @@ class _InteractionCardState extends State<_InteractionCard> {
                 ),
               ],
             ),
-          if (widget.onSnooze != null)
+          if (widget.onSnooze != null && !widget.readOnly)
             Align(
               alignment: Alignment.centerLeft,
               child: Padding(
@@ -5143,7 +5158,16 @@ class _HookReviewCard extends StatefulWidget {
   final Map<String, dynamic> interaction;
   final Future<dynamic> Function(List<String> reviewItemIds) onTrust;
 
-  const _HookReviewCard({required this.interaction, required this.onTrust});
+  /// Read-only boundary (design D2, step-3 supplement): hides the trust
+  /// action on the subagent detail page — respondWorkspaceHookReview is a
+  /// write command against the child session.
+  final bool readOnly;
+
+  const _HookReviewCard({
+    required this.interaction,
+    required this.onTrust,
+    this.readOnly = false,
+  });
 
   @override
   State<_HookReviewCard> createState() => _HookReviewCardState();
@@ -5232,25 +5256,29 @@ class _HookReviewCardState extends State<_HookReviewCard> {
               item: item,
               checked: _checked.contains('${item['reviewItemId']}'),
               busy: _busy,
-              onChecked: (on) => setState(() {
-                on == true
-                    ? _checked.add('${item['reviewItemId']}')
-                    : _checked.remove('${item['reviewItemId']}');
-              }),
+              onChecked: widget.readOnly
+                  ? null
+                  : (on) => setState(() {
+                        on == true
+                            ? _checked.add('${item['reviewItemId']}')
+                            : _checked.remove('${item['reviewItemId']}');
+                      }),
             ),
-          Align(
-            alignment: Alignment.centerRight,
-            child: Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: FilledButton(
-                style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
+          // Read-only: display-only card — no trust button (D2).
+          if (!widget.readOnly)
+            Align(
+              alignment: Alignment.centerRight,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: FilledButton(
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    minimumSize: Size.zero,
                   ),
-                  minimumSize: Size.zero,
-                ),
-                onPressed: _busy || _checked.isEmpty ? null : _trust,
+                  onPressed: _busy || _checked.isEmpty ? null : _trust,
                 child: Text(
                   tr(context, 'chat.hook.trustChecked'),
                   style: ZType.sub,
@@ -5270,13 +5298,16 @@ class _HookReviewItem extends StatelessWidget {
   final Map item;
   final bool checked;
   final bool busy;
-  final ValueChanged<bool?> onChecked;
+
+  /// Null on the read-only subagent detail page — the checkbox shows its
+  /// state but cannot be toggled (D2).
+  final ValueChanged<bool?>? onChecked;
 
   const _HookReviewItem({
     required this.item,
     required this.checked,
     required this.busy,
-    required this.onChecked,
+    this.onChecked,
   });
 
   @override
@@ -5375,6 +5406,10 @@ class _QuestionsView extends StatefulWidget {
 
   /// Payload-level `sensitive` (D8) — masks every question's custom input.
   final bool sensitive;
+
+  /// Read-only boundary (design D2): option chips stay visible greyed out;
+  /// the custom-answer chip/input and the submit button hide.
+  final bool readOnly;
   final void Function(Map<String, dynamic> content) onResolve;
 
   const _QuestionsView({
@@ -5382,6 +5417,7 @@ class _QuestionsView extends StatefulWidget {
     required this.busy,
     required this.sensitive,
     required this.onResolve,
+    this.readOnly = false,
   });
 
   @override
@@ -5489,6 +5525,7 @@ class _QuestionsViewState extends State<_QuestionsView> {
             question: widget.questions[i],
             busy: widget.busy,
             sensitive: widget.sensitive,
+            readOnly: widget.readOnly,
             selected: _answers.selections[i] ?? const [],
             customOpen: _answers.customOpen.contains(i),
             customController: _customControllers[i]!,
@@ -5498,7 +5535,10 @@ class _QuestionsViewState extends State<_QuestionsView> {
             onToggleCustom: () => _toggleCustom(i, widget.questions[i]),
             onCustomChanged: (text) => _answers = _answers.setCustom(i, text),
           ),
-        Align(
+        // Read-only (D2): no answering → no submit row (the answered
+        // counter inside it can never light up either).
+        if (!widget.readOnly)
+          Align(
           alignment: Alignment.centerRight,
           child: Padding(
             padding: const EdgeInsets.only(top: 4),
@@ -5574,6 +5614,10 @@ class _QuestionItem extends StatelessWidget {
 
   /// Payload-level `sensitive` (D8) — password-mode custom input.
   final bool sensitive;
+
+  /// Read-only boundary (design D2): option chips grey out; the custom
+  /// -answer chip and its input never render.
+  final bool readOnly;
   final List<String> selected;
   final bool customOpen;
   final TextEditingController customController;
@@ -5592,6 +5636,7 @@ class _QuestionItem extends StatelessWidget {
     required this.question,
     required this.busy,
     required this.sensitive,
+    required this.readOnly,
     required this.selected,
     required this.customOpen,
     required this.customController,
@@ -5638,23 +5683,28 @@ class _QuestionItem extends StatelessWidget {
                           style: ZType.sub,
                         ),
                         selected: selected.contains('${o['value']}'),
-                        onSelected: busy
+                        // Read-only (D2): the option stays on display,
+                        // greyed out.
+                        onSelected: busy || readOnly
                             ? null
                             : (on) => onToggleOption('${o['value']}'),
                       ),
-                  FilterChip(
-                    avatar: const Icon(Icons.edit, size: 13),
-                    label: Text(
-                      tr(context, 'chat.interact.customAnswer'),
-                      style: ZType.sub,
+                  // Read-only (D2): the custom answer opens an input — an
+                  // answering affordance, hidden.
+                  if (!readOnly)
+                    FilterChip(
+                      avatar: const Icon(Icons.edit, size: 13),
+                      label: Text(
+                        tr(context, 'chat.interact.customAnswer'),
+                        style: ZType.sub,
+                      ),
+                      selected: customOpen,
+                      onSelected: busy ? null : (on) => onToggleCustom(),
                     ),
-                    selected: customOpen,
-                    onSelected: busy ? null : (on) => onToggleCustom(),
-                  ),
                 ],
               ),
             ),
-            if (customOpen)
+            if (customOpen && !readOnly)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
                 child: TextField(
