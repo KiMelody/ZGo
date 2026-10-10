@@ -8,6 +8,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -723,6 +724,22 @@ List<List<Map<String, dynamic>>> groupChatRows(List<Map<String, dynamic>> rows) 
   return groups;
 }
 
+/// Child-session (subagent) row view (acceptance fix): drops the
+/// spawn-time `modelChange` timeline marker the desktop logs when the
+/// subagent's configured model differs from the parent's. The child views
+/// surface the model themselves (the detail page's AppBar subtitle /
+/// [chatModelLabel]'s marker fallback), so the marker at the top of the
+/// transcript reads as the model display instead of the transcript.
+List<Map<String, dynamic>> childSessionRows(
+  Iterable<Map<String, dynamic>> rows,
+) {
+  return rows.where((row) {
+    if (row['kind'] != 'timelineMarker') return true;
+    final marker = row['marker'];
+    return marker is! Map || marker['type'] != 'modelChange';
+  }).toList();
+}
+
 /// The row's display timestamp: the first positive numeric among the
 /// usual alias keys (`createdAt`/`sentAt`/`at`). Moved verbatim from
 /// `_ChatPageState` — the assistant feedback row and the page's time
@@ -734,6 +751,40 @@ int? rowTimestamp(Map<String, dynamic>? row) {
     if (v is num && v > 0) return v.toInt();
   }
   return null;
+}
+
+/// Model label for the subagent detail page's AppBar subtitle (design D4):
+/// the official web's provider display rule (`JMe` semantics) — a bare
+/// model id for the default/official provider, `provider/model` for
+/// third-party providers. Empty when the snapshot carries no model.
+///
+/// Official providers: empty, `glm`, and the coding-plan account ids
+/// `account:(zai|bigmodel)-*` (the repo's [parsePlanAccess] family rule,
+/// live-probed session config carries e.g. `account:zai-individual-coding-
+/// plan`) — everything else is a custom provider and prefixes the id.
+String chatModelLabel(ConversationState state) {
+  var model = state.currentModel;
+  if (model.isEmpty) {
+    // Child-session snapshots may land without config; the transcript's
+    // newest `modelChange` marker still carries the model in force — the
+    // desktop logs it at spawn time even when the snapshot is bare.
+    for (final row in state.rows.reversed) {
+      if (row['kind'] != 'timelineMarker') continue;
+      final marker = row['marker'];
+      if (marker is Map && '${marker['type'] ?? ''}' == 'modelChange') {
+        model = '${marker['toModel'] ?? ''}';
+        break;
+      }
+    }
+  }
+  if (model.isEmpty) return '';
+  final provider = '${state.config?['provider'] ?? ''}'.trim();
+  final official = provider.isEmpty ||
+      provider == 'glm' ||
+      RegExp(r'^account:(zai|bigmodel)-').hasMatch(provider);
+  if (official) return model;
+  if (model.startsWith('$provider/')) return model;
+  return '$provider/$model';
 }
 
 class ChatTurnGroup extends StatefulWidget {
@@ -774,6 +825,13 @@ class ChatTurnGroup extends StatefulWidget {
   /// it; the capsule then never renders.
   final GitWorkspaceController? gitController;
 
+  /// Read-only boundary (design D2): true on the subagent detail page.
+  /// Hides every send-shaped affordance the turn renders — the feedback
+  /// row (copy/like/dislike/fork/hooks), the user bubble's edit-resend
+  /// plumbing and the file-changes 撤销 button. Pure browsing (tool
+  /// drill-in, previews, diff/collapse) stays.
+  final bool readOnly;
+
   const ChatTurnGroup({
     super.key,
     required this.rows,
@@ -789,6 +847,7 @@ class ChatTurnGroup extends StatefulWidget {
     this.onEditSend,
     this.theme,
     this.gitController,
+    this.readOnly = false,
   });
 
   @override
@@ -930,6 +989,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
           onEditSend: widget.onEditSend,
           workspaceLabel: workspaceLabel,
           theme: widget.theme,
+          readOnly: widget.readOnly,
         ),
       );
     }
@@ -975,6 +1035,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
             turnFeedbackLocked: _feedbackLocked,
             workspaceLabel: workspaceLabel,
             theme: widget.theme,
+            readOnly: widget.readOnly,
           ),
         );
       } else if (p.kind == 'rowGroup') {
@@ -992,6 +1053,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
             feed: widget.feed,
             workspaceLabel: workspaceLabel,
             theme: widget.theme,
+            readOnly: widget.readOnly,
           ),
         );
       } else {
@@ -1007,6 +1069,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
             preview: widget.preview,
             feed: widget.feed,
             theme: widget.theme,
+            readOnly: widget.readOnly,
           ),
         );
       }
@@ -1043,6 +1106,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
           sessionId: sessionId,
           row: header!,
           onAction: onAction,
+          readOnly: widget.readOnly,
         ),
       );
     }
@@ -1092,6 +1156,11 @@ class ChatRow extends StatelessWidget {
   /// Source page's theme controller — rides the fork flow to the new page.
   final ThemeController? theme;
 
+  /// Read-only boundary (design D2): masks [showFeedback] (the whole
+  /// feedback row — copy/like/dislike/fork/hooks — stays unrendered) and
+  /// nulls the user bubble's edit-resend plumbing.
+  final bool readOnly;
+
   const ChatRow({
     super.key,
     required this.row,
@@ -1108,6 +1177,7 @@ class ChatRow extends StatelessWidget {
     this.onEditSend,
     this.workspaceLabel,
     this.theme,
+    this.readOnly = false,
   });
 
   Map<String, dynamic> get _target => {
@@ -1278,9 +1348,11 @@ class ChatRow extends StatelessWidget {
         row: row,
         gateway: gateway,
         sessionId: sessionId,
-        editingRowId: editingRowId,
+        // Read-only boundary (D2): null plumbing keeps the legacy static
+        // bubble (no edit affordance, no inline edit card).
+        editingRowId: readOnly ? null : editingRowId,
         // The page callback carries the target; the bubble passes it on.
-        onEditSend: onEditSend == null
+        onEditSend: readOnly || onEditSend == null
             ? null
             : (newText, rewind) => onEditSend!(_target, newText, rewind),
         rewindRunning: state.isRunning,
@@ -1291,7 +1363,10 @@ class ChatRow extends StatelessWidget {
         sessionId: sessionId,
         state: state,
         preview: preview,
-        showFeedback: showFeedback,
+        // Read-only boundary (D2): the feedback row — copy included — is
+        // not rendered at all, so masking showFeedback (not just the
+        // buttons) is exactly the required shape.
+        showFeedback: showFeedback && !readOnly,
         hookRows: hookRows,
         turnFeedbackLocked: turnFeedbackLocked,
         workspaceLabel: workspaceLabel,
@@ -1323,6 +1398,10 @@ class ChatRow extends StatelessWidget {
     };
     final kind = row['kind'];
     if (kind != 'userInput' && kind != 'assistantText') return widget_;
+    // Read-only boundary (D2): the long-press sheet is all send-shaped
+    // actions (edit-resend/fork/side-ask/rewind/file changes) — suppressed
+    // wholesale on the subagent detail page.
+    if (readOnly) return widget_;
     return GestureDetector(
       onLongPress: () => _showActions(context),
       child: widget_,
@@ -2320,10 +2399,13 @@ class _ToolCallTileState extends State<_ToolCallTile> {
                   // subscription follows the expansion.
                   if (_expanded &&
                       widget.feed != null &&
+                      widget.gateway != null &&
                       (childSessionId ?? '').isNotEmpty)
                     _AgentChildTimeline(
                       feed: widget.feed!,
                       childSessionId: childSessionId!,
+                      gateway: widget.gateway!,
+                      preview: widget.preview,
                     ),
                 ],
               ),
@@ -2477,9 +2559,18 @@ class _AgentChildTimeline extends StatefulWidget {
   final SubagentFeed feed;
   final String childSessionId;
 
+  /// Shared-renderer plumbing (design D6): the inline rows render through
+  /// the main-chat [ChatRow] — same boxes, same tokens — flat (no turn
+  /// grouping; the nested expansion mirrors the child window like the
+  /// official inline childToolCalls).
+  final ChatGateway gateway;
+  final ChatPreview preview;
+
   const _AgentChildTimeline({
     required this.feed,
     required this.childSessionId,
+    required this.gateway,
+    required this.preview,
   });
 
   @override
@@ -2539,9 +2630,14 @@ class _AgentChildTimelineState extends State<_AgentChildTimeline> {
         // pooled state, but the inline timeline stays at the window —
         // official parity (the web's inline childToolCalls shows only
         // the parent-window mirror rows; live-certified 2026-10-08).
-        final window = child.rows.length > 60
-            ? child.rows.skip(child.rows.length - 60)
-            : child.rows;
+        // childSessionRows drops the spawn-time modelChange marker — the
+        // model lives in the detail page's subtitle / label fallback, not
+        // in the transcript.
+        final window = childSessionRows(
+          child.rows.length > 60
+              ? child.rows.skip(child.rows.length - 60)
+              : child.rows,
+        );
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -2566,7 +2662,21 @@ class _AgentChildTimelineState extends State<_AgentChildTimeline> {
                   ],
                 ),
               ),
-            for (final row in window) SubagentTimelineRow(row: row),
+            for (final row in window)
+              ChatRow(
+                row: row,
+                gateway: widget.gateway,
+                sessionId: widget.childSessionId,
+                // Read-only inline rows: everything send-shaped is gated
+                // off inside ChatRow; nothing here dispatches writes.
+                onAction: (label, action) async {
+                  await action();
+                },
+                state: child,
+                preview: widget.preview,
+                feed: widget.feed,
+                readOnly: true,
+              ),
           ],
         );
       },
@@ -2614,7 +2724,7 @@ class _ProgressRow extends StatelessWidget {
 /// phase pill on the right.
 /// Turn header at the TOP of a turn: 「已工作 N 分 N 秒」灰字 +
 /// chevron (toggles the file-changes card), status pill on the right.
-class _TurnHeader extends StatelessWidget {
+class _TurnHeader extends StatefulWidget {
   final Map<String, dynamic> row;
   final bool hasChanges;
   final bool expanded;
@@ -2633,9 +2743,90 @@ class _TurnHeader extends StatelessWidget {
   });
 
   @override
+  State<_TurnHeader> createState() => _TurnHeaderState();
+}
+
+/// Stateful for the running-turn elapsed ticker: the official web keeps the
+/// running duration alive with a local 1s clock (`setInterval`), the wire
+/// only refreshes `activeMs` on upserts — a quiet stretch (thinking / long
+/// tool) would otherwise freeze the readout on all three surfaces.
+class _TurnHeaderState extends State<_TurnHeader> {
+  Timer? _ticker;
+
+  /// Test seam (design D1): assertions inject a controlled clock and drive
+  /// the ticker via `tester.pump` — fast tests see ~0ms of real wall-clock
+  /// delta, so a wall-clock assertion would be flaky by construction.
+  @visibleForTesting
+  DateTime Function() clock = DateTime.now;
+
+  /// Test seam: the arming state the elapsed tests assert on (terminal
+  /// upsert / unmount must both have canceled the ticker).
+  @visibleForTesting
+  bool get tickerArmed => _ticker != null;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncTicker();
+  }
+
+  @override
+  void didUpdateWidget(_TurnHeader oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncTicker();
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  /// Armed only while running WITH a wire `startedAt` (the local recompute's
+  /// base); a terminal upsert disarms via didUpdateWidget, the ListView
+  /// recycling the header disarms via dispose. Ticks rebuild only this
+  /// small header — a screen normally holds exactly one running header.
+  void _syncTicker() {
+    final armed =
+        widget.row['state'] == 'running' && widget.row['startedAt'] is num;
+    if (armed && _ticker == null) {
+      _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    } else if (!armed && _ticker != null) {
+      _ticker!.cancel();
+      _ticker = null;
+    }
+  }
+
+  /// Duration source (design D1, the official RX chain with one deliberate
+  /// deviation): terminal turns keep `activeMs` (endedAt − startedAt
+  /// fallback, official-same). A running turn recomputes locally and takes
+  /// the MAX with the wire value — the official bundle is pure priority,
+  /// but our wire DOES carry activeMs while running (frozen-readout report
+  /// 2026-10-14), so priority alone would refreeze; the max also keeps the
+  /// readout monotonic against device/desktop clock skew. Missing
+  /// startedAt falls back to the wire value (pre-ticker behavior).
+  int? _elapsedMs() {
+    final row = widget.row;
+    final activeMs = (row['activeMs'] as num?)?.toInt();
+    final startedAt = (row['startedAt'] as num?)?.toInt();
+    final endedAt = (row['endedAt'] as num?)?.toInt();
+    if (row['state'] != 'running') {
+      if (activeMs != null) return activeMs;
+      if (endedAt != null && startedAt != null) return endedAt - startedAt;
+      return null;
+    }
+    if (startedAt == null) return activeMs;
+    final live = math.max(0, clock().millisecondsSinceEpoch - startedAt);
+    return math.max(activeMs ?? 0, live);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final row = widget.row;
     final phase = row['state'] as String? ?? '';
-    final duration = _fmtDuration(context, (row['activeMs'] as num?)?.toInt());
+    final duration = _fmtDuration(context, _elapsedMs());
 
     final phaseKey = switch (phase) {
       'running' => 'phase.running',
@@ -2647,7 +2838,7 @@ class _TurnHeader extends StatelessWidget {
     // Terminal pill only after the confirm window held (a blip back to
     // running inside the window must not flash 「已结束」).
     final showPill = phaseKey != null &&
-        (terminalConfirmed || !turnTerminalPhases.contains(phase));
+        (widget.terminalConfirmed || !turnTerminalPhases.contains(phase));
 
     return Padding(
       padding: const EdgeInsets.only(top: 10, bottom: 4),
@@ -2658,18 +2849,18 @@ class _TurnHeader extends StatelessWidget {
               trP(context, 'chat.turn.worked', [duration]),
               style: ZType.caption.copyWith(color: ZInk.faint(context)),
             ),
-          if (hasChanges)
+          if (widget.hasChanges)
             InkWell(
               onTap: () {
                 HapticFeedback.lightImpact();
-                onToggle();
+                widget.onToggle();
               },
               child: SizedBox(
                 width: zTouchWidth,
                 height: zTouchHeight,
                 child: Center(
                   child: Icon(
-                    expanded
+                    widget.expanded
                         ? Icons.keyboard_arrow_up
                         : Icons.keyboard_arrow_down,
                     size: 16,
@@ -2701,12 +2892,18 @@ class _FileChangesBar extends StatelessWidget {
   final Map<String, dynamic> row;
   final Future<void> Function(String, Future<dynamic> Function()) onAction;
 
+  /// Read-only boundary (design D2): hides the 撤销 button — a write
+  /// command against the session; the bar itself (file count / ± counters)
+  /// stays.
+  final bool readOnly;
+
   const _FileChangesBar({
     required this.changes,
     required this.gateway,
     required this.sessionId,
     required this.row,
     required this.onAction,
+    this.readOnly = false,
   });
 
   @override
@@ -2744,13 +2941,14 @@ class _FileChangesBar extends StatelessWidget {
               ),
             ),
           ),
-          TextButton(
-            onPressed: () => _rewindWithPreview(context),
-            child: Text(
-              tr(context, 'chat.files.undo'),
-              style: ZType.sub,
+          if (!readOnly)
+            TextButton(
+              onPressed: () => _rewindWithPreview(context),
+              child: Text(
+                tr(context, 'chat.files.undo'),
+                style: ZType.sub,
+              ),
             ),
-          ),
         ],
       ),
     );
@@ -3072,7 +3270,10 @@ class _SubagentTile extends StatelessWidget {
 /// Opens the read-only subagent child-session detail page (works bar row,
 /// subagent stream tile, goal panel running tile). [feed] is the chat
 /// page's shared child-subscription pool — the page joins it instead of
-/// opening a private subscription.
+/// opening a private subscription. [confirmWindow] rides along where the
+/// caller knows the chat page's terminal-footer window; callers that don't
+/// (the drill-in points inside this module) omit it and the detail page
+/// falls back to the chat default.
 void openSubagentDetail(
   BuildContext context,
   ChatGateway gateway, {
@@ -3083,6 +3284,7 @@ void openSubagentDetail(
   String? workId,
   String? parentSessionId,
   bool running = false,
+  Duration? confirmWindow,
 }) {
   final sid = childSessionId ?? '';
   if (sid.isEmpty) return;
@@ -3097,6 +3299,7 @@ void openSubagentDetail(
         workId: workId,
         parentSessionId: parentSessionId,
         running: running,
+        confirmWindow: confirmWindow,
       ),
     ),
   );
@@ -3121,6 +3324,9 @@ class ToolGroupCard extends StatefulWidget {
   /// Source page's theme controller — rides the fork flow to the new page.
   final ThemeController? theme;
 
+  /// Read-only boundary (design D2) — forwarded to the expanded rows.
+  final bool readOnly;
+
   const ToolGroupCard({
     super.key,
     required this.rows,
@@ -3132,6 +3338,7 @@ class ToolGroupCard extends StatefulWidget {
     required this.workspaceLabel,
     this.theme,
     this.feed,
+    this.readOnly = false,
   });
 
   @override
@@ -3225,6 +3432,7 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
                       feed: widget.feed,
                       workspaceLabel: widget.workspaceLabel,
                       theme: widget.theme,
+                      readOnly: widget.readOnly,
                     ),
                 ],
               ),

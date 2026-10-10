@@ -400,8 +400,8 @@ class _GitStatusGroupState extends State<GitStatusGroup> {
   }
 
   /// Landscape (short viewport) form: a bare conversation row carrying the
-  /// tool-call row token (`_ToolSummary` family — compact grid, caption
-  /// icon, no card chrome) so it reads as message content, not a panel.
+  /// tool-call row token (compact grid, caption icon, no card chrome) so
+  /// it reads as message content, not a panel.
   /// Collapsed is one line (title + stats + chevron); expanded adds a second
   /// line of quick links (changes review, branch switcher, commit/push) —
   /// each opening its full-height sheet, immune to the keyboard-clamped
