@@ -1015,6 +1015,8 @@ class _ChatPageState extends State<ChatPage> {
     final locale = UiSettingsProvider.of(context)?.locale ?? 'zh-CN';
     try {
       final res = await run();
+      // This verdict is mirrored verbatim (De Morgan) by [_ackOk] — the
+      // delete flow's pop gate. Change one, change the other.
       if (res is Map &&
           res['status'] != null &&
           res['status'] != 'accepted' &&
@@ -2208,7 +2210,7 @@ class _ChatPageState extends State<ChatPage> {
     controller.dispose();
     if (text == null || text.isEmpty || !mounted) return;
     await _run(
-      tr(context, 'tasks.opFailed'),
+      tr(context, 'chat.op.failed.generic'),
       () => widget.gateway.renameTask(sessionId, text),
     );
   }
@@ -2296,7 +2298,7 @@ class _ChatPageState extends State<ChatPage> {
         if (sessionId != null) {
           final target = !_pinned;
           _run(
-            tr(context, 'tasks.opFailed'),
+            tr(context, 'chat.op.failed.generic'),
             () => widget.gateway.setTaskPinned(sessionId, target),
           );
           setState(() => _pinned = target);
@@ -2304,14 +2306,14 @@ class _ChatPageState extends State<ChatPage> {
       case 'archive':
         if (sessionId != null) {
           _run(
-            tr(context, 'tasks.opFailed'),
+            tr(context, 'chat.op.failed.generic'),
             () => widget.gateway.setTaskArchived(sessionId, true),
           );
         }
       case 'unread':
         if (sessionId != null) {
           _run(
-            tr(context, 'tasks.opFailed'),
+            tr(context, 'chat.op.failed.generic'),
             () => widget.gateway.setTaskUnread(sessionId, true),
           );
         }
@@ -2343,9 +2345,16 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  /// Delete confirmation (confirmDialog.taskDelete*): the session
-  /// is removed from the workspace and records cannot be recovered. Pops
-  /// the chat page after success.
+  /// Delete confirmation (tasks.action.delete*): the task is removed
+  /// from the workspace and records cannot be recovered. Routing mirrors the
+  /// task list's C1/D4 delete (task_list_page `_deleteTaskDialog`): the
+  /// registry write goes through [ChatGateway.deleteTask] — deleteSession
+  /// never touches tasks-index, a "deleted" row would resurrect through the
+  /// relay overview / bootstrap / reseed paths — and a registry-external
+  /// draft row (resolve misses, isTaskResolveFailure) falls back ONCE to the
+  /// V4 `deleteSession` command. The page pops only on a real delete
+  /// ([_ackOk] mirrors `_run`'s failure verdict); the failure toast is
+  /// already `_run`'s, so a failed RPC stays on the chat page.
   Future<void> _deleteSession(String sessionId) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -2373,12 +2382,38 @@ class _ChatPageState extends State<ChatPage> {
       ),
     );
     if (confirmed != true || !mounted) return;
+    var deleted = false;
     await _run(
-      tr(context, 'tasks.opFailed'),
-      () => widget.gateway.conversationCommands.deleteSession(sessionId),
+      tr(context, 'chat.op.failed.generic'),
+      // Returns the winning ack so `_run`'s verdict branch sees it (a
+      // failed ack must toast, not just refuse the pop): [_ackOk] gates
+      // the pop on the same envelope.
+      () async {
+        try {
+          final res = await widget.gateway.deleteTask(sessionId);
+          deleted = _ackOk(res);
+          return res;
+        } catch (e) {
+          if (!isTaskResolveFailure(e)) rethrow;
+          final res =
+              await widget.gateway.conversationCommands.deleteSession(sessionId);
+          deleted = _ackOk(res);
+          return res;
+        }
+      },
     );
-    if (mounted) Navigator.of(context).maybePop();
+    if (deleted && mounted) Navigator.of(context).maybePop();
   }
+
+  /// Mirrors `_run`'s success verdict for one RPC answer: a Map ack whose
+  /// `status` is neither `accepted` nor `noop` is a failure; anything else —
+  /// including answers without an ack envelope (the zcode-task
+  /// `deleteTask` result) — counts as done.
+  static bool _ackOk(dynamic res) =>
+      res is! Map ||
+      res['status'] == null ||
+      res['status'] == 'accepted' ||
+      res['status'] == 'noop';
 
   /// Menu order: pin toggle / rename / archive / unread, then the
   /// copy actions (official 06 order: 复制路径 / 复制任务路径 / 复制日志
@@ -3152,7 +3187,7 @@ class _ChatPageState extends State<ChatPage> {
                 const SizedBox(height: 20),
                 FilledButton.icon(
                   onPressed: () => _run(
-                    tr(context, 'tasks.opFailed'),
+                    tr(context, 'chat.op.failed.generic'),
                     widget.gateway.reconnect,
                   ),
                   icon: const Icon(Icons.refresh, size: 18),

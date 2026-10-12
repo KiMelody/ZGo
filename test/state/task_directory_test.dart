@@ -307,6 +307,25 @@ void main() {
     }
   });
 
+  test('a relay row with a null/missing taskId drops — never a null-assert '
+      'crash', () {
+    // 2026-10-11 group+pick regression guard: '${task['taskId']}' of a
+    // missing/null key interpolates to 'null' (NOT empty), while
+    // SessionEntry.sessionId derives '${null ?? ''}' = ''. The grouping key
+    // must derive exactly like the entry — otherwise the id-less group
+    // reaches the pick, every row fails its sessionId check, and the
+    // null-assert on bestRelayRow's result throws.
+    final dir = TaskDirectory(relayTasks: [
+      {'title': 'no-id', 'workspaceIdentity': 'a', 'updatedAt': 300},
+      {'taskId': null, 'title': 'null-id', 'workspaceIdentity': 'b',
+          'updatedAt': 300},
+      _relayTask('t1', 'real', updatedAt: 200),
+    ]);
+    final row = dir.allEntries().single;
+    expect(row.$1.sessionId, 't1');
+    expect(row.$2, 'real');
+  });
+
   test('with duplicate relay rows, the live row still wins per task id', () {
     // Live override precedence is unchanged by the row dedup: the
     // live row refreshes the data and attributes by the index's own

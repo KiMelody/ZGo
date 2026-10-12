@@ -185,6 +185,9 @@ const _zh = {
   'chat.creating': '正在创建会话（首次可能需要预热）…',
   'chat.send.failed': '发送失败: \$0',
   'chat.op.failed': '操作失败: \$0',
+  // Non-template sibling for _run's error prefix (the raw error rides
+  // after the colon — a template $0 here would leak literally).
+  'chat.op.failed.generic': '操作失败',
   'chat.compact.failed': '压缩失败',
   'chat.goal.pauseFailed': '暂停目标失败',
   'chat.goal.resumeFailed': '恢复目标失败',
@@ -1386,6 +1389,7 @@ const _en = {
   'chat.creating': 'Creating the session (first run may warm up)…',
   'chat.send.failed': 'Send failed: \$0',
   'chat.op.failed': 'Operation failed: \$0',
+  'chat.op.failed.generic': 'Operation failed',
   'chat.compact.failed': 'Compact failed',
   'chat.goal.pauseFailed': 'Pause goal failed',
   'chat.goal.resumeFailed': 'Resume goal failed',
