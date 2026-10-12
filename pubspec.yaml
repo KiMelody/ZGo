@@ -58,6 +58,13 @@ dependencies:
   home_widget: '>=0.7.0 <0.9.0'
   app_links: '>=6.0.0 <7.0.0'
   clock: '>=1.1.0 <2.0.0'
+  # Plan-page token store. The ohos implementation is the pub.dev
+  # flutter_secure_storage_ohos package (SIG port): its native side listens
+  # on the umbrella's method channel, so app code only ever imports the
+  # umbrella — no platform-split. That package pins the platform interface
+  # to ^1.x, which keeps the umbrella on 9.x (10.x needs ^2.x).
+  flutter_secure_storage: '>=9.2.0 <10.0.0'
+  flutter_secure_storage_ohos: '>=1.0.0 <2.0.0'
 
 dev_dependencies:
   flutter_test:

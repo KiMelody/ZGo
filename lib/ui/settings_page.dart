@@ -6,11 +6,13 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../notifications/keepalive_controller.dart';
+import '../plan/plan_account.dart';
 import '../state/device_store.dart';
 import '../state/quota_watch.dart';
 import '../update/app_channel.dart';
 import '../update/update_service.dart';
 import 'about_page.dart';
+import 'plan_page.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 import 'usage_stats_page.dart';
@@ -26,6 +28,10 @@ class SettingsPage extends StatefulWidget {
   /// Quota-watch controller (Android only): read for the N7 status hint
   /// under the master switch; null on hosts without the feature.
   final QuotaWatchController? quotaWatch;
+
+  /// Plan-account controller (z.ai billing plane); null = the section is
+  /// hidden (hosts / tests that don't wire the feature).
+  final PlanController? plan;
   const SettingsPage({
     super.key,
     required this.store,
@@ -33,6 +39,7 @@ class SettingsPage extends StatefulWidget {
     required this.ui,
     required this.keepalive,
     this.quotaWatch,
+    this.plan,
   });
 
   @override
@@ -140,7 +147,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Scaffold(
       appBar: AppBar(title: Text(tr(context, 'settings.title'))),
       body: AnimatedBuilder(
-        animation: Listenable.merge([theme, ui, widget.quotaWatch]),
+        animation: Listenable.merge([theme, ui, widget.quotaWatch, widget.plan]),
         builder: (context, _) => Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: zContentMaxWidth),
@@ -443,6 +450,18 @@ class _SettingsPageState extends State<SettingsPage> {
                     ],
                   ],
                 ],
+                if (widget.plan != null) ...[
+                  _header(context, tr(context, 'plan.section')),
+                  ListTile(
+                    leading: const Icon(Icons.card_membership_outlined),
+                    title: Text(tr(context, 'plan.section')),
+                    subtitle: Text(_planSubtitle(context)),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.of(context).push(zRoute(
+                      (_) => PlanPage(controller: widget.plan!),
+                    )),
+                  ),
+                ],
                 _header(context, tr(context, 'settings.data')),
                 ListTile(
                   leading: const Icon(Icons.bar_chart_outlined),
@@ -479,6 +498,21 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
       ),
     );
+  }
+
+  /// Entry-row subtitle: signed-out = guide copy; signed-in = the account
+  /// label plus the first bucket's remaining percentage (no data yet →
+  /// the label alone).
+  String _planSubtitle(BuildContext context) {
+    final plan = widget.plan!;
+    if (!plan.signedIn) return tr(context, 'plan.entry.hint');
+    final label = plan.accountLabel ?? tr(context, 'plan.account');
+    final buckets = plan.snapshot.buckets;
+    final first = buckets.isEmpty ? null : buckets.first;
+    final total = first?.total ?? 0;
+    if (first == null || first.remaining == null || total <= 0) return label;
+    final pct = ((first.remaining! / total) * 100).round();
+    return trP(context, 'plan.entry.summary', [label, '$pct']);
   }
 
   /// Status line under the keep-alive switch: the service reports its own
