@@ -22,6 +22,7 @@ import 'ui/devices_page.dart';
 import 'ui/off_peak_page.dart';
 import 'ui/quota_reset_dialog.dart';
 import 'ui/remote_page.dart';
+import 'ui/system_bars.dart';
 import 'ui/task_list_page.dart';
 import 'ui/theme.dart';
 import 'ui/ui_settings.dart';
@@ -136,6 +137,9 @@ class _ZGoAppState extends State<ZGoApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Immersive system bars (task 10-12): cold start in landscape goes
+    // immersive at once; the observer callbacks below re-assert it (R4).
+    _applySystemBars();
     _theme.load();
     final uiLoaded = _ui.load();
     _scheduled.load();
@@ -360,6 +364,22 @@ class _ZGoAppState extends State<ZGoApp>
     _hub.scheduleResume(device);
   }
 
+  /// Rotation → re-assert the orientation-matched system bars (task
+  /// 10-12). The manifest declares `orientation|screenSize` configChanges,
+  /// so the activity survives the rotation and metrics events are the
+  /// rotation signal.
+  @override
+  void didChangeMetrics() {
+    _applySystemBars();
+  }
+
+  /// The one funnel for all three system-bar trigger points — initState,
+  /// rotation and lifecycle resumed (some ROMs reset the bars while
+  /// backgrounded). The apply is idempotent, so re-asserting is free (R4).
+  void _applySystemBars() {
+    applySystemBarsForView();
+  }
+
   /// Quota watch cadence (2026-09-20 真机诊断): doze stalls the RPCs, so
   /// going to the background (paused — home screen, app switch, screen
   /// off) drops to the slow 5-minute cadence, and a resume refreshes at
@@ -368,6 +388,7 @@ class _ZGoAppState extends State<ZGoApp>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _applySystemBars();
       _quotaWatch.foregrounded();
     } else if (state == AppLifecycleState.paused) {
       _quotaWatch.backgrounded();
