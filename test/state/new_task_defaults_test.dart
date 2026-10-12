@@ -107,7 +107,7 @@ void main() {
       expect(config['model'], 'anything');
     });
 
-    test('A4: mode outside prep options ∪ four tiers → dropped', () {
+    test('A4: mode outside prep options ∪ fallback vocabulary → dropped', () {
       final config = sanitizeNewTaskConfig(
         {'mode': 'sudo', 'model': '', 'thought': ''},
         prep(modes: ['build', 'plan'], thoughtCurrent: 'high'),
@@ -115,7 +115,7 @@ void main() {
       expect(config.containsKey('mode'), isFalse);
     });
 
-    test('A4: four-tier vocabulary applies even when prep lacks it', () {
+    test('A4: fallback vocabulary applies even when prep lacks it', () {
       final config = sanitizeNewTaskConfig(
         {'mode': 'yolo', 'model': '', 'thought': ''},
         prep(modes: null, thoughtCurrent: 'high'),
@@ -123,12 +123,28 @@ void main() {
       expect(config['mode'], 'yolo');
     });
 
-    test('A4: prep-listed mode beyond four tiers is accepted', () {
+    test('A4: prep-listed mode beyond the fallback vocabulary is accepted', () {
       final config = sanitizeNewTaskConfig(
         {'mode': 'agent', 'model': '', 'thought': ''},
         prep(modes: ['build', 'agent'], thoughtCurrent: 'high'),
       );
       expect(config['mode'], 'agent');
+    });
+
+    test('A4: guarded (desktop 3.15.1) passes the fallback vocabulary', () {
+      final config = sanitizeNewTaskConfig(
+        {'mode': 'guarded', 'model': '', 'thought': ''},
+        prep(modes: null, thoughtCurrent: 'high'),
+      );
+      expect(config['mode'], 'guarded');
+    });
+
+    test('A4: legacy edit value stays accepted (old-storage compat)', () {
+      final config = sanitizeNewTaskConfig(
+        {'mode': 'edit', 'model': '', 'thought': ''},
+        prep(modes: null, thoughtCurrent: 'high'),
+      );
+      expect(config['mode'], 'edit');
     });
 
     test('A5: invalid thought falls back to prep currentValue', () {
@@ -155,7 +171,7 @@ void main() {
       expect(config['thought'], 'max');
     });
 
-    test('A7: prep null → no model, four-tier mode only, thought=max', () {
+    test('A7: prep null → no model, fallback-vocabulary mode only, thought=max', () {
       final dropped = sanitizeNewTaskConfig(
         {'mode': 'agent', 'model': 'p/m', 'thought': ''},
         null,
