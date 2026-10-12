@@ -38,7 +38,8 @@ Map<String, String> mergeNewTaskConfig(
 /// - model：prep 有模型选项时须 ∈ options，否则丢弃；prep 无模型选项时不校验
 ///   （与用户手选同语义，走 provider 目录兜底路径）；prep 为 null（无人值守
 ///   定时发送且 prepareWorkspace 失败）时不带，防失效默认打挂创建（PRD A7）。
-/// - mode：∈ prep mode 选项 ∪ {build,edit,plan,yolo} 四档兜底词表，否则丢弃。
+/// - mode：∈ prep mode 选项 ∪ {build,edit,guarded,plan,yolo} 五档兜底词表
+///   （guarded=桌面 3.15.1「自主模式」，edit=历史存储值，引擎层仍合法），否则丢弃。
 /// - thought：恒含合法值（见 [effectiveNewTaskThought]）——缺 thought 会让
 ///   冷启动的 createSession 直接失败。
 Map<String, dynamic> sanitizeNewTaskConfig(
@@ -64,7 +65,7 @@ Map<String, dynamic> sanitizeNewTaskConfig(
 
   final mode = merged['mode'] ?? '';
   final modeOption = prep?.option('mode');
-  const fallbackModes = {'build', 'edit', 'plan', 'yolo'};
+  const fallbackModes = {'build', 'edit', 'guarded', 'plan', 'yolo'};
   final modeAllowed = mode.isNotEmpty &&
       (fallbackModes.contains(mode) ||
           (modeOption?.options.any((v) => v.value == mode) ?? false));
