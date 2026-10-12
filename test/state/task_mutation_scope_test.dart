@@ -102,4 +102,69 @@ void main() {
       'pinned': true,
     });
   });
+
+  test('multi-home twins → the newer-updatedAt row wins, BOTH frame orders '
+      '(scope pick = TaskDirectory.byId, never frame order)', () async {
+    final older = {
+      'taskId': 't-dual',
+      'workspacePath': '/repo/old',
+      'workspaceIdentity': 'old-id',
+      'updatedAt': 100,
+    };
+    final newer = {
+      'taskId': 't-dual',
+      'workspacePath': '/repo/new',
+      'workspaceIdentity': 'new-id',
+      'updatedAt': 200,
+    };
+    for (final frame in [
+      [older, newer],
+      [newer, older],
+    ]) {
+      final session = sessionWith(frame);
+      await session.taskCommands.delete('t-dual');
+      expect(
+        singleMutation(session),
+        {
+          'taskId': 't-dual',
+          'workspacePath': '/repo/new',
+          'workspaceIdentity': 'new-id',
+        },
+        reason: 'frame order ${frame[0]['workspacePath']} first',
+      );
+    }
+  });
+
+  test('multi-home twins with equal updatedAt → lexicographically smaller '
+      'workspace key wins, BOTH frame orders', () async {
+    final keyB = {
+      'taskId': 't-dual',
+      'workspacePath': '/repo/b',
+      'workspaceIdentity': 'b-id',
+      'updatedAt': 100,
+    };
+    final keyA = {
+      'taskId': 't-dual',
+      'workspacePath': '/repo/a',
+      'workspaceIdentity': 'a-id',
+      'updatedAt': 100,
+    };
+    for (final frame in [
+      [keyB, keyA],
+      [keyA, keyB],
+    ]) {
+      final session = sessionWith(frame);
+      await session.taskCommands.rename('t-dual', 'x');
+      expect(
+        singleMutation(session),
+        {
+          'taskId': 't-dual',
+          'workspacePath': '/repo/a',
+          'workspaceIdentity': 'a-id',
+          'title': 'x',
+        },
+        reason: 'frame order ${frame[0]['workspacePath']} first',
+      );
+    }
+  });
 }

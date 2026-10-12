@@ -96,21 +96,32 @@ class TaskDirectory {
       _merge() {
     final byId = <String, (SessionEntry, String?, bool)>{};
     final sessionOnlyIds = <String>{};
+    // Relay phase, group + pick: duplicate rows (desktop mirror copies)
+    // collect per id first, then [bestRelayRow] resolves each group — the
+    // SAME pure pick the mutation scope reads
+    // (DeviceSession._taskMutationScope), so the row a user sees IS the
+    // row a delete addresses. Grouping key mirrors
+    // [SessionEntry.fromRelayTask] ('${task['taskId'] ?? ''}' — same
+    // derivation as the entry's sessionId, so a null/missing taskId is ''
+    // and drops here instead of grouping under the literal string 'null'
+    // and dead-ending the pick's null-assert), and the tombstone /
+    // empty-id filters keep their original order ahead of it.
+    final grouped = <String, List<Map<String, dynamic>>>{};
     for (final task in relayTasks) {
-      final entry = SessionEntry.fromRelayTask(task);
-      if (entry.sessionId.isEmpty) continue;
+      final id = '${task['taskId'] ?? ''}';
+      if (id.isEmpty) continue;
       // Locally-confirmed delete: drop the relay row too — the overview
       // in memory may be stale (see [locallyDeletedTaskIds]).
-      if (locallyDeletedTaskIds.contains(entry.sessionId)) continue;
-      final key = relayKeyOf(task);
-      final existing = byId[entry.sessionId];
-      // Duplicate relay rows (desktop copies) resolve deterministically
-      // — see [_relayRowBeats]; frame order must never decide the group.
-      if (existing != null &&
-          !_relayRowBeats(entry, key, existing.$1, existing.$2)) {
-        continue;
-      }
-      byId[entry.sessionId] = (entry, key, task['archived'] == true);
+      if (locallyDeletedTaskIds.contains(id)) continue;
+      (grouped[id] ??= []).add(task);
+    }
+    for (final MapEntry(key: id, value: rows) in grouped.entries) {
+      final task = bestRelayRow(rows, id)!;
+      byId[id] = (
+        SessionEntry.fromRelayTask(task),
+        relayKeyOf(task),
+        task['archived'] == true,
+      );
     }
     // Sticky homes (design 10-02): pin the surviving rows to their
     // live-confirmed group. Applied AFTER the pick so [_relayRowBeats]
@@ -241,6 +252,42 @@ class TaskDirectory {
       return candidate.lastActivityAt > incumbent.lastActivityAt;
     }
     return (candidateKey ?? '').compareTo(incumbentKey ?? '') < 0;
+  }
+
+  /// The winning relay row for [taskId] among its duplicates (desktop
+  /// mirror copies, see [_relayRowBeats]) — [byId]'s pick extracted as a
+  /// pure function of the row set so every reader of "the row the user
+  /// sees" gets the same row: greater `updatedAt` wins, a tie falls to the
+  /// lexicographically smaller workspace key ([relayKeyOf]); frame order
+  /// never decides. Consumed by [_merge] and by
+  /// `DeviceSession._taskMutationScope` — the mutation address must be the
+  /// visible row, not the first row in frame order (the desktop resolves
+  /// mutations by the exact taskId+scope triple, so a frame-order pick
+  /// addresses a twin copy while the visible row stays, 2026-10-11).
+  /// Deliberately NO tombstone filtering — that stays on the [_merge]
+  /// consumption side; the scope caller cannot hit a tombstone anyway (a
+  /// task enters that set only after its delete succeeded).
+  static Map<String, dynamic>? bestRelayRow(
+    List<Map<String, dynamic>> relayTasks,
+    String taskId,
+  ) {
+    Map<String, dynamic>? best;
+    SessionEntry? bestEntry;
+    String? bestKey;
+    for (final task in relayTasks) {
+      // Same id derivation as the grouping key / sessionId ('?? ''': a
+      // null/missing taskId never matches a real id).
+      if ('${task['taskId'] ?? ''}' != taskId) continue;
+      final entry = SessionEntry.fromRelayTask(task);
+      if (entry.sessionId.isEmpty) continue;
+      final key = relayKeyOf(task);
+      if (best == null || _relayRowBeats(entry, key, bestEntry!, bestKey)) {
+        best = task;
+        bestEntry = entry;
+        bestKey = key;
+      }
+    }
+    return best;
   }
 
   /// Entries of one workspace, merged; archived rows in or out per

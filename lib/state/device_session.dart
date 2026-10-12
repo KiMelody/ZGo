@@ -1518,8 +1518,11 @@ class DeviceSession extends ChangeNotifier
   /// Mutation 作用域按目标任务的归属工作区组装（桌面 resolveTaskAddress
   /// 按 taskId+workspacePath+workspaceIdentity 三元组寻址）；relay 概览
   /// 全工作区覆盖，查不到（冷启动未拉到/会话库私有行）回退活动工作区。
+  /// 同 id 多归属行（桌面镜像行）取 [TaskDirectory.bestRelayRow] —— 与
+  /// TaskDirectory.byId 完全同规则的择优，所见=所删；帧序 firstOrNull
+  /// 会把 mutation 寻址到非用户所见的那份孪生行（10-11 核查 V3）。
   Map<String, dynamic> _taskMutationScope(String taskId) {
-    final row = relayTasks.where((t) => t['taskId'] == taskId).firstOrNull;
+    final row = TaskDirectory.bestRelayRow(relayTasks, taskId);
     if (row == null) return offPeakScope;
     return {
       'workspacePath': row['workspacePath'],
@@ -1882,12 +1885,55 @@ class DeviceSession extends ChangeNotifier
 
   @override
   String? taskDisplayStatus(String sessionId) {
-    for (final task in _relayTasks) {
-      if ('${task['taskId']}' == sessionId) {
-        return task['displayStatus'] as String?;
+    // The desktop registry duplicates one task id into every remote-enabled
+    // workspace and those rows' displayStatus drifts apart (15 live
+    // multi-row ids, 2026-10-11) — the old first-hit scan answered whatever
+    // row the bootstrap frame happened to list first (frame order varies
+    // between snapshots, see [TaskDirectory._relayRowBeats]), so dead
+    // sessions surfaced as running zombies. Pick deterministically instead
+    // — a pure function of the row set: a terminal status beats a
+    // running-class one (sending into a dead session is the worse error
+    // direction), then the greater updatedAt wins (the real row keeps
+    // receiving activity updates while its copies freeze at registration),
+    // remaining ties fall to the lexicographically smaller workspace path
+    // and then the status string. Unrecognized values (including a missing
+    // field) count as running-class.
+    const terminalStatuses = {'completed', 'error'};
+    ({bool terminal, int updatedAt, String workspace, String status}) rankOf(
+      Map<String, dynamic> task,
+    ) {
+      final status = task['displayStatus'] as String?;
+      return (
+        terminal: terminalStatuses.contains(status),
+        updatedAt: (task['updatedAt'] as num?)?.toInt() ?? 0,
+        workspace: '${task['workspacePath'] ?? ''}',
+        status: status ?? '',
+      );
+    }
+
+    bool beats(
+      ({bool terminal, int updatedAt, String workspace, String status}) c,
+      ({bool terminal, int updatedAt, String workspace, String status}) i,
+    ) {
+      if (c.terminal != i.terminal) return c.terminal;
+      if (c.updatedAt != i.updatedAt) return c.updatedAt > i.updatedAt;
+      if (c.workspace != i.workspace) {
+        return c.workspace.compareTo(i.workspace) < 0;
+      }
+      return c.status.compareTo(i.status) < 0;
+    }
+
+    Map<String, dynamic>? best;
+    var bestRank = (terminal: false, updatedAt: 0, workspace: '', status: '');
+    for (final task in relayTasks) {
+      if ('${task['taskId']}' != sessionId) continue;
+      final rank = rankOf(task);
+      if (best == null || beats(rank, bestRank)) {
+        best = task;
+        bestRank = rank;
       }
     }
-    return null;
+    return best?['displayStatus'] as String?;
   }
 
   @override

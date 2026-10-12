@@ -442,6 +442,25 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   List<({String id, String title})> mentionSessions() =>
       mentionSessionsResult;
 
+  /// Programmed [ChatGateway.deleteTask] acks, dequeued front-per-call
+  /// (empty → plain accepted). An Exception/Error entry is thrown — the
+  /// registry-resolve failure arrives as a thrown ChannelRpcError
+  /// (`matches=0` shape, channel_client.dart). The call itself always lands
+  /// in [calls]; the chat-page delete tests assert the routing on it.
+  final List<Object?> deleteTaskResults = [];
+
+  @override
+  Future<dynamic> deleteTask(String sessionId) async {
+    _accept('deleteTask', [sessionId]);
+    if (deleteTaskResults.isNotEmpty) {
+      final next = deleteTaskResults.removeAt(0);
+      if (next is Exception) throw next;
+      if (next is Error) throw next;
+      return next;
+    }
+    return const {'status': 'accepted'};
+  }
+
   /// Programmed [ChatGateway.searchWorkspaceFiles] answer; a non-null
   /// [searchWorkspaceFilesError] is thrown (the unreachable verdict the
   /// add-context panel hides the file section on).

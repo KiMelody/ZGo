@@ -6,6 +6,7 @@ import 'package:flutter/services.dart'
     show MethodChannel, SystemChannels, Uint8List;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:zgo/protocol/channel_client.dart';
 import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/protocol/remote_client.dart';
 import 'package:zgo/state/device_session.dart';
@@ -1864,6 +1865,115 @@ void main() {
       await tester.pumpWidget(wrap(const SizedBox.shrink()));
       expect(gateway.forgottenMissingSessions, ['s1']);
       expect(gateway.isSessionMissing('s1'), isFalse);
+    });
+  });
+
+  // ---- chat-page delete routing (10-11 chat-delete-task-routing) ----
+
+  group('chat-page delete routing (10-11)', () {
+    /// Pushes the chat page over a launcher route so the delete's
+    /// `maybePop` is observable (on the home route it is a silent no-op).
+    /// Returns the gateway for programming / assertions.
+    Future<FakeChatGateway> pumpPushedChat(WidgetTester tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.reset);
+      final gateway = FakeChatGateway();
+      await tester.pumpWidget(
+        wrap(
+          Builder(
+            builder: (context) => TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) =>
+                      ChatPage(gateway: gateway, sessionId: 's1', title: 't'),
+                ),
+              ),
+              child: const Text('open chat'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open chat'));
+      // One turn so the page leaves the loading spinner (state.ready) —
+      // pumpAndSettle would time out on it otherwise.
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi', 'state': 'done'},
+      ]);
+      await tester.pumpAndSettle();
+      return gateway;
+    }
+
+    /// Opens the 更多 menu and confirms the delete dialog (both the menu
+    /// entry and the confirm button carry the same 删除 copy).
+    Future<void> confirmDelete(WidgetTester tester) async {
+      await tester.tap(find.byTooltip('更多'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('删除'));
+      await tester.pumpAndSettle(); // menu closes, dialog opens
+      await tester.tap(find.text('删除'));
+      await tester.pumpAndSettle(); // dialog closes, RPC settles
+    }
+
+    testWidgets('registered row: delete routes through deleteTask, never '
+        'the deleteSession command, and pops on success', (tester) async {
+      final gateway = await pumpPushedChat(tester);
+
+      await confirmDelete(tester);
+
+      expect(
+        gateway.calls.where((c) => c.$1 == 'deleteTask').single.$2,
+        ['s1'],
+      );
+      expect(gateway.calls.where((c) => c.$1 == 'deleteSession'), isEmpty);
+      expect(find.byType(ChatPage), findsNothing);
+    });
+
+    testWidgets('draft row: deleteTask resolve failure falls back to '
+        'deleteSession exactly once, then pops', (tester) async {
+      final gateway = await pumpPushedChat(tester);
+      gateway.deleteTaskResults.add(
+        ChannelRpcError('列表 mutation 无法解析唯一 source, taskId=s1', null),
+      );
+
+      await confirmDelete(tester);
+
+      expect(gateway.calls.where((c) => c.$1 == 'deleteTask'), hasLength(1));
+      final fallback =
+          gateway.calls.where((c) => c.$1 == 'deleteSession').toList();
+      expect(fallback, hasLength(1));
+      expect(fallback.single.$2, ['s1']);
+      expect(find.byType(ChatPage), findsNothing);
+    });
+
+    testWidgets('RPC failure: no fallback, the toast is _run\'s and the '
+        'page stays put (no pop on a failed delete)', (tester) async {
+      final gateway = await pumpPushedChat(tester);
+      gateway.deleteTaskResults.add(ChannelRpcError('bridge is down', null));
+
+      await confirmDelete(tester);
+
+      expect(gateway.calls.where((c) => c.$1 == 'deleteTask'), hasLength(1));
+      expect(gateway.calls.where((c) => c.$1 == 'deleteSession'), isEmpty);
+      expect(find.textContaining('bridge is down'), findsOneWidget);
+      expect(find.byType(ChatPage), findsOneWidget);
+    });
+
+    testWidgets('failed ack: no fallback, no pop — locks the '
+        '_ackOk/_run verdict mirror on one input', (tester) async {
+      final gateway = await pumpPushedChat(tester);
+      gateway.deleteTaskResults.add(
+        const {'status': 'failed', 'reasonCode': 'x'},
+      );
+
+      await confirmDelete(tester);
+
+      expect(gateway.calls.where((c) => c.$1 == 'deleteTask'), hasLength(1));
+      expect(gateway.calls.where((c) => c.$1 == 'deleteSession'), isEmpty);
+      // Both sides of the mirror on the same input: _run's verdict toasts...
+      expect(find.textContaining('操作失败'), findsOneWidget);
+      // ...and _ackOk's copy of that verdict refuses the pop.
+      expect(find.byType(ChatPage), findsOneWidget);
     });
   });
 
