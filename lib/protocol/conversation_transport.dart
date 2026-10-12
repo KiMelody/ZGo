@@ -116,6 +116,24 @@ class ConversationTransport {
   /// library; not public API.
   void log(String line) => onLog?.call(line);
 
+  /// Failure-retry backoff for the subscriptions' resubscribe loop: the
+  /// [failedAttempts]-th consecutive failure waits `3s → 6s → 12s` (3*2^n,
+  /// capped at 12s). Scope boundary (10-11 R2): this ONLY governs the
+  /// failure-retry queue in `_SubscriptionBase._resubscribe` — the bridge
+  /// recovery wave (`_onBridgeRecovered`) resubscribes directly without a
+  /// timer, and the first `start()` reports to its caller instead of
+  /// retrying. A successful subscribe (ack) resets the attempt count.
+  /// Injectable so tests can shrink it (protocol tests drive real timers).
+  /// The base class is shared by the conversation AND sessions-index
+  /// subscriptions, so both retry queues back off (the storm-pressure
+  /// argument is generic); the sessionNotFound terminal classification is
+  /// marker-scoped and cannot hit an index subscribe (its refusals carry
+  /// no session phrase).
+  Duration resubscribeBackoff(int failedAttempts) {
+    final step = failedAttempts.clamp(0, 2).toInt();
+    return Duration(seconds: 3 << step);
+  }
+
   Future<void> handshake() {
     if (_handshaken) return Future.value();
     return _handshakeFuture ??=
@@ -179,7 +197,17 @@ class ConversationTransport {
   Future<ConversationSubscription> subscribe(String sessionId) async {
     await handshake();
     final subscription = ConversationSubscription(this, sessionId);
-    await subscription.start();
+    try {
+      await subscription.start();
+    } catch (e) {
+      // The failed initial subscribe is never tracked, so nothing else
+      // would dispose it — yet its constructor already armed the fragment
+      // cleanup timer, the frame listener and the bridge-recovery hook
+      // (10-11: a sessionNotFound refusal makes this a recurring path —
+      // every open of a dead session would leak one timer forever).
+      await subscription.dispose();
+      rethrow;
+    }
     _subscriptions[sessionId] = subscription;
     return subscription;
   }

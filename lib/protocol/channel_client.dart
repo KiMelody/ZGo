@@ -182,6 +182,35 @@ bool isTaskResolveFailureText(String text) =>
 bool isTaskResolveFailure(Object error) =>
     error is ChannelRpcError && isTaskResolveFailureText(error.message);
 
+/// The desktop's authoritative "session does not exist" refusal for
+/// Conversation V4 subscribes (`fault.subscribe.sessionNotFound`): the wire
+/// error message is
+/// `Session is not active and not persisted: <id> (fault.subscribe.sessionNotFound)`
+/// (live evidence, desktop logs 10-10).
+/// A refused session's subscribe can NEVER succeed — retrying it is pure
+/// churn (the 10-10 KICK storm retried each dead session 3-9 times at
+/// fixed 3s). Distinct from the sessions-index tombstone (10-06), which
+/// INFERS a cross-terminal deletion from index diffs; this is the
+/// subscribe channel's AUTHORITATIVE rejection.
+///
+/// Two markers, both named by the PRD envelope (the taskResolve
+/// dual-marker precedent): the full phrase, and the bare fault code for
+/// wordings that carry only the code. The phrase must stay FULL — the
+/// shorter `Session is not active` is a DIFFERENT desktop error (the
+/// readSession path's not-yet-hydrated refusal, transient, and its fault
+/// code is not sessionNotFound either).
+const String sessionNotFoundMarker = 'Session is not active and not persisted';
+const String sessionNotFoundCodeMarker = 'fault.subscribe.sessionNotFound';
+
+/// String-level form of [isSessionNotFoundError] for callers that hold the
+/// error only as text (`'$e'` in a log/banner path).
+bool isSessionNotFoundText(String text) =>
+    text.contains(sessionNotFoundMarker) ||
+    text.contains(sessionNotFoundCodeMarker);
+
+bool isSessionNotFoundError(Object error) =>
+    error is ChannelRpcError && isSessionNotFoundText(error.message);
+
 /// The desktop's session-busy refusal (design C1 10-05 D1): session-scoped
 /// commands (fork, …) are rejected with 「会话正在进行中，稍后再试」 while
 /// the session is mid-turn (research-emulator.md「busy 之谜」, four

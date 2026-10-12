@@ -191,5 +191,36 @@ void main() {
       isFalse,
     );
     expect(isSessionBusyError(StateError('busy')), isFalse);
+
+    // sessionNotFound refusal (10-11 terminal): the live full-message form
+    // and the bare-code form both classify; the SHORTER transient phrase
+    // (readSession's not-yet-hydrated refusal) must NOT.
+    expect(
+      isSessionNotFoundError(ChannelRpcError(
+          'Session is not active and not persisted: s1 '
+          '(fault.subscribe.sessionNotFound)', null)),
+      isTrue,
+    );
+    expect(
+      isSessionNotFoundError(
+          ChannelRpcError('fault.subscribe.sessionNotFound', null)),
+      isTrue,
+    );
+    expect(
+      isSessionNotFoundError(
+          ChannelRpcError('Session is not active: s1', null)),
+      isFalse,
+    );
+    expect(
+      isSessionNotFoundError(ChannelRpcError('Method not found', null)),
+      isFalse,
+    );
+    expect(isSessionNotFoundError(StateError('matches=0')), isFalse);
+    // The string-level form shares the predicate's markers.
+    expect(
+      isSessionNotFoundText('ChannelRpcError: fault.subscribe.sessionNotFound'),
+      isTrue,
+    );
+    expect(isSessionNotFoundText('Session is not active: s1'), isFalse);
   });
 }

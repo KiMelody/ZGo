@@ -34,6 +34,37 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
   bool _resyncing = false;
   Timer? _resubscribeTimer;
 
+  /// Consecutive resubscribe failures — drives the exponential backoff
+  /// ([ConversationTransport.resubscribeBackoff]: 3s → 6s → 12s capped).
+  /// Cleared the moment a subscribe ack arrives, so the next failure
+  /// episode starts from the base delay again. Scope: ONLY the
+  /// failure-retry queue in [_resubscribe] — the bridge recovery wave and
+  /// the initial `start()` do not consult it (see the transport method's
+  /// boundary note).
+  int _resubscribeAttempts = 0;
+
+  /// Terminal subscribe failure (10-11): the desktop AUTHORITATIVELY
+  /// refused the subscription with sessionNotFound — the session is
+  /// neither active nor persisted, so every retry is guaranteed to fail.
+  /// One-way: no retry timer is armed and [_onBridgeRecovered] must not
+  /// resurrect the subscription either (the refusal is a fact about the
+  /// SESSION, not the link — a rebuilt bridge cannot make a dead session
+  /// exist). Semantic boundary vs the sessions-index tombstone
+  /// (DeviceSession.recordVanishedSessions): the tombstone INFERS a
+  /// cross-terminal deletion from index diffs (can be a false positive by
+  /// construction); this is the subscribe channel's AUTHORITATIVE
+  /// rejection. When both hold for one id, the UI presents this one.
+  bool _terminalFailed = false;
+
+  final _terminalFailures = StreamController<Object?>.broadcast();
+
+  /// Emits the subscribe error once when a resubscribe attempt classifies
+  /// as the authoritative sessionNotFound refusal ([_terminalFailed] goes
+  /// true). Upper layers (DeviceSession → ChatPage) listen to render the
+  ///「会话不存在」terminal state. Broadcast: nobody listening (initial-open
+  /// path surfaces through the start() exception instead) just drops it.
+  Stream<Object?> get terminalFailures => _terminalFailures.stream;
+
   /// Monotonic subscribe-attempt generation: `start()` bumps it on entry.
   /// A late ack (or late failure) whose attempt no longer matches — a
   /// watchdog/bridge-recovery resubscribe raced the pending call — is
@@ -175,6 +206,9 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
     if (_subscriptionId == null) {
       throw StateError('$_subscribeMethod: missing ack.subscriptionId');
     }
+    // Successful subscribe (ack in hand): the backoff episode is over —
+    // the next failure starts from the base delay again.
+    _resubscribeAttempts = 0;
     _onSubscribeAck(ack?.cast<String, dynamic>() ?? const {});
     final staged = List<Map<String, dynamic>>.from(_stagedFrames);
     _stagedFrames.clear();
@@ -185,12 +219,17 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
   }
 
   void _onBridgeRecovered() {
-    if (_disposed) return;
+    if (_disposed || _terminalFailed) return;
     _transport.log('[$_logTag] bridge recovered, resubscribing $topic');
     _resubscribe();
   }
 
   Future<void> _resubscribe() async {
+    // One-way terminal guard at the entry too: a sibling resubscribe may
+    // still be mid-flight (awaiting handshake) when the latest attempt
+    // classifies sessionNotFound — without this guard it would issue one
+    // more subscribe on a terminally-failed subscription.
+    if (_disposed || _terminalFailed) return;
     await _transport.handshake();
     _onResubscribeCleanup();
     _cancelFrameListener?.call();
@@ -213,10 +252,34 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
     try {
       await start();
     } catch (e) {
+      if (isSessionNotFoundError(e)) {
+        // Authoritative refusal (sessionNotFound): the session does not
+        // exist and never will on this link — retries are guaranteed to
+        // fail (10-10 storm: each dead session churned 3-9 pointless
+        // retries). Enter the terminal failure: no retry timer, and the
+        // bridge recovery wave will not resurrect it (see the
+        // [_terminalFailed] contract, incl. the tombstone distinction).
+        _terminalFailed = true;
+        _transport.log('[$_logTag] subscribe refused (session not found), '
+            'terminal: $e');
+        // dispose() may have raced this in-flight attempt (page closed
+        // mid-resubscribe) and closed the stream — add-after-close throws,
+        // which would escape this fire-and-forget call unhandled.
+        if (!_terminalFailures.isClosed) _terminalFailures.add(e);
+        return;
+      }
       _transport.log('[$_logTag] resubscribe failed: $e');
       _resubscribeTimer?.cancel();
-      _resubscribeTimer = Timer(const Duration(seconds: 3), () {
-        if (!_disposed && _subscriptionId == null) _resubscribe();
+      // Exponential backoff (10-11 R2): 3s → 6s → 12s capped — the fixed
+      // 3s hammer amplified the KICK storm's subscribe pressure (1308
+      // desktop subscribe calls that day). Backoff applies ONLY to this
+      // failure-retry queue; `_onBridgeRecovered` and the initial
+      // `start()` bypass it (transport method's boundary note).
+      final delay = _transport.resubscribeBackoff(_resubscribeAttempts++);
+      _resubscribeTimer = Timer(delay, () {
+        if (!_disposed && !_terminalFailed && _subscriptionId == null) {
+          _resubscribe();
+        }
       });
     }
   }
@@ -305,6 +368,7 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
     _resubscribeTimer?.cancel();
     _ackWatchdog?.cancel();
     _fragmentCleanup?.cancel();
+    _terminalFailures.close();
     await _onDispose();
     _transport.session.recovered.removeListener(_onBridgeRecovered);
     _cancelFrameListener?.call();
@@ -484,6 +548,29 @@ class SessionsIndexSubscription extends _SubscriptionBase<SessionsIndexState> {
   SessionsIndexSubscription(ConversationTransport transport)
     : super(transport, SessionsIndexState(), 'v4-si');
 
+  /// Monotonic subscription generation: bumped on every successful
+  /// (re)subscribe — `start()` covers both the initial open and a bridge
+  /// swing's `_resubscribe` (the ~45s replayGraceExceeded pendulum).
+  /// DeviceSession keys its tombstone diff baseline to this value (read
+  /// at diff time): a new generation's frames may only ESTABLISH a fresh
+  /// baseline, never diff against the previous generation's ids (10-11
+  /// tombstone false positive, findings §4-A).
+  int _generation = 0;
+
+  /// See [_generation].
+  int get generation => _generation;
+
+  /// Kind of the logical frame currently being applied to [state]
+  /// (`payload.kind`: 'snapshot' | 'deltas'); null outside a frame.
+  /// Published just before `applyFrame` so synchronous state listeners
+  /// (the tombstone producer) can tell frame kinds apart — cross-kind
+  /// "missing means deleted" diffing is what produced the 10-11 false
+  /// positives (findings §4-B).
+  String? _applyingFrameKind;
+
+  /// See [_applyingFrameKind].
+  String? get applyingFrameKind => _applyingFrameKind;
+
   @override
   String get _frameEventName => 'onDynamicSessionsIndexFrame';
   @override
@@ -518,9 +605,19 @@ class SessionsIndexSubscription extends _SubscriptionBase<SessionsIndexState> {
   }
 
   @override
+  void _onSubscribeAck(Map<String, dynamic> ack) {
+    // Bumped BEFORE start() replays the staged frames (they apply right
+    // after this hook), so the new generation's first frame — staged or
+    // pushed — can only establish a fresh tombstone baseline.
+    _generation++;
+  }
+
+  @override
   void _acceptLogicalFrame(Map<String, dynamic> frame) {
     final subId = subscriptionId;
     if (subId == null || frame['subscriptionId'] != subId) return;
+    _applyingFrameKind = (frame['payload'] as Map?)?['kind'] as String?;
     state.applyFrame(frame, onGap: _resync);
+    _applyingFrameKind = null;
   }
 }

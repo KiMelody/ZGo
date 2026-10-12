@@ -5,7 +5,12 @@ import 'package:flutter/foundation.dart';
 
 import '../protocol/automation.dart';
 import '../protocol/channel_client.dart'
-    show Channels, isBridgeGateTimeoutError, isChannelLevelError, isChannelMissingError;
+    show
+        Channels,
+        isBridgeGateTimeoutError,
+        isChannelLevelError,
+        isChannelMissingError,
+        isSessionNotFoundError;
 import '../protocol/connection_params.dart';
 import '../protocol/conversation.dart';
 import '../protocol/file_service.dart';
@@ -284,6 +289,20 @@ abstract interface class ChatGateway
   /// its reader — the set is add-only otherwise.
   void forgetDeletedSession(String sessionId);
 
+  /// Authoritative subscribe refusal (10-11 sessionNotFound terminal):
+  /// true once the desktop's subscribe channel answered
+  /// `fault.subscribe.sessionNotFound` for [sessionId] — the session is
+  /// neither active nor persisted, so the subscription is terminally
+  /// failed (no more retries). Semantic boundary vs [isSessionDeleted]:
+  /// the tombstone INFERS a cross-terminal deletion from sessions-index
+  /// diffs; THIS is the subscribe channel's AUTHORITATIVE rejection.
+  /// Where both hold, the UI presents this one (authority over inference).
+  bool isSessionMissing(String sessionId);
+
+  /// Drops [sessionId] from the missing-session set (chat page dispose —
+  /// same reader-recovery shape as [forgetDeletedSession]).
+  void forgetMissingSession(String sessionId);
+
   /// Entitlement/quota snapshot (usage-stats.getEntitlementSnapshot) via
   /// the session-wide [EntitlementPoller]: cached within the staleness
   /// window, [force] bypasses it. Never throws — failures arrive as an
@@ -430,13 +449,36 @@ class DeviceSession extends ChangeNotifier
   /// ([forgetDeletedSession]).
   final Set<String> _deletedSessionIds = <String>{};
 
-  /// Diff baseline of [recordVanishedSessions]: the session ids seen at
-  /// the previous ready frame, tagged with the workspace key they belong
-  /// to. Reset on every workspace open — a NEW subscription starts with a
-  /// fresh baseline, so a bridge swing's resubscribe (or a workspace
-  /// switch) can never diff against a foreign frame; mass vanishings
-  /// across subscriptions read as nothing.
-  ({String? key, Set<String> ids})? _indexDiffBase;
+  /// Authoritative subscribe refusals (10-11 sessionNotFound terminal):
+  /// session ids the desktop's subscribe channel refused with
+  /// `fault.subscribe.sessionNotFound`. Distinct from
+  /// [_deletedSessionIds] in EPISTEMIC STATUS, not in UI form: the
+  /// tombstone set holds sessions-index diff INFERENCE (revocable), this
+  /// holds the channel's AUTHORITATIVE rejection (a session that is not
+  /// active and not persisted cannot come back on this link). Two entry
+  /// points: the initial open's subscribe throw, and a live
+  /// subscription's terminal-failure broadcast (the resubscribe path —
+  /// no more retry timers once here). Consumed by the chat page through
+  /// [ChatGateway.isSessionMissing]; the page drops its own id on dispose
+  /// ([forgetMissingSession]) — same reader-recovery shape as the
+  /// tombstone set.
+  final Set<String> _sessionMissingIds = <String>{};
+
+  /// Diff baseline of [recordVanishedSessions], tagged with the workspace
+  /// key AND the subscription generation they belong to. Two sets with
+  /// different refresh rules (see [recordVanishedSessions]):
+  /// [snapshotIds] holds only SNAPSHOT-confirmed ids (snapshot omissions
+  /// are diffed against it — a delta-admitted id missing from a re-seeded
+  /// snapshot is re-seed lag, not a deletion); [seenIds] additionally
+  /// holds delta-admitted ids (an explicit `session.removed` delta is
+  /// trusted for every id the state held). Cleared on every workspace
+  /// open (new subscription), and invalidated by generation: every
+  /// successful resubscribe of [_sessionsSub] (the ~45s bridge swing's
+  /// `_resubscribe`, `SessionsIndexSubscription.generation`) starts a new
+  /// generation whose first frames may only ESTABLISH a fresh baseline —
+  /// never diff against a foreign one (10-11 tombstone false positive).
+  ({String? key, int gen, Set<String> snapshotIds, Set<String> seenIds})?
+  _indexDiffBase;
 
   /// Live-confirmed workspace homes (design 10-02 sticky home): task
   /// id → workspace key, written every time a live sessions-index
@@ -497,29 +539,83 @@ class DeviceSession extends ChangeNotifier
     }
   }
 
+  /// Live-frame signals of the active sessions-index subscription,
+  /// consumed by [recordVanishedSessions] (10-11 tombstone fix): the
+  /// subscription generation (bumped by every successful (re)subscribe —
+  /// the bridge swing's resubscribe included) and the kind of the frame
+  /// currently being applied ('snapshot' | 'deltas'; null when no frame
+  /// is in flight, e.g. the post-attach baseline call in
+  /// [_openWorkspaceNow]). Overridable so the fake session can replay
+  /// resubscribes and drive frames without a real subscription.
+  @protected
+  int get indexGeneration => _sessionsSub?.generation ?? 0;
+  @protected
+  String? get applyingFrameKind => _sessionsSub?.applyingFrameKind;
+
   /// Records cross-terminal deletion tombstones from a live index frame
-  /// (task 10-06 chat tombstone): session ids present at the previous
-  /// ready frame of the SAME subscription + workspace that are gone from
-  /// the current one (a `session.removed` delta, or a resync snapshot
-  /// against the ids that state held before). Wired next to
-  /// [confirmLiveHomes] on every live frame — public so the fake session
-  /// can replay the same wiring (test/helpers/fake_device_session.dart).
+  /// (task 10-06 chat tombstone). Conservative by design (宁可漏报不可
+  /// 误报 — a false tombstone bans sends on a live session):
   ///
-  /// Conservative by design (宁可漏报不可误报 — a false tombstone bans
-  /// sends on a live session): only same-state frames are diffed; the
-  /// first ready frame of a (fresh or reset) baseline only establishes
-  /// it. Snapshots are treated as complete workspace listings — the
-  /// sessions-index is the desktop's own sidebar set (see spec
-  /// task-registry-semantics §2), so a same-state re-snapshot without an
-  /// id IS a deletion, not a paging boundary.
+  /// Diffing only happens within one subscription generation + workspace
+  /// key, and the two baseline sets answer different questions
+  /// (findings 10-11 §4-A/B):
+  /// - A **delta** frame may only drop an id through an explicit
+  ///   `session.removed` op — a trusted deletion signal. It is diffed
+  ///   against [seenIds] (every id the state held, delta-admitted ones
+  ///   included), so a same-generation removal delta records instantly
+  ///   (10-06 red line — even for a session no snapshot confirmed yet).
+  /// - A **snapshot** is a complete re-seed of the listing, so an
+  ///   omission only indicts SNAPSHOT-confirmed ids
+  ///   ([_indexDiffBase.snapshotIds]): a delta-admitted id missing from
+  ///   a re-seeded snapshot (a bridge-rebuild or gap-resync first frame)
+  ///   is re-seed lag, NOT a deletion (10-11 H1/H3). The sessions-index
+  ///   is the desktop's own sidebar set (see spec
+  ///   task-registry-semantics §2), so a same-generation re-snapshot
+  ///   without a snapshot-confirmed id IS a deletion.
+  ///
+  /// Wired next to [confirmLiveHomes] on every live frame — public so
+  /// the fake session can replay the same wiring
+  /// (test/helpers/fake_device_session.dart).
   void recordVanishedSessions() {
     final state = sessions;
     if (state == null || !state.ready) return;
     final current = state.sessions.keys.toSet();
+    final gen = indexGeneration;
     final base = _indexDiffBase;
-    _indexDiffBase = (key: state.subscribedWorkspaceKey, ids: current);
-    if (base == null || base.key != state.subscribedWorkspaceKey) return;
-    _deletedSessionIds.addAll(base.ids.difference(current));
+    final fresh = base == null ||
+        base.key != state.subscribedWorkspaceKey ||
+        base.gen != gen;
+    final delta = applyingFrameKind == 'deltas';
+    if (!fresh) {
+      // Delta frames only lose ids through an explicit `session.removed`
+      // op (see the doc above) — every disappearance is a real deletion.
+      if (delta) {
+        _deletedSessionIds.addAll(base.seenIds.difference(current));
+      } else {
+        _deletedSessionIds.addAll(base.snapshotIds.difference(current));
+      }
+    }
+    // Snapshots re-seed the listing: they refresh BOTH sets. Only an
+    // EXPLICIT delta frame keeps snapshotIds anchored at the last
+    // snapshot while seenIds tracks the delta-admitted growth — a call
+    // with nothing in flight (the post-attach baseline call in
+    // [_openWorkspaceNow], tests driving the state directly) refreshes
+    // like a snapshot.
+    if (fresh || !delta) {
+      _indexDiffBase = (
+        key: state.subscribedWorkspaceKey,
+        gen: gen,
+        snapshotIds: current,
+        seenIds: current,
+      );
+    } else {
+      _indexDiffBase = (
+        key: base.key,
+        gen: gen,
+        snapshotIds: base.snapshotIds,
+        seenIds: current,
+      );
+    }
   }
 
   /// True while a workspace bridge + sessions-index open is in flight.
@@ -753,7 +849,17 @@ class DeviceSession extends ChangeNotifier
   /// mobile-diagnostic emitter (D3): the session state machine's reporting
   /// line. [_client] may be null (or the link already closed) during early
   /// transitions — the relay drops then. Void, never awaited, never throws.
+  ///
+  /// D3 is a closed set: the wire `failureReason` must stay inside the
+  /// desktop's 11-value enum. The relay KICKED path's internal 'kicked'
+  /// (RelayFailure.reason / `_kicked`, both consumed unchanged by the
+  /// kicked state machine and the UI) maps to its semantic desktop
+  /// equivalent 'session-conflict' on this outbound line only — relay
+  /// close code 4009 is the same event.
   void _diag(String event, [Map<String, dynamic>? fields]) {
+    if (fields != null && fields['failureReason'] == 'kicked') {
+      fields = {...fields, 'failureReason': 'session-conflict'};
+    }
     _client?.sendMobileDiagnostic(event, fields);
   }
 
@@ -1575,6 +1681,9 @@ class DeviceSession extends ChangeNotifier
   Future<ChatHandle> subscribe(String sessionId) async {
     final existing = _chatSubs[sessionId];
     if (existing != null) {
+      // The first handle's terminal-failure listener is still live on this
+      // shared subscription (it cancels only when its own handle closes,
+      // which also disposes the subscription) — a second reader needs none.
       return ChatHandle(
         state: existing.state,
         close: () async {
@@ -1585,11 +1694,33 @@ class DeviceSession extends ChangeNotifier
         },
       );
     }
-    final sub = await _requireConversation.subscribe(sessionId);
+    late final StreamSubscription<Object?> terminalSub;
+    final ConversationSubscription sub;
+    try {
+      sub = await _requireConversation.subscribe(sessionId);
+    } catch (e) {
+      if (isSessionNotFoundError(e)) {
+        // Initial open of a dead session (10-11): the authoritative
+        // refusal arrives straight from the first subscribe — record it
+        // so the page renders the「会话不存在」terminal state instead of
+        // the retryable error banner, and rethrow as before.
+        _sessionMissingIds.add(sessionId);
+        notifyListeners();
+      }
+      rethrow;
+    }
     _chatSubs[sessionId] = sub;
+    // Resubscribe-path refusals surface through the terminal broadcast
+    // (the subscription has already stopped its own retry queue); the
+    // gateway notify re-runs the open page's banner builder.
+    terminalSub = sub.terminalFailures.listen((_) {
+      _sessionMissingIds.add(sessionId);
+      notifyListeners();
+    });
     return ChatHandle(
       state: sub.state,
       close: () async {
+        await terminalSub.cancel();
         if (_chatSubs[sessionId] == sub) {
           _chatSubs.remove(sessionId);
           await sub.dispose();
@@ -1766,6 +1897,15 @@ class DeviceSession extends ChangeNotifier
   @override
   void forgetDeletedSession(String sessionId) {
     _deletedSessionIds.remove(sessionId);
+  }
+
+  @override
+  bool isSessionMissing(String sessionId) =>
+      _sessionMissingIds.contains(sessionId);
+
+  @override
+  void forgetMissingSession(String sessionId) {
+    _sessionMissingIds.remove(sessionId);
   }
 
   /// Session-wide entitlement poller — the usage page and the chat quota

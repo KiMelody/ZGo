@@ -457,6 +457,12 @@ class RelayClient {
   @visibleForTesting
   bool get debugDiagGateOpen => _diagAuthOk;
 
+  /// Diagnostics: replays a relay `error` frame through the real handler so
+  /// tests can reach the KICKED path (state + failure) without a live wire.
+  @visibleForTesting
+  void debugHandleRelayError(String? code, String? message) =>
+      _handleRelayError(code, message);
+
   Future<void> dispose() async {
     _disposed = true;
     _intentionallyClosed = true;

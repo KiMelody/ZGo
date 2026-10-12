@@ -429,6 +429,19 @@ class _ChatPageState extends State<ChatPage> {
     return id != null && widget.gateway.isSessionDeleted(id);
   }
 
+  /// Authoritative subscribe refusal (10-11 sessionNotFound terminal):
+  /// the desktop's subscribe channel answered fault.subscribe.
+  /// sessionNotFound for this session — it is neither active nor
+  /// persisted, so the subscription is terminally failed. Same read-only
+  /// page form as [_tombstoned] (banner + disabled send, no pop), but
+  /// epistemically authoritative: the channel REJECTED the session where
+  /// the tombstone only INFERS a deletion from index diffs. When both
+  /// hold, this one takes the banner (authority over inference).
+  bool get _sessionMissing {
+    final id = _sessionId;
+    return id != null && widget.gateway.isSessionMissing(id);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -803,10 +816,14 @@ class _ChatPageState extends State<ChatPage> {
     try {
       widget.gateway.sendViewState();
     } catch (_) {}
-    // Tombstone memory recovery (10-06): the page held this id's tombstone
-    // reader — release it so the add-only set does not outlive the page.
+    // Absence memory recovery (10-06 tombstone + 10-11 missing): the page
+    // held this id's reader in both sets — release them so the add-only
+    // sets do not outlive the page.
     final sessionId = _sessionId;
-    if (sessionId != null) widget.gateway.forgetDeletedSession(sessionId);
+    if (sessionId != null) {
+      widget.gateway.forgetDeletedSession(sessionId);
+      widget.gateway.forgetMissingSession(sessionId);
+    }
     _handle?.close();
     _feed.dispose();
     _git.dispose();
@@ -1093,10 +1110,11 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _send() async {
     final text = _inputController.text.trim();
     if ((text.isEmpty && _pendingFiles.isEmpty) || _sending) return;
-    // Tombstone (10-06): a session deleted elsewhere accepts no sends —
-    // the slash-bar shortcuts below route here directly, past the greyed
+    // Absence guards (10-06 tombstone + 10-11 sessionNotFound terminal):
+    // a deleted-elsewhere or refused session accepts no sends — the
+    // slash-bar shortcuts below route here directly, past the greyed
     // button.
-    if (_tombstoned) return;
+    if (_tombstoned || _sessionMissing) return;
     HapticFeedback.lightImpact();
 
     // Slash commands (as in the web composer).
@@ -2831,7 +2849,7 @@ class _ChatPageState extends State<ChatPage> {
                   ? const SizedBox.shrink()
                   : _secondHeaderRow(context, wsLabel),
             ),
-            if (_error != null)
+            if (_error != null && !_sessionMissing)
               Material(
                 color: ZColors.danger.withValues(alpha: 0.15),
                 child: ListTile(
@@ -2846,30 +2864,41 @@ class _ChatPageState extends State<ChatPage> {
                   ),
                 ),
               ),
-            // Cross-terminal deletion tombstone (10-06): own
-            // gateway-animating builder — `chat` above is captured once per
-            // State.build, so only AnimatedBuilders re-run on the session's
-            // tombstone notify. The always-present slot keeps the Column
-            // child list structurally constant (spec §8.1 discipline); the
-            // message list above stays read-only either way.
+            // Absence banners: the authoritative subscribe refusal (10-11
+            // sessionNotFound terminal) and the cross-terminal deletion
+            // tombstone (10-06) — the tombstone's own gateway-animating
+            // builder (`chat` above is captured once per State.build, so
+            // only AnimatedBuilders re-run on the session's tombstone
+            // notify). Authority precedence: when both hold, the
+            //「会话不存在」refusal wins the banner. The always-present slot
+            // keeps the Column child list structurally constant (spec
+            // §8.1 discipline); the message list above stays read-only
+            // either way.
             AnimatedBuilder(
               animation: widget.gateway,
-              builder: (context, _) => _tombstoned
-                  ? Material(
-                      color: ZColors.danger.withValues(alpha: 0.15),
-                      child: ListTile(
-                        dense: true,
-                        leading: Icon(
-                          Icons.delete_outline,
-                          color: ZInk.dangerTone(context),
-                        ),
-                        title: Text(
-                          tr(context, 'chat.banner.sessionDeleted'),
-                          style: ZType.sub,
-                        ),
+              builder: (context, _) {
+                final missing = _sessionMissing;
+                if (!missing && !_tombstoned) return const SizedBox.shrink();
+                return Material(
+                  color: ZColors.danger.withValues(alpha: 0.15),
+                  child: ListTile(
+                    dense: true,
+                    leading: Icon(
+                      Icons.delete_outline,
+                      color: ZInk.dangerTone(context),
+                    ),
+                    title: Text(
+                      tr(
+                        context,
+                        missing
+                            ? 'chat.banner.sessionMissing'
+                            : 'chat.banner.sessionDeleted',
                       ),
-                    )
-                  : const SizedBox.shrink(),
+                      style: ZType.sub,
+                    ),
+                  ),
+                );
+              },
             ),
             // D2 off-peak queue card: its own state-driven slot (empty
             // unless the session is bound to an off-peak run with a live
@@ -7052,6 +7081,15 @@ class _InputBarState extends State<_InputBar> {
     return sid != null && gateway.isSessionDeleted(sid);
   }
 
+  /// Authoritative subscribe refusal (10-11): the subscribe channel
+  /// answered sessionNotFound for this session — same greyed-send form as
+  /// [_sessionDeleted], epistemically authoritative (see
+  /// _ChatPageState._sessionMissing).
+  bool get _sessionMissing {
+    final sid = sessionId;
+    return sid != null && gateway.isSessionMissing(sid);
+  }
+
   // Field forwarders so the build/helpers below read like the original
   // stateless widget.
   TextEditingController get controller => widget.controller;
@@ -7245,8 +7283,10 @@ class _InputBarState extends State<_InputBar> {
                               _StopButton(onStop: () => _stop(context))
                             else
                               _SendButton(
-                                enabled:
-                                    _hasInput && !sending && !_sessionDeleted,
+                                enabled: _hasInput &&
+                                    !sending &&
+                                    !_sessionDeleted &&
+                                    !_sessionMissing,
                                 sending: sending,
                                 onSend: _sendAndCollapse,
                               ),
@@ -7347,8 +7387,10 @@ class _InputBarState extends State<_InputBar> {
                     showStop
                         ? _StopButton(onStop: () => _stop(context))
                         : _SendButton(
-                            enabled:
-                                _hasInput && !sending && !_sessionDeleted,
+                            enabled: _hasInput &&
+                                !sending &&
+                                !_sessionDeleted &&
+                                !_sessionMissing,
                             sending: sending,
                             onSend: _sendAndCollapse,
                           ),
