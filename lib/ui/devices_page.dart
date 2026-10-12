@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../notifications/keepalive_controller.dart';
+import '../plan/plan_account.dart';
 import '../protocol/connection_params.dart';
 import '../state/device_session.dart';
 import '../state/device_store.dart';
@@ -33,6 +34,10 @@ class DevicesPage extends StatefulWidget {
   /// Quota-watch controller handed to the settings section (null on hosts
   /// without the feature).
   final QuotaWatchController? quotaWatch;
+
+  /// Plan-account controller handed to the settings section (null when
+  /// the feature is not wired).
+  final PlanController? plan;
   const DevicesPage({
     super.key,
     required this.store,
@@ -42,6 +47,7 @@ class DevicesPage extends StatefulWidget {
     required this.scheduled,
     required this.keepalive,
     this.quotaWatch,
+    this.plan,
   });
 
   @override
@@ -407,6 +413,7 @@ class _DevicesPageState extends State<DevicesPage>
                 ui: widget.ui,
                 keepalive: widget.keepalive,
                 quotaWatch: widget.quotaWatch,
+                plan: widget.plan,
               ),
             )),
           ),
