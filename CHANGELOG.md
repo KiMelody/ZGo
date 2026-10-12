@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.2] - 2026-10-12
+
+### Added
+
+- **Account plan quota**: plan page with billing balance/current REST
+  queries; OAuth device-flow browser sign-in as the primary path
+  (polling, cancel, copy-link, timeout/reject retry) with manual JWT
+  paste kept as fallback; an explicit expired state via a local expiry
+  memo when the server silently empties balances; Noto Sans SC fonts
+  bundled.
+- **Landscape immersive fullscreen**: system bars hide app-wide in
+  landscape (Android immersiveSticky / iOS overlays) and restore in
+  portrait, re-asserted idempotently from a root observer; SafeArea,
+  manifest and plist stay untouched.
+
+### Changed
+
+- **Composer aligned with official stop/send behavior**: stop
+  visibility follows `control.canStop` with an empty composer; tapping
+  stop optimistically hides the button and recalibrates on the next
+  authoritative write; the redundant skill button is removed and the
+  tool-row running-state overflow is closed out (compact + button
+  48→40, model/thought chips capped at 150dp).
+
+### Fixed
+
+- **Subscription resilience**: tombstone baselines bind to subscription
+  generations, so bridge-swing resubscribes no longer read reseeded
+  snapshot gaps as deletes; `sessionNotFound` is a one-way terminal
+  state with an authoritative rejection banner and send gating;
+  resubscribes back off 3/6/12 s; `deviceInfo.updatedAt` backfilled on
+  view-state updates; diagnostic `failureReason` sanitized
+  (`kicked` → `session-conflict`).
+- **Task list & session operations**: duplicate-id rows resolve display
+  status by terminal-first precedence (no more zombie running rows);
+  chat-page delete routes through `deleteTask` (persistent soft delete,
+  draft-row fallback), fixing the delete-revive loop; mutation scope
+  row selection aligns with `TaskDirectory.byId`; failure-toast prefix
+  no longer leaks a literal `$0`.
+
 ## [1.14.1] - 2026-10-08
 
 ### Added
