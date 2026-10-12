@@ -40,19 +40,47 @@ class FakeDeviceSession extends DeviceSession {
     // records cross-terminal deletion tombstones (task 10-06) — the
     // seeded snapshot included, same order as _onSessionsChanged.
     sessions.addListener(_onLiveFrame);
-    sessions.applyFrame({
+    deliver({
       'toSeq': 1,
       'payload': {
         'kind': 'snapshot',
         'snapshot': {'workspaceId': 'ws-1', 'sessions': entries},
       },
-    }, onGap: () {});
+    });
   }
 
   void _onLiveFrame() {
     recordVanishedSessions();
     confirmLiveHomes();
   }
+
+  /// Tombstone-diff signals (the device_session.dart override seam): the
+  /// live index's subscription generation and the kind of the frame
+  /// currently being applied. Tests bump [generation] to replay a
+  /// bridge-swing resubscribe; [deliver] publishes the frame kind around
+  /// applyFrame exactly like the production subscription does.
+  int generation = 0;
+  String? frameKind;
+
+  @override
+  int get indexGeneration => generation;
+  @override
+  String? get applyingFrameKind => frameKind;
+
+  /// Delivers a live sessions-index frame the way
+  /// [SessionsIndexSubscription] does: the frame kind is published
+  /// before applyFrame (state listeners read it synchronously) and
+  /// cleared after.
+  void deliver(Map<String, dynamic> frame, {void Function()? onGap}) {
+    frameKind = (frame['payload'] as Map?)?['kind'] as String?;
+    sessions.applyFrame(frame, onGap: onGap ?? () {});
+    frameKind = null;
+  }
+
+  /// A bridge-swing resubscribe: bumps the subscription generation so
+  /// the next delivered frame only establishes a fresh tombstone
+  /// baseline — never diffs against this generation's ids (10-11 fix).
+  void resubscribeSessionsIndex() => generation++;
 
   late List<Map<String, dynamic>> _workspaces;
 

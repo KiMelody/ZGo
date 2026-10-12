@@ -211,6 +211,23 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
     deletedSessionIds.remove(sessionId);
   }
 
+  /// Authoritative subscribe refusals (10-11 sessionNotFound terminal) —
+  /// same shape as the tombstone set above.
+  final Set<String> missingSessionIds = {};
+
+  /// Ids handed to [forgetMissingSession] (the page's dispose recovery).
+  final List<String> forgottenMissingSessions = [];
+
+  @override
+  bool isSessionMissing(String sessionId) =>
+      missingSessionIds.contains(sessionId);
+
+  @override
+  void forgetMissingSession(String sessionId) {
+    forgottenMissingSessions.add(sessionId);
+    missingSessionIds.remove(sessionId);
+  }
+
   /// Every recorded call as (method, positionalArgs).
   final List<(String, List<Object?>)> calls = [];
 

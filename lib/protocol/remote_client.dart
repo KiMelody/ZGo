@@ -15,6 +15,33 @@ import 'rpc_transport.dart';
 
 String _reqId(String prefix) => generateRequestId(prefix);
 
+/// Builds the `mobile-view-state-update` payload (external-relay union,
+/// desktop zod: `deviceInfo` is optional as a whole but — once present —
+/// requires `updatedAt`: a finite number, NOT `.optional()`. A
+/// deviceInfo without it fails the union and the desktop drops the whole
+/// payload, `invalid external relay payload dropped`; see task 10-11
+/// view-state-drop-investigation §2/§5). Top-level so tests can pin the
+/// wire shape without a socket.
+Map<String, dynamic> mobileViewStatePayload({
+  required String workspaceKey,
+  String? taskId,
+  String? appVersion,
+}) =>
+    {
+      'zcode_type': 'mobile-view-state-update',
+      'viewState': {
+        'activeWorkspaceKey': workspaceKey,
+        if (taskId != null) 'activeTaskId': taskId,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      },
+      'deviceInfo': {
+        'platform': remotePlatformName(),
+        'version': appVersion ?? 'web',
+        'name': remoteAppName,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      },
+    };
+
 /// High-level facade replicating the web client's `otn()` flow:
 /// relay connect -> pair -> bootstrap -> workspace bridge -> channel RPC.
 class RemoteClient {
@@ -424,19 +451,11 @@ class RemoteClient {
     required String workspaceKey,
     String? taskId,
   }) async {
-    relay.sendPayload({
-      'zcode_type': 'mobile-view-state-update',
-      'viewState': {
-        'activeWorkspaceKey': workspaceKey,
-        if (taskId != null) 'activeTaskId': taskId,
-        'updatedAt': DateTime.now().millisecondsSinceEpoch,
-      },
-      'deviceInfo': {
-        'platform': remotePlatformName(),
-        'version': params.appVersion ?? 'web',
-        'name': remoteAppName,
-      },
-    });
+    relay.sendPayload(mobileViewStatePayload(
+      workspaceKey: workspaceKey,
+      taskId: taskId,
+      appVersion: params.appVersion,
+    ));
   }
 
   /// mobile-diagnostic (G7): fire-and-forget telemetry for the session

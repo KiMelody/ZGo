@@ -10,6 +10,10 @@ import '../helpers/fake_device_session.dart';
 /// the fake exactly like production `_onSessionsChanged`) and surface
 /// through `isSessionDeleted`. The chat page drops its own id on dispose
 /// (`forgetDeletedSession`).
+///
+/// The second group locks the 10-11 anti-false-positive rules (bridge-swing
+/// resubscribes and delta→snapshot boundaries must never tombstone) plus
+/// the 10-06 red line (same-generation removal deltas still do).
 void main() {
   final params = RemoteConnectionParams.parse(
     'https://zcode.z.ai/remote/v4?sid=abc&hash=xyz&t=123&mid=m1'
@@ -28,13 +32,31 @@ void main() {
         },
       };
 
-  Map<String, dynamic> removedDelta(String id) => {
-        'fromSeq': 1,
-        'toSeq': 2,
+  Map<String, dynamic> removedDelta(String id, [int fromSeq = 1, int toSeq = 2]) => {
+        'fromSeq': fromSeq,
+        'toSeq': toSeq,
         'payload': {
           'kind': 'deltas',
           'deltas': [
             {'op': 'session.removed', 'sessionId': id},
+          ],
+        },
+      };
+
+  /// One `session.upserted` delta — how the desktop pushes a new or
+  /// updated session row.
+  Map<String, dynamic> upsertDelta(
+    Map<String, dynamic> session,
+    int fromSeq,
+    int toSeq,
+  ) =>
+      {
+        'fromSeq': fromSeq,
+        'toSeq': toSeq,
+        'payload': {
+          'kind': 'deltas',
+          'deltas': [
+            {'op': 'session.upserted', 'session': session},
           ],
         },
       };
@@ -170,5 +192,135 @@ void main() {
     // Other tombstones are untouched.
     session.sessions.applyFrame(snapshot(const []), onGap: () {});
     expect(session.isSessionDeleted('s2'), isTrue);
+  });
+
+  // --- 10-11 bridge-swing false positives, now regressions (task
+  // 10-11-acceptance-fix-batch; ex forensic suite
+  // tombstone_hypothesis_proof_test.dart, rewritten to assert the FIX).
+  // The ~45s replayGraceExceeded pendulum resubscribes the SAME
+  // SessionsIndexState without an openWorkspace; before the
+  // generation + frame-kind rules landed, the rebuilt subscription's
+  // re-seeded first frame diffed against pre-swing ids and tombstoned
+  // live sessions (H1/H2/H3 in the 10-11 findings). The H2 control — a
+  // genuinely fresh subscription's first frame only establishes the
+  // baseline — stays covered by "a fresh baseline does not mass-record"
+  // above.
+
+  test('H1 regression: a delta-admitted id missing from a later snapshot '
+      'is not a deletion', () {
+    final session = FakeDeviceSession(
+      deviceId: 'd1',
+      params: params,
+      entries: [liveRow('A'), liveRow('B')],
+    );
+    // The desktop pushes the brand-new session X as a delta...
+    session.deliver(upsertDelta(liveRow('X'), 1, 2));
+    expect(session.isSessionDeleted('X'), isFalse);
+
+    // ...and a same-workspace snapshot omits it again (re-seed lag).
+    session.deliver(snapshot([liveRow('A'), liveRow('B')]));
+
+    expect(
+      session.isSessionDeleted('X'),
+      isFalse,
+      reason: 'X was never snapshot-confirmed — a snapshot after a delta '
+          'must re-baseline, not diff "missing means deleted"',
+    );
+    expect(session.isSessionDeleted('A'), isFalse);
+    expect(session.isSessionDeleted('B'), isFalse);
+  });
+
+  test('H2 regression: a resubscribe never diffs against pre-swing ids', () {
+    // Real-world 10-11 10:34 shape: createSession lands between two ~45s
+    // bridge swings; the rebuilt subscription's first re-seeded snapshot
+    // reaches the SAME state + baseline (no openWorkspace ran).
+    final session = FakeDeviceSession(
+      deviceId: 'd1',
+      params: params,
+      entries: [liveRow('A'), liveRow('B'), liveRow('X')],
+    );
+    expect(session.isSessionDeleted('X'), isFalse);
+
+    session.resubscribeSessionsIndex();
+    session.deliver(snapshot([liveRow('A'), liveRow('B')]));
+
+    expect(
+      session.isSessionDeleted('X'),
+      isFalse,
+      reason: 'the new generation must establish its own baseline first',
+    );
+
+    // X returns with the next re-seeded frame and stays un-banned (the
+    // add-only set no longer records the false positive at all).
+    session.deliver(snapshot([liveRow('A'), liveRow('B'), liveRow('X')]));
+    expect(session.isSessionDeleted('X'), isFalse);
+  });
+
+  test('H3 regression: a gap-resync snapshot does not tombstone '
+      'delta-admitted ids', () {
+    final session = FakeDeviceSession(
+      deviceId: 'd1',
+      params: params,
+      entries: [liveRow('A')],
+    );
+    session.deliver(upsertDelta(liveRow('X'), 1, 2));
+    expect(session.isSessionDeleted('X'), isFalse);
+
+    // A seq-mismatched delta fires onGap -> production runs _resync() ->
+    // the desktop answers with a fresh snapshot (which lags X).
+    var gapFired = false;
+    session.deliver(
+      {
+        'fromSeq': 9, // != state.seq (2) -> gap
+        'toSeq': 10,
+        'payload': {
+          'kind': 'deltas',
+          'deltas': const [],
+        },
+      },
+      onGap: () => gapFired = true,
+    );
+    expect(gapFired, isTrue, reason: 'delta seq gap must call onGap');
+    expect(session.isSessionDeleted('X'), isFalse);
+
+    // The resync snapshot omits X: re-seed lag, not a deletion.
+    session.deliver(snapshot([liveRow('A')]));
+    expect(session.isSessionDeleted('X'), isFalse);
+  });
+
+  test('red line: a same-generation session.removed delta still records '
+      'the tombstone', () {
+    // 10-06 red line under the frame-kind rules: removal deltas stay
+    // immediately trusted within one subscription generation.
+    final session = FakeDeviceSession(
+      deviceId: 'd1',
+      params: params,
+      entries: [liveRow('A'), liveRow('B'), liveRow('X')],
+    );
+    session.deliver(removedDelta('X'));
+    expect(session.isSessionDeleted('X'), isTrue);
+    expect(session.isSessionDeleted('A'), isFalse);
+    expect(session.isSessionDeleted('B'), isFalse);
+  });
+
+  test('red line: a removal delta of a delta-admitted id records too '
+      '(no snapshot confirmed it yet)', () {
+    // The other half of the red line: a session created via an upsert
+    // delta (createSession) and remotely deleted before any snapshot
+    // confirmed it — the removal delta is an explicit op, so it must
+    // tombstone even though the id never entered the snapshot baseline
+    // (which stays delta-free so H1/H3 re-seed lag cannot tombstone).
+    final session = FakeDeviceSession(
+      deviceId: 'd1',
+      params: params,
+      entries: [liveRow('A'), liveRow('B')],
+    );
+    session.deliver(upsertDelta(liveRow('X'), 1, 2));
+    expect(session.isSessionDeleted('X'), isFalse);
+
+    session.deliver(removedDelta('X', 2, 3));
+
+    expect(session.isSessionDeleted('X'), isTrue);
+    expect(session.isSessionDeleted('A'), isFalse);
   });
 }

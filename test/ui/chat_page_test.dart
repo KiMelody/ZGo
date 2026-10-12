@@ -1789,6 +1789,84 @@ void main() {
     });
   });
 
+  group('sessionNotFound terminal (10-11)', () {
+    Future<FakeChatGateway> pumpChat(WidgetTester tester,
+        {required FakeChatGateway gateway}) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi', 'state': 'done'},
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      return gateway;
+    }
+
+    InkWell sendButtonOf(WidgetTester tester) => tester.widget<InkWell>(
+          find
+              .ancestor(
+                of: find.byIcon(Icons.arrow_upward),
+                matching: find.byType(InkWell),
+              )
+              .first,
+        );
+
+    testWidgets('missing id: banner shows and send greys out', (tester) async {
+      final gateway = await pumpChat(
+        tester,
+        gateway: FakeChatGateway()..missingSessionIds.add('s1'),
+      );
+
+      // Banner + greyed send (input present, but refused).
+      expect(find.text('会话不存在'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), '继续');
+      await tester.pump();
+      expect(sendButtonOf(tester).onTap, isNull);
+
+      // The id leaving the set (production: never mid-life; the page
+      // re-reads on the gateway notify either way) recovers the composer.
+      gateway.missingSessionIds.remove('s1');
+      gateway.notifyListeners();
+      await tester.pump();
+      expect(find.text('会话不存在'), findsNothing);
+      expect(sendButtonOf(tester).onTap, isNotNull);
+    });
+
+    testWidgets('tombstone and refusal both hold: the authoritative '
+        'refusal wins the banner (PRD R1)', (tester) async {
+      await pumpChat(
+        tester,
+        gateway: FakeChatGateway()
+          ..deletedSessionIds.add('s1')
+          ..missingSessionIds.add('s1'),
+      );
+
+      expect(find.text('会话不存在'), findsOneWidget);
+      expect(find.text('会话已在其他位置删除'), findsNothing);
+      await tester.enterText(find.byType(TextField), '继续');
+      await tester.pump();
+      expect(sendButtonOf(tester).onTap, isNull);
+    });
+
+    testWidgets('dispose forgets the page-held missing id', (tester) async {
+      final gateway = await pumpChat(
+        tester,
+        gateway: FakeChatGateway()..missingSessionIds.add('s1'),
+      );
+      expect(gateway.forgottenMissingSessions, isEmpty);
+      expect(gateway.isSessionMissing('s1'), isTrue);
+
+      // Unmount the page (dispose path) — the id must leave the set.
+      await tester.pumpWidget(wrap(const SizedBox.shrink()));
+      expect(gateway.forgottenMissingSessions, ['s1']);
+      expect(gateway.isSessionMissing('s1'), isFalse);
+    });
+  });
+
   testWidgets('更多 menu: official order and pin toggle flips label', (
     tester,
   ) async {
