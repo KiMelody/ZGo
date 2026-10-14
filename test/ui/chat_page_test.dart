@@ -149,6 +149,11 @@ Widget wrap(Widget child) => MaterialApp(
   home: child,
 );
 
+/// The message list's ListView — the FIRST one in the message-area Stack.
+/// The turn navigator strip (task 10-14) mounts its own scrollable as a
+/// later sibling, so unqualified `find.byType(ListView)` now matches two.
+Finder messageList() => find.byType(ListView).first;
+
 /// Snapshot for one running subagent (`subagents.running[]` entry + its
 /// `kind=='subagent'` works entry, live-probed 2026-09-13), optionally plus a
 /// plain bash work. The composer button counts all three kinds, so the
@@ -532,7 +537,7 @@ void main() {
 
       // The message ListView is the only one on a resting page.
       ScrollController controller() =>
-          tester.widget<ListView>(find.byType(ListView)).controller!;
+          tester.widget<ListView>(messageList()).controller!;
       final pinned = controller();
       // Steady state: pin to the bottom explicitly (the launch animation
       // targets the SliverList's ESTIMATED max; its revision lands a frame
@@ -1482,7 +1487,7 @@ void main() {
 
     testWidgets('message viewport clears 40% of screen height', (tester) async {
       await pumpLandscape(tester);
-      final listH = tester.getSize(find.byType(ListView).first).height;
+      final listH = tester.getSize(messageList()).height;
       final appBarH = tester.getSize(find.byType(AppBar)).height;
       // C6 acceptance line (≥40%); the shipped state measures 198px ≈ 48%.
       expect(
@@ -2063,7 +2068,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final controller =
-        tester.widget<ListView>(find.byType(ListView)).controller!;
+        tester.widget<ListView>(messageList()).controller!;
     // The control stays mounted and cross-fades, so its target opacity is the
     // visibility signal (IgnorePointer blocks taps while transparent).
     double opacity() => tester
@@ -3020,7 +3025,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     final controller =
-        tester.widget<ListView>(find.byType(ListView)).controller!;
+        tester.widget<ListView>(messageList()).controller!;
     // Trigger via the pull gesture rather than a button tap: the tap's
     // gesture-arena routing is unreliable in this fixture's frame schedule
     // (armed → prepend post-frame → landing), while the pull drives the
@@ -3029,7 +3034,7 @@ void main() {
       controller.jumpTo(0);
       await tester.pump();
       final gesture = await tester.startGesture(
-        tester.getCenter(find.byType(ListView)),
+        tester.getCenter(messageList()),
       );
       await tester.pump();
       await gesture.moveBy(const Offset(0, 300));
@@ -3993,7 +3998,7 @@ void main() {
   }
 
   ScrollController historyController(WidgetTester tester) =>
-      tester.widget<ListView>(find.byType(ListView)).controller!;
+      tester.widget<ListView>(messageList()).controller!;
 
   int rowsRangeCalls(FakeChatGateway gateway) =>
       gateway.calls.where((c) => c.$1 == 'rowsRange').length;
@@ -4014,13 +4019,13 @@ void main() {
   Set<String> visibleMessages(WidgetTester tester) => {
     for (final w in tester.widgetList<SelectableText>(
       find.descendant(
-        of: find.byType(ListView),
+        of: messageList(),
         matching: find.byType(SelectableText),
       ),
     ))
       w.data,
     for (final w in tester.widgetList<Text>(
-      find.descendant(of: find.byType(ListView), matching: find.byType(Text)),
+      find.descendant(of: messageList(), matching: find.byType(Text)),
     ))
       w.data,
   }.whereType<String>().toSet();
@@ -4031,7 +4036,7 @@ void main() {
     final entries = <(String, double)>[];
     for (final w in tester.widgetList<SelectableText>(
       find.descendant(
-        of: find.byType(ListView),
+        of: messageList(),
         matching: find.byType(SelectableText),
       ),
     )) {
@@ -4069,7 +4074,7 @@ void main() {
     expect(transport.calls.length, 1, reason: 'open auto-load consumed page 1');
 
     final gesture = await tester.startGesture(
-      tester.getCenter(find.byType(ListView)),
+      tester.getCenter(messageList()),
     );
     await tester.pump();
     await gesture.moveBy(Offset(0, inWindowDrag(controller)));
@@ -4109,7 +4114,7 @@ void main() {
     expect(rowsRangeCalls(gateway), 1);
 
     final gesture = await tester.startGesture(
-      tester.getCenter(find.byType(ListView)),
+      tester.getCenter(messageList()),
     );
     await tester.pump();
     await gesture.moveBy(const Offset(0, 100));
@@ -4150,7 +4155,7 @@ void main() {
     // what must trigger the prefetch. AC: 快速上翻 approaching the top loads
     // once without needing to touch the top.
     await tester.fling(
-      find.byType(ListView),
+      messageList(),
       const Offset(0, 300),
       2000,
       warnIfMissed: false,
@@ -4190,7 +4195,7 @@ void main() {
     final controller = historyController(tester);
     // Drag into the window: the in-flight load keeps the trigger parked.
     final gesture = await tester.startGesture(
-      tester.getCenter(find.byType(ListView)),
+      tester.getCenter(messageList()),
     );
     await tester.pump();
     await gesture.moveBy(Offset(0, inWindowDrag(controller)));
@@ -4217,7 +4222,7 @@ void main() {
     controller.jumpTo(600);
     await tester.pumpAndSettle();
     final gesture2 = await tester.startGesture(
-      tester.getCenter(find.byType(ListView)),
+      tester.getCenter(messageList()),
     );
     await tester.pump();
     await gesture2.moveBy(const Offset(0, 50)); // inside the window
@@ -4243,7 +4248,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final gesture = await tester.startGesture(
-      tester.getCenter(find.byType(ListView)),
+      tester.getCenter(messageList()),
     );
     await tester.pump();
     await gesture.moveBy(const Offset(0, 300));
@@ -4283,7 +4288,7 @@ void main() {
     expect(visibleBefore, isNotEmpty);
 
     final gesture = await tester.startGesture(
-      tester.getCenter(find.byType(ListView)),
+      tester.getCenter(messageList()),
     );
     await tester.pump();
     await gesture.moveBy(const Offset(0, 300));
@@ -4324,7 +4329,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final gesture = await tester.startGesture(
-      tester.getCenter(find.byType(ListView)),
+      tester.getCenter(messageList()),
     );
     await tester.pump();
     await gesture.moveBy(const Offset(0, 50)); // one step: no damping yet
@@ -4438,7 +4443,7 @@ void main() {
     expect(find.textContaining('页1首段'), findsOneWidget);
 
     final gesture = await tester.startGesture(
-      tester.getCenter(find.byType(ListView)),
+      tester.getCenter(messageList()),
     );
     await tester.pump();
     await gesture.moveBy(const Offset(0, -50)); // into the window, not the head
@@ -4519,7 +4524,7 @@ void main() {
     final controller = historyController(tester);
 
     final gesture = await tester.startGesture(
-      tester.getCenter(find.byType(ListView)),
+      tester.getCenter(messageList()),
     );
     await tester.pump();
     await gesture.moveBy(Offset(0, inWindowDrag(controller)));
@@ -4566,7 +4571,7 @@ void main() {
     // group + bottom padding) fills the viewport exactly — no blank tail
     // past the end (the overshoot bug), no undershoot (the estimate bug).
     expect(controller.offset, closeTo(controller.position.maxScrollExtent, 0.5));
-    final listBox = tester.renderObject(find.byType(ListView)) as RenderBox;
+    final listBox = tester.renderObject(messageList()) as RenderBox;
     final viewportTop = listBox.localToGlobal(Offset.zero).dy;
     final viewportBottom = viewportTop + listBox.size.height;
     // The newest message text is on screen, just above the viewport bottom
@@ -4596,7 +4601,7 @@ void main() {
     controller.jumpTo(600);
     await tester.pumpAndSettle();
     final gesture = await tester.startGesture(
-      tester.getCenter(find.byType(ListView)),
+      tester.getCenter(messageList()),
     );
     await tester.pump();
     await gesture.moveBy(const Offset(0, 50));
@@ -4615,7 +4620,7 @@ void main() {
     await tester.pump(); // prepend applies: veil setState lands
     await tester.pump(); // veiled frame renders; post-frame chain lands
     final veil = find
-        .ancestor(of: find.byType(ListView), matching: find.byType(Opacity))
+        .ancestor(of: messageList(), matching: find.byType(Opacity))
         .first;
     expect(tester.widget<Opacity>(veil).opacity, 0.0,
         reason: 'the prepend frame must paint behind the veil');

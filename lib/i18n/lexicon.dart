@@ -172,6 +172,10 @@ const _zh = {
   'chat.loadOlder': '加载更早消息',
   'chat.loadOlder.failed': '加载失败: \$0',
   'chat.jumpToBottom': '回到底部',
+  // Turn navigator (official web `chat.turnNavigator.*`, bundle-verified
+  // 10-14: label + jumpToQuery copied verbatim from web_v4_intl.js).
+  'chat.turnNavigator.label': '对话问题导航',
+  'chat.turnNavigator.jumpToQuery': '跳转到第 \$0 条问题',
   'chat.subscribe.failed': '订阅失败: \$0',
   'chat.subscribe.timeout': '数据加载超时，请重试',
   'chat.reconnecting': '连接已断开，正在自动重连…',
@@ -1412,6 +1416,8 @@ const _en = {
   'chat.loadOlder': 'Load older messages',
   'chat.loadOlder.failed': 'Load failed: \$0',
   'chat.jumpToBottom': 'Jump to bottom',
+  'chat.turnNavigator.label': 'Conversation query map',
+  'chat.turnNavigator.jumpToQuery': 'Jump to query \$0',
   'chat.subscribe.failed': 'Subscribe failed: \$0',
   'chat.subscribe.timeout': 'Timed out loading — try again',
   'chat.reconnecting': 'Connection lost, reconnecting…',
