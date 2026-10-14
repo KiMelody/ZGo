@@ -4,7 +4,8 @@ import 'dart:ui' as ui;
 
 import 'package:clock/clock.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
     show RenderRepaintBoundary, ScrollCacheExtent;
@@ -32,6 +33,7 @@ import 'subagent_feed.dart';
 import 'timeline.dart';
 import 'tool_row_semantics.dart';
 import 'top_bounce_physics.dart';
+import 'turn_navigator.dart';
 
 /// Native chat view for one task (session), backed by Conversation V4 over
 /// [ChatGateway]. Draft mode (no [sessionId]): the first message issues
@@ -317,6 +319,34 @@ class _ChatPageState extends State<ChatPage> {
   /// is widened for a frame so SliverList lays out down to the anchor and
   /// the landing is measured, never estimated.
   double? _anchorCacheExtent;
+
+  /// Temporary oversize cacheExtent for the turn-navigator jump (task
+  /// 10-14; null = platform default). Same trick as [_anchorCacheExtent]:
+  /// the target turn may sit outside the ~250px layout cache, so the cache
+  /// widens for a frame, the landing is MEASURED (never estimated —
+  /// chat-conventions §9), and the extent is restored.
+  double? _jumpCacheExtent;
+
+  /// Turn navigator directory (design §2.1): ascending rowIds of the real
+  /// user queries in the loaded window, recomputed in the state listener
+  /// only when `(rows.length, firstRowId, lastRowId)` changes — streaming
+  /// text deltas hit the memo key and never recompute (PRD AC: the cell
+  /// list does not recompute on text deltas).
+  List<int> _queryRowIds = const [];
+  (int, String?, String?)? _queryDirKey;
+
+  /// Turn navigator highlight: the query at the viewport top, computed on
+  /// scroll ([_updateActiveQueryIndex]). A ValueNotifier so a highlight
+  /// change repaints only the strip, never the page.
+  final ValueNotifier<int?> _activeQueryIndex = ValueNotifier(null);
+
+  /// Turn navigator expanded-overlay handle (design §3.1): the page pushes
+  /// "the list scrolled" into the component via
+  /// [TurnNavigatorState.collapse] from the scroll hook ([_onListScroll]).
+  /// Expanded state and its animation live inside the component — never
+  /// here; the component does not import the page.
+  final GlobalKey<TurnNavigatorState> _turnNavigatorKey =
+      GlobalKey<TurnNavigatorState>();
 
   /// Invalidation epoch for anchor-compensation chains: stored (and bumped
   /// per prepend commit) in the pager; forwarded here so the compensation
@@ -690,6 +720,11 @@ class _ChatPageState extends State<ChatPage> {
         !identical(scrollable.position, _scrollController.position)) {
       return false;
     }
+    // Expanded-navigator dismissal (design §3.1, four collapse routes):
+    // any scroll of THIS list collapses the long-press overlay. No-op
+    // while collapsed; identity routing above keeps sibling scrollables
+    // (diff cards, code blocks) from dismissing it.
+    _turnNavigatorKey.currentState?.collapse();
     if (n is ScrollStartNotification) {
       // dragDetails != null → a user drag starts; null → programmatic
       // activity (jumpTo / animateTo, see [_positioning]).
@@ -731,10 +766,14 @@ class _ChatPageState extends State<ChatPage> {
         _pullArmed = false;
         if (!_loadingOlder) _loadOlder();
       }
+      // Navigator highlight rides the same pass, post-frame (design §2.2).
+      _scheduleActiveQueryUpdate();
     } else if (n is ScrollEndNotification) {
       _positioning = false;
       _userDragActive = false;
       _scrollSettled = true;
+      // Navigator highlight settles on the final position.
+      _scheduleActiveQueryUpdate();
       // The scroll has truly settled (drag released, spring/fling done):
       // a drag-held history page may now flush (see the DRAG HOLD note in
       // [HistoryPager.settle]).
@@ -831,6 +870,7 @@ class _ChatPageState extends State<ChatPage> {
     _inputController.dispose();
     _scrollController.dispose();
     _frozenFrame?.dispose();
+    _activeQueryIndex.dispose();
     super.dispose();
   }
 
@@ -889,6 +929,10 @@ class _ChatPageState extends State<ChatPage> {
       widget.gateway.sendViewState(taskId: sessionId);
       handle.state.addListener(_scrollToBottom);
       handle.state.addListener(_onConfigMaybeReverted);
+      handle.state.addListener(_refreshQueryDirectory);
+      // The snapshot may already be applied when the handle resolves —
+      // seed the directory now (the memo key makes a redundant call free).
+      _refreshQueryDirectory();
       // Terminal-hysteresis memory rides the parent conversation (subagent
       // rows + backgroundWorks).
       _feed.observe(handle.state);
@@ -945,6 +989,173 @@ class _ChatPageState extends State<ChatPage> {
       duration: const Duration(milliseconds: 200),
       curve: Curves.easeOut,
     );
+  }
+
+  // ---------------------------------------------------- turn navigator
+
+  /// Directory refresh (design §2.1): the memo key makes text-delta
+  /// notifies free — only a row-set shape change recomputes. Runs as a
+  /// state listener; [setState] fires only when the directory value really
+  /// changed.
+  void _refreshQueryDirectory() {
+    final state = _state;
+    if (state == null || !mounted) return;
+    final rows = state.rows;
+    final key = (
+      rows.length,
+      rows.isEmpty ? null : '${rows.first['rowId']}',
+      rows.isEmpty ? null : '${rows.last['rowId']}',
+    );
+    if (_queryDirKey == key) return;
+    _queryDirKey = key;
+    final next = turnNavigatorQueryRowIds(rows);
+    if (listEquals(next, _queryRowIds)) return;
+    setState(() => _queryRowIds = next);
+    // The highlight may follow the new directory (a fresh query appended
+    // while pinned to the bottom arrives without any scroll notification).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _updateActiveQueryIndex();
+    });
+  }
+
+  /// Highlight scheduling: scroll notifications fire BEFORE their frame's
+  /// layout, so computing inline reads the PREVIOUS frame's boxes — a jump
+  /// or drag release would leave the highlight one layout behind with
+  /// nothing to correct it. Scheduling post-frame reads the settled layout
+  /// instead (coalesced to one pass per frame).
+  bool _activeQueryScheduled = false;
+
+  void _scheduleActiveQueryUpdate() {
+    if (_activeQueryScheduled || _queryRowIds.length < 2) return;
+    _activeQueryScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _activeQueryScheduled = false;
+      if (mounted) _updateActiveQueryIndex();
+    });
+  }
+
+  /// Highlight pass (design §2.2): the first built query group at/over the
+  /// viewport top wins; when every built query sits above it, the last one
+  /// does (the nearest above). Built groups form one contiguous SliverList
+  /// window, so "last built above" IS the nearest above. When no query
+  /// group is measurable (viewport deep inside a long answer, beyond the
+  /// layout cache), the current value stands — no flicker.
+  void _updateActiveQueryIndex() {
+    final queries = _queryRowIds;
+    if (queries.length < 2 || !_scrollController.hasClients) return;
+    final viewport = _listViewportBox();
+    if (viewport == null) return;
+    final viewportTop = viewport.localToGlobal(Offset.zero).dy;
+    int? active;
+    for (final (widget, box) in _builtGroups()) {
+      final first = widget.rows.first['rowId'];
+      if (first is! num) continue;
+      final index = queries.indexOf(first.toInt());
+      if (index < 0) continue;
+      if (box.localToGlobal(Offset.zero).dy >= viewportTop - 40) {
+        active = index;
+        break;
+      }
+      active = index;
+    }
+    if (active == null || active == _activeQueryIndex.value) return;
+    _activeQueryIndex.value = active;
+  }
+
+  /// Navigator tap (design §2.3): detach the bottom pin, then land the
+  /// tapped query on the viewport top — measured, never estimated
+  /// (chat-conventions §9). The gates keep the jump from racing an active
+  /// drag, a prepend compensation chain, or another programmatic scroll.
+  void _jumpToQuery(int rowId) {
+    if (!_scrollController.hasClients) return;
+    if (_userDragActive || _compensationPending || _positioning) return;
+    if (_stickToBottom && mounted) setState(() => _stickToBottom = false);
+    _landOnQuery(rowId, hop: 0);
+  }
+
+  /// Upper bound for the jump's one-frame cache widen (same ceiling the
+  /// anchor compensation uses).
+  static const double _kJumpMaxCacheExtent = 120000.0;
+
+  /// Measured landing on a query turn group: `target = pixels +
+  /// (boxTop - viewportTop)` from real RenderBoxes; off-window targets
+  /// get the cache widened (hop 0) or a coarse side probe (hop 1) first so
+  /// layout walks in — the estimate only positions the probe or sizes the
+  /// cache, never the final landing.
+  Future<void> _landOnQuery(int rowId, {required int hop}) async {
+    if (!mounted || !_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final viewport = _listViewportBox();
+    if (viewport == null) return;
+    final viewportTop = viewport.localToGlobal(Offset.zero).dy;
+    final groupKey = ValueKey('turn-$rowId');
+    RenderBox? box;
+    for (final (widget, candidate) in _builtGroups()) {
+      if (widget.key == groupKey) {
+        box = candidate;
+        break;
+      }
+    }
+    if (box != null) {
+      final target = (position.pixels +
+              (box.localToGlobal(Offset.zero).dy - viewportTop))
+          .clamp(0.0, position.maxScrollExtent);
+      debugPrint('[nav] jump rowId=$rowId hop=$hop '
+          'px=${position.pixels.toStringAsFixed(1)} -> '
+          '${target.toStringAsFixed(1)}');
+      // Keep the widened cache through the glide: restoring it first lets
+      // the SliverList revert to the extent ESTIMATE mid-flight and the
+      // animation gets clamped by the noisy value (parks short of the true
+      // end). With the cache wide, max stays exact for the whole flight.
+      await _scrollController.animateTo(
+        target,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOut,
+      );
+      if (mounted && _jumpCacheExtent != null) {
+        setState(() => _jumpCacheExtent = null);
+      }
+      return;
+    }
+    if (hop == 0) {
+      // Off-window target: widen the layout cache for a frame so
+      // SliverList lays out down/up to it, then measure (the width covers
+      // both directions at the current extent, ×2 headroom for the
+      // SliverList's extent estimate — same ceiling as the anchor chain).
+      setState(() {
+        _jumpCacheExtent = math.min(
+          (position.maxScrollExtent + position.viewportDimension) * 2,
+          _kJumpMaxCacheExtent,
+        );
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _landOnQuery(rowId, hop: 1);
+      });
+      return;
+    }
+    if (hop == 1) {
+      // Still not built with the widened cache (enormous session): coarse
+      // probe to the target's side, let the real layout walk in, then the
+      // measured landing — the estimate-grade-anchor discipline of
+      // [_compensateAnchor], never a landing on the estimate itself.
+      var towardTop = true;
+      for (final (widget, _) in _builtGroups()) {
+        final first = widget.rows.first['rowId'];
+        if (first is num && first.toInt() > rowId) {
+          towardTop = false;
+          break;
+        }
+      }
+      _scrollController.jumpTo(towardTop ? 0.0 : position.maxScrollExtent);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _landOnQuery(rowId, hop: 2);
+      });
+      return;
+    }
+    // Degenerate: unmeasurable even at the probe — give up where we are.
+    if (_jumpCacheExtent != null) {
+      setState(() => _jumpCacheExtent = null);
+    }
   }
 
   void _toast(String message) {
@@ -2526,9 +2737,11 @@ class _ChatPageState extends State<ChatPage> {
                       child: ListView.builder(
                         key: _listKey,
                         controller: _scrollController,
-                        scrollCacheExtent: _anchorCacheExtent == null
+                        scrollCacheExtent: _anchorCacheExtent == null &&
+                                _jumpCacheExtent == null
                             ? null
-                            : ScrollCacheExtent.pixels(_anchorCacheExtent!),
+                            : ScrollCacheExtent.pixels(
+                                _anchorCacheExtent ?? _jumpCacheExtent!),
                         // Top rubber-band only while older history exists;
                         // flipping to null restores the platform clamp (no
                         // pull, no trigger).
@@ -3012,6 +3225,35 @@ class _ChatPageState extends State<ChatPage> {
                         onPressed: _animateToBottom,
                       ),
                     ),
+                  ),
+                  // Turn navigator (task 10-14): right-edge query strip,
+                  // vertically centered, the visual bars falling entirely
+                  // inside the list's existing 16dp right padding — content
+                  // never yields, zero overlap by construction. The 44dp
+                  // hit band's inner 28dp lies over content by design
+                  // (taps jump; drags pass through to the list). The mount
+                  // is a full fill so the long-press overlay (R2, design
+                  // §3.1) can span its 68dp float panel plus the
+                  // outside-tap barrier; every inactive pixel inside the
+                  // component stays transparent to hit tests.
+                  Positioned.fill(
+                    child: state == null || _queryRowIds.length < 2
+                        ? const SizedBox.shrink()
+                        : AnimatedBuilder(
+                            animation: state,
+                            builder: (context, _) =>
+                                ValueListenableBuilder<int?>(
+                                  valueListenable: _activeQueryIndex,
+                                  builder: (context, active, _) =>
+                                      TurnNavigator(
+                                        key: _turnNavigatorKey,
+                                        rowIds: _queryRowIds,
+                                        activeIndex: active,
+                                        canLoadOlder: state.canLoadOlder,
+                                        onJump: _jumpToQuery,
+                                      ),
+                                ),
+                          ),
                   ),
                   // Status strip while the IME is up: floats over the list
                   // bottom instead of being a Column flex child. The loose
