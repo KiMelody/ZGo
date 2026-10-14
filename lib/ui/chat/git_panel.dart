@@ -732,7 +732,9 @@ Future<void> _showCommitPushMenu(
 // D3 — message-level change capsule
 // ---------------------------------------------------------------------------
 
-/// The message-attached 「更改 +N -M」pill (official 05c). Data priority
+/// The message-attached 「更改 +N -M」card (official 05c; user-directed
+/// 10-14: chip → full-width card at the chat-tile spec, same visual rank as
+/// the file-changes card below it). Data priority
 /// (design decision 3): the workspace-level git summary
 /// (`gitWorktreeChangeSummary`, from the shared controller) wins over the
 /// turn-level `activeTaskChangeSummary` (the turn header's `fileChanges`).
@@ -754,36 +756,36 @@ class ChangeCapsule extends StatelessWidget {
     final stats = gitWorktree ?? activeTask;
     if (stats == null) return const SizedBox.shrink();
     return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: InkWell(
-          onTap: onOpen,
-          borderRadius: BorderRadius.circular(ZRadius.field),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: ZInk.tile(context),
-              borderRadius: BorderRadius.circular(ZRadius.field),
-              border: Border.all(color: ZInk.hairline(context)),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.edit_note_outlined,
-                    size: 13, color: ZInk.muted(context)),
-                const SizedBox(width: 4),
-                Text(
-                  tr(context, 'git.changes.label'),
-                  style: ZType.caption.copyWith(color: ZInk.soft(context)),
-                ),
-                const SizedBox(width: 6),
-                _StatsText(
-                  stats: stats,
-                  style: ZType.caption.copyWith(color: ZInk.muted(context)),
-                ),
-              ],
-            ),
+      // Same rhythm as the neighbouring file-changes card (bottom: 12).
+      padding: const EdgeInsets.only(bottom: ZTile.seam),
+      child: InkWell(
+        onTap: onOpen,
+        borderRadius: BorderRadius.circular(ZRadius.tile),
+        child: Container(
+          // Header-row geometry shared with the reasoning/terminal/code
+          // cards: headHeight floor + ZTile.head horizontal inset.
+          constraints: const BoxConstraints(minHeight: ZTile.headHeight),
+          padding: ZTile.head,
+          decoration: BoxDecoration(
+            color: ZInk.tile(context),
+            borderRadius: BorderRadius.circular(ZRadius.tile),
+            border: Border.all(color: ZInk.hairline(context)),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.edit_note_outlined,
+                  size: ZTile.iconSize, color: ZInk.muted(context)),
+              const SizedBox(width: 4),
+              Text(
+                tr(context, 'git.changes.label'),
+                style: ZType.sub.copyWith(color: ZInk.soft(context)),
+              ),
+              const SizedBox(width: 6),
+              _StatsText(
+                stats: stats,
+                style: ZType.sub.copyWith(color: ZInk.muted(context)),
+              ),
+            ],
           ),
         ),
       ),
@@ -929,6 +931,30 @@ class _GitReviewPanelState extends State<GitReviewPanel> {
         danger: true,
       );
     }
+    // No workspace bound to this page: [GitWorkspaceController.reload] no-ops
+    // on its `available` guard, so `loaded` would never set and the spinner
+    // below would spin forever — render the non-repository verdict instead.
+    if (!c.available) {
+      return _message(
+        context,
+        icon: Icons.folder_off_outlined,
+        title: tr(context, 'git.empty.notRepositoryTitle'),
+        body: tr(context, 'git.empty.notRepositoryDescription'),
+      );
+    }
+    // First workspace read still in flight: a centered spinner, never the
+    // "not a repository" empty state — that verdict only exists once
+    // [GitWorkspaceController.loaded], and the panel opens with `reload()`
+    // still in flight on a slow desktop RPC.
+    if (!c.loaded) {
+      return const Center(
+        child: SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
     if (!c.isGitAvailable) {
       return _message(
         context,
@@ -943,15 +969,6 @@ class _GitReviewPanelState extends State<GitReviewPanel> {
         icon: Icons.folder_off_outlined,
         title: tr(context, 'git.empty.notRepositoryTitle'),
         body: tr(context, 'git.empty.notRepositoryDescription'),
-      );
-    }
-    if (c.loading && !c.loaded) {
-      return Padding(
-        padding: const EdgeInsets.all(16),
-        child: Text(
-          tr(context, 'git.loading.description'),
-          style: ZType.sub.copyWith(color: ZInk.muted(context)),
-        ),
       );
     }
     final sections = _sections(c);
