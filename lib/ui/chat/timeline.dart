@@ -1943,12 +1943,17 @@ class _AssistantBubble extends StatelessWidget {
     final feedback = row['feedback'] as String?;
     final timestamp = rowTimestamp(row);
     return Container(
-      margin: const EdgeInsets.only(right: 24, top: 8, bottom: 8),
+      // Right margin moved out of the bubble (10-14 batch add-on): fenced
+      // code blocks inside the markdown must span the full column (aligned
+      // with the reasoning/tool cards), so prose keeps the 24dp wrap inset
+      // via [AppMarkdown.proseRightInset] instead of this margin.
+      margin: const EdgeInsets.symmetric(vertical: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           AppMarkdown(
             text,
+            proseRightInset: 24,
             imageResolver: preview.resolveImage,
             onLinkTap: (href) => preview.openLink(context, href),
           ),

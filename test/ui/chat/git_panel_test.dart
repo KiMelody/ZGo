@@ -8,6 +8,7 @@ import 'package:zgo/protocol/channel_client.dart';
 import 'package:zgo/protocol/git_service.dart';
 import 'package:zgo/ui/chat/diff_view.dart';
 import 'package:zgo/ui/chat/git_panel.dart';
+import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
 /// Records every wire call the port makes and answers from [_handler].
@@ -247,6 +248,49 @@ void main() {
       expect(find.text('更改'), findsNothing);
       expect(find.byType(InkWell), findsNothing);
     });
+
+    testWidgets('renders as a full-width card at the chat-tile spec',
+        (tester) async {
+      await tester.pumpWidget(_wrap(ChangeCapsule(
+        activeTask: const GitChangeStats(fileCount: 1, added: 5, removed: 5),
+        onOpen: () {},
+      )));
+
+      final container = tester.widget<Container>(find.ancestor(
+        of: find.text('更改'),
+        matching: find.byType(Container),
+      ).first);
+      final decor = container.decoration! as BoxDecoration;
+      // Card tokens (user-directed 10-14): tile radius with the hairline
+      // border kept, head-row height floor and horizontal inset.
+      expect(decor.borderRadius, BorderRadius.circular(ZRadius.tile));
+      expect(decor.border, isNotNull);
+      expect(container.constraints!.minHeight, ZTile.headHeight);
+      expect(container.padding, ZTile.head);
+      // Splash follows the new radius.
+      final ink = tester.widget<InkWell>(find.ancestor(
+        of: find.text('更改'),
+        matching: find.byType(InkWell),
+      ));
+      expect(ink.borderRadius, BorderRadius.circular(ZRadius.tile));
+      // Spans the full column width — no content-adaptive shrink-wrap.
+      expect(tester.getSize(find.ancestor(
+        of: find.text('更改'),
+        matching: find.byType(Container),
+      ).first).width, tester.getSize(find.byType(ChangeCapsule)).width);
+      // Copy and icon at the shared head-row spec (sub / 16, not the old
+      // caption / 13 chip), plus the sibling-card bottom rhythm.
+      expect(tester.widget<Text>(find.text('更改')).style!.fontSize,
+          ZType.sub.fontSize);
+      expect(tester.widget<Icon>(find.byIcon(Icons.edit_note_outlined)).size,
+          ZTile.iconSize);
+      expect(
+        tester.widget<Padding>(find.byWidgetPredicate((w) =>
+            w is Padding &&
+            w.padding == const EdgeInsets.only(bottom: ZTile.seam))).padding,
+        const EdgeInsets.only(bottom: ZTile.seam),
+      );
+    });
   });
 
   group('GitStatusGroup', () {
@@ -389,6 +433,48 @@ void main() {
   });
 
   group('GitReviewPanel', () {
+    testWidgets('first load in flight shows a spinner, not the '
+        'not-repository empty state', (tester) async {
+      final gate = Completer<void>();
+      Future<dynamic> slowSummary(String method, List<Object?> args) async {
+        if (method == 'getRepositorySummary') {
+          await gate.future;
+          return {'isRepository': true, 'branchName': 'main'};
+        }
+        return _repoHandler(method, args);
+      }
+
+      final fake = _FakeGit(slowSummary);
+      final c = _controller(fake);
+      // showGitReviewPanel kicks off the reload right before building the
+      // sheet; hold the summary read open so the panel paints mid-load.
+      unawaited(c.reload());
+      await tester.pumpWidget(_wrap(GitReviewPanel(controller: c)));
+
+      expect(find.byType(CircularProgressIndicator), findsWidgets);
+      expect(find.text('不是 Git 仓库'), findsNothing);
+      expect(find.text('当前工作区不受 Git 管理'), findsNothing);
+
+      gate.complete();
+      await _flush(tester);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.text('lib/a.dart'), findsOneWidget);
+    });
+
+    testWidgets('no workspace bound renders the not-repository verdict, '
+        'never an eternal spinner', (tester) async {
+      final fake = _FakeGit(_repoHandler);
+      // Empty workspacePath: reload() no-ops on the available guard, so the
+      // panel must fall to the verdict branch instead of spinning forever.
+      final c = GitWorkspaceController(fake.port, '');
+      await tester.pumpWidget(_wrap(GitReviewPanel(controller: c)));
+      await _flush(tester);
+
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.text('不是 Git 仓库'), findsOneWidget);
+      expect(fake.countOf('getRepositorySummary'), 0); // no RPC was issued
+    });
+
     testWidgets('groups untracked/unstaged rows and stages a file',
         (tester) async {
       final fake = _FakeGit(_repoHandler);
