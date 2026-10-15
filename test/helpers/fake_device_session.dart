@@ -87,6 +87,20 @@ class FakeDeviceSession extends DeviceSession {
   /// Seeded relay overview tasks (`Dg`).
   @override
   List<Map<String, dynamic>> relayTasks;
+
+  /// Overview-application seam mirroring the production wiring
+  /// ([DeviceSession._applyRelayOverview] and the
+  /// `workspace-list-updated` push path): replaces the relay overview AND
+  /// runs the [DeviceSession.reconcileTaskHomes] both production
+  /// application points run (anchor reconcile + tombstone TTL prune +
+  /// absence prune). Tests drive overview changes through this instead of
+  /// poking [relayTasks] directly, so the application wiring stays
+  /// guarded.
+  void applyRelayOverview(List<Map<String, dynamic>> tasks) {
+    relayTasks = tasks;
+    reconcileTaskHomes();
+  }
+
   Map<String, dynamic>? _active;
   final List<Map<String, dynamic>> chatRows;
 
