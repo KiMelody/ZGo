@@ -44,8 +44,11 @@ class TaskCommandsPort {
   static const _pinMethods = ['setTaskPinned', 'pinTask'];
   static const _unreadMethods = ['setTaskUnread', 'markTaskUnread'];
 
-  Map<String, dynamic> _payload(String taskId) => {
-    ...scopeOf(taskId),
+  Map<String, dynamic> _payload(
+    String taskId, {
+    Map<String, dynamic>? scopeOverride,
+  }) => {
+    ...scopeOverride ?? scopeOf(taskId),
     'taskId': taskId,
   };
 
@@ -53,12 +56,13 @@ class TaskCommandsPort {
     String op,
     List<String> methods,
     String taskId,
-    Map<String, dynamic> fields,
-  ) => _probe.run(
+    Map<String, dynamic> fields, {
+    Map<String, dynamic>? scopeOverride,
+  }) => _probe.run(
     op,
     methods,
     argsOf: (method) => <Object?>[
-      {..._payload(taskId), ...fields},
+      {..._payload(taskId, scopeOverride: scopeOverride), ...fields},
     ],
   );
 
@@ -87,8 +91,15 @@ class TaskCommandsPort {
 
   /// Deletes a task. Web copy: the task is removed from the workspace and
   /// existing records cannot be recovered — callers must confirm first.
-  Future<dynamic> delete(String taskId) =>
-      _run('delete', const ['deleteTask'], taskId, const {});
+  /// [scope] overrides the task-level scope when the caller must address
+  /// ONE SPECIFIC registry copy (pollution cleanup, design 10-16
+  /// multi-copy-home-correction: the copy's own workspacePath/identity —
+  /// the merged best-row scope would address the true row, not the mirror).
+  Future<dynamic> delete(
+    String taskId, {
+    Map<String, dynamic>? scope,
+  }) => _run('delete', const ['deleteTask'], taskId, const {},
+      scopeOverride: scope);
 
   /// Archived tasks of this workspace (the archive view's data source).
   /// Workspace-level scope — the empty taskId, not any single task's owner.

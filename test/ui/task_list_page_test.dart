@@ -2053,6 +2053,202 @@ void main() {
     });
   });
 
+  // ---- 10-16 multi-copy home correction (归属纠正, design
+  // multi-copy-home-correction R2/层 3) ----
+  group('multi-copy home correction', () {
+    // Same C1 fixture recipe: a live row + a seeded relay overview, the
+    // session installed through the hub so its notifications rebuild the
+    // page (the group-key flip is part of what these tests assert).
+    Future<(DeviceStore, Device, FakeDeviceSession)> setupMultiCopy(
+      WidgetTester tester, {
+      required List<Map<String, dynamic>> relayTasks,
+      Future<dynamic> Function(String channel, String method,
+              List<Object?> args)?
+          channelHandler,
+    }) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 'fork1',
+            'title': 'Fork 草稿',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now,
+          },
+        ],
+        // Both pollution workspaces are listed (the bridge lists every
+        // workspace, the polluted one included). The multi-copy row's group
+        // is the cold pick — /repo/mirror — so the ROW lives in the mirror
+        // card; the app card (active, expanded) is where it must land after
+        // the correction.
+        workspaces: [
+          {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+          {'workspacePath': '/repo/mirror'},
+        ],
+        relayTasks: relayTasks,
+        channelHandler: channelHandler,
+      );
+      final hub = DeviceSessionHub(nativeListEnabled: () => false)
+        ..installForTesting(session);
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: hub,
+        device: device,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      return (store, device, session);
+    }
+
+    // True home row: the listed workspace's path, carrying its identity. The
+    // mirror is path-only and lex-smaller than the canonical 'app-id' key
+    // ('/'(0x2F) < 'a') — the cold pick lands on the MIRROR, which is what
+    // the user then corrects.
+    Map<String, dynamic> trueHomeRow() => {
+          'taskId': 'fork1',
+          'title': 'Fork 草稿',
+          'workspacePath': '/repo/app',
+          'workspaceIdentity': 'app-id',
+          'displayStatus': 'idle',
+          'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        };
+    Map<String, dynamic> mirrorRow() => {
+          'taskId': 'fork1',
+          'title': 'Fork 草稿',
+          'workspacePath': '/repo/mirror',
+          'displayStatus': 'idle',
+          'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        };
+
+    Finder sheetTile(String label) => find.widgetWithText(ListTile, label);
+    Finder inDialog(Finder f) =>
+        find.descendant(of: find.byType(AlertDialog), matching: f);
+
+    /// Multi-copy fixtures put the row under the (collapsed, non-active)
+    /// mirror card — expand it, then long-press the row into the sheet.
+    Future<void> openSheet(
+      WidgetTester tester, {
+      bool inMirrorCard = true,
+    }) async {
+      if (inMirrorCard) {
+        await tester.tap(find.text('mirror'));
+        await tester.pumpAndSettle();
+      }
+      await tester.longPress(find.text('Fork 草稿'));
+      await tester.pumpAndSettle();
+    }
+
+    /// sheet → 归属纠正 → dialog.
+    Future<void> openCorrection(WidgetTester tester) async {
+      await openSheet(tester);
+      await tester.tap(sheetTile('归属纠正'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('multi-copy row: the sheet carries 归属纠正 above 删除',
+        (tester) async {
+      await setupMultiCopy(tester, relayTasks: [trueHomeRow(), mirrorRow()]);
+      await openSheet(tester);
+
+      expect(sheetTile('归属纠正'), findsOneWidget);
+      expect(sheetTile('删除'), findsOneWidget);
+    });
+
+    testWidgets('single-copy row: no 归属纠正 entry', (tester) async {
+      // Single copy: no pollution — the row groups into the true home's
+      // card (active, expanded) and the entry stays out.
+      await setupMultiCopy(tester, relayTasks: [trueHomeRow()]);
+      await openSheet(tester, inMirrorCard: false);
+
+      expect(sheetTile('归属纠正'), findsNothing);
+      expect(sheetTile('删除'), findsOneWidget);
+    });
+
+    testWidgets('dialog: default = the row the list shows (cold pick) + '
+        '当前显示 tag + unchecked checkbox; confirm without deletion writes '
+        'the anchor and fires no deleteTask', (tester) async {
+      final (_, _, session) = await setupMultiCopy(
+        tester,
+        relayTasks: [trueHomeRow(), mirrorRow()],
+      );
+      await openCorrection(tester);
+
+      // One radio per relay copy; the default selection (and the tag) is the
+      // directory's shown row — the cold pick, candidate index 1 (the
+      // lex-smaller mirror). Checkbox: off (the deletion is opt-in).
+      expect(find.byType(RadioListTile<int>), findsNWidgets(2));
+      expect(
+        tester
+            .widget<RadioGroup<int>>(find.byType(RadioGroup<int>))
+            .groupValue,
+        1,
+      );
+      expect(inDialog(find.text('当前显示')), findsOneWidget);
+      expect(
+        tester.widget<CheckboxListTile>(find.byType(CheckboxListTile)).value,
+        isFalse,
+      );
+
+      // Pick the true home and confirm without the delete option.
+      await tester.tap(inDialog(find.text('app')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '保存'));
+      await tester.pumpAndSettle();
+
+      expect(session.taskHomeStore.homeKeys['fork1'], 'app-id',
+          reason: 'source ④: the anchor lands canonicalized');
+      expect(session.taskDirectory.allEntries().single.$2, 'app-id',
+          reason: 'the group flips to the adjudicated true home');
+      expect(session.channelCalls.where((c) => c.$2 == 'deleteTask'), isEmpty);
+    });
+
+    testWidgets('dialog: checking the deletion turns the confirm button red '
+        'and sends per-copy deleteTask scopes; the true row stays visible',
+        (tester) async {
+      final (_, _, session) = await setupMultiCopy(
+        tester,
+        relayTasks: [trueHomeRow(), mirrorRow()],
+      );
+      await openCorrection(tester);
+
+      await tester.tap(inDialog(find.text('app')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(CheckboxListTile));
+      await tester.pumpAndSettle();
+
+      // The destructive option on → danger-styled confirm (delete-dialog
+      // recipe).
+      expect(
+        tester
+            .widget<FilledButton>(find.widgetWithText(FilledButton, '保存'))
+            .style
+            ?.backgroundColor
+            ?.resolve(<WidgetState>{}),
+        Theme.of(tester.element(find.byType(AlertDialog))).colorScheme.error,
+      );
+
+      await tester.tap(find.widgetWithText(FilledButton, '保存'));
+      await tester.pumpAndSettle();
+
+      // One deleteTask for the mirror, carrying the MIRROR's own scope (the
+      // merged scope would address the true row).
+      final deletes = session.channelCalls
+          .where((c) => c.$1 == 'zcode-task' && c.$2 == 'deleteTask')
+          .toList();
+      expect(deletes.map((c) => c.$3.single), [
+        {'workspacePath': '/repo/mirror', 'taskId': 'fork1'},
+      ]);
+      expect(session.taskHomeStore.locallyDeletedTaskIds, isEmpty,
+          reason: 'no tombstone — it is per-id and would hide the true row');
+      expect(find.text('Fork 草稿'), findsOneWidget,
+          reason: 'the true row stays visible');
+    });
+  });
+
   // ---- C2 (10-05): task-list UX batch — B2 radio freeze / B7 empty group /
   // B8 group dot / B9 sheet object title ----
   group('C2 task-list UX: radio sync, empty group, group dot, sheet title', () {

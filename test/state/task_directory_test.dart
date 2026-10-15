@@ -264,14 +264,14 @@ void main() {
   });
 
   test('duplicate relay rows (desktop mirror) resolve on stable fields: '
-      'terminal → createdAt → key lex', () {
-    // 2026-10-15 stable-anchor rule (design §2.1, PRD R2): updatedAt
-    // EXITED the comparison keys — it changes on every touch, and the
-    // touched copy kept re-winning (the group/status flapping this task
-    // kills). Mirror copies share the real row's creation millisecond
-    // (spec §3.1), so the deterministic tie-break is the lexicographically
-    // smaller key. Both frame orders must still agree (the §3.1
-    // frame-order independence is kept).
+      'pinned → createdAt → key lex', () {
+    // 2026-10-15 stable-anchor rule (design §2.1, PRD R2) + 10-16 first
+    // key: updatedAt EXITED the comparison keys — it changes on every
+    // touch, and the touched copy kept re-winning (the group/status
+    // flapping this task kills). Mirror copies share the real row's
+    // creation millisecond (spec §3.1), so the deterministic tie-break is
+    // the lexicographically smaller key. Both frame orders must still
+    // agree (the §3.1 frame-order independence is kept).
     for (final rows in [
       [
         _relayTask('t1', 'mirror', updatedAt: 100),
@@ -308,26 +308,29 @@ void main() {
   });
 
   test('a row-SET change is what can still move the pick', () {
-    // The other half of the stability acceptance: adding a terminal copy
+    // The other half of the stability acceptance: adding a pinned copy
     // (rule 1) or removing the winning copy may flip the pick — expected,
     // deterministic on the new set, and invisible to anchored ids.
-    final base = [_relayTask('t1', 'alpha', displayStatus: 'running')];
+    final base = [_relayTask('t1', 'alpha')];
     expect(TaskDirectory(relayTasks: base).allEntries().single.$2, 'alpha');
-    final withTerminalCopy = [
+    final withPinnedCopy = [
       ...base,
-      _relayTask('t1', 'zeta', displayStatus: 'completed'),
+      _relayTask('t1', 'zeta', pinned: true),
     ];
     expect(
-      TaskDirectory(relayTasks: withTerminalCopy).allEntries().single.$2,
+      TaskDirectory(relayTasks: withPinnedCopy).allEntries().single.$2,
       'zeta',
-      reason: 'terminal beats running-class whatever the key order',
+      reason: 'a pinned copy beats the unpinned one whatever the key order',
     );
   });
 
-  test('terminal status beats a fresher running-class copy in the cold pick',
-      () {
-    // Rule 1 of the stable pick: a settled copy outranks a zombie running
-    // one (the §3.6 direction), whatever the updatedAt difference.
+  test('terminal status is OUT of the cold pick — a running true row no '
+      'longer loses its group to a frozen mirror', () {
+    // 10-16 (design 10-16 multi-copy-home-correction R1): the alive/frozen
+    // split never discriminated pollution (both directions occur), and it
+    // made a RUNNING true row lose its group to a frozen mirror copy
+    // (b6f8f415 showed in artcraft while running). Terminal judgment lives
+    // in displayStatusWinner — the STATUS field only.
     for (final rows in [
       [
         _relayTask('t1', 'zeta', displayStatus: 'completed', updatedAt: 1),
@@ -338,11 +341,77 @@ void main() {
         _relayTask('t1', 'zeta', displayStatus: 'completed', updatedAt: 1),
       ],
     ]) {
+      final row = TaskDirectory(relayTasks: rows).allEntries().single;
+      expect(row.$2, 'alpha',
+          reason: 'lex decides now — the terminal key is gone');
+      expect(row.$1.phase, 'completedSuccess',
+          reason: 'the STATUS synthesis stays terminal-first (M1)');
+    }
+  });
+
+  test('cold pick: a pinned copy beats a terminal lex-smaller mirror (the '
+      'c881d00e shape)', () {
+    // 10-16 pollution forensics: the true row carries the user's pin (pin
+    // is a per-workspace registry field and lands on the true home), the
+    // mirror is terminal AND lex-smaller ('F:\ZLinker' beats every
+    // lowercase-named workspace). Pinned is the only discriminating stable
+    // key the wire carries.
+    for (final rows in [
+      [
+        _relayTask('t1', 'F:\\ZLinker', displayStatus: 'completed'),
+        _relayTask('t1', 'f:\\chat', pinned: true, displayStatus: 'idle'),
+      ],
+      [
+        _relayTask('t1', 'f:\\chat', pinned: true, displayStatus: 'idle'),
+        _relayTask('t1', 'F:\\ZLinker', displayStatus: 'completed'),
+      ],
+    ]) {
+      final row = TaskDirectory(relayTasks: rows).allEntries().single;
+      expect(row.$2, 'f:\\chat');
+      expect(row.$1.raw['pinned'], isTrue,
+          reason: 'the body rides the pinned true row');
+    }
+  });
+
+  test('both copies pinned (or none): the pinned key is a no-op, createdAt '
+      'then lex decide', () {
+    // The pinned key only separates a pinned/unpinned split; a both-pinned
+    // group (user pinned the row in two workspaces) falls through to the
+    // 10-15 rules unchanged.
+    for (final rows in [
+      [
+        _relayTask('t1', 'zeta', pinned: true, createdAt: 100),
+        _relayTask('t1', 'alpha', pinned: true, createdAt: 200),
+      ],
+      [
+        _relayTask('t1', 'alpha', pinned: true, createdAt: 200),
+        _relayTask('t1', 'zeta', pinned: true, createdAt: 100),
+      ],
+    ]) {
       expect(
         TaskDirectory(relayTasks: rows).allEntries().single.$2,
-        'zeta',
+        'alpha',
+        reason: 'equal pinned → greater createdAt wins',
       );
     }
+  });
+
+  test('an anchored multi-copy id stays on the anchor even when another '
+      'copy is pinned', () {
+    // The anchor layer stays FIRST: the user's persisted adjudication
+    // (source ④) outranks the pinned key, mirroring the anchored-copy
+    // priority over the cold pick.
+    final dir = TaskDirectory(
+      relayTasks: [
+        _relayTask('t1', 'anchored-ws', updatedAt: 1),
+        _relayTask('t1', 'pinned-ws', pinned: true, updatedAt: 2),
+      ],
+      confirmedHomeKeys: {'t1': 'anchored-ws'},
+    );
+    final row = dir.allEntries().single;
+    expect(row.$2, 'anchored-ws');
+    expect(row.$1.raw['pinned'], isNull,
+        reason: 'the body rides the anchored copy, not the pinned one');
   });
 
   test('same class, different createdAt: the later-created row wins', () {
@@ -406,10 +475,11 @@ void main() {
   });
 
   test('with duplicate relay rows, the live row still wins per task id', () {
-    // Live override precedence is unchanged by the row dedup: the
-    // live row refreshes the data and attributes by the index's own
-    // subscription identity — listSessions membership beats the relay
-    // pick key.
+    // Multi-copy semantics (design 10-15 multi-copy-stable-group, check
+    // P1-3): the live row still refreshes the DATA, but its group key no
+    // longer follows the index's subscription identity — both workspaces'
+    // live indexes claim a polluted id, so attribution follows the relay
+    // cold pick (equal class + equal createdAt → lexicographic): 'mirror'.
     final dir = TaskDirectory(
       relayTasks: [
         _relayTask('t1', 'mirror', updatedAt: 100),
@@ -426,16 +496,17 @@ void main() {
     );
     final row = dir.allEntries().single;
     expect(row.$1.phase, 'running'); // live data wins
-    expect(row.$2, 'subscribed'); // the index's membership, not the pick key
+    expect(row.$2, 'mirror', // the stable cold pick, not the active index
+        reason: 'multi-copy: switching workspaces must not migrate the row');
   });
 
   test('live membership beats a relay pick won by the mirror row', () {
-    // 2026-09-23 emulator acceptance, direct regression: the session
-    // really lives in the real workspace, but its desktop copy row
-    // (stale foreign key) had the greater updatedAt and won the relay
-    // pick — the live row then inherited that copy key and the session
-    // stayed in the wrong group, viewable there but unoperable. The live
-    // index of the real workspace self-certifies the home: it must win.
+    // 2026-09-23 emulator acceptance regression. NOTE (design 10-15
+    // multi-copy-stable-group #10): under the multi-copy stable-key rule
+    // this STILL passes, but by lexicographic luck ('real_ws' <
+    // 'stale_zgo') — the single-copy membership doctrine it documents is
+    // now guarded by the dedicated single-copy case above
+    // ('live rows attribute by the index subscription identity').
     final dir = TaskDirectory(
       relayTasks: [
         _relayTask('t1', 'stale_zgo', updatedAt: 200),
@@ -452,14 +523,15 @@ void main() {
     );
     final row = dir.allEntries().single;
     expect(row.$1.phase, 'running'); // live data wins
-    expect(row.$2, 'real_ws'); // live membership beats the mirror pick key
+    expect(row.$2, 'real_ws'); // cold-pick stable key (lex: real_ws < stale_zgo)
   });
 
   test('pinned: duplicate relay rows resolve on the same stable fields', () {
     // Same layered rule in the pinned base phase ([TaskDirectory
-    // .pinnedEntries] groups its own relay loop): equal class + equal
-    // createdAt → the lexicographically smaller key wins — zeta's higher
-    // updatedAt is irrelevant now (2026-10-15 stable-anchor rule).
+    // .pinnedEntries] groups its own relay loop): both pinned + equal
+    // createdAt → the lexicographically smaller key wins — the pinned key
+    // is a no-op on an all-pinned group, zeta's higher updatedAt stays
+    // irrelevant (2026-10-15 stable-anchor rule).
     final dir = TaskDirectory(relayTasks: [
       _relayTask('t1', 'zeta', pinned: true, updatedAt: 5),
       _relayTask('t1', 'alpha', pinned: true, updatedAt: 9),
@@ -467,6 +539,40 @@ void main() {
     final pinned = dir.pinnedEntries();
     expect(pinned, hasLength(1));
     expect(pinned.single.$2, 'alpha');
+  });
+
+  test('pinned projection: a multi-copy id whose true row is pinned keys '
+      'BOTH projections the same (10-16 two-projection fix)', () {
+    // c881d00e forensics: the main list (full-copy cold pick) and the
+    // pinned card (pinned-only relay phase / live allCopies pick) used to
+    // disagree — terminal-first picked the mirror in one projection while
+    // the pinned true row won the other. Pinned-first keys them the same.
+    final live = _liveIndex(
+      [
+        {
+          'sessionId': 't1',
+          'title': 'live-t1',
+          'phase': 'running',
+          'lastActivityAt': 5,
+          'pinned': true,
+        },
+      ],
+      subscribedWorkspaceKey: 'F:\\ZLinker',
+    );
+    final dir = TaskDirectory(
+      relayTasks: [
+        _relayTask('t1', 'F:\\ZLinker', displayStatus: 'completed'),
+        _relayTask('t1', 'f:\\chat', pinned: true, displayStatus: 'idle'),
+      ],
+      sessions: live,
+    );
+    // Main list: the multi-copy stable key = the cold pick (pinned true row).
+    expect(dir.allEntries().single.$2, 'f:\\chat');
+    // Pinned card: the live layer's allCopies pick runs the SAME
+    // bestRelayRow — same key, no contradiction.
+    final pinned = dir.pinnedEntries();
+    expect(pinned, hasLength(1));
+    expect(pinned.single.$2, 'f:\\chat');
   });
 
   test('deleted-tombstone live rows are dropped, untombstoned ones stay',
@@ -894,6 +1000,247 @@ void main() {
       'workspacePath': '',
     });
     expect(TaskDirectory.workspaceForKey(const [], blank, 'x'), isNull);
+  });
+
+  group('cached live snapshots (design 10-15-task-live-snapshot-cache)', () {
+    SessionEntry cachedRow(String id, {String? identity, bool pinned = false}) =>
+        SessionEntry({
+          'sessionId': id,
+          'title': 'cached-$id',
+          'phase': 'running',
+          'lastActivityAt': 5,
+          if (identity != null) 'workspaceIdentity': identity,
+          if (pinned) 'pinned': true,
+        });
+
+    test('cache fills the gap: a row neither relay nor active live carries '
+        'survives in its snapshot group', () {
+      final dir = TaskDirectory(
+        cachedSessions: {
+          'alpha': [cachedRow('t1')],
+        },
+      );
+      final all = dir.allEntries();
+      expect(all, hasLength(1));
+      expect(all.single.$1.title, 'cached-t1');
+      expect(all.single.$2, 'alpha',
+          reason: 'attribution = liveKeyOf(entry, snapshot key)');
+    });
+
+    test('layering: relay and active live both suppress the cached row', () {
+      final dir = TaskDirectory(
+        relayTasks: [_relayTask('t1', 'alpha')],
+        sessions: _liveIndex([
+          {'sessionId': 't2', 'title': 'live-t2', 'phase': 'running'},
+        ], subscribedWorkspaceKey: 'alpha'),
+        cachedSessions: {
+          'alpha': [cachedRow('t1'), cachedRow('t2'), cachedRow('t3')],
+        },
+      );
+      final all = dir.allEntries();
+      expect(all, hasLength(3));
+      // t1: relay wins the body — title is the relay spelling, not cached-.
+      expect(
+        all.firstWhere((e) => e.$1.sessionId == 't1').$1.title,
+        'relay-t1',
+      );
+      // t2: the ACTIVE live row wins.
+      expect(
+        all.firstWhere((e) => e.$1.sessionId == 't2').$1.title,
+        'live-t2',
+      );
+      // t3: gap filler only.
+      expect(
+        all.firstWhere((e) => e.$1.sessionId == 't3').$1.title,
+        'cached-t3',
+      );
+    });
+
+    test('cached gap rows carry the sessionOnly marker', () {
+      final dir = TaskDirectory(
+        cachedSessions: {
+          'alpha': [cachedRow('t1')],
+        },
+      );
+      expect(dir.sessionOnlyIds, contains('t1'));
+    });
+
+    test('locally-deleted ids never resurface through the cache', () {
+      final dir = TaskDirectory(
+        locallyDeletedTaskIds: const {'t1'},
+        cachedSessions: {
+          'alpha': [cachedRow('t1'), cachedRow('t2')],
+        },
+      );
+      expect(
+        dir.allEntries().map((e) => e.$1.sessionId),
+        ['t2'],
+      );
+    });
+
+    test('pinned gap rows pin through the cache, suppressed rows stay with '
+        'their layer', () {
+      final dir = TaskDirectory(
+        relayTasks: [_relayTask('tR', 'alpha', pinned: true)],
+        sessions: _liveIndex([
+          {
+            'sessionId': 'tL',
+            'title': 'live-tL',
+            'phase': 'running',
+            'pinned': true,
+          },
+        ], subscribedWorkspaceKey: 'alpha'),
+        cachedSessions: {
+          'alpha': [
+            cachedRow('tC', pinned: true),
+            cachedRow('tR'),
+            cachedRow('tL'),
+          ],
+        },
+      );
+      final pinned = dir.pinnedEntries();
+      expect(pinned.map((e) => e.$1.sessionId).toSet(), {'tR', 'tL', 'tC'});
+      // The cached body loses to both winning layers.
+      expect(
+        pinned.firstWhere((e) => e.$1.sessionId == 'tR').$1.title,
+        'relay-tR',
+      );
+      expect(
+        pinned.firstWhere((e) => e.$1.sessionId == 'tL').$1.title,
+        'live-tL',
+      );
+      expect(
+        pinned.firstWhere((e) => e.$1.sessionId == 'tC').$1.title,
+        'cached-tC',
+      );
+    });
+
+    test('a cached row with its own workspaceIdentity keeps it (same rule as '
+        'live rows)', () {
+      final dir = TaskDirectory(
+        cachedSessions: {
+          'alpha': [cachedRow('t1', identity: 'beta')],
+        },
+      );
+      expect(dir.allEntries().single.$2, 'beta');
+    });
+  });
+
+  group('multi-copy stable group key (design 10-15 multi-copy-stable-group)',
+      () {
+    Map<String, dynamic> livePinned(String id) => {
+          'sessionId': id,
+          'title': 'live-$id',
+          'phase': 'running',
+          'lastActivityAt': 1,
+          'pinned': true,
+        };
+
+    test('#1 multi-copy + live: body is live, key is the canonicalized '
+        'cold pick', () {
+      final dir = TaskDirectory(
+        relayTasks: [
+          _relayTask('t1', '/repo/mirror', updatedAt: 100),
+          _relayTask('t1', '/repo/real', updatedAt: 200),
+        ],
+        sessions: _liveIndex([
+          {'sessionId': 't1', 'title': 'live-t1', 'phase': 'running'},
+        ], subscribedWorkspaceKey: 'active_ws'),
+        keyAliases: const {
+          'm': 'm',
+          '/repo/mirror': 'm',
+          'r': 'r',
+          '/repo/real': 'r',
+        },
+      );
+      final row = dir.allEntries().single;
+      expect(row.$1.title, 'live-t1', reason: 'live body rides the row');
+      expect(row.$2, 'm',
+          reason: 'cold pick (/repo/mirror, lex) canonicalized through '
+              'keyAliases — a raw path key matches no identity folder');
+    });
+
+    test('#2 multi-copy + anchor: the anchor pins the group, live never '
+        'flips it', () {
+      final dir = TaskDirectory(
+        relayTasks: [
+          _relayTask('t1', '/repo/mirror'),
+          _relayTask('t1', '/repo/real'),
+        ],
+        sessions: _liveIndex([
+          {'sessionId': 't1', 'title': 'live-t1', 'phase': 'running'},
+        ], subscribedWorkspaceKey: 'active_ws'),
+        confirmedHomeKeys: const {'t1': 'm'},
+      );
+      expect(dir.allEntries().single.$2, 'm');
+    });
+
+    test('#3 stable across the ACTIVE workspace: same input, A-live vs '
+        'B-live, identical key', () {
+      TaskDirectory buildWith(String activeKey) => TaskDirectory(
+            relayTasks: [
+              _relayTask('t1', '/repo/mirror'),
+              _relayTask('t1', '/repo/real'),
+            ],
+            sessions: _liveIndex([
+              {'sessionId': 't1', 'title': 'live-t1', 'phase': 'running'},
+            ], subscribedWorkspaceKey: activeKey),
+          );
+      final keyA = buildWith('alpha').allEntries().single.$2;
+      final keyB = buildWith('beta').allEntries().single.$2;
+      expect(keyA, '/repo/mirror');
+      expect(keyA, keyB,
+          reason: 'the PMA110 round-2 migration regression, pinned directly');
+    });
+
+    test('#4 single-copy keeps live membership as ground truth', () {
+      final dir = TaskDirectory(
+        relayTasks: [_relayTask('t1', 'home_ws')],
+        sessions: _liveIndex([
+          {'sessionId': 't1', 'title': 'live-t1', 'phase': 'running'},
+        ], subscribedWorkspaceKey: 'subscribed'),
+      );
+      expect(dir.allEntries().single.$2, 'subscribed',
+          reason: '2026-09-23 doctrine survives for single-copy ids');
+    });
+
+    test('#5 session-only rows keep liveKeyOf (multi-copy ids always have '
+        'a relay row — the cache/live-only path never meets them)', () {
+      final dir = TaskDirectory(
+        sessions: _liveIndex([
+          {'sessionId': 't1', 'title': 'live-t1', 'phase': 'running'},
+        ], subscribedWorkspaceKey: 'solo'),
+      );
+      expect(dir.allEntries().single.$2, 'solo');
+    });
+
+    test('#6 pinned multi-copy with NO pinned relay copy: key from the full '
+        'copy set, non-null, openable (check P1-2)', () {
+      final dir = TaskDirectory(
+        relayTasks: [
+          _relayTask('t1', 'mirror', updatedAt: 100), // both UNpinned
+          _relayTask('t1', 'real', updatedAt: 200),
+        ],
+        sessions: _liveIndex([livePinned('t1')],
+            subscribedWorkspaceKey: 'subscribed'),
+      );
+      final pinned = dir.pinnedEntries();
+      expect(pinned, hasLength(1));
+      expect(pinned.single.$2, 'mirror',
+          reason: 'full-set cold pick — not the pinned projection\'s own '
+              'grouping, not the active index key');
+      expect(
+        TaskDirectory.workspaceForKey(
+          const [
+            {'workspacePath': '/repo/mirror', 'workspaceIdentity': 'mirror'},
+          ],
+          pinned.single.$1,
+          pinned.single.$2,
+        ),
+        isNotNull,
+        reason: 'a null key would make the pinned row unopenable',
+      );
+    });
   });
 
 }

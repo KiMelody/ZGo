@@ -446,6 +446,17 @@ class DeviceSession extends ChangeNotifier
   /// next rebuild.
   final TaskHomeStore _homeStore;
 
+  /// Last live sessions-index snapshot per workspace key (design
+  /// 10-15-task-live-snapshot-cache §数据结构): the merge layer's gap
+  /// filler while a workspace is NOT the subscribed one. Switching
+  /// workspaces disposes the old subscription, and a session whose registry
+  /// row is still stuck in the desktop's stale overview cache would
+  /// otherwise vanish from the list until the workspace is re-entered.
+  /// Pure in-memory, no TTL, no cap (workspace counts are tiny); cleared
+  /// with the rest of the directory state on suspend; whole-map replaced
+  /// by each fresh first frame of the same key.
+  final Map<String, List<SessionEntry>> _liveSnapshots = {};
+
   /// Cross-terminal deletion tombstones (task 10-06 chat tombstone):
   /// session ids that VANISHED from the live sessions-index while this
   /// session held the subscription — the desktop-side signal that another
@@ -521,6 +532,7 @@ class DeviceSession extends ChangeNotifier
         locallyDeletedTaskIds: _homeStore.locallyDeletedTaskIds,
         confirmedHomeKeys: _homeStore.homeKeys,
         keyAliases: _workspaceKeyAliases,
+        cachedSessions: _liveSnapshots,
       );
 
   /// Workspace key alias table (check P1-2, 2026-10-15): every listed
@@ -562,7 +574,10 @@ class DeviceSession extends ChangeNotifier
   /// - no relay row (session-only / registry window) → no establish; an
   ///   agreeing confirmation refreshes (covers ids anchored at creation
   ///   whose registry row has not landed yet).
-  /// Entries without any attribution confirm nothing. Wired to every live
+  /// Entries without any attribution confirm nothing. Anchor write
+  /// sources ①(creation, [createTaskWithMessage]) ②(single-copy live)
+  /// ③(agreeing refresh) + ④(user adjudication,
+  /// [correctTaskHome] — outside this gate by design). Wired to every live
   /// frame via [_onSessionsChanged]; the fake session replays the same
   /// wiring.
   void confirmLiveHomes() {
@@ -593,6 +608,53 @@ class DeviceSession extends ChangeNotifier
         _homeStore.refreshHome(id, now: clock.now());
       }
     }
+  }
+
+  /// Snapshots a ready live sessions-index into [_liveSnapshots] under its
+  /// subscription key (design 10-15-task-live-snapshot-cache §写点):
+  /// probe-deleted ids (the registry's add-only `deleted=1` rows — valid
+  /// at snapshot time, valid forever) and locally-confirmed tombstones are
+  /// filtered at this write point; the merge layer additionally re-checks
+  /// the tombstones at its read point (a local delete can land between
+  /// the two). Called from [_onSessionsChanged] on every frame AND from
+  /// the manual first-frame catch-up in [_openWorkspaceNow] (the listener
+  /// only attaches after the tombstone probe — a snapshot landing during
+  /// it would be missed, same race [confirmLiveHomes] patches). Public so
+  /// the fake session can replay the same wiring.
+  void snapshotSessionsIntoCache(SessionsIndexState state) {
+    final cacheKey = state.subscribedWorkspaceKey;
+    if (cacheKey == null || cacheKey.isEmpty || !state.ready) return;
+    final probeDeleted = state.deletedTaskIds;
+    final localDeleted = _homeStore.locallyDeletedTaskIds;
+    final rows = [
+      for (final e in state.list)
+        if (!probeDeleted.contains(e.sessionId) &&
+            !localDeleted.contains(e.sessionId))
+          e,
+    ];
+    final previous = _liveSnapshots[cacheKey];
+    // Diagnostic (10-15 live-snapshot acceptance): only log content CHANGES —
+    // the write rides every live frame, an unconditional log would flood.
+    if (previous == null || _snapshotChanged(previous, rows)) {
+      _log('[session] live snapshot cached: key=$cacheKey '
+          'rows=${rows.length} (was ${previous?.length ?? 'none'})');
+    }
+    _liveSnapshots[cacheKey] = rows;
+  }
+
+  /// Content fingerprint for the snapshot-cache diagnostic: id →
+  /// lastActivityAt. Map comparison, not positional — [SessionsIndexState
+  /// .list] sorts by lastActivityAt only and Dart's sort is unstable, so
+  /// equal-timestamp rows can swap positions across snapshots and a
+  /// positional compare would false-positive (design 10-15
+  /// multi-copy-stable-group §插桩, check P2-4).
+  static bool _snapshotChanged(List<SessionEntry> a, List<SessionEntry> b) {
+    if (a.length != b.length) return true;
+    final byId = {for (final e in b) e.sessionId: e.lastActivityAt};
+    for (final e in a) {
+      if (byId[e.sessionId] != e.lastActivityAt) return true;
+    }
+    return false;
   }
 
   /// Anchor reconciliation + lifecycle (design 10-15 §1.1), run after
@@ -1105,12 +1167,16 @@ class DeviceSession extends ChangeNotifier
         sub.state.deletedTaskIds = const {};
       }
       sub.state.addListener(_onSessionsChanged);
+      _log('[session] workspace open ok: key=$key '
+          '(${sw.elapsed.inMilliseconds}ms)');
       // A snapshot may have landed during the tombstone probe above —
       // before the listener attached. Confirm whatever is already there
       // (a no-op while the index is still empty) and baseline the
       // tombstone diff against it, so a removal delta in the very first
       // post-attach frame still finds its before-ids.
       confirmLiveHomes();
+      // Same race, same patch for the snapshot cache (design §写点 调用点二).
+      snapshotSessionsIntoCache(sub.state);
       recordVanishedSessions();
       _error = null;
       onWorkspaceOpened?.call(key);
@@ -1139,6 +1205,7 @@ class DeviceSession extends ChangeNotifier
       // banner, so the set must already hold the vanished ids.
       recordVanishedSessions();
       confirmLiveHomes();
+      snapshotSessionsIntoCache(sub.state);
       // First snapshot landed — the list is alive again.
       _listWatchdog?.cancel();
       _listEscalations = 0;
@@ -1669,6 +1736,74 @@ class DeviceSession extends ChangeNotifier
       if (row['workspaceIdentity'] != null)
         'workspaceIdentity': row['workspaceIdentity'],
     };
+  }
+
+  /// The relay home row of [taskId] as the merged directory shows it —
+  /// [TaskDirectory.bestRelayRow] with THIS session's anchors and key
+  /// aliases (private here, so the UI must come through this forward).
+  /// Design 10-16 multi-copy-home-correction: the home-correction dialog
+  /// uses it as BOTH the default selection and the「当前显示」marker — the
+  /// returned row IS the row the list currently shows.
+  Map<String, dynamic>? relayHomeRowOf(String taskId) =>
+      TaskDirectory.bestRelayRow(
+        relayTasks,
+        taskId,
+        homeKeys: _homeStore.homeKeys,
+        keyAliases: _workspaceKeyAliases,
+      );
+
+  /// User home adjudication (anchor write source ④, design 10-16
+  /// multi-copy-home-correction): the user picks the TRUE home copy among
+  /// a multi-copy id's rows. Writes the anchor canonicalized through
+  /// [_workspaceKeyAliases] (same spelling rule as every other anchor
+  /// source), then optionally deletes every OTHER registry copy with its
+  /// OWN per-copy scope (the desktop's resolveTaskAddress matches the
+  /// taskId+scope triple — the merged scope would address the true row,
+  /// not the mirror). NO local tombstone: tombstones are per-id and would
+  /// hide the true row too. The anti-pollution gate is untouched — it
+  /// governs AUTOMATIC live-frame writes; an explicit user write is the
+  /// adjudication the gate defers to (multi-copy live frames keep
+  /// refreshing an agreeing anchor only).
+  Future<void> correctTaskHome(
+    String taskId,
+    Map<String, dynamic> homeCopy, {
+    bool deleteOtherCopies = false,
+  }) async {
+    final aliases = _workspaceKeyAliases;
+    final rawKey = TaskDirectory.relayKeyOf(homeCopy);
+    if (rawKey != null) {
+      _homeStore.anchorHome(taskId, aliases[rawKey] ?? rawKey,
+          now: clock.now());
+    }
+    notifyListeners();
+    if (!deleteOtherCopies) return;
+    Object? firstError;
+    // NOT identical(): _applyRelayOverview rebuilds every relay map on each
+    // landing (bootstrap / 30s refresh / push / reloadTasks), so the map
+    // the dialog picked may already be a stale instance by confirm time —
+    // an identity test would then delete the TRUE row as a "mirror" (check
+    // P1-1). Compare fields instead: same path+identity = same copy.
+    final homePath = '${homeCopy['workspacePath'] ?? ''}';
+    final homeIdentity = '${homeCopy['workspaceIdentity'] ?? ''}';
+    for (final task in List.of(relayTasks)) {
+      if ('${task['taskId'] ?? ''}' != taskId) continue;
+      if ('${task['workspacePath'] ?? ''}' == homePath &&
+          '${task['workspaceIdentity'] ?? ''}' == homeIdentity) {
+        continue;
+      }
+      final path = task['workspacePath'];
+      if (path is! String || path.isEmpty) continue; // unaddressable copy
+      try {
+        await taskCommands.delete(taskId, scope: {
+          'workspacePath': path,
+          if (task['workspaceIdentity'] != null)
+            'workspaceIdentity': task['workspaceIdentity'],
+        });
+      } catch (e) {
+        firstError ??= e; // keep deleting the rest, surface the first failure
+      }
+    }
+    if (firstError != null) throw firstError;
   }
 
   /// Workspace file reads on the `file` channel (the desktop's fileService —
@@ -2253,6 +2388,13 @@ class DeviceSession extends ChangeNotifier
     _activeWorkspace = null;
     _workspaces = [];
     _relayTasks = [];
+    // Snapshot cache dies with the rest of the directory state — a rebuild
+    // is a cold start (design §清点). Retry loops don't pass through here,
+    // so a flapping link keeps its cached rows.
+    if (_liveSnapshots.isNotEmpty) {
+      _log('[session] live snapshots cleared (${_liveSnapshots.length} keys)');
+    }
+    _liveSnapshots.clear();
     _failureReason = null;
     _kicked = false;
     _error = null;

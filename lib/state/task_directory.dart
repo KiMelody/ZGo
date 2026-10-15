@@ -75,12 +75,25 @@ class TaskDirectory {
   /// raw comparison (every pre-existing call site's behavior unchanged).
   final Map<String, String> keyAliases;
 
+  /// Cached last live sessions-index snapshot per workspace key (design
+  /// 10-15-task-live-snapshot-cache): the merge layer's gap filler. A row
+  /// participates ONLY when neither the relay layer nor the ACTIVE live
+  /// index carries its id — switching workspaces disposes the old
+  /// subscription while the new session's registry row is still stuck in
+  /// the desktop's stale overview cache, and without this layer the row
+  /// vanishes until the workspace is re-entered. Evidence channels (anchor
+  /// confirmation / reconcile / relay pick) never read it. Key =
+  /// `subscribedWorkspaceKey` recorded at subscribe time; rows are
+  /// probe- and tombstone-filtered at the write point.
+  final Map<String, List<SessionEntry>> cachedSessions;
+
   const TaskDirectory({
     this.relayTasks = const [],
     this.sessions,
     this.locallyDeletedTaskIds = const {},
     this.confirmedHomeKeys = const {},
     this.keyAliases = const {},
+    this.cachedSessions = const {},
   });
 
   /// Merged rows plus the source marker of the live rows
@@ -173,20 +186,50 @@ class TaskDirectory {
         // (Addendum 2, 2026-09-23 device report: default 12 → 22). The
         // local set covers deletes this device confirmed while the
         // desktop index (and its probe) lag behind.
-        if (sessions!.deletedTaskIds.contains(entry.sessionId) ||
-            locallyDeletedTaskIds.contains(entry.sessionId)) {
+        final id = entry.sessionId;
+        if (sessions!.deletedTaskIds.contains(id) ||
+            locallyDeletedTaskIds.contains(id)) {
           continue;
         }
         // Source marker (C1-D2): no surviving relay anchor above → the
         // row exists only in the live sessions-index.
-        if (!byId.containsKey(entry.sessionId)) {
-          sessionOnlyIds.add(entry.sessionId);
+        if (!byId.containsKey(id)) {
+          sessionOnlyIds.add(id);
         }
-        byId[entry.sessionId] = (
-          entry,
-          liveKeyOf(entry, sessions!.subscribedWorkspaceKey),
-          byId[entry.sessionId]?.$3 ?? false,
-        );
+        // Multi-copy ids (registry pollution, design 10-15
+        // multi-copy-stable-group): the live index of EVERY workspace
+        // carrying a copy claims membership, so liveKeyOf follows
+        // whichever workspace is ACTIVE — switching = migration = the
+        // "vanishing row" (PMA110 round-2 forensics, sess_b6f8f415). Keep
+        // the relay-layer key (anchor ?? cold pick, stable on
+        // untouchable fields); the live body still rides the row, so
+        // status stays real-time.
+        String? key;
+        if (grouped[id] != null && grouped[id]!.length > 1) {
+          // Canonicalize through keyAliases (§3.8 alias contract): the
+          // cold-pick branch spells path-form while folders/live keys
+          // are workspaceKeyOf-form — a raw path key matches no folder
+          // and the row becomes unopenable.
+          final relayKey = byId[id]?.$2;
+          key = relayKey == null ? null : keyAliases[relayKey] ?? relayKey;
+        }
+        key ??= liveKeyOf(entry, sessions!.subscribedWorkspaceKey);
+        byId[id] = (entry, key, byId[id]?.$3 ?? false);
+      }
+    }
+    // Cached snapshots (third layer): gap filler only — any id the relay
+    // layer or the active live index already carries wins, so this never
+    // touches the anchored-home / pick semantics above. Same attribution
+    // rule as the live loop (liveKeyOf with the snapshot's own key), so a
+    // row keeps the group it had before the workspace was switched away
+    // from. Archived is relay's sole authority → false, like live rows.
+    for (final MapEntry(key: cacheKey, value: rows) in cachedSessions.entries) {
+      for (final entry in rows) {
+        final id = entry.sessionId;
+        if (locallyDeletedTaskIds.contains(id)) continue;
+        if (byId.containsKey(id)) continue;
+        sessionOnlyIds.add(id);
+        byId[id] = (entry, liveKeyOf(entry, cacheKey), false);
       }
     }
     return (rows: byId.values.toList(), sessionOnlyIds: sessionOnlyIds);
@@ -268,8 +311,14 @@ class TaskDirectory {
   /// 2026-09-23 updatedAt rule whose input kept changing: every touched
   /// copy re-won and the group flapped). Pure function of STABLE fields
   /// only:
-  /// 1. terminal status first (completed|error beats running-class) — a
-  ///    settled copy outranks a zombie running one (the §3.6 direction);
+  /// 1. pinned copy first (10-16 pollution forensics): mirror copies don't
+  ///    carry the user's pin — pin is a per-workspace registry field and
+  ///    the user pins in the true home. Above createdAt/lex, both of which
+  ///    are pollution-blind (copies share the birth millisecond, spec
+  ///    §3.1; the lex order is a systemic bias — 'F:\ZLinker' beats every
+  ///    lowercase-named workspace). The residual no-pin cases fall through
+  ///    to the user adjudication channel (anchor source ④,
+  ///    DeviceSession.correctTaskHome);
   /// 2. greater `createdAt` — mirror copies share the real row's creation
   ///    millisecond (spec §3.1), so this separates genuinely different
   ///    ages without ever flipping on activity;
@@ -278,29 +327,25 @@ class TaskDirectory {
   /// `updatedAt` is deliberately OUT of the comparison keys: it changes on
   /// every touch, and only a change in the row SET (a copy added or
   /// removed) may now move the pick — a touched copy cannot. Terminal
-  /// classes read the mapped phase ([SessionEntry.fromRelayTask]:
-  /// completed→completedSuccess, error→error); unrecognized values count
-  /// as running-class (spec §3.6 rule 4).
+  /// status is OUT too (10-16): a settled copy outranking a live one made
+  /// a RUNNING true row lose its group to a frozen mirror copy (both
+  /// directions of the alive/frozen split occur in pollution, so it never
+  /// discriminated) — terminal judgment lives in [displayStatusWinner],
+  /// which decides the STATUS field only.
   static bool _relayRowBeats(
     SessionEntry candidate,
     String? candidateKey,
     SessionEntry incumbent,
     String? incumbentKey,
   ) {
-    final candidateTerminal = _isTerminalPhase(candidate.phase);
-    final incumbentTerminal = _isTerminalPhase(incumbent.phase);
-    if (candidateTerminal != incumbentTerminal) return candidateTerminal;
+    final candidatePinned = candidate.raw['pinned'] == true;
+    final incumbentPinned = incumbent.raw['pinned'] == true;
+    if (candidatePinned != incumbentPinned) return candidatePinned;
     if (candidate.createdAt != incumbent.createdAt) {
       return candidate.createdAt > incumbent.createdAt;
     }
     return (candidateKey ?? '').compareTo(incumbentKey ?? '') < 0;
   }
-
-  /// Terminal phases after [SessionEntry.fromRelayTask]'s mapping
-  /// (displayStatus completed|error → completedSuccess|error); everything
-  /// else — including unrecognized values — is running-class.
-  static bool _isTerminalPhase(String phase) =>
-      phase == 'completedSuccess' || phase == 'error';
 
   /// The M1 displayStatus pick over one id's relay copies (spec
   /// task-registry-semantics §3.6, 2026-10-11) — moved here from
@@ -367,8 +412,9 @@ class TaskDirectory {
   ///    Row keys canonicalize through [keyAliases] before the comparison
   ///    (check P1-2: the anchor is workspaceKeyOf-spelled, the row may be
   ///    path-spelled — same workspace, two strings);
-  /// 2. otherwise the cold stable pick ([_relayRowBeats]: terminal →
-  ///    createdAt → key lex, `updatedAt` out of the comparison keys).
+  /// 2. otherwise the cold stable pick ([_relayRowBeats]: pinned →
+  ///    createdAt → key lex, `updatedAt` and terminal status out of the
+  ///    comparison keys).
   /// Frame order never decides. Consumed by [_merge], [pinnedEntries] and
   /// `DeviceSession._taskMutationScope` — the mutation address must be the
   /// visible (home) row, not the first row in frame order (the desktop
@@ -467,17 +513,61 @@ class TaskDirectory {
       byId[id] = (entry, confirmedHomeKeys[id] ?? relayKeyOf(task));
     }
     if (sessions?.ready == true) {
+      // Multi-copy attribution needs the FULL relay set: this projection's
+      // own `grouped` above only holds pinned copies, so a multi-copy id
+      // whose relay copies are all unpinned/stale would flip with the
+      // active workspace here while staying stable in [_merge] (design
+      // 10-15 multi-copy-stable-group §pinned, check P1-2).
+      final allCopies = <String, List<Map<String, dynamic>>>{};
+      for (final task in relayTasks) {
+        final id = '${task['taskId'] ?? ''}';
+        if (id.isEmpty) continue;
+        if (locallyDeletedTaskIds.contains(id)) continue;
+        (allCopies[id] ??= []).add(task);
+      }
       for (final entry in sessions!.list) {
         // Same tombstone rules as [_rows] — deleted live rows never pin.
-        if (sessions!.deletedTaskIds.contains(entry.sessionId) ||
-            locallyDeletedTaskIds.contains(entry.sessionId)) {
+        final id = entry.sessionId;
+        if (sessions!.deletedTaskIds.contains(id) ||
+            locallyDeletedTaskIds.contains(id)) {
           continue;
         }
+        if (entry.raw['pinned'] != true) continue;
+        String? key;
+        final copies = allCopies[id];
+        if (copies != null && copies.length > 1) {
+          // Anchor → canonicalized cold-pick key; null falls through to
+          // the live attribution below (a null key would make the pinned
+          // row unopenable — workspaceForKey skips list matching then
+          // live rows carry no path).
+          final anchored = confirmedHomeKeys[id];
+          if (anchored != null) {
+            key = anchored;
+          } else {
+            final task = bestRelayRow(
+              copies,
+              id,
+              homeKeys: confirmedHomeKeys,
+              keyAliases: keyAliases,
+            );
+            final rawKey = task == null ? null : relayKeyOf(task);
+            if (rawKey != null) key = keyAliases[rawKey] ?? rawKey;
+          }
+        }
+        key ??= liveKeyOf(entry, sessions!.subscribedWorkspaceKey);
+        byId[id] = (entry, key);
+      }
+    }
+    // Cached snapshots: same gap-filler rule as [_merge] — without this a
+    // pinned row that survives via the cache would sit in its workspace
+    // group yet vanish from the pinned section on the same page (check
+    // P2-4).
+    for (final MapEntry(key: cacheKey, value: rows) in cachedSessions.entries) {
+      for (final entry in rows) {
+        if (locallyDeletedTaskIds.contains(entry.sessionId)) continue;
+        if (byId.containsKey(entry.sessionId)) continue;
         if (entry.raw['pinned'] == true) {
-          byId[entry.sessionId] = (
-            entry,
-            liveKeyOf(entry, sessions!.subscribedWorkspaceKey),
-          );
+          byId[entry.sessionId] = (entry, liveKeyOf(entry, cacheKey));
         }
       }
     }
