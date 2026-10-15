@@ -28,6 +28,7 @@ import 'link_supervisor.dart';
 import 'quota_reset.dart';
 import 'quota_watch.dart' show QuotaWatchSource;
 import 'task_directory.dart';
+import 'task_home_store.dart';
 
 String workspaceTitle(Map<String, dynamic> w) {
   final label = w['label'] as String?;
@@ -361,7 +362,17 @@ class DeviceSession extends ChangeNotifier
     this.onWorkspaceOpened,
     this.clientFactory,
     this.timings = const StallTimings(),
-  });
+  }) : _homeStore = TaskHomeStore(deviceId: deviceId) {
+    // Persisted task-home anchors + local delete tombstones (design
+    // 10-15): fire-and-forget like every store load — until it lands the
+    // directory keeps the cold-pick behavior; one notify re-groups rows
+    // once the disk state has merged in.
+    unawaited(_homeStore.load().then((_) {
+      // Only a disk state that actually merged in is worth a re-group
+      // notify; an empty/cold store must not add noise notifies.
+      if (!_disposed && _homeStore.hasPersistedState) notifyListeners();
+    }));
+  }
 
   RemoteClient? _client;
   BridgeSession? _bridge;
@@ -425,25 +436,23 @@ class DeviceSession extends ChangeNotifier
   /// non-active workspaces (and the archive view) from exactly this list.
   List<Map<String, dynamic>> _relayTasks = [];
 
-  /// Task ids whose delete RPC completed successfully on THIS device
-  /// (design 10-02 Step 3). The desktop's live sessions-index has no
-  /// deleted concept (its subscription snapshot still lists them) and the
-  /// relay overview row can lag in memory when a reloadTasks response is
-  /// swallowed by a bridge reopen — this client-side tombstone is the only
-  /// layer covering both resurrection paths (see [TaskDirectory
-  /// .locallyDeletedTaskIds]). Add-only by design: task ids are never
-  /// reused and the set stays small. A timed-out / errored delete must
-  /// NOT land here — with the outcome unknown, hiding a task the user
-  /// believes deleted but isn't is worse than a stale row.
-  final Set<String> _locallyDeletedTaskIds = <String>{};
+  /// Persisted home anchors + local delete tombstones (design 10-15,
+  /// [TaskHomeStore] — SharedPreferences, per-device keys). Replaces the
+  /// 10-02 pure-memory sticky-home map and the 10-02 in-memory delete
+  /// set: both survive restarts now, so a confirmed home keeps its group
+  /// and a deleted task cannot resurrect from a surviving mirror copy.
+  /// Writes go through the store (memory-sync + fire-and-forget save);
+  /// the directory reads its live views, so every update re-merges on the
+  /// next rebuild.
+  final TaskHomeStore _homeStore;
 
   /// Cross-terminal deletion tombstones (task 10-06 chat tombstone):
   /// session ids that VANISHED from the live sessions-index while this
   /// session held the subscription — the desktop-side signal that another
-  /// terminal deleted the session (app-initiated deletes land in
-  /// [_locallyDeletedTaskIds] instead; the index-disappearance path also
-  /// records them here, harmless — the page for such a session is already
-  /// exiting). Consumed by the chat page through
+  /// terminal deleted the session (app-initiated deletes land in the
+  /// home store's local tombstones instead; the index-disappearance path
+  /// also records them here, harmless — the page for such a session is
+  /// already exiting). Consumed by the chat page through
   /// [ChatGateway.isSessionDeleted]. Add-only in memory (session ids are
   /// never reused); the open chat page drops its own id on dispose
   /// ([forgetDeletedSession]).
@@ -480,17 +489,6 @@ class DeviceSession extends ChangeNotifier
   ({String? key, int gen, Set<String> snapshotIds, Set<String> seenIds})?
   _indexDiffBase;
 
-  /// Live-confirmed workspace homes (design 10-02 sticky home): task
-  /// id → workspace key, written every time a live sessions-index
-  /// snapshot arrives (membership IS the ground truth of a task's
-  /// home, spec §3.2). Extends that verdict's lifetime past the
-  /// subscription itself, so a bridge swing's resubscribe window —
-  /// where live coverage drops and rows would fall back to the relay
-  /// pick key — can no longer flip a confirmed row's group. Pure
-  /// memory, never serialized; a real move overwrites via the next
-  /// live confirmation.
-  final Map<String, String> _confirmedHomeKeys = {};
-
   /// Well-known `app-error` reason of the last fatal failure (the
   /// web's `webRemoteControl.failure.*` enum); UI maps it to localized copy.
   String? _failureReason;
@@ -511,32 +509,143 @@ class DeviceSession extends ChangeNotifier
   List<Map<String, dynamic>> get relayTasks => _relayTasks;
 
   /// Merged task directory (relay overview ⊕ live sessions-index),
-  /// recomputed on every read — see [TaskDirectory].
+  /// recomputed on every read — see [TaskDirectory]. Anchors and local
+  /// delete tombstones read live off [_homeStore], so a write re-merges
+  /// on the next rebuild without extra state. [TaskDirectory.keyAliases]
+  /// rides along so [TaskDirectory.bestRelayRow]'s anchor matching
+  /// canonicalizes path-spelled relay keys (check P1-2).
   @override
   TaskDirectory get taskDirectory => TaskDirectory(
         relayTasks: relayTasks,
         sessions: sessions,
-        locallyDeletedTaskIds: _locallyDeletedTaskIds,
-        confirmedHomeKeys: _confirmedHomeKeys,
+        locallyDeletedTaskIds: _homeStore.locallyDeletedTaskIds,
+        confirmedHomeKeys: _homeStore.homeKeys,
+        keyAliases: _workspaceKeyAliases,
       );
 
-  /// Confirms every live sessions-index membership into
-  /// [_confirmedHomeKeys] (design 10-02 sticky home): the index is the
-  /// product of `listSessions(directory = workspace)`, so membership in
-  /// it IS the ground truth of a task's home (task-registry-semantics
-  /// §3.2) — recording the verdict extends it past the subscription
-  /// itself, so a bridge swing's resubscribe window (live coverage down,
-  /// rows fall back to the relay pick) cannot re-group a confirmed row.
-  /// Entries without any attribution (no identity/path and no
-  /// subscription key) confirm nothing. Wired to every live frame via
-  /// [_onSessionsChanged]; the fake session replays the same wiring.
+  /// Workspace key alias table (check P1-2, 2026-10-15): every listed
+  /// workspace contributes `workspacePath → workspaceKeyOf(ws)` plus the
+  /// canonical key mapping to itself. The live channel spells keys in the
+  /// workspaceKeyOf form (liveKeyOf falls back to
+  /// subscribedWorkspaceKey = workspaceKeyOf), relay rows the path form —
+  /// one workspace, two strings. Every anchor write / comparison
+  /// canonicalizes through this so the same workspace can never be misread
+  /// as a move. Computed at every use point off the VIRTUAL [workspaces]
+  /// getter (the fake session seeds it through the override) — always
+  /// fresh, no staleness window of its own.
+  Map<String, String> get _workspaceKeyAliases {
+    final aliases = <String, String>{};
+    for (final ws in workspaces) {
+      final key = workspaceKeyOf(ws);
+      if (key == null) continue;
+      aliases[key] = key;
+      final path = ws['workspacePath'];
+      if (path is String && path.isNotEmpty) aliases[path] = key;
+    }
+    return aliases;
+  }
+
+  /// Confirms live sessions-index membership into the persisted home
+  /// anchors — design 10-15 §1.1 write sources ②/③ (replacing the 10-02
+  /// sticky home's unconditional write): the index is the product of
+  /// `listSessions(directory = workspace)`, so membership in it IS the
+  /// ground truth of a task's home (task-registry-semantics §3.2) — but
+  /// only while the relay overview does not contradict itself for the id:
+  /// - relay single copy → write the anchor (establish / follow / flip):
+  ///   an unambiguous registry cannot be mirror pollution;
+  /// - relay MULTI-copy → the anti-pollution gate: NO establish, NO flip
+  ///   (the index copies disagreeing among themselves makes membership
+  ///   evidence untrusted — the biggest false-anchor source of the 10-02
+  ///   sticky home); a confirmation AGREEING with the existing anchor
+  ///   only refreshes its timestamp (source ③ — harmless, keeps the
+  ///   anchor fresh against the absence prune);
+  /// - no relay row (session-only / registry window) → no establish; an
+  ///   agreeing confirmation refreshes (covers ids anchored at creation
+  ///   whose registry row has not landed yet).
+  /// Entries without any attribution confirm nothing. Wired to every live
+  /// frame via [_onSessionsChanged]; the fake session replays the same
+  /// wiring.
   void confirmLiveHomes() {
     final state = sessions;
     if (state == null || !state.ready) return;
+    final aliases = _workspaceKeyAliases;
     for (final entry in state.list) {
-      final key = TaskDirectory.liveKeyOf(entry, state.subscribedWorkspaceKey);
-      if (key != null) _confirmedHomeKeys[entry.sessionId] = key;
+      final raw = TaskDirectory.liveKeyOf(entry, state.subscribedWorkspaceKey);
+      if (raw == null) continue;
+      // 键规范化（check P1-2）：锚一律写 workspaceKeyOf 规范拼写，path
+      // 拼写先归一再比较/写入。
+      final key = aliases[raw] ?? raw;
+      final id = entry.sessionId;
+      var copies = 0;
+      // The virtual getter, not the private field: the fake session seeds
+      // the overview through the override. The count rides the possibly-
+      // stale in-memory overview: inside a lag window a single-copy view
+      // can anchor an actually-multi-copy id — that is exactly what the
+      // App rendered at the time, deterministic and loss-free (check P2-5).
+      for (final task in relayTasks) {
+        if ('${task['taskId'] ?? ''}' == id) copies++;
+      }
+      if (copies == 1) {
+        _homeStore.anchorHome(id, key, now: clock.now());
+      } else if (_homeStore.homeKeys[id] == key) {
+        // Gate holds (multi-copy) or the registry row has not landed: an
+        // agreeing confirmation only refreshes the anchor it agrees with.
+        _homeStore.refreshHome(id, now: clock.now());
+      }
     }
+  }
+
+  /// Anchor reconciliation + lifecycle (design 10-15 §1.1), run after
+  /// every relay overview application ([_applyRelayOverview] /
+  /// [_onWorkspaceListUpdated]) — never per live frame, so the stale
+  /// in-memory overview can't flip an anchor the live channel owns:
+  /// - tombstoned id → drop its anchor (a confirmed delete is definitive);
+  /// - anchored id NOT visible in the live index whose relay set collapsed
+  ///   to a single copy with a different key → obey the relay and
+  ///   overwrite the anchor (the self-heal exit: post-cleanup stale
+  ///   anchors AND real moves both land here). Both keys canonicalize
+  ///   through [_workspaceKeyAliases] first (check P1-2: the live anchor
+  ///   is workspaceKeyOf-spelled, the relay row may be path-spelled — the
+  ///   SAME workspace must not read as a move). Live-visible ids are
+  ///   skipped — their anchors are managed by the live confirmation
+  ///   channel ([confirmLiveHomes]); the two channels must never fight
+  ///   over one id.
+  /// - tombstones past [TaskHomeStore.tombstoneTtl] → pruned (check P1-1:
+  ///   TTL is their only removal path — a re-listing overview never lifts
+  ///   a tombstone; surviving copies and stale frames re-list deleted ids
+  ///   legitimately, so「复现移除」was removed).
+  /// - ids absent from relay∪live for [TaskHomeStore.absenceTtl] → prune.
+  /// Public so the fake session can replay the same wiring.
+  void reconcileTaskHomes() {
+    final liveIds = sessions?.sessions.keys.toSet() ?? const <String>{};
+    final copyCounts = <String, int>{};
+    final singleKeys = <String, String?>{};
+    // The virtual getter, not the private field: the fake session seeds
+    // the overview through the override.
+    for (final task in relayTasks) {
+      final id = '${task['taskId'] ?? ''}';
+      if (id.isEmpty) continue;
+      copyCounts[id] = (copyCounts[id] ?? 0) + 1;
+      singleKeys[id] = copyCounts[id] == 1 ? TaskDirectory.relayKeyOf(task) : null;
+    }
+    final aliases = _workspaceKeyAliases;
+    final tombstoned = _homeStore.locallyDeletedTaskIds;
+    for (final id in _homeStore.homeKeys.keys.toList()) {
+      if (tombstoned.contains(id)) {
+        _homeStore.dropAnchor(id);
+        continue;
+      }
+      if (liveIds.contains(id)) continue;
+      if (copyCounts[id] == 1) {
+        final raw = singleKeys[id];
+        final key = raw == null ? null : (aliases[raw] ?? raw);
+        if (key != null && key != _homeStore.homeKeys[id]) {
+          _homeStore.anchorHome(id, key, now: clock.now());
+        }
+      }
+    }
+    _homeStore.pruneExpiredTombstones(now: clock.now());
+    _homeStore.pruneAbsent({...liveIds, ...copyCounts.keys}, now: clock.now());
   }
 
   /// Live-frame signals of the active sessions-index subscription,
@@ -773,6 +882,9 @@ class DeviceSession extends ChangeNotifier
         for (final t in tasks)
           if (t is Map) t.cast<String, dynamic>(),
       ];
+      // Push frames carry a fresh task overview: same anchor reconcile as
+      // [_applyRelayOverview] (design 10-15 §1.1).
+      reconcileTaskHomes();
     }
     notifyListeners();
   }
@@ -1169,6 +1281,9 @@ class DeviceSession extends ChangeNotifier
         for (final t in tasks)
           if (t is Map) t.cast<String, dynamic>(),
     ];
+    // Fresh overview = fresh anchor evidence: tombstone expiry, single-copy
+    // reconcile, absence prune (design 10-15 §1.1).
+    reconcileTaskHomes();
   }
 
   /// In-flight dedup for [refreshTaskOverview].
@@ -1401,6 +1516,12 @@ class DeviceSession extends ChangeNotifier
   @visibleForTesting
   void debugAttachGateForTest(WorkspaceGate gate) => _testGate = gate;
 
+  /// Test seam: the persisted anchor/tombstone store — anchor tests seed
+  /// homes / assert the persisted sets directly through it (FakeDeviceSession
+  /// inherits the seam).
+  @visibleForTesting
+  TaskHomeStore get taskHomeStore => _homeStore;
+
   /// Server-side automations of the connected desktop. Bound to the
   /// zcode-agent channel (listAllAutomations was probed there). The wire
   /// shape (scheduleRule/modelSelection/setAutomationEnabled) is gated on
@@ -1465,7 +1586,17 @@ class DeviceSession extends ChangeNotifier
     if (workspaceId == null || workspaceId.isEmpty) {
       throw StateError('no workspace');
     }
-    return conv.createSession(workspaceId, firstText: text, config: config);
+    final id = await conv.createSession(
+      workspaceId,
+      firstText: text,
+      config: config,
+    );
+    // 写入源①（design 10-15 §1.1）：手机端创建会话 = App 即真值源，成功
+    // 即锚定到活动工作区 —— 注册表行落地前（甚至被镜像污染前）home 已定。
+    final ws = _activeWorkspace;
+    final key = ws == null ? null : workspaceKeyOf(ws);
+    if (key != null) _homeStore.anchorHome(id, key, now: clock.now());
+    return id;
   }
 
   // ------------------------------------------------------------ ChatGateway
@@ -1518,11 +1649,20 @@ class DeviceSession extends ChangeNotifier
   /// Mutation 作用域按目标任务的归属工作区组装（桌面 resolveTaskAddress
   /// 按 taskId+workspacePath+workspaceIdentity 三元组寻址）；relay 概览
   /// 全工作区覆盖，查不到（冷启动未拉到/会话库私有行）回退活动工作区。
-  /// 同 id 多归属行（桌面镜像行）取 [TaskDirectory.bestRelayRow] —— 与
-  /// TaskDirectory.byId 完全同规则的择优，所见=所删；帧序 firstOrNull
-  /// 会把 mutation 寻址到非用户所见的那份孪生行（10-11 核查 V3）。
+  /// 同 id 多归属行（桌面镜像行）取 [TaskDirectory.bestRelayRow] 并传入
+  /// 持久锚 —— 与 TaskDirectory 合并视图完全同规则的分层 home（锚定副本
+  /// 优先，否则冷启动稳定 pick），所见=所删；帧序 firstOrNull 会把
+  /// mutation 寻址到非用户所见的那份孪生行（10-11 核查 V3）。
   Map<String, dynamic> _taskMutationScope(String taskId) {
-    final row = TaskDirectory.bestRelayRow(relayTasks, taskId);
+    final row = TaskDirectory.bestRelayRow(
+      relayTasks,
+      taskId,
+      homeKeys: _homeStore.homeKeys,
+      // Same canonicalization the directory's visible-row pick uses
+      // (check P1-2): without it the alias mismatch would leave the scope
+      // on the cold pick while the UI shows the anchored copy — 所见≠所删.
+      keyAliases: _workspaceKeyAliases,
+    );
     if (row == null) return offPeakScope;
     return {
       'workspacePath': row['workspacePath'],
@@ -1586,7 +1726,7 @@ class DeviceSession extends ChangeNotifier
     // tombstone the row and re-notify so the merged directory recomputes
     // even when the desktop's workspace-list-updated push was swallowed
     // by a bridge reopen (design 10-02 Step 3).
-    _locallyDeletedTaskIds.add(sessionId);
+    _rememberLocalDelete(sessionId);
     notifyListeners();
     return res;
   }
@@ -1606,9 +1746,18 @@ class DeviceSession extends ChangeNotifier
   /// first.
   Future<dynamic> deleteSession(String sessionId) async {
     final res = await conversationCommands.deleteSession(sessionId);
-    _locallyDeletedTaskIds.add(sessionId);
+    _rememberLocalDelete(sessionId);
     notifyListeners();
     return res;
+  }
+
+  /// Records a confirmed local delete (design 10-02 Step 3 + 10-15 §1.2):
+  /// the id enters the PERSISTED tombstone set (surviving mirror copies
+  /// can no longer resurrect it across restarts) and its home anchor —
+  /// if any — drops at once (a deleted id never keeps a home).
+  void _rememberLocalDelete(String sessionId) {
+    _homeStore.addLocalDelete(sessionId);
+    _homeStore.dropAnchor(sessionId);
   }
 
   @override
@@ -1885,55 +2034,13 @@ class DeviceSession extends ChangeNotifier
 
   @override
   String? taskDisplayStatus(String sessionId) {
-    // The desktop registry duplicates one task id into every remote-enabled
-    // workspace and those rows' displayStatus drifts apart (15 live
-    // multi-row ids, 2026-10-11) — the old first-hit scan answered whatever
-    // row the bootstrap frame happened to list first (frame order varies
-    // between snapshots, see [TaskDirectory._relayRowBeats]), so dead
-    // sessions surfaced as running zombies. Pick deterministically instead
-    // — a pure function of the row set: a terminal status beats a
-    // running-class one (sending into a dead session is the worse error
-    // direction), then the greater updatedAt wins (the real row keeps
-    // receiving activity updates while its copies freeze at registration),
-    // remaining ties fall to the lexicographically smaller workspace path
-    // and then the status string. Unrecognized values (including a missing
-    // field) count as running-class.
-    const terminalStatuses = {'completed', 'error'};
-    ({bool terminal, int updatedAt, String workspace, String status}) rankOf(
-      Map<String, dynamic> task,
-    ) {
-      final status = task['displayStatus'] as String?;
-      return (
-        terminal: terminalStatuses.contains(status),
-        updatedAt: (task['updatedAt'] as num?)?.toInt() ?? 0,
-        workspace: '${task['workspacePath'] ?? ''}',
-        status: status ?? '',
-      );
-    }
-
-    bool beats(
-      ({bool terminal, int updatedAt, String workspace, String status}) c,
-      ({bool terminal, int updatedAt, String workspace, String status}) i,
-    ) {
-      if (c.terminal != i.terminal) return c.terminal;
-      if (c.updatedAt != i.updatedAt) return c.updatedAt > i.updatedAt;
-      if (c.workspace != i.workspace) {
-        return c.workspace.compareTo(i.workspace) < 0;
-      }
-      return c.status.compareTo(i.status) < 0;
-    }
-
-    Map<String, dynamic>? best;
-    var bestRank = (terminal: false, updatedAt: 0, workspace: '', status: '');
-    for (final task in relayTasks) {
-      if ('${task['taskId']}' != sessionId) continue;
-      final rank = rankOf(task);
-      if (best == null || beats(rank, bestRank)) {
-        best = task;
-        bestRank = rank;
-      }
-    }
-    return best?['displayStatus'] as String?;
+    // M1 择优（spec task-registry-semantics §3.6，2026-10-11）已迁入
+    // [TaskDirectory.displayStatusWinner] 并成为合成行 displayStatus 的
+    // 同一选择（design 10-15 §2.2 字段级合成）—— 这里只读该结果，两套
+    // 择优合一：同输入下列表行的相位与这里返回的状态必然一致。规则不变
+    // （终态优先 → 同类取 updatedAt 大 → workspacePath 字典序 → 状态串
+    // 兜底；未识别值按运行态类）。
+    return TaskDirectory.displayStatusWinner(relayTasks, sessionId);
   }
 
   @override

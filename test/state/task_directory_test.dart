@@ -31,13 +31,14 @@ Map<String, dynamic> _relayTask(
   bool pinned = false,
   String displayStatus = 'idle',
   int updatedAt = 1,
+  int createdAt = 1,
 }) =>
     {
       'taskId': id,
       'title': 'relay-$id',
       'workspaceIdentity': key,
       'displayStatus': displayStatus,
-      'createdAt': 1,
+      'createdAt': createdAt,
       'updatedAt': updatedAt,
       if (archived) 'archived': true,
       if (pinned) 'pinned': true,
@@ -262,13 +263,15 @@ void main() {
     expect(dir.allEntries().single.$2, 'beta');
   });
 
-  test('duplicate relay rows (desktop mirror) pick the greatest updatedAt',
-      () {
-    // 2026-09-23: the desktop registry copies every task into
-    // remote-enabled workspaces — two active rows per id, and their order
-    // in the bootstrap frame varies between snapshots. The real row keeps
-    // receiving activity updates while the copy freezes at registration,
-    // so the newer row must win in either frame order.
+  test('duplicate relay rows (desktop mirror) resolve on stable fields: '
+      'terminal → createdAt → key lex', () {
+    // 2026-10-15 stable-anchor rule (design §2.1, PRD R2): updatedAt
+    // EXITED the comparison keys — it changes on every touch, and the
+    // touched copy kept re-winning (the group/status flapping this task
+    // kills). Mirror copies share the real row's creation millisecond
+    // (spec §3.1), so the deterministic tie-break is the lexicographically
+    // smaller key. Both frame orders must still agree (the §3.1
+    // frame-order independence is kept).
     for (final rows in [
       [
         _relayTask('t1', 'mirror', updatedAt: 100),
@@ -281,13 +284,89 @@ void main() {
     ]) {
       final dir = TaskDirectory(relayTasks: rows);
       final row = dir.allEntries().single;
-      expect(row.$2, 'real');
-      expect(row.$1.lastActivityAt, 200);
+      expect(row.$2, 'mirror');
+      expect(row.$1.lastActivityAt, 100);
     }
   });
 
-  test('duplicate relay rows with equal updatedAt pick the smaller key', () {
-    // Theoretical tie: the lexicographically smaller workspace key wins so
+  test('a copy being touched no longer flips the pick (updatedAt out of the '
+      'comparison keys)', () {
+    // Cold-pick stability acceptance (PRD R2): bumping one copy's
+    // updatedAt — the OLD rule's deciding key — must not move the row;
+    // only a change in the row SET may.
+    final rows = [
+      _relayTask('t1', 'zeta', updatedAt: 1),
+      _relayTask('t1', 'alpha', updatedAt: 1),
+    ];
+    expect(TaskDirectory(relayTasks: rows).allEntries().single.$2, 'alpha');
+    final touched = [
+      _relayTask('t1', 'zeta', updatedAt: 999),
+      _relayTask('t1', 'alpha', updatedAt: 1),
+    ];
+    expect(TaskDirectory(relayTasks: touched).allEntries().single.$2, 'alpha',
+        reason: 'updatedAt is no longer a comparison key (design 10-15)');
+  });
+
+  test('a row-SET change is what can still move the pick', () {
+    // The other half of the stability acceptance: adding a terminal copy
+    // (rule 1) or removing the winning copy may flip the pick — expected,
+    // deterministic on the new set, and invisible to anchored ids.
+    final base = [_relayTask('t1', 'alpha', displayStatus: 'running')];
+    expect(TaskDirectory(relayTasks: base).allEntries().single.$2, 'alpha');
+    final withTerminalCopy = [
+      ...base,
+      _relayTask('t1', 'zeta', displayStatus: 'completed'),
+    ];
+    expect(
+      TaskDirectory(relayTasks: withTerminalCopy).allEntries().single.$2,
+      'zeta',
+      reason: 'terminal beats running-class whatever the key order',
+    );
+  });
+
+  test('terminal status beats a fresher running-class copy in the cold pick',
+      () {
+    // Rule 1 of the stable pick: a settled copy outranks a zombie running
+    // one (the §3.6 direction), whatever the updatedAt difference.
+    for (final rows in [
+      [
+        _relayTask('t1', 'zeta', displayStatus: 'completed', updatedAt: 1),
+        _relayTask('t1', 'alpha', displayStatus: 'running', updatedAt: 999),
+      ],
+      [
+        _relayTask('t1', 'alpha', displayStatus: 'running', updatedAt: 999),
+        _relayTask('t1', 'zeta', displayStatus: 'completed', updatedAt: 1),
+      ],
+    ]) {
+      expect(
+        TaskDirectory(relayTasks: rows).allEntries().single.$2,
+        'zeta',
+      );
+    }
+  });
+
+  test('same class, different createdAt: the later-created row wins', () {
+    // Rule 2: mirror copies share the real row's creation millisecond
+    // (spec §3.1), so createdAt separates genuinely different ages without
+    // ever flipping on activity.
+    for (final rows in [
+      [
+        _relayTask('t1', 'old', updatedAt: 999, createdAt: 100),
+        _relayTask('t1', 'new', updatedAt: 1, createdAt: 200),
+      ],
+      [
+        _relayTask('t1', 'new', updatedAt: 1, createdAt: 200),
+        _relayTask('t1', 'old', updatedAt: 999, createdAt: 100),
+      ],
+    ]) {
+      expect(TaskDirectory(relayTasks: rows).allEntries().single.$2, 'new');
+    }
+  });
+
+  test('duplicate relay rows with no stable-field difference pick the '
+      'smaller key', () {
+    // The tie-break that remains after updatedAt left: equal class + equal
+    // createdAt → the lexicographically smaller workspace key wins, so
     // the grouping stays a pure function of the row set — no frame-order
     // flip, ever.
     for (final rows in [
@@ -376,9 +455,11 @@ void main() {
     expect(row.$2, 'real_ws'); // live membership beats the mirror pick key
   });
 
-  test('pinned: duplicate relay rows pick the greatest updatedAt too', () {
-    // Same duplicate-row rule in the pinned base phase ([TaskDirectory
-    // .pinnedEntries] keeps its own relay loop).
+  test('pinned: duplicate relay rows resolve on the same stable fields', () {
+    // Same layered rule in the pinned base phase ([TaskDirectory
+    // .pinnedEntries] groups its own relay loop): equal class + equal
+    // createdAt → the lexicographically smaller key wins — zeta's higher
+    // updatedAt is irrelevant now (2026-10-15 stable-anchor rule).
     final dir = TaskDirectory(relayTasks: [
       _relayTask('t1', 'zeta', pinned: true, updatedAt: 5),
       _relayTask('t1', 'alpha', pinned: true, updatedAt: 9),
@@ -531,17 +612,19 @@ void main() {
     expect(dir.totalTaskCount, 1);
   });
 
-  // ---- sticky live-confirmed homes (design 10-02 / AC1-AC4) ------------
-  // A live sessions-index confirmation pins the row's group past the
-  // subscription itself: the bridge swing's resubscribe window (live
-  // coverage down) drops rows back onto the relay pick key — the pick
-  // loses mirror rows to stale foreign keys, the row oscillates between
-  // groups. The confirmed home overrides the final grouping key only;
-  // the pick phase itself still compares raw relay keys.
+  // ---- persistent home anchors (design 10-15, the 10-02 sticky home
+  // evolved) --------------------------------------------
+  // A live confirmation (relay single-copy) writes a PERSISTED anchor: it
+  // now selects the home COPY (first layer ahead of the cold pick) and
+  // pins the group past the subscription itself — the bridge swing's
+  // resubscribe window (live coverage down) drops rows onto the cold pick
+  // instead of the updatedAt-racy old pick, and neither a touched copy nor
+  // a restarted process can move a confirmed row's group.
 
   test('a confirmed home pins the relay pick row (AC1/AC4)', () {
-    // The stale desktop copy row (stale_zgo) has the greater updatedAt and
-    // wins the relay pick — live had confirmed the real home real_ws.
+    // The stale desktop copy row (stale_zgo) had the greater updatedAt and
+    // won the OLD pick — the anchor selects the real home real_ws copy
+    // directly now (2026-10-15 layered home, design §2.1).
     final rows = [
       _relayTask('t1', 'stale_zgo', updatedAt: 200),
       _relayTask('t1', 'real_ws', updatedAt: 100),
@@ -565,9 +648,11 @@ void main() {
     expect(window.entriesFor('stale_zgo'), isEmpty);
   });
 
-  test('cold start (no confirmed homes) keeps the pure relay pick (AC3)',
-      () {
-    // Empty cache = pre-feature behavior: the pick key rules, no pin.
+  test('cold start (no confirmed homes) keeps the pure cold pick (AC3)', () {
+    // Empty cache = pre-anchor behavior. 2026-10-15: the pick itself
+    // resolves on stable fields (terminal → createdAt → key lex) —
+    // mirror/real here share createdAt, so the lex-smaller 'mirror' wins
+    // regardless of its lower updatedAt.
     final dir = TaskDirectory(
       relayTasks: [
         _relayTask('t1', 'mirror', updatedAt: 200),
@@ -577,12 +662,12 @@ void main() {
     expect(dir.allEntries().single.$2, 'mirror');
   });
 
-  test('the pick still resolves duplicate rows by RAW relay keys when a '
-      'confirmed home exists', () {
-    // The home key ('a') sorts below both raw keys ('b', 'c'): if the
-    // sticky key leaked into the beats comparison, the equal-updatedAt
-    // tie-break would flip with the frame order. Both orders must pick
-    // the same row data and pin the group to the confirmed home.
+  test('an anchor matching no copy keeps pinning the group while the cold '
+      'pick stands in as the body', () {
+    // The anchored key ('a') is carried by NO row ('b', 'c'): the body
+    // comes from the stable pick on the raw keys (both orders agree on
+    // row-b), while the group stays pinned to the anchor — transient
+    // until the relay-reconcile self-heal follows the evidence.
     for (final rows in [
       [
         {

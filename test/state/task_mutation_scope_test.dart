@@ -103,8 +103,13 @@ void main() {
     });
   });
 
-  test('multi-home twins → the newer-updatedAt row wins, BOTH frame orders '
+  test('multi-home twins → the stable pick row wins, BOTH frame orders '
       '(scope pick = TaskDirectory.byId, never frame order)', () async {
+    // 2026-10-15 stable-anchor rule: updatedAt exited the pick keys
+    // (design §2.1) — no createdAt on either row (equal) and equal
+    // terminal class, so the lexicographically smaller key
+    // ('/repo/new' < '/repo/old') decides. The frame-order independence
+    // assertion tradition is kept.
     final older = {
       'taskId': 't-dual',
       'workspacePath': '/repo/old',
@@ -135,8 +140,45 @@ void main() {
     }
   });
 
-  test('multi-home twins with equal updatedAt → lexicographically smaller '
-      'workspace key wins, BOTH frame orders', () async {
+  test('an anchored twin is the mutation target, ahead of the stable pick '
+      '(design 10-15: scope follows the synthesized home)', () async {
+    // The anchor selects the home copy FIRST (design §2.1 layer 1) — the
+    // cold pick (and any updatedAt/lex order) must not displace it: the
+    // visible row IS the anchored copy, so the delete must address it.
+    final copy = {
+      'taskId': 't-dual',
+      'workspacePath': '/repo/copy',
+      'workspaceIdentity': 'copy-id',
+      'updatedAt': 999,
+    };
+    final real = {
+      'taskId': 't-dual',
+      'workspacePath': '/repo/real',
+      'workspaceIdentity': 'real-id',
+      'updatedAt': 1,
+    };
+    for (final frame in [
+      [copy, real],
+      [real, copy],
+    ]) {
+      final session = sessionWith(frame);
+      session.taskHomeStore.anchorHome('t-dual', 'real-id');
+      await session.taskCommands.delete('t-dual');
+      expect(
+        singleMutation(session),
+        {
+          'taskId': 't-dual',
+          'workspacePath': '/repo/real',
+          'workspaceIdentity': 'real-id',
+        },
+        reason: 'the anchored copy is the home the user sees '
+            '(frame order ${frame[0]['workspacePath']} first)',
+      );
+    }
+  });
+
+  test('multi-home twins with equal stable fields → lexicographically '
+      'smaller workspace key wins, BOTH frame orders', () async {
     final keyB = {
       'taskId': 't-dual',
       'workspacePath': '/repo/b',

@@ -17,9 +17,9 @@ String? workspaceKeyOf(Map<String, dynamic> w) {
 }
 
 /// Merged view of every task on one device — the one home of the
-/// 「relay 任务总览打底、live 会话索引按 Task id 胜出；同 id 多行（桌面
-/// 镜像行）按 updatedAt 择优、平级按 workspaceKey 字典序」rule (CONTEXT.md
-/// 「Task Directory」). Live rows whose id is in the deleted-tombstone set
+/// 「relay 任务总览打底、live 会话索引按 Task id 胜出；同 id 多副本分层定
+/// home（持久锚 → 冷启动稳定 pick），displayStatus 字段级合成」rule
+/// (design 10-15). Live rows whose id is in the deleted-tombstone set
 /// ([SessionsIndexState.deletedTaskIds]) are skipped — the desktop's live
 /// index still lists tasks the user deleted (its session-library view has
 /// no deleted concept) while the relay overview omits them, so unfiltered
@@ -37,32 +37,50 @@ class TaskDirectory {
   /// Live sessions-index of the subscribed workspace (null until subscribed).
   final SessionsIndexState? sessions;
 
-  /// Locally-confirmed deletes (design 10-02 Step 3): task ids whose
+  /// Locally-confirmed deletes (design 10-02 Step 3, persisted since
+  /// design 10-15 §1.2 via the session's [TaskHomeStore]): task ids whose
   /// delete RPC returned success on this device. Unlike the probe-derived
   /// [SessionsIndexState.deletedTaskIds] — which guards the live loops
   /// only so a relay base row survives — this set filters BOTH sources:
   /// a successful delete is definitive, while the relay overview row can
   /// lag in memory when a reloadTasks response is swallowed by a bridge
-  /// reopen. Owned by the session and add-only, so it is aliased here
-  /// without copying and re-reads see every new tombstone.
+  /// reopen. Owned by the session's [TaskHomeStore] — add-only with a
+  /// 7-day TTL (check P1-1, 2026-10-15: a re-listing overview never lifts
+  /// a tombstone; expiry is the only removal) — and re-read fresh on every
+  /// [DeviceSession.taskDirectory] construction, so new tombstones are
+  /// seen at once.
   final Set<String> locallyDeletedTaskIds;
 
-  /// Live-confirmed workspace homes (design 10-02 sticky home): task id →
-  /// workspace key as recorded by the session's live sessions-index
-  /// ([DeviceSession.confirmLiveHomes]). The relay pick phase still
-  /// resolves duplicate rows with the raw relay keys, but the surviving
-  /// row's grouping key is pinned to the confirmed home — a bridge
-  /// swing's resubscribe window (live coverage down, rows fall back to
-  /// the relay pick) can no longer flip a confirmed row's group. Aliased
+  /// Persisted home anchors (design 10-15 §1.1, [TaskHomeStore] backed):
+  /// task id → workspace key, written by three sources only — the phone
+  /// itself creating the session (App = source of truth), a live
+  /// confirmation while the id's relay set holds exactly one copy, and a
+  /// live confirmation agreeing with an existing anchor (refresh). The
+  /// FIRST layer of home resolution: the anchored copy becomes the home
+  /// row and its key the group, ahead of the cold pick — a bridge swing's
+  /// resubscribe window (live coverage down) can no longer flip a
+  /// confirmed row's group, and neither can a touched copy. Multi-copy
+  /// ids' live frames never establish or flip an anchor (the
+  /// anti-pollution gate lives on the session's confirmLiveHomes). Aliased
   /// without copying, like [locallyDeletedTaskIds]; a cold start passes
-  /// the empty map and keeps the pure relay-pick behavior.
+  /// the empty map and keeps the pure cold-pick behavior.
   final Map<String, String> confirmedHomeKeys;
+
+  /// Workspace key aliases (check P1-2, 2026-10-15): path-spelled →
+  /// canonical [workspaceKeyOf]-spelled keys, built by the session from its
+  /// workspace list. [bestRelayRow]'s anchor matching canonicalizes each
+  /// row's key through this before comparing against the anchor (which the
+  /// session always writes in canonical spelling), so one workspace
+  /// carrying two string forms cannot read as a move. Defaults to empty =
+  /// raw comparison (every pre-existing call site's behavior unchanged).
+  final Map<String, String> keyAliases;
 
   const TaskDirectory({
     this.relayTasks = const [],
     this.sessions,
     this.locallyDeletedTaskIds = const {},
     this.confirmedHomeKeys = const {},
+    this.keyAliases = const {},
   });
 
   /// Merged rows plus the source marker of the live rows
@@ -116,25 +134,36 @@ class TaskDirectory {
       (grouped[id] ??= []).add(task);
     }
     for (final MapEntry(key: id, value: rows) in grouped.entries) {
-      final task = bestRelayRow(rows, id)!;
-      byId[id] = (
-        SessionEntry.fromRelayTask(task),
-        relayKeyOf(task),
-        task['archived'] == true,
-      );
-    }
-    // Sticky homes (design 10-02): pin the surviving rows to their
-    // live-confirmed group. Applied AFTER the pick so [_relayRowBeats]
-    // keeps comparing raw relay keys — the row selection semantics are
-    // unchanged, only the final grouping key is overridden. The live loop
-    // below still outranks a pinned key whenever the index is ready (and
-    // the same snapshot overwrote the cache, so they agree anyway).
-    for (final id in byId.keys) {
-      final home = confirmedHomeKeys[id];
-      if (home != null) {
-        final (entry, _, archived) = byId[id]!;
-        byId[id] = (entry, home, archived);
-      }
+      // Layered home (design 10-15 §2.1): the anchored copy when one still
+      // carries the anchored key, else the cold stable pick ([bestRelayRow]
+      // — the SAME pure pick the mutation scope reads, so the row a user
+      // sees IS the row a delete addresses).
+      final task = bestRelayRow(
+        rows,
+        id,
+        homeKeys: confirmedHomeKeys,
+        keyAliases: keyAliases,
+      )!;
+      // Field-level synthesis (design 10-15 §2.2): the body fields
+      // (title/pinned/archived/unreadAt/lastError/workspace) ride the home
+      // copy; `displayStatus` comes from the M1 terminal-first winner over
+      // the WHOLE group ([displayStatusWinner]) — the same selection
+      // DeviceSession.taskDisplayStatus reads, the two former picks merged.
+      final status = displayStatusWinner(rows, id);
+      final entry = SessionEntry.fromRelayTask({
+        ...task,
+        // The winner's exact value: a null (missing on the winning copy)
+        // erases the home copy's own field so the phase derives as
+        // running-class exactly like the M1 rules.
+        'displayStatus': status,
+      });
+      // Group key: the anchor pins it even when no copy carries the
+      // anchored key anymore (transient — the relay-reconcile self-heal in
+      // DeviceSession.reconcileTaskHomes follows the single-copy
+      // evidence); otherwise the home copy's own key. The live loop below
+      // still outranks a pinned key whenever the index is ready.
+      final key = confirmedHomeKeys[id] ?? relayKeyOf(task);
+      byId[id] = (entry, key, task['archived'] == true);
     }
     if (sessions?.ready == true) {
       for (final entry in sessions!.list) {
@@ -235,42 +264,127 @@ class TaskDirectory {
   }
 
   /// Whether a duplicate relay row for one task id displaces the row already
-  /// kept. The desktop registry copies every task into remote-enabled
-  /// workspaces — two active rows per id, same-millisecond created, and the
-  /// bootstrap frame order varies between snapshots (Addendum 2026-09-23,
-  /// device-verified). The greater `updatedAt` wins: the real row keeps
-  /// receiving activity updates while the copy freezes at registration;
-  /// a tie falls back to the lexicographically smaller workspace key, so
-  /// the result is a pure function of the row set — never of frame order.
+  /// kept — the COLD stable pick (design 10-15 §2.1, replacing the
+  /// 2026-09-23 updatedAt rule whose input kept changing: every touched
+  /// copy re-won and the group flapped). Pure function of STABLE fields
+  /// only:
+  /// 1. terminal status first (completed|error beats running-class) — a
+  ///    settled copy outranks a zombie running one (the §3.6 direction);
+  /// 2. greater `createdAt` — mirror copies share the real row's creation
+  ///    millisecond (spec §3.1), so this separates genuinely different
+  ///    ages without ever flipping on activity;
+  /// 3. lexicographically smaller workspace key — the mirror case's
+  ///    deterministic tie-break.
+  /// `updatedAt` is deliberately OUT of the comparison keys: it changes on
+  /// every touch, and only a change in the row SET (a copy added or
+  /// removed) may now move the pick — a touched copy cannot. Terminal
+  /// classes read the mapped phase ([SessionEntry.fromRelayTask]:
+  /// completed→completedSuccess, error→error); unrecognized values count
+  /// as running-class (spec §3.6 rule 4).
   static bool _relayRowBeats(
     SessionEntry candidate,
     String? candidateKey,
     SessionEntry incumbent,
     String? incumbentKey,
   ) {
-    if (candidate.lastActivityAt != incumbent.lastActivityAt) {
-      return candidate.lastActivityAt > incumbent.lastActivityAt;
+    final candidateTerminal = _isTerminalPhase(candidate.phase);
+    final incumbentTerminal = _isTerminalPhase(incumbent.phase);
+    if (candidateTerminal != incumbentTerminal) return candidateTerminal;
+    if (candidate.createdAt != incumbent.createdAt) {
+      return candidate.createdAt > incumbent.createdAt;
     }
     return (candidateKey ?? '').compareTo(incumbentKey ?? '') < 0;
   }
 
-  /// The winning relay row for [taskId] among its duplicates (desktop
-  /// mirror copies, see [_relayRowBeats]) — [byId]'s pick extracted as a
-  /// pure function of the row set so every reader of "the row the user
-  /// sees" gets the same row: greater `updatedAt` wins, a tie falls to the
-  /// lexicographically smaller workspace key ([relayKeyOf]); frame order
-  /// never decides. Consumed by [_merge] and by
+  /// Terminal phases after [SessionEntry.fromRelayTask]'s mapping
+  /// (displayStatus completed|error → completedSuccess|error); everything
+  /// else — including unrecognized values — is running-class.
+  static bool _isTerminalPhase(String phase) =>
+      phase == 'completedSuccess' || phase == 'error';
+
+  /// The M1 displayStatus pick over one id's relay copies (spec
+  /// task-registry-semantics §3.6, 2026-10-11) — moved here from
+  /// DeviceSession.taskDisplayStatus as the SHARED static behind both the
+  /// synthesized row's status (field-level synthesis, design 10-15 §2.2)
+  /// and [DeviceSession.taskDisplayStatus], so the two former picks can no
+  /// longer disagree. The rule itself is UNCHANGED from M1 — this one
+  /// keeps `updatedAt` as its same-class tie-break on purpose: it decides
+  /// the STATUS field only, never the grouping (a touched copy may flip a
+  /// status string inside one class, never the row's group):
+  /// 1. terminal (completed|error) beats running-class;
+  /// 2. same class → greater updatedAt (the real row keeps receiving
+  ///    activity updates while its copies freeze at registration);
+  /// 3. remaining ties → lexicographically smaller workspacePath, then
+  ///    the status string (total order backstop);
+  /// 4. unrecognized / missing values count as running-class.
+  static String? displayStatusWinner(
+    List<Map<String, dynamic>> relayTasks,
+    String taskId,
+  ) {
+    const terminalStatuses = {'completed', 'error'};
+    ({bool terminal, int updatedAt, String workspace, String status}) rankOf(
+      Map<String, dynamic> task,
+    ) {
+      final status = task['displayStatus'] as String?;
+      return (
+        terminal: terminalStatuses.contains(status),
+        updatedAt: (task['updatedAt'] as num?)?.toInt() ?? 0,
+        workspace: '${task['workspacePath'] ?? ''}',
+        status: status ?? '',
+      );
+    }
+
+    bool beats(
+      ({bool terminal, int updatedAt, String workspace, String status}) c,
+      ({bool terminal, int updatedAt, String workspace, String status}) i,
+    ) {
+      if (c.terminal != i.terminal) return c.terminal;
+      if (c.updatedAt != i.updatedAt) return c.updatedAt > i.updatedAt;
+      if (c.workspace != i.workspace) {
+        return c.workspace.compareTo(i.workspace) < 0;
+      }
+      return c.status.compareTo(i.status) < 0;
+    }
+
+    Map<String, dynamic>? best;
+    var bestRank = (terminal: false, updatedAt: 0, workspace: '', status: '');
+    for (final task in relayTasks) {
+      // Same id derivation as the grouping key / sessionId.
+      if ('${task['taskId'] ?? ''}' != taskId) continue;
+      final rank = rankOf(task);
+      if (best == null || beats(rank, bestRank)) {
+        best = task;
+        bestRank = rank;
+      }
+    }
+    return best?['displayStatus'] as String?;
+  }
+
+  /// The home relay row for [taskId] among its duplicates (desktop
+  /// mirror copies) — the layered resolution of design 10-15 §2.1:
+  /// 1. the anchored copy ([homeKeys][taskId]) when one still carries
+  ///    that workspace key — the persisted anchor is the first layer.
+  ///    Row keys canonicalize through [keyAliases] before the comparison
+  ///    (check P1-2: the anchor is workspaceKeyOf-spelled, the row may be
+  ///    path-spelled — same workspace, two strings);
+  /// 2. otherwise the cold stable pick ([_relayRowBeats]: terminal →
+  ///    createdAt → key lex, `updatedAt` out of the comparison keys).
+  /// Frame order never decides. Consumed by [_merge], [pinnedEntries] and
   /// `DeviceSession._taskMutationScope` — the mutation address must be the
-  /// visible row, not the first row in frame order (the desktop resolves
-  /// mutations by the exact taskId+scope triple, so a frame-order pick
-  /// addresses a twin copy while the visible row stays, 2026-10-11).
+  /// visible (home) row, not the first row in frame order (the desktop
+  /// resolves mutations by the exact taskId+scope triple, so a frame-order
+  /// pick addresses a twin copy while the visible row stays, 2026-10-11).
   /// Deliberately NO tombstone filtering — that stays on the [_merge]
   /// consumption side; the scope caller cannot hit a tombstone anyway (a
   /// task enters that set only after its delete succeeded).
   static Map<String, dynamic>? bestRelayRow(
     List<Map<String, dynamic>> relayTasks,
-    String taskId,
-  ) {
+    String taskId, {
+    Map<String, String> homeKeys = const {},
+    Map<String, String> keyAliases = const {},
+  }) {
+    final anchor = homeKeys[taskId];
+    Map<String, dynamic>? anchorRow;
     Map<String, dynamic>? best;
     SessionEntry? bestEntry;
     String? bestKey;
@@ -281,13 +395,21 @@ class TaskDirectory {
       final entry = SessionEntry.fromRelayTask(task);
       if (entry.sessionId.isEmpty) continue;
       final key = relayKeyOf(task);
+      if (anchor != null &&
+          anchorRow == null &&
+          (keyAliases[key] ?? key) == anchor) {
+        anchorRow = task;
+      }
       if (best == null || _relayRowBeats(entry, key, bestEntry!, bestKey)) {
         best = task;
         bestEntry = entry;
         bestKey = key;
       }
     }
-    return best;
+    // The anchor pins the home copy; when no copy still carries the
+    // anchored key the cold pick stands in as the body while the group
+    // key stays anchored (callers read confirmedHomeKeys for it).
+    return anchorRow ?? best;
   }
 
   /// Entries of one workspace, merged; archived rows in or out per
@@ -312,34 +434,37 @@ class TaskDirectory {
 
   /// Pinned tasks across the device, most recently active first. Live rows
   /// win per task id and keep a pinned live task even when archived.
-  /// Archived live tasks remain pinned.
+  /// Archived live tasks remain pinned. Duplicate pinned relay rows
+  /// resolve through the SAME layered home + field synthesis as [_merge]
+  /// (design 10-15) — the pinned section can no longer disagree with the
+  /// main list about a twin's body or status.
   List<(SessionEntry, String?)> pinnedEntries() {
-    final byId = <String, (SessionEntry, String?)>{};
+    final grouped = <String, List<Map<String, dynamic>>>{};
     for (final task in relayTasks) {
       if (task['pinned'] != true || task['archived'] == true) continue;
-      final entry = SessionEntry.fromRelayTask(task);
-      if (entry.sessionId.isEmpty) continue;
+      final id = '${task['taskId'] ?? ''}';
+      if (id.isEmpty) continue;
       // Same locally-deleted rule as [_rows] — a confirmed delete never
       // pins, whatever the stale overview says.
-      if (locallyDeletedTaskIds.contains(entry.sessionId)) continue;
-      final key = relayKeyOf(task);
-      final existing = byId[entry.sessionId];
-      // Same duplicate-row rule as [_rows] — see [_relayRowBeats].
-      if (existing != null &&
-          !_relayRowBeats(entry, key, existing.$1, existing.$2)) {
-        continue;
-      }
-      byId[entry.sessionId] = (entry, key);
+      if (locallyDeletedTaskIds.contains(id)) continue;
+      (grouped[id] ??= []).add(task);
     }
-    // Same sticky-home rule as [_rows] — the pinned rows group by their
-    // live-confirmed home, after the pick so its raw-key tie-break stays
-    // frame-order independent.
-    for (final id in byId.keys) {
-      final home = confirmedHomeKeys[id];
-      if (home != null) {
-        final (entry, _) = byId[id]!;
-        byId[id] = (entry, home);
-      }
+    final byId = <String, (SessionEntry, String?)>{};
+    for (final MapEntry(key: id, value: rows) in grouped.entries) {
+      final task = bestRelayRow(
+        rows,
+        id,
+        homeKeys: confirmedHomeKeys,
+        keyAliases: keyAliases,
+      );
+      if (task == null) continue;
+      final status = displayStatusWinner(rows, id);
+      final entry = SessionEntry.fromRelayTask({
+        ...task,
+        'displayStatus': status,
+      });
+      // Same anchor-pins-the-group rule as [_merge].
+      byId[id] = (entry, confirmedHomeKeys[id] ?? relayKeyOf(task));
     }
     if (sessions?.ready == true) {
       for (final entry in sessions!.list) {
