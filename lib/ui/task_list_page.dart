@@ -2056,6 +2056,10 @@ class _TaskListPageState extends State<TaskListPage>
   /// recovered). Metadata ops run on the zcode-task channel and refresh the
   /// list (the relay also pushes workspace-list-updated).
   ///
+  /// Multi-copy rows (registry pollution, design 10-16
+  /// multi-copy-home-correction) additionally offer 归属纠正 just above
+  /// delete — the user adjudication channel ([_correctHomeDialog]).
+  ///
   /// C1 (10-05) draft awareness: a row that exists only in the live
   /// sessions-index (fork draft, no registry anchor) can never resolve a
   /// task mutation (matches=0, research.md R2) — the four registry ops are
@@ -2076,6 +2080,12 @@ class _TaskListPageState extends State<TaskListPage>
     final unread = entry.raw['unreadAt'] != null;
     final isDraft =
         session.taskDirectory.sessionOnlyIds.contains(entry.sessionId);
+    // Copy count of the id (registry pollution, 10-16): > 1 gates the
+    // 归属纠正 entry. Read at sheet open — the same read point as every
+    // other directory view.
+    final copyCount = session.relayTasks
+        .where((t) => '${t['taskId'] ?? ''}' == entry.sessionId)
+        .length;
     // B9 object title: which workspace the task belongs to, resolved from
     // the merged directory (the same source the grouped views use) with the
     // row's own origin fields as fallback.
@@ -2260,6 +2270,15 @@ class _TaskListPageState extends State<TaskListPage>
                   });
                 },
               ),
+              if (copyCount > 1)
+                ListTile(
+                  leading: const Icon(Icons.home_work_outlined),
+                  title: Text(tr(sheetCtx, 'tasks.action.correctHome')),
+                  onTap: () {
+                    Navigator.of(sheetCtx).pop();
+                    _correctHomeDialog(session, entry);
+                  },
+                ),
               ListTile(
                 leading: Icon(
                   Icons.delete_outline,
@@ -2279,6 +2298,164 @@ class _TaskListPageState extends State<TaskListPage>
         ),
       ),
     );
+  }
+
+  /// 归属纠正 (design 10-16 multi-copy-home-correction R2/层 3): the
+  /// multi-copy id's rows are listed as radio candidates (workspace name +
+  /// status + time). The row the list currently shows — the directory's
+  /// anchored/cold pick, [DeviceSession.relayHomeRowOf] — is preselected
+  /// AND tagged 当前显示 (one selection, two uses). Confirm writes the
+  /// anchor (source ④, [DeviceSession.correctTaskHome]) and optionally
+  /// deletes the other copies with their OWN per-copy scopes; the list
+  /// reloads right after, like the other sheet flows.
+  Future<void> _correctHomeDialog(
+    DeviceSession session,
+    SessionEntry entry,
+  ) async {
+    final candidates = [
+      for (final task in session.relayTasks)
+        if ('${task['taskId'] ?? ''}' == entry.sessionId) task,
+    ];
+    if (candidates.length < 2) return; // sheet was opened on a stale count
+    // Locate the shown row among the candidates by copy identity
+    // (workspacePath+workspaceIdentity field equality) — NOT by comparing
+    // candidate keys against the group key: relay row keys are
+    // path-spelled while the group key may be canonical workspaceKeyOf
+    // spelling, so a raw comparison never matches (design P2-7).
+    final shownRow = session.relayHomeRowOf(entry.sessionId);
+    var shownIndex = 0;
+    if (shownRow != null) {
+      for (var i = 0; i < candidates.length; i++) {
+        if (_sameRelayCopy(candidates[i], shownRow)) {
+          shownIndex = i;
+          break;
+        }
+      }
+    }
+    // Workspace display name: the listed workspace matched by
+    // workspacePath, else [workspaceTitle]'s own fallback chain (path last
+    // segment → identity).
+    String candidateTitle(Map<String, dynamic> task) {
+      for (final ws in session.workspaces) {
+        if (task['workspacePath'] != null &&
+            ws['workspacePath'] == task['workspacePath']) {
+          return workspaceTitle(ws);
+        }
+      }
+      return workspaceTitle(task);
+    }
+
+    var chosen = shownIndex;
+    var deleteCopies = false;
+    final result = await showDialog<(int, bool)>(
+      context: context,
+      useRootNavigator: false,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (dialogCtx, setDialogState) => AlertDialog(
+          title: Text(tr(dialogCtx, 'tasks.correctHome.title')),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                RadioGroup<int>(
+                  groupValue: chosen,
+                  onChanged: (v) =>
+                      setDialogState(() => chosen = v ?? chosen),
+                  child: Column(
+                    children: [
+                      for (var i = 0; i < candidates.length; i++)
+                        RadioListTile<int>(
+                          value: i,
+                          contentPadding:
+                              const EdgeInsets.symmetric(horizontal: 8),
+                          title: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  candidateTitle(candidates[i]),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if (i == shownIndex)
+                                Text(
+                                  tr(dialogCtx, 'tasks.correctHome.current'),
+                                  style: ZType.caption
+                                      .copyWith(color: ZInk.faint(dialogCtx)),
+                                ),
+                            ],
+                          ),
+                          subtitle: Text(
+                            _copySubtitle(dialogCtx, candidates[i]),
+                            style: ZType.caption
+                                .copyWith(color: ZInk.faint(dialogCtx)),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                CheckboxListTile(
+                  dense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                  value: deleteCopies,
+                  onChanged: (v) =>
+                      setDialogState(() => deleteCopies = v ?? false),
+                  title: Text(
+                    tr(dialogCtx, 'tasks.correctHome.deleteCopies'),
+                    style: ZType.sub.copyWith(color: ZInk.faint(dialogCtx)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogCtx).pop(),
+              child: Text(tr(dialogCtx, 'common.cancel')),
+            ),
+            FilledButton(
+              // Danger style once the destructive option is on (the delete
+              // dialog's recipe): copy deletion cannot be recovered.
+              style: deleteCopies
+                  ? FilledButton.styleFrom(
+                      backgroundColor: Theme.of(dialogCtx).colorScheme.error,
+                    )
+                  : null,
+              onPressed: () =>
+                  Navigator.of(dialogCtx).pop((chosen, deleteCopies)),
+              child: Text(tr(dialogCtx, 'common.save')),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == null) return;
+    await _runOp(() async {
+      await session.correctTaskHome(
+        entry.sessionId,
+        candidates[result.$1],
+        deleteOtherCopies: result.$2,
+      );
+      await _reloadTasks(session);
+    });
+  }
+
+  /// Whether two relay task maps address the SAME registry copy — the
+  /// (workspacePath, workspaceIdentity) pair the mutation scope triple
+  /// uses. Field equality, never `identical`: the overview rebuilds every
+  /// relay map on each landing, so the dialog's picked instance can be
+  /// stale by confirm time (check P1-1).
+  static bool _sameRelayCopy(Map<String, dynamic> a, Map<String, dynamic> b) =>
+      '${a['workspacePath'] ?? ''}' == '${b['workspacePath'] ?? ''}' &&
+      '${a['workspaceIdentity'] ?? ''}' == '${b['workspaceIdentity'] ?? ''}';
+
+  /// One correction-candidate line's subtitle: the list rows' own
+  /// formatters — the phase-pill vocabulary (mapped off displayStatus) +
+  /// the compact relative time.
+  String _copySubtitle(BuildContext ctx, Map<String, dynamic> task) {
+    final e = SessionEntry.fromRelayTask(task);
+    return '${_phaseVisual(e.phase).$1}'
+        ' · ${relativeTimeShort(ctx, e.lastActivityAt)}';
   }
 
   /// Task-rename flow (inline on web; modal here) — placeholder

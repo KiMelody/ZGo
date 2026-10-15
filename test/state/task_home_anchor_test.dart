@@ -65,9 +65,11 @@ void main() {
       );
       expect(session.taskHomeStore.homeKeys, isEmpty,
           reason: 'multi-copy relay + live confirm → the gate refuses');
-      // 开窗在 live 组（R4 live 覆盖照旧）。
-      expect(session.taskDirectory.allEntries().single.$2, 'alpha');
-      // 关窗回冷选组：确定性两态，不是回归（R4）——分组由稳定 pick 决定。
+      // 开窗即冷选组：multi-copy-stable-group（2026-10-15 二轮取证推翻
+      // stable-anchor R4 的「两态」裁决——开窗在 live 组、切区即迁移正是
+      // 用户看到的「会话消失」；现在 live 只供行体，组键恒为稳定 pick）。
+      expect(session.taskDirectory.allEntries().single.$2, '/repo/other');
+      // 关窗同组：两态变一态。
       session.sessions.applyFrame(snapshot(const []), onGap: () {});
       expect(session.taskDirectory.allEntries().single.$2, '/repo/other',
           reason: 'no anchor was established; the cold pick (key lex) rules');
@@ -266,27 +268,28 @@ void main() {
         deviceId: 'd1',
         params: params,
         relayTasks: [
+          relayRow('t1', '/repo/a', updatedAt: 1),
           {
-            ...relayRow('t1', '/repo/a', updatedAt: 1),
+            ...relayRow('t1', '/repo/b', updatedAt: 999, displayStatus: 'error'),
             'title': 'home-title',
             'lastError': {'message': 'boom', 'traceId': 'tr-1'},
           },
-          relayRow('t1', '/repo/b', updatedAt: 999, displayStatus: 'error'),
         ],
       );
       final row = session.taskDirectory.allEntries().single;
-      // Cold pick: error copy is terminal → home; status winner also the
-      // error copy — body and status agree here.
-      expect(row.$2, '/repo/b');
+      // Cold pick (10-16 key order): no pinned, equal createdAt → the lex
+      // smaller key wins — terminal status no longer picks the home copy
+      // (that judgment lives in displayStatusWinner only). Body rides /repo/a.
+      expect(row.$2, '/repo/a');
       expect(row.$1.title, 'relay-t1');
       // The anchored home overrides the body source without touching the
       // synthesized status.
-      session.taskHomeStore.anchorHome('t1', '/repo/a');
+      session.taskHomeStore.anchorHome('t1', '/repo/b');
       final anchored = session.taskDirectory.allEntries().single;
       expect(anchored.$1.title, 'home-title',
           reason: 'body fields (title/lastError/…) ride the anchored copy');
       expect(anchored.$1.lastErrorTraceId, 'tr-1');
-      expect(anchored.$2, '/repo/a');
+      expect(anchored.$2, '/repo/b');
       expect(session.taskDisplayStatus('t1'), 'error',
           reason: 'the M1 winner is anchor-independent');
     });
@@ -433,6 +436,146 @@ void main() {
           reason: 'the single copy now lists workspaceIdentity=moved — a '
               'real move, not a spelling alias');
       expect(session.taskDirectory.allEntries().single.$2, 'moved');
+    });
+  });
+
+  group('user home adjudication (anchor source ④, design 10-16)', () {
+    // The persistence tests above write anchors/tombstones through the mock
+    // SharedPreferences (shared across tests in this file) — start each
+    // adjudication test from an empty store so「no tombstone」assertions
+    // see only this test's writes.
+    setUp(() => SharedPreferences.setMockInitialValues({}));
+
+    test('correctTaskHome(真身行) pins the group at the anchor (canonical '
+        'spelling); live frames and overview reconciles never flip it',
+        () async {
+      // Multi-copy pollution: the cold pick lands on the lex-smaller mirror
+      // ('/repo/mirror' < '/repo/true'); the user adjudicates the true row.
+      final session = FakeDeviceSession(
+        deviceId: 'd1',
+        params: params,
+        relayTasks: [
+          relayRow('t1', '/repo/true', updatedAt: 1),
+          relayRow('t1', '/repo/mirror', updatedAt: 9),
+        ],
+        workspaces: const [
+          {'workspacePath': '/repo/true', 'workspaceIdentity': 'true-id'},
+          {'workspacePath': '/repo/mirror', 'workspaceIdentity': 'mirror-id'},
+        ],
+      );
+      expect(session.taskDirectory.allEntries().single.$2, '/repo/mirror',
+          reason: 'pre-correction: the lex-smaller mirror owns the group');
+      final trueCopy = session.relayTasks
+          .firstWhere((t) => t['workspacePath'] == '/repo/true');
+
+      await session.correctTaskHome('t1', trueCopy);
+      expect(session.taskHomeStore.homeKeys['t1'], 'true-id',
+          reason: 'the anchor canonicalizes the path-spelled row key into '
+              'the workspaceKeyOf spelling (source ④, same rule as every '
+              'other anchor source)');
+      expect(session.taskDirectory.allEntries().single.$2, 'true-id',
+          reason: 'the group flips to the anchor at once');
+
+      // Agreeing live frame (the true home's index confirms membership):
+      // the gate only refreshes the user anchor.
+      session.sessions.applyFrame(snapshot([liveRow('t1')]), onGap: () {});
+      expect(session.taskHomeStore.homeKeys['t1'], 'true-id');
+      expect(session.taskDirectory.allEntries().single.$2, 'true-id');
+
+      // Disagreeing live frame (switched to the mirror workspace; its index
+      // also claims membership): the anti-pollution gate still moves
+      // nothing — the explicit user write is the adjudication it defers to.
+      session.sessions.subscribedWorkspaceKey = 'mirror-id';
+      session.sessions.applyFrame(snapshot([liveRow('t1')]), onGap: () {});
+      expect(session.taskHomeStore.homeKeys['t1'], 'true-id',
+          reason: 'a disagreeing multi-copy live frame cannot flip the '
+              'user anchor');
+      expect(session.taskDirectory.allEntries().single.$2, 'true-id',
+          reason: 'the group stays on the anchor across workspace switches');
+
+      // Overview landing (bootstrap / 30s refresh / push): the reconcile
+      // sees a multi-copy id — no anchor change either.
+      session.sessions.applyFrame(snapshot(const []), onGap: () {});
+      session.applyRelayOverview([
+        relayRow('t1', '/repo/true', updatedAt: 3),
+        relayRow('t1', '/repo/mirror', updatedAt: 40),
+      ]);
+      expect(session.taskHomeStore.homeKeys['t1'], 'true-id');
+      expect(session.taskDirectory.allEntries().single.$2, 'true-id');
+    });
+
+    test('deleteOtherCopies: every NON-home copy gets one deleteTask with '
+        'its OWN scope; zero tombstone; false → zero calls', () async {
+      // Three copies: the true row plus two mirrors — one identity-carrying,
+      // one path-only. Per-copy scope means each deleteTask carries the
+      // COPY's own workspace triple, never the merged best-row scope (that
+      // addresses the true row, not the mirror).
+      List<Map<String, dynamic>> threeCopies() => [
+            relayRow('t1', '/repo/true'),
+            {...relayRow('t1', '/repo/m1'), 'workspaceIdentity': 'm1-id'},
+            relayRow('t1', '/repo/m2'),
+          ];
+      final session = FakeDeviceSession(
+        deviceId: 'd1',
+        params: params,
+        relayTasks: threeCopies(),
+        workspaces: const [
+          {'workspacePath': '/repo/true', 'workspaceIdentity': 'true-id'},
+          {'workspacePath': '/repo/m1', 'workspaceIdentity': 'm1-id'},
+          {'workspacePath': '/repo/m2'},
+        ],
+      );
+      final homeCopy = session.relayTasks
+          .firstWhere((t) => t['workspacePath'] == '/repo/true');
+
+      // The overview lands between opening the dialog and confirming: the
+      // picked map is a STALE instance by confirm time (check P1-1). The
+      // copy identity must be field equality, or the true row would be
+      // deleted as a "mirror" (irreversible).
+      session.applyRelayOverview(threeCopies());
+      expect(identical(homeCopy, session.relayTasks.first), isFalse);
+
+      await session.correctTaskHome('t1', homeCopy, deleteOtherCopies: true);
+
+      final deletes = session.channelCalls
+          .where((c) => c.$1 == 'zcode-task' && c.$2 == 'deleteTask')
+          .toList();
+      expect(deletes.map((c) => c.$3.single), [
+        {
+          'workspacePath': '/repo/m1',
+          'workspaceIdentity': 'm1-id',
+          'taskId': 't1',
+        },
+        {'workspacePath': '/repo/m2', 'taskId': 't1'},
+      ], reason: 'one deleteTask per non-home copy, each with its own '
+          'workspacePath/Identity — the true row is never a target');
+      // NO local tombstone: tombstones are per-id and would hide the true
+      // row too (10-11 false-positive lesson).
+      expect(session.taskHomeStore.locallyDeletedTaskIds, isEmpty);
+      expect(session.taskDirectory.allEntries(), hasLength(1),
+          reason: 'the true row stays visible');
+      expect(session.taskDirectory.allEntries().single.$2, 'true-id',
+          reason: 'the anchor pins the group at the true home');
+
+      // deleteOtherCopies: false → the anchor write only, zero wire deletes.
+      final anchorOnly = FakeDeviceSession(
+        deviceId: 'd1',
+        params: params,
+        relayTasks: threeCopies(),
+        workspaces: const [
+          {'workspacePath': '/repo/true', 'workspaceIdentity': 'true-id'},
+        ],
+      );
+      await anchorOnly.correctTaskHome(
+        't1',
+        anchorOnly.relayTasks
+            .firstWhere((t) => t['workspacePath'] == '/repo/true'),
+      );
+      expect(
+        anchorOnly.channelCalls.where((c) => c.$2 == 'deleteTask'),
+        isEmpty,
+      );
+      expect(anchorOnly.taskDirectory.allEntries().single.$2, 'true-id');
     });
   });
 }

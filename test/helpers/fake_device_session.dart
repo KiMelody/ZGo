@@ -36,9 +36,10 @@ class FakeDeviceSession extends DeviceSession {
         _active == null ? null : workspaceKeyOf(_active!);
     // Replay the production wiring (openWorkspace attaches the session's
     // live-frame listener to the subscribed index): every frame this fake
-    // delivers re-confirms the sticky home cache (design 10-02) AND
-    // records cross-terminal deletion tombstones (task 10-06) — the
-    // seeded snapshot included, same order as _onSessionsChanged.
+    // delivers re-confirms the sticky home cache (design 10-02), records
+    // cross-terminal deletion tombstones (task 10-06) AND snapshots into
+    // the per-workspace cache (design 10-15 live-snapshot) — the seeded
+    // snapshot included, same order as _onSessionsChanged.
     sessions.addListener(_onLiveFrame);
     deliver({
       'toSeq': 1,
@@ -52,6 +53,7 @@ class FakeDeviceSession extends DeviceSession {
   void _onLiveFrame() {
     recordVanishedSessions();
     confirmLiveHomes();
+    snapshotSessionsIntoCache(sessions);
   }
 
   /// Tombstone-diff signals (the device_session.dart override seam): the

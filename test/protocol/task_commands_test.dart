@@ -165,6 +165,39 @@ void main() {
     expect(scopeAskedWith, ['t1', 't2', 't3', 't4', 't5', '']);
   });
 
+  test('delete with a scope override addresses ONE specific registry copy '
+      '(pollution cleanup, design 10-16)', () async {
+    // Mirror-copy deletion must carry the copy's OWN workspace scope — the
+    // merged best-row scope would address the true row, not the mirror.
+    final calls = <(String, Map<String, Object?>)>[];
+    final port = TaskCommandsPort(
+      (method, args) async {
+        calls.add((method, (args.single as Map).cast<String, Object?>()));
+        return null;
+      },
+      scope: (_) => {'workspacePath': '/true-home'},
+    );
+
+    await port.delete(
+      's1',
+      scope: {
+        'workspacePath': '/mirror-ws',
+        'workspaceIdentity': 'mirror-id',
+      },
+    );
+    expect(calls.single.$1, 'deleteTask');
+    expect(calls.single.$2, {
+      'workspacePath': '/mirror-ws',
+      'workspaceIdentity': 'mirror-id',
+      'taskId': 's1',
+    });
+
+    // Without the override the task-level scopeOf still applies (unchanged).
+    calls.clear();
+    await port.delete('s1');
+    expect(calls.single.$2, {'workspacePath': '/true-home', 'taskId': 's1'});
+  });
+
   test('validation errors do not advance to the next candidate', () async {
     final tried = <String>[];
     final port = TaskCommandsPort(
