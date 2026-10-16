@@ -809,6 +809,8 @@ const _zh = {
   'usage.heatmap.month.12': '12月',
   'usage.trend.title': '每日 Token 趋势图',
   'usage.trend.description': '按天展示 Token 用量变化，共 \$0 天。',
+  // 趋势图点击明细头部（官方 labelFormatter：`{date} - {tokens} tokens`）。
+  'usage.trend.tooltipTotal': '\$0 - \$1 tokens',
   'usage.unknownModel': '未知模型',
   'usage.modelChart.title': '模型用量',
   'usage.modelChart.other': '其他模型',
@@ -2103,6 +2105,8 @@ const _en = {
   'usage.heatmap.month.12': 'Dec',
   'usage.trend.title': 'Daily token trend',
   'usage.trend.description': 'Token usage per day, \$0 days in total.',
+  // Trend tooltip header (official labelFormatter: `{date} - {tokens} tokens`).
+  'usage.trend.tooltipTotal': '\$0 - \$1 tokens',
   'usage.unknownModel': 'Unknown model',
   'usage.modelChart.title': 'Model usage',
   'usage.modelChart.other': 'Other models',
