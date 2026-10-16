@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.3] - 2026-10-17
+
+### Added
+
+- **Usage heatmap interactions**: month label row plus a tap bubble
+  anchored to the hit day (scroll clears it; snapshot refresh and mode
+  switches dismiss it); short histories synthesize dates for the null
+  leading columns from the first real week's anchor, so month groups
+  render even when the window starts mid-month; the heatmap scrollbar
+  shows only while dragging instead of sitting permanently visible.
+- **Usage trend tap details**: tapping the chart opens a detail bubble
+  for the nearest day with an active-dot marker.
+- **Desktop 3.15.1 autonomy mode**: `guarded` joins the autonomy
+  lexicon (bilingual) and the config write-back whitelist; `edit`
+  remains accepted for compatibility with older desktops.
+- **Task ownership corrections**: long-pressing a duplicated task row
+  opens a dialog to re-assign its owning workspace.
+
+### Changed
+
+- **Trend chart X-axis ticks**: greedy spacing by measured label width
+  (first and last ticks always kept, middle ticks yield) replaces the
+  previous show-all-up-to-14 / step 5|7 rule, fixing first/last label
+  overlap on 360 dp screens.
+
+### Fixed
+
+- **Usage limit rows on narrow screens**: `UsageLimitRow` is extracted
+  into its own widget with a two-tier flex that sacrifices in the
+  order title tail → clock → right value; smoke-tested at
+  320/360/384 dp with quantified truncation assertions.
+- **Keyboard-short viewport folding**: a hysteresis probe (100/80 px)
+  treats a keyboard-inset viewport as an equivalent short viewport —
+  the second header row folds and long banner strings fall back to
+  single-slot scrolling; overflow behavior is pinned by a test matrix
+  across keyboard dimensions.
+- **Task list multi-copy ownership**: per-workspace live snapshot
+  caches keep rows from vanishing when switching workspaces; live
+  group keys stay stable so rows no longer migrate between groups;
+  cold pick prefers pinned rows and exits grouping on terminal
+  states, and anchors honor user-corrected ownership.
+
 ## [1.14.2] - 2026-10-12
 
 ### Added
