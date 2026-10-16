@@ -340,6 +340,16 @@ class _ChatPageState extends State<ChatPage> {
   /// change repaints only the strip, never the page.
   final ValueNotifier<int?> _activeQueryIndex = ValueNotifier(null);
 
+  /// True while the keyboard occupies the viewport (IME inset past the
+  /// 100/80 hysteresis band, R2 10-16). Flipped by [_KeyboardProbe] —
+  /// ChatPage.build must never read the inset itself (2026-09-20 掉帧红线,
+  /// chat-conventions §8.2). Consumed by the leaf slots that fold the
+  /// keyboard-occupied viewport: the second header row and the pre-list
+  /// banner run. Portrait heights never trip the `short` (<480) check while
+  /// the IME shrinks the body to roughly that territory, so the keyboard
+  /// needs its own equivalently-collapsed layout.
+  final ValueNotifier<bool> _imeOccupied = ValueNotifier(false);
+
   /// Turn navigator expanded-overlay handle (design §3.1): the page pushes
   /// "the list scrolled" into the component via
   /// [TurnNavigatorState.collapse] from the scroll hook ([_onListScroll]).
@@ -871,6 +881,7 @@ class _ChatPageState extends State<ChatPage> {
     _scrollController.dispose();
     _frozenFrame?.dispose();
     _activeQueryIndex.dispose();
+    _imeOccupied.dispose();
     super.dispose();
   }
 
@@ -2662,6 +2673,15 @@ class _ChatPageState extends State<ChatPage> {
   static const double _kMessageColumnWidth = 848;
   static const double _kComposerColumnWidth = 864;
 
+  /// Keyboard-occupied viewport (R2 10-16): ceiling for the pre-list banner
+  /// run. The IME shrinks the body by its full inset; with the header row
+  /// already folded, an unbounded run here is what could still push the
+  /// fixed stack (banners + composer) past the body height — a RenderFlex
+  /// overflow the shrunken viewport must scroll instead. Sized so the run
+  /// still shows whole single banners (error bar ~64, quota warning ~110,
+  /// off-peak card ~72) while two-plus stacked ones start scrolling.
+  static const double _kBannerRunMaxHeight = 200;
+
   Widget _contentCol(Widget child, {double maxWidth = _kMessageColumnWidth}) {
     return Center(
       child: ConstrainedBox(
@@ -3010,6 +3030,151 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 
+  /// Pre-list banner run: subscribe failure / absence tombstone (missing or
+  /// deleted session) / off-peak queue card / quota warning — ONE constant
+  /// type at ONE constant Column position (spec §8.1; previously these
+  /// children were added and removed inline, shifting every later child's
+  /// Element pairing on each flip).
+  ///
+  /// While the keyboard occupies the viewport (R2 10-16) the run is capped
+  /// at [_kBannerRunMaxHeight] and scrolls: the IME shrinks the body by its
+  /// full inset, and an unbounded run is what could still push the fixed
+  /// stack (banners + composer) past the body height — scroll instead of a
+  /// RenderFlex overflow. Keyboard down returns the run verbatim, so the
+  /// resting layout is unchanged.
+  ///
+  /// (The GatewayBanner above the status-strip slot is NOT part of this run:
+  /// it renders after the message list, and moving it here would reorder the
+  /// visual stack.)
+  Widget _preListBanners(BuildContext context) {
+    final run = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_error != null && !_sessionMissing)
+          Material(
+            color: ZColors.danger.withValues(alpha: 0.15),
+            child: ListTile(
+              dense: true,
+              title: Text(
+                trP(context, 'chat.subscribe.failed', ['$_error']),
+                style: ZType.sub,
+              ),
+              trailing: TextButton(
+                onPressed: _subscribe,
+                child: Text(tr(context, 'tasks.retry')),
+              ),
+            ),
+          ),
+        // Absence banners: the authoritative subscribe refusal (10-11
+        // sessionNotFound terminal) and the cross-terminal deletion
+        // tombstone (10-06) — the tombstone's own gateway-animating
+        // builder (`chat` in build is captured once per State.build, so
+        // only AnimatedBuilders re-run on the session's tombstone
+        // notify). Authority precedence: when both hold, the
+        //「会话不存在」refusal wins the banner. The always-present slot
+        // keeps the Column child list structurally constant (spec
+        // §8.1 discipline); the message list above stays read-only
+        // either way.
+        AnimatedBuilder(
+          animation: widget.gateway,
+          builder: (context, _) {
+            final missing = _sessionMissing;
+            if (!missing && !_tombstoned) return const SizedBox.shrink();
+            return Material(
+              color: ZColors.danger.withValues(alpha: 0.15),
+              child: ListTile(
+                dense: true,
+                leading: Icon(
+                  Icons.delete_outline,
+                  color: ZInk.dangerTone(context),
+                ),
+                title: Text(
+                  tr(
+                    context,
+                    missing
+                        ? 'chat.banner.sessionMissing'
+                        : 'chat.banner.sessionDeleted',
+                  ),
+                  style: ZType.sub,
+                ),
+              ),
+            );
+          },
+        ),
+        // D2 off-peak queue card: its own state-driven slot (empty
+        // unless the session is bound to an off-peak run with a live
+        // queue position).
+        _offPeakQueueCard(context),
+        if (_showQuotaWarning)
+          // Warning-only banner (PRD: the「使用重置券」action moved to
+          // the usage sheet; switch model / view usage remain).
+          Material(
+            color: ZColors.danger.withValues(alpha: 0.15),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 6),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    tr(context, 'chat.quota.exhaustedTitle'),
+                    style: ZType.sub.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: ZInk.dangerTone(context),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    tr(context, 'chat.quota.exhaustedBody'),
+                    style: ZType.caption.copyWith(color: ZInk.muted(context)),
+                  ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextButton(
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        onPressed: _showModelSheet,
+                        child: Text(
+                          tr(context, 'chat.quota.switchModel'),
+                          style: ZType.sub,
+                        ),
+                      ),
+                      if (widget.onOpenUsage != null)
+                        TextButton(
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                          ),
+                          onPressed: widget.onOpenUsage,
+                          child: Text(
+                            tr(context, 'chat.quota.viewUsage'),
+                            style: ZType.sub,
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+    return ValueListenableBuilder<bool>(
+      valueListenable: _imeOccupied,
+      builder: (context, imeOccupied, _) => imeOccupied
+          ? ConstrainedBox(
+              constraints: const BoxConstraints(
+                maxHeight: _kBannerRunMaxHeight,
+              ),
+              child: SingleChildScrollView(child: run),
+            )
+          : run,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = _state;
@@ -3089,126 +3254,23 @@ class _ChatPageState extends State<ChatPage> {
           children: [
             // Second header row: task title + workspace chip + 更多
             // (portrait content; landscape carries all of it in the app
-            // bar). The slot itself stays occupied on short viewports —
-            // constant type, constant Column position (spec §8.1: a
-            // toggling child here shifts every later child's pairing).
-            _contentCol(
-              short
-                  ? const SizedBox.shrink()
-                  : _secondHeaderRow(context, wsLabel),
-            ),
-            if (_error != null && !_sessionMissing)
-              Material(
-                color: ZColors.danger.withValues(alpha: 0.15),
-                child: ListTile(
-                  dense: true,
-                  title: Text(
-                    trP(context, 'chat.subscribe.failed', ['$_error']),
-                    style: ZType.sub,
-                  ),
-                  trailing: TextButton(
-                    onPressed: _subscribe,
-                    child: Text(tr(context, 'tasks.retry')),
-                  ),
-                ),
+            // bar). The slot itself stays occupied — constant type, constant
+            // Column position (spec §8.1: a toggling child here shifts every
+            // later child's pairing). Two folds render the same placeholder
+            // inside it: `short` (landscape) and the IME-occupied viewport
+            // (R2 10-16 — the keyboard shrinks the body to short-viewport
+            // territory while heightOf stays at the full screen, so plain
+            // `short` never fires). The inset is not read here; the probe
+            // owns the hysteresis flip (§8.2).
+            ValueListenableBuilder<bool>(
+              valueListenable: _imeOccupied,
+              builder: (context, imeOccupied, _) => _contentCol(
+                short || imeOccupied
+                    ? const SizedBox.shrink()
+                    : _secondHeaderRow(context, wsLabel),
               ),
-            // Absence banners: the authoritative subscribe refusal (10-11
-            // sessionNotFound terminal) and the cross-terminal deletion
-            // tombstone (10-06) — the tombstone's own gateway-animating
-            // builder (`chat` above is captured once per State.build, so
-            // only AnimatedBuilders re-run on the session's tombstone
-            // notify). Authority precedence: when both hold, the
-            //「会话不存在」refusal wins the banner. The always-present slot
-            // keeps the Column child list structurally constant (spec
-            // §8.1 discipline); the message list above stays read-only
-            // either way.
-            AnimatedBuilder(
-              animation: widget.gateway,
-              builder: (context, _) {
-                final missing = _sessionMissing;
-                if (!missing && !_tombstoned) return const SizedBox.shrink();
-                return Material(
-                  color: ZColors.danger.withValues(alpha: 0.15),
-                  child: ListTile(
-                    dense: true,
-                    leading: Icon(
-                      Icons.delete_outline,
-                      color: ZInk.dangerTone(context),
-                    ),
-                    title: Text(
-                      tr(
-                        context,
-                        missing
-                            ? 'chat.banner.sessionMissing'
-                            : 'chat.banner.sessionDeleted',
-                      ),
-                      style: ZType.sub,
-                    ),
-                  ),
-                );
-              },
             ),
-            // D2 off-peak queue card: its own state-driven slot (empty
-            // unless the session is bound to an off-peak run with a live
-            // queue position).
-            _offPeakQueueCard(context),
-            if (_showQuotaWarning)
-              // Warning-only banner (PRD: the「使用重置券」action moved to
-              // the usage sheet; switch model / view usage remain).
-              Material(
-                color: ZColors.danger.withValues(alpha: 0.15),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 6),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        tr(context, 'chat.quota.exhaustedTitle'),
-                        style: ZType.sub.copyWith(
-                          fontWeight: FontWeight.w600,
-                          color: ZInk.dangerTone(context),
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        tr(context, 'chat.quota.exhaustedBody'),
-                        style: ZType.caption.copyWith(color: ZInk.muted(context)),
-                      ),
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          TextButton(
-                            style: TextButton.styleFrom(
-                              visualDensity: VisualDensity.compact,
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 8),
-                            ),
-                            onPressed: _showModelSheet,
-                            child: Text(
-                              tr(context, 'chat.quota.switchModel'),
-                              style: ZType.sub,
-                            ),
-                          ),
-                          if (widget.onOpenUsage != null)
-                            TextButton(
-                              style: TextButton.styleFrom(
-                                visualDensity: VisualDensity.compact,
-                                padding:
-                                    const EdgeInsets.symmetric(horizontal: 8),
-                              ),
-                              onPressed: widget.onOpenUsage,
-                              child: Text(
-                                tr(context, 'chat.quota.viewUsage'),
-                                style: ZType.sub,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+            _preListBanners(context),
             Expanded(
               child: Stack(
                 children: [
@@ -3388,6 +3450,7 @@ class _ChatPageState extends State<ChatPage> {
       ),
     );
     return _KeyboardProbe(
+      imeOccupied: _imeOccupied,
       child: AnimatedBuilder(
         animation: widget.gateway,
         builder: (context, _) => widget.gateway.kicked
@@ -3476,16 +3539,29 @@ class _ChatPageState extends State<ChatPage> {
 
 /// ------------------------------------------------------- keyboard scope
 
-/// Publishes the keyboard-open state to the strip slots via [_KeyboardScope].
-/// Deliberately the only widget in the page that depends on the IME inset
-/// (besides the Scaffold's own layout): the animation delivers a fresh inset
-/// every frame for ~300ms, and a dependency in ChatPage.build would rebuild
-/// the whole page per frame (2026-09-20 真机掉帧). This probe rebuilds
-/// instead and returns the identical child widget, so Element updates
-/// short-circuit below it; the scope only notifies its dependents when the
-/// boolean flips.
+/// IME "occupies the viewport" hysteresis band (dp, R2 10-16): the fold
+/// engages once the bottom inset is past [_kImeOccupiedEnter] and releases
+/// only below [_kImeOccupiedExit]. The band in between keeps the fold stable
+/// while the ~300ms IME animation runs and while OEM candidate strips make
+/// the inset jitter.
+const double _kImeOccupiedEnter = 100;
+const double _kImeOccupiedExit = 80;
+
+/// Publishes the keyboard-open state to the strip slots via [_KeyboardScope]
+/// and the keyboard-occupied-viewport boolean to the fold slots via
+/// [imeOccupied]. Deliberately the only widget in the page that depends on
+/// the IME inset (besides the Scaffold's own layout): the animation delivers
+/// a fresh inset every frame for ~300ms, and a dependency in ChatPage.build
+/// would rebuild the whole page per frame (2026-09-20 真机掉帧). This probe
+/// rebuilds instead and returns the identical child widget, so Element
+/// updates short-circuit below it; the scope notifies its dependents only
+/// when the boolean flips, and [imeOccupied] only at the hysteresis band
+/// edges — its listeners rebuild their own small slot, never the page.
 class _KeyboardProbe extends StatefulWidget {
-  const _KeyboardProbe({required this.child});
+  const _KeyboardProbe({required this.imeOccupied, required this.child});
+
+  /// Owned by [_ChatPageState]; flipped in place (see [imeOccupied]).
+  final ValueNotifier<bool> imeOccupied;
 
   final Widget child;
 
@@ -3503,7 +3579,14 @@ class _KeyboardProbeState extends State<_KeyboardProbe> {
     // inset from the body's MediaQuery (removeViewInsets), so widgets inside
     // the body can never see the real value (that is why the old read lived
     // in ChatPage.build).
-    _open = MediaQuery.viewInsetsOf(context).bottom > 0;
+    final bottom = MediaQuery.viewInsetsOf(context).bottom;
+    _open = bottom > 0;
+    // Hysteresis flip (R2 10-16): a ValueNotifier setter no-ops on an equal
+    // value, so only the two band edges ever notify — the fold slots
+    // rebuild on the enter/exit frame, not on every animated inset frame.
+    widget.imeOccupied.value = widget.imeOccupied.value
+        ? bottom > _kImeOccupiedExit
+        : bottom > _kImeOccupiedEnter;
   }
 
   @override
