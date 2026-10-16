@@ -7,8 +7,9 @@ import 'package:zgo/ui/ui_settings.dart';
 import 'package:zgo/ui/usage/usage_heatmap.dart';
 
 /// D3 heatmap contracts: the level formula edges, the 52×7 normalization,
-/// weekly/cumulative aggregation, the tap hit test and the widget-level
-/// detail / empty states (task 10-08-parity-usage design test matrix).
+/// weekly/cumulative aggregation, the snapped tap hit test, the month-label
+/// spans and the widget-level bubble / empty states (task 10-08-parity-usage
+/// design test matrix; 10-16-usage-chart-tooltips steps 1-2).
 void main() {
   UsageHeatmap heatmapOf(List<List<UsageHeatmapCell?>> days) => UsageHeatmap(
         weeks: [
@@ -154,16 +155,22 @@ void main() {
 
   // ------------------------------------------------------- hit locating
 
-  test('heatmapCellAt maps points to (week, day) and rejects gaps/outside',
+  test('heatmapCellAt snaps gaps to the nearest cell and rejects outside',
       () {
     const cellSize = 10.0;
     const gap = 2.0;
     expect(heatmapCellAt(Offset(5, 5), cellSize: cellSize), (0, 0));
-    // Second column starts at 12 — inside gap and inside cell:
-    expect(heatmapCellAt(Offset(11, 5), cellSize: cellSize), isNull);
+    expect(heatmapCellAt(Offset(0, 0), cellSize: cellSize), (0, 0));
+    // Gap between columns 0/1 (10..12): its first half still snaps to 0,
+    // the exact midpoint and beyond round to cell 1.
+    expect(heatmapCellAt(Offset(10.5, 5), cellSize: cellSize), (0, 0));
+    expect(heatmapCellAt(Offset(11, 5), cellSize: cellSize), (1, 0));
     expect(heatmapCellAt(Offset(13, 5), cellSize: cellSize), (1, 0));
     expect(heatmapCellAt(Offset(5, 25), cellSize: cellSize), (0, 2));
-    // Past the grid / negative / on the right edge:
+    // Half a step beyond the top-left borders still snaps inward...
+    expect(heatmapCellAt(Offset(-0.9, -0.9), cellSize: cellSize), (0, 0));
+    // ...but past that the grid is left behind.
+    expect(heatmapCellAt(Offset(-1.1, 5), cellSize: cellSize), isNull);
     expect(
       heatmapCellAt(
         Offset(kHeatmapWeeks * (cellSize + gap), 5),
@@ -171,14 +178,127 @@ void main() {
       ),
       isNull,
     );
-    expect(heatmapCellAt(Offset(-1, 5), cellSize: cellSize), isNull);
     expect(heatmapCellAt(Offset(5, 85), cellSize: cellSize), isNull);
     expect(heatmapCellAt(Offset(5, 5), cellSize: 0), isNull);
   });
 
+  // --------------------------------------------------- month label spans
+
+  test('heatmapMonthSpans merges consecutive same-month columns (kVn)', () {
+    final grid = <List<UsageHeatmapCell?>>[
+      [cell('2025-12-03')], // no '-01' → the column's first day
+      [cell('2025-12-28'), cell('2026-01-01')], // '-01' wins over day 0
+      [cell('2026-01-08')], // merges with the previous column
+      [null, null], // all-null column → synthesized from the anchor
+      [null, cell('2026-02-03')], // first non-null day fallback
+    ];
+    final spans = heatmapMonthSpans(grid);
+    expect(spans, hasLength(3));
+    expect(spans[0].key, '2025-12');
+    expect(spans[0].startWeek, 0);
+    expect(spans[0].span, 1);
+    expect(spans[0].month, 12);
+    expect(spans[1].key, '2026-01');
+    expect(spans[1].startWeek, 1);
+    expect(spans[1].span, 2); // two consecutive January columns
+    expect(spans[1].month, 1);
+    // The all-null column sits one week before the anchor column (whose
+    // first non-null day 2026-02-03 minus its row lands on 2026-02-02): its
+    // 7-day window [01-26..02-01] carries the 02-01 month start, so it joins
+    // February instead of collapsing into a blank '' stretch.
+    expect(spans[2].key, '2026-02');
+    expect(spans[2].startWeek, 3);
+    expect(spans[2].span, 2);
+    expect(spans[2].month, 2);
+    expect(
+      spans.fold(0, (sum, span) => sum + span.span),
+      grid.length,
+    );
+  });
+
+  test('heatmapMonthSpans keeps only the last 12 month labels', () {
+    final grid = [
+      for (var m = 1; m <= 12; m++)
+        [cell('2025-${m.toString().padLeft(2, '0')}-15')],
+      [cell('2026-01-15')], // the 13th month group
+    ];
+    final spans = heatmapMonthSpans(grid);
+    expect(spans, hasLength(13));
+    // The oldest group stays blank but keeps its span width; the last 12
+    // keep their labels.
+    expect(spans.first.key, '2025-01');
+    expect(spans.first.startWeek, 0);
+    expect(spans.first.span, 1);
+    expect(spans.first.month, isNull);
+    expect(spans[1].month, 2);
+    expect(spans.last.key, '2026-01');
+    expect(spans.last.startWeek, 12);
+    expect(spans.last.month, 1);
+  });
+
+  test('heatmapMonthSpans backfills a short history across the full year',
+      () {
+    // Real data: two mid-October 2026 weeks; normalize left-pads the other
+    // 50 columns with nulls. The label row must still carry the full-year
+    // axis instead of one clipped '10月' (10-16-heatmap-month-lattice).
+    final grid = normalizeHeatmapWeeks(heatmapOf([
+      [cell('2026-10-06')],
+      [cell('2026-10-13')],
+    ]));
+    final spans = heatmapMonthSpans(grid);
+    // Twelve labeled groups — one per month, the year wrap reading 11月,
+    // 12月, 1月 … 10月 (the oldest partial group is blanked, not dropped).
+    expect(
+      [for (final span in spans) span.month].whereType<int>().toList(),
+      [11, 12, for (var month = 1; month <= 10; month++) month],
+    );
+    expect(spans.first.month, isNull);
+    expect(spans.last.key, '2026-10');
+    // The synthesized 09-29 column (its window carries 10-01) joins the two
+    // real October weeks.
+    expect(spans.last.startWeek, kHeatmapWeeks - 3);
+    expect(spans.last.span, 3);
+    // Geometric visibility gate: a label only reads when its slot is a few
+    // columns wide — every middle group must clear that (the bug was
+    // find.text passing while the lone label was clipped invisible).
+    for (final span in spans.sublist(1, spans.length - 1)) {
+      expect(span.span, greaterThanOrEqualTo(4), reason: span.key);
+    }
+  });
+
+  test('heatmapMonthSpans synthesizes across the year boundary', () {
+    // The anchor week starts 2025-12-29, so its window [12-29..01-04] holds
+    // 01-01 and reads as January — December and January must stay separate
+    // labeled groups.
+    final grid = normalizeHeatmapWeeks(heatmapOf([
+      [cell('2026-01-05')],
+    ]));
+    final spans = heatmapMonthSpans(grid);
+    final december = spans.firstWhere((span) => span.key == '2025-12');
+    final january = spans.firstWhere((span) => span.key == '2026-01');
+    expect(december.month, 12);
+    expect(december.span, 4); // the full December window
+    expect(january.month, 1);
+    expect(january.startWeek, december.startWeek + december.span);
+    expect(spans.last.key, '2026-01');
+    // 13 groups over the year; the oldest (2025-01) is the blanked one.
+    expect(spans.first.key, '2025-01');
+    expect(spans.first.month, isNull);
+  });
+
+  test('heatmapMonthSpans: an all-null grid is one blank span', () {
+    final spans = heatmapMonthSpans(normalizeHeatmapWeeks(heatmapOf([[]])));
+    expect(spans, hasLength(1));
+    expect(spans.single.key, '');
+    expect(spans.single.startWeek, 0);
+    expect(spans.single.span, kHeatmapWeeks);
+    expect(spans.single.month, isNull);
+  });
+
   // -------------------------------------------------------------- widget
 
-  testWidgets('tapping a cell surfaces the official detail copy', (tester) async {
+  testWidgets('tapping a cell surfaces the official detail bubble',
+      (tester) async {
     await tester.pumpWidget(wrap(UsageHeatmapCard(
       heatmap: heatmapOf([
         [cell('2026-10-06', level: 2, tokens: 12000, turns: 4, tools: 2)],
@@ -193,12 +313,104 @@ void main() {
     expect(find.textContaining('1.2万'), findsOneWidget); // compact tokens
     expect(find.textContaining('4 轮消息'), findsOneWidget);
 
-    // Switching to the tools metric swaps the detail template.
+    // A repeat tap on the same cell closes the bubble (toggle).
+    await tapCell(tester, dataWeek, 0);
+    expect(find.textContaining('tokens'), findsNothing);
+
+    // Switching to the tools metric clears the selection...
+    await tapCell(tester, dataWeek, 0);
     await tester.tap(find.text('工具次数'));
     await tester.pumpAndSettle();
-    // Selection clears on mode/metric change; tap the cell again.
+    expect(find.textContaining('tokens'), findsNothing);
+    // ...and a fresh tap surfaces the tools template in the bubble.
     await tapCell(tester, dataWeek, 0);
     expect(find.textContaining('2 次工具'), findsOneWidget);
+
+    // A range-mode switch with a live selection clears it too (the same
+    // reset the metric chip exercises — pinned for the AC list).
+    await tester.tap(find.text('每周'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('tokens'), findsNothing);
+
+    // A refreshed heatmap (new snapshot instance) drops the stale selection.
+    await tapCell(tester, dataWeek, 0);
+    await tester.pumpWidget(wrap(UsageHeatmapCard(
+      heatmap: heatmapOf([
+        [cell('2026-10-06', level: 2, tokens: 12000, turns: 4, tools: 2)],
+      ]),
+    )));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('tokens'), findsNothing);
+  });
+
+  testWidgets('empty cells and the month-label row dismiss the bubble',
+      (tester) async {
+    await tester.pumpWidget(wrap(UsageHeatmapCard(
+      heatmap: heatmapOf([
+        [cell('2026-10-06', level: 2, tokens: 12000, turns: 4, tools: 2)],
+      ]),
+    )));
+    await tester.pumpAndSettle();
+
+    await tapCell(tester, dataWeek, 0);
+    expect(find.textContaining('tokens'), findsOneWidget);
+
+    // A null cell clears the selection instead of opening a bubble.
+    await tapCell(tester, 0, 0);
+    expect(find.textContaining('tokens'), findsNothing);
+
+    // The month-label row sits past the 52×7 range (row ≥ 7) — its taps
+    // dismiss the bubble as "outside the grid".
+    await tapCell(tester, dataWeek, 0);
+    expect(find.textContaining('tokens'), findsOneWidget);
+    final gridRect = tester.getRect(find.byKey(UsageHeatmapCard.gridKey));
+    await tester.tapAt(gridRect.bottomLeft + const Offset(20, 14));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('tokens'), findsNothing);
+  });
+
+  testWidgets('the month-label row aligns each label with its month span',
+      (tester) async {
+    await tester.pumpWidget(wrap(UsageHeatmapCard(
+      heatmap: heatmapOf([
+        [cell('2026-10-06', level: 2, tokens: 5)],
+      ]),
+    )));
+    await tester.pumpAndSettle();
+
+    final gridRect = tester.getRect(find.byKey(UsageHeatmapCard.gridKey));
+    final cellSize =
+        (gridRect.width - (kHeatmapWeeks - 1) * kHeatmapGap) / kHeatmapWeeks;
+    final step = cellSize + kHeatmapGap;
+    // The 10月 group also absorbs the synthesized column one week up (its
+    // 09-29..10-05 window carries 10-01), so the label starts a step earlier
+    // than the real week.
+    expect(find.text('10月'), findsOneWidget);
+    expect(
+      tester.getRect(find.text('10月')).left,
+      closeTo(gridRect.left + (dataWeek - 1) * step, 1),
+    );
+    // ...and the synthesized lead columns fill the whole year's label row.
+    expect(find.textContaining('月'), findsNWidgets(12));
+  });
+
+  testWidgets('short histories keep the full year of month labels',
+      (tester) async {
+    await tester.pumpWidget(wrap(UsageHeatmapCard(
+      heatmap: heatmapOf([
+        [cell('2026-10-06', level: 2, tokens: 5)],
+        [cell('2026-10-13', level: 1, tokens: 3)],
+      ]),
+    )));
+    await tester.pumpAndSettle();
+
+    // Two real weeks only, yet the label row carries the same full-year axis
+    // the official padded grid does — including months far from the data
+    // stretch (10-16-heatmap-month-lattice).
+    expect(find.textContaining('月'), findsNWidgets(12));
+    expect(find.text('11月'), findsOneWidget); // the oldest kept month
+    expect(find.text('5月'), findsOneWidget); // mid-year, far from the data
+    expect(find.text('10月'), findsOneWidget);
   });
 
   testWidgets('weekly mode detail aggregates the column', (tester) async {
@@ -277,6 +489,55 @@ void main() {
         tester.state<ScrollableState>(find.byType(Scrollable)).position;
     expect(position.maxScrollExtent, greaterThan(0));
     expect(position.pixels, position.maxScrollExtent);
+  });
+
+  testWidgets(
+      'narrow scroll: gap taps snap to the nearest cell, scrolling closes '
+      'the bubble', (tester) async {
+    tester.view.devicePixelRatio = 3.0;
+    tester.view.physicalSize = const Size(1080, 2400); // 360dp wide
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(wrap(UsageHeatmapCard(
+      heatmap: heatmapOf([
+        [cell('2026-10-05', level: 2, tokens: 12000, turns: 4, tools: 2)],
+        [cell('2026-10-12', level: 3, tokens: 8000, turns: 2, tools: 1)],
+      ]),
+    )));
+    await tester.pumpAndSettle();
+
+    // The label row rides the same scroll child as the grid: both fixture
+    // weeks share 2026-10, and the synthesized column one step up (its
+    // 09-28..10-04 window carries 10-01) joins them, so the single '10月'
+    // slot starts two steps before the latest week.
+    final rect = tester.getRect(find.byKey(UsageHeatmapCard.gridKey));
+    final cellSize =
+        (rect.width - (kHeatmapWeeks - 1) * kHeatmapGap) / kHeatmapWeeks;
+    final step = cellSize + kHeatmapGap;
+    expect(find.text('10月'), findsOneWidget);
+    expect(
+      tester.getRect(find.text('10月')).left,
+      closeTo(rect.left + (dataWeek - 2) * step, 1),
+    );
+
+    // Tap inside the 2dp gap on the right of the week-1 column (0.5dp past
+    // its edge): still nearer that column, so the snapped hit selects it
+    // instead of being rejected as a gap.
+    await tester.tapAt(
+      rect.topLeft +
+          Offset((dataWeek - 1) * step + cellSize + 0.5, cellSize / 2),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('2026-10-05'), findsOneWidget);
+    expect(find.textContaining('tokens'), findsOneWidget);
+
+    // A horizontal scroll invalidates the bubble's anchor: it closes. The
+    // drag starts in row 0, above the bubble anchored under the tapped cell.
+    await tester.dragFrom(
+      rect.topLeft + Offset(rect.width / 2, 4),
+      const Offset(60, 0),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('tokens'), findsNothing);
   });
 
   testWidgets('the grid paints the 52×7 ladder and carries the intensity '
