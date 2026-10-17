@@ -1,12 +1,38 @@
 package org.kimelody.zgo
 
 import android.content.Intent
+import android.os.Build
+import android.os.Bundle
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import org.json.JSONObject
 
 class MainActivity : FlutterActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        requestHighRefreshRate()
+    }
+
+    /**
+     * Flutter never asks the system for a high-refresh display mode
+     * (flutter/flutter#35162), and OEM "smart refresh" arbiters pin apps
+     * without an explicit request at 60Hz. Ask for the fastest mode at the
+     * current resolution; no-op below API 23 or when no mode is found.
+     */
+    private fun requestHighRefreshRate() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        @Suppress("DEPRECATION") // Activity.getDisplay() needs API 30
+        val dm = windowManager.defaultDisplay
+        val best = dm.supportedModes
+            .filter {
+                it.physicalWidth == dm.mode.physicalWidth &&
+                    it.physicalHeight == dm.mode.physicalHeight
+            }
+            .maxByOrNull { it.refreshRate } ?: return
+        window.attributes = window.attributes.apply { preferredDisplayModeId = best.modeId }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
