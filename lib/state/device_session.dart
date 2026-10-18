@@ -264,6 +264,14 @@ abstract interface class ChatGateway
   Future<TextChunk> fileReadText(String workspacePath, String path,
       {int offset = 0, required int length});
 
+  /// Byte-range read on the same port (`{path, offset, length}`, byte units)
+  /// — the pdf range transport's data source. The desktop clamps one call to
+  /// 1 MiB and answers an empty payload past EOF (the loop's termination
+  /// signal); callers follow the official 256 KiB step. See
+  /// [FileServicePort.readFileRange].
+  Future<FileRange> fileReadRange(String workspacePath, String path,
+      {required int offset, required int length});
+
   /// Workspace Git operations (the desktop `git` channel's gitService) for
   /// the chat status-panel Git group and the review panel. Method names are
   /// probed at runtime with both naming sets — see [GitPort].
@@ -1908,6 +1916,12 @@ class DeviceSession extends ChangeNotifier
   Future<TextChunk> fileReadText(String workspacePath, String path,
           {int offset = 0, required int length}) =>
       fileService.readText(workspacePath, path, offset: offset, length: length);
+
+  @override
+  Future<FileRange> fileReadRange(String workspacePath, String path,
+          {required int offset, required int length}) =>
+      fileService.readFileRange(workspacePath, path,
+          offset: offset, length: length);
 
   /// Grouped task view of every known workspace (`zcode-task
   /// .listGroupedTaskViewStructure`, desktop 3.12.3 — live-probed

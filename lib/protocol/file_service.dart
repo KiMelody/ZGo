@@ -27,10 +27,42 @@ class MediaPreview {
 class TextChunk {
   final String text;
 
-  /// More pages available at the next offset. Null until the live probe
-  /// certifies the pagination field ("hasMore semantics").
+  /// Wire `truncated` (byte arithmetic `offset + bytesRead < totalBytes`,
+  /// asar-certified): more bytes available at the next offset. Null when the
+  /// desktop omits the field.
   final bool? hasMore;
-  const TextChunk({required this.text, this.hasMore});
+
+  /// Total file size in BYTES (wire `totalBytes`). Null when absent.
+  final int? totalBytes;
+
+  /// Bytes actually read by this call (wire `bytesRead`). Null when absent.
+  final int? bytesRead;
+
+  /// Desktop binary sniff (wire `isBinary`, the official O7 heuristic: a NUL
+  /// byte, or control characters over 30%). `text` is empty when true. Null
+  /// when absent.
+  final bool? isBinary;
+
+  const TextChunk({
+    required this.text,
+    this.hasMore,
+    this.totalBytes,
+    this.bytesRead,
+    this.isBinary,
+  });
+}
+
+/// One byte-range read of a workspace file (`readFileRange`) — the pdf.js
+/// range-transport data source. [bytes] holds exactly what the desktop
+/// answered; an EMPTY payload is the certified end-of-read signal (an offset
+/// past EOF answers empty, not an error).
+class FileRange {
+  final Uint8List bytes;
+
+  /// Bytes actually received (0 = end of file).
+  int get length => bytes.length;
+
+  const FileRange({required this.bytes});
 }
 
 /// One workspace file row of the search panel's file tab
@@ -53,8 +85,8 @@ class WorkspaceFileEntry {
 /// preview assembly) — the desktop's fileService on the `file` channel
 /// (`Channels.file`, a fixed channel name outside the probing surface).
 ///
-/// Method names (`readMediaPreview` / `readTextFile` / `stat`) come
-/// from the desktop bundle and run through [MethodProbe]
+/// Method names (`readMediaPreview` / `readTextFile` / `readFileRange` /
+/// `stat`) come from the desktop bundle and run through [MethodProbe]
 /// like every other port — never hardcoded as a success assumption. Older
 /// naming variants trail the bundle-derived names so a divergent desktop
 /// build still works.
@@ -70,7 +102,10 @@ class WorkspaceFileEntry {
 /// are never swallowed into empty results. Answer field names are the
 /// desktop's own: stat `{type, size, mtimeMs}`,
 /// readMediaPreview `{dataBase64, mediaType, totalBytes}`, readTextFile
-/// `{content, offset, bytesRead, totalBytes, truncated, isBinary}`.
+/// `{content, offset, bytesRead, totalBytes, truncated, isBinary}`,
+/// readFileRange a byte list (live-certified 2026-10-18 —
+/// research/readfile-range-probe.md: the desktop's Uint8Array arrives as a
+/// `List<int>` straight off the IPC decode; any other shape is an error).
 class FileServicePort {
   /// Binds one RPC: the channel is fixed by the port owner, method/args vary.
   final Future<dynamic> Function(String method, List<Object?> args) call;
@@ -87,6 +122,10 @@ class FileServicePort {
     'readMedia',
   ];
   static const _textCandidates = ['readTextFile', 'readText', 'readFileText'];
+  // Single-name table: the official service table certifies `readFileRange`
+  // with no legacy variants (`readFileRange: e('fileService.readFileRange')`,
+  // main bundle @4781210 — research/official-pdf-integration.md §2.2).
+  static const _rangeCandidates = ['readFileRange'];
   // Workspace file listing (the ⌘K file tab). Names are renderer-side
   // evidence (createFileService @270609580-@270610091) — the runtime
   // zcode.cjs does NOT carry them, so a runtime miss proves nothing.
@@ -187,7 +226,63 @@ class FileServicePort {
     return TextChunk(
       text: text,
       hasMore: res['truncated'] is bool ? res['truncated'] as bool : null,
+      totalBytes:
+          res['totalBytes'] is num ? (res['totalBytes'] as num).toInt() : null,
+      bytesRead:
+          res['bytesRead'] is num ? (res['bytesRead'] as num).toInt() : null,
+      isBinary: res['isBinary'] is bool ? res['isBinary'] as bool : null,
     );
+  }
+
+  /// Byte-range read — the pdf.js range transport's data source. Wire args
+  /// `{path, offset, length}`; offset/length are BYTE units (the desktop
+  /// does an fd positioned read).
+  ///
+  /// Desktop discipline (certified from the bundled fileService —
+  /// research/official-pdf-integration.md §6):
+  /// - one call clamps `length` to 1 MiB (default 256 KiB);
+  /// - an offset past EOF answers an EMPTY payload, not an error — the empty
+  ///   read is the loop's termination signal.
+  /// Callers follow the official 256 KiB step (`offset += bytes.length`).
+  ///
+  /// The answer form is live-certified (2026-10-18,
+  /// research/readfile-range-probe.md): the desktop's Uint8Array arrives as
+  /// a byte list (`List<int>`, `_Uint8ArrayView` off the IPC decode), never a
+  /// base64 string or `{dataBase64}` map. Parsing is strict — the
+  /// readMediaPreview precedent: a non-list answer throws a [StateError]
+  /// naming the port and the answer shape; an unparseable answer is never
+  /// swallowed into an empty range (which would read as end-of-file).
+  Future<FileRange> readFileRange(
+    String workspacePath,
+    String path, {
+    required int offset,
+    required int length,
+  }) async {
+    final res = await _probe.run(
+      'readFileRange',
+      _rangeCandidates,
+      argsOf: (_) => <Object?>[
+        {..._scope(workspacePath, path), 'offset': offset, 'length': length},
+      ],
+    );
+    return FileRange(bytes: _rangeBytes(res));
+  }
+
+  /// The live-certified answer form, one output ([Uint8List]): a
+  /// [Uint8List] (`_Uint8ArrayView`) straight off the IPC Buffer/VSBuffer
+  /// tag, or a plain `List<int>` when it rode a JSON array. Empty is the
+  /// legal end-of-file payload; a non-int element or any non-list shape
+  /// throws — never an empty range read.
+  static Uint8List _rangeBytes(dynamic res) {
+    if (res is List) {
+      if (res.every((e) => e is int)) {
+        return Uint8List.fromList(res.cast<int>());
+      }
+      throw StateError('fileService.readFileRange: non-integer list answer '
+          '(${res.runtimeType}) head=${res.take(8).toList()}');
+    }
+    throw StateError(
+        'fileService.readFileRange: unexpected answer ${res.runtimeType}');
   }
 
   // ------------------------------------------------ workspace file listing
