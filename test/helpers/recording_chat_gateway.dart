@@ -488,10 +488,11 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   }
 
   /// Programmed file-service answers (file-preview tests); defaults are
-  /// inert (file stat / zero bytes / empty text).
+  /// inert (file stat / zero bytes / empty text / empty range).
   FileStat fileStatResult = const FileStat(type: 'file', size: 0);
   MediaPreview fileReadMediaResult = MediaPreview(bytes: Uint8List(0));
   TextChunk fileReadTextResult = const TextChunk(text: '');
+  FileRange fileReadRangeResult = FileRange(bytes: Uint8List(0));
 
   @override
   Future<FileStat> fileStat(String workspacePath, String path) async {
@@ -511,6 +512,13 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
       {int offset = 0, required int length}) async {
     _accept('fileReadText', [workspacePath, path, offset, length]);
     return fileReadTextResult;
+  }
+
+  @override
+  Future<FileRange> fileReadRange(String workspacePath, String path,
+      {required int offset, required int length}) async {
+    _accept('fileReadRange', [workspacePath, path, offset, length]);
+    return fileReadRangeResult;
   }
 
   /// Optional per-method handler for the git port; null falls back to the

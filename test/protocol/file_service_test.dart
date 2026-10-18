@@ -158,6 +158,167 @@ void main() {
     expect(chunked.hasMore, isTrue);
   });
 
+  test('readText exposes the completed TextChunk fields (totalBytes / '
+      'bytesRead / isBinary)', () async {
+    final port = FileServicePort((method, args) async => <String, dynamic>{
+          'content': 'ab',
+          'truncated': true,
+          'totalBytes': 10,
+          'bytesRead': 2,
+          'isBinary': false,
+        });
+    final chunk = await port.readText('/repo', 'a.txt', offset: 0, length: 2);
+    expect(chunk.text, 'ab');
+    expect(chunk.hasMore, isTrue);
+    expect(chunk.totalBytes, 10);
+    expect(chunk.bytesRead, 2);
+    expect(chunk.isBinary, isFalse);
+
+    // num → toInt (a JSON number may arrive as a double)
+    final numeric = await FileServicePort((method, args) async =>
+            <String, dynamic>{'content': 'x', 'totalBytes': 1048576.0})
+        .readText('/repo', 'a.txt', length: 1);
+    expect(numeric.totalBytes, 1048576);
+  });
+
+  test('TextChunk completion fields: absent → null, mistyped → null', () async {
+    FileServicePort answering(dynamic res) =>
+        FileServicePort((method, args) async => res);
+
+    final absent = await answering({'content': 'x'})
+        .readText('/repo', 'a.txt', length: 1);
+    expect(absent.totalBytes, isNull);
+    expect(absent.bytesRead, isNull);
+    expect(absent.isBinary, isNull);
+
+    final mistyped = await answering(<String, dynamic>{
+      'content': 'x',
+      'totalBytes': '10',
+      'bytesRead': '2',
+      'isBinary': 'yes',
+    }).readText('/repo', 'a.txt', length: 1);
+    expect(mistyped.totalBytes, isNull);
+    expect(mistyped.bytesRead, isNull);
+    expect(mistyped.isBinary, isNull);
+
+    // Plain-string answer carries no chunk metadata at all.
+    final plain =
+        await answering('file body').readText('/repo', 'a.txt', length: 10);
+    expect(plain.totalBytes, isNull);
+    expect(plain.bytesRead, isNull);
+    expect(plain.isBinary, isNull);
+  });
+
+  group('readFileRange (pdf range transport)', () {
+    FileServicePort answering(dynamic res) =>
+        FileServicePort((method, args) async => res);
+
+    test('probes the single certified candidate, then reuses it directly',
+        () async {
+      final calls = <String>[];
+      final port = FileServicePort((method, args) async {
+        calls.add(method);
+        return <int>[1, 2, 3];
+      });
+
+      final res =
+          await port.readFileRange('/repo', 'a.pdf', offset: 0, length: 4096);
+      expect(calls, ['readFileRange'],
+          reason: 'single certified name — no legacy candidates');
+      expect(res.bytes, Uint8List.fromList([1, 2, 3]));
+      expect(res.length, 3);
+
+      calls.clear();
+      await port.readFileRange('/repo', 'a.pdf', offset: 3, length: 4096);
+      expect(calls, ['readFileRange'], reason: 'resolved method skips probing');
+    });
+
+    test('a miss reprobes nothing (single candidate) and rethrows', () async {
+      var calls = 0;
+      final port = FileServicePort((method, args) async {
+        calls++;
+        throw ChannelRpcError('no such method: $method', null);
+      });
+      await expectLater(
+        port.readFileRange('/repo', 'a.pdf', offset: 0, length: 4096),
+        throwsA(isA<ChannelRpcError>()),
+      );
+      expect(calls, 1);
+    });
+
+    test('payload is exactly {path, offset, length} — no workspacePath rides '
+        'along', () async {
+      final payloads = <Map<String, Object?>>[];
+      final port = FileServicePort((method, args) async {
+        payloads.add((args.single as Map).cast<String, Object?>());
+        return <int>[];
+      });
+
+      await port.readFileRange('/repo', 'a.pdf',
+          offset: 256 * 1024, length: 256 * 1024);
+      expect(payloads.single, {
+        'path': 'a.pdf',
+        'offset': 256 * 1024,
+        'length': 256 * 1024,
+      });
+      expect(payloads.single.containsKey('workspacePath'), isFalse);
+    });
+
+    test('the live-certified byte-list answer decodes (Uint8Array straight '
+        'off the IPC decode)', () async {
+      const payload = [0x25, 0x50, 0x44, 0x46]; // %PDF
+      final expected = Uint8List.fromList(payload);
+
+      final list = await answering(<int>[...payload])
+          .readFileRange('/repo', 'a.pdf', offset: 0, length: 4);
+      expect(list.bytes, expected, reason: 'plain int list');
+
+      // The probe's actual answer runtimeType is `_Uint8ArrayView`
+      // (research/readfile-range-probe.md) — a Uint8List off the IPC
+      // Buffer/VSBuffer decode.
+      final typed = await answering(Uint8List.fromList(payload))
+          .readFileRange('/repo', 'a.pdf', offset: 0, length: 4);
+      expect(typed.bytes, expected,
+          reason: 'Uint8List straight off the IPC Buffer tag');
+    });
+
+    test('empty payload is the certified end-of-file signal, not an error',
+        () async {
+      for (final empty in <dynamic>[
+        <int>[],
+        Uint8List(0),
+      ]) {
+        final res = await answering(empty).readFileRange('/repo', 'a.pdf',
+            offset: 1 << 30, length: 4096);
+        expect(res.length, 0);
+        expect(res.bytes, isEmpty);
+      }
+    });
+
+    test('non-byte-list answers throw StateErrors naming the port', () async {
+      Future<void> expectStateError(dynamic answer) async {
+        await expectLater(
+          answering(answer)
+              .readFileRange('/repo', 'a.pdf', offset: 0, length: 4),
+          throwsA(isA<StateError>().having((e) => e.message, 'message',
+              contains('fileService.readFileRange'))),
+        );
+      }
+
+      await expectStateError(42); // scalar
+      await expectStateError(<dynamic>[1, 'x']); // non-integer list
+      await expectStateError('not base64!!'); // plain string
+      // Live-certified 2026-10-18 (research/readfile-range-probe.md): the
+      // base64-string and {dataBase64}-map shapes do NOT occur — the strict
+      // parse rejects them (readMediaPreview precedent), even when they
+      // would have been decodable.
+      await expectStateError(base64Encode([1, 2, 3]));
+      await expectStateError(<String, dynamic>{'dataBase64': base64Encode([1, 2, 3])});
+      await expectStateError(<String, dynamic>{'bytes': 1}); // no dataBase64
+      await expectStateError(<String, dynamic>{'dataBase64': 42}); // mistyped
+    });
+  });
+
   group('workspace file listing (search panel file tab, design D7)', () {
     test('searchWorkspaceFiles answers typed rows; payload is the exact '
         '{rootPath, query, limit} shape', () async {
