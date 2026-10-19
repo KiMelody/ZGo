@@ -11,6 +11,30 @@ library;
 /// Why a text read produced no content.
 enum FileReadFailure { notFound, binary, empty, tooLarge, readFailed }
 
+/// Preview-wide per-file read cap (2 MiB): the text preview's truncation
+/// ceiling and the PDF page's whole-read cutoff are the same user-facing
+/// "files up to this size preview in full" line, so they share one value.
+/// (The HTML assembler's own resource-fetch caps are a separate scale.)
+const int previewReadCapBytes = 2 * 1024 * 1024;
+
+/// Official `f6` classifier (research/official-pdf-integration §2 error
+/// table): a missing file surfaces as ENOENT / "no such file or directory"
+/// in the error text; the desktop's over-limit reads answer the "…file is
+/// too large for inline preview" family. Everything else is an unclassified
+/// read failure.
+FileReadFailure classifyReadFailure(String message) {
+  if (_missingFileRe.hasMatch(message)) return FileReadFailure.notFound;
+  if (_tooLargeRe.hasMatch(message)) return FileReadFailure.tooLarge;
+  return FileReadFailure.readFailed;
+}
+
+final _missingFileRe = RegExp(
+  r'\bENOENT\b|no such file or directory',
+  caseSensitive: false,
+);
+
+final _tooLargeRe = RegExp(r'too large', caseSensitive: false);
+
 /// One whole-file text read: [text] non-null means success (possibly
 /// truncated at the app's 2 MiB cap — see [truncated]); otherwise
 /// [failure] carries the classified reason. [totalBytes] is the wire file

@@ -40,7 +40,6 @@ const String _readCapLabel = '2.0 MiB';
 /// order below the read that produced the text). The timing sentinel in
 /// file_preview_page_test.dart guards that: chunking 2 MiB must stay under
 /// a second.
-@visibleForTesting
 List<String> chunkSourceByLines(String text, {int chunkBytes = _chunkBytes}) {
   if (text.isEmpty) return const [];
   final chunks = <String>[];
@@ -614,7 +613,6 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
 /// zero-handler posture is structural: [InAppWebView.onWebViewCreated] stays
 /// null and handlers can only be registered there (the pdf page's three
 /// read-only handlers are the deliberate second tier, S6).
-@visibleForTesting
 Widget buildSandboxedWebView(String html) {
   return InAppWebView(
     initialData: InAppWebViewInitialData(

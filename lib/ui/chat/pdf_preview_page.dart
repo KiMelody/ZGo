@@ -8,6 +8,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../../protocol/file_service.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
+import 'file_read_result.dart';
 
 /// The official range step (research/official-pdf-integration.md §2.2): the
 /// document asks `pdfRange` for 256 KiB per call (the desktop clamps one
@@ -122,7 +123,8 @@ class _PdfPreviewPageState extends State<PdfPreviewPage> {
 
   /// The official three-state threshold (research §2.2): at or below it the
   /// document pulls the file eagerly, above it the range transport streams.
-  static const _fullMaxBytes = 2 * 1024 * 1024;
+  /// Same preview-wide line as the text cap ([previewReadCapBytes]).
+  static const _fullMaxBytes = previewReadCapBytes;
 
   _Phase _phase = _Phase.loading;
   String? _html;
@@ -212,23 +214,15 @@ class _PdfPreviewPageState extends State<PdfPreviewPage> {
     });
   }
 
-  /// Official `f6` classifier (research §2 error table): a missing file
-  /// surfaces as ENOENT / "no such file or directory" in the error text.
-  /// Kept local like the read layer's own copy in `ChatPreview`.
-  static final _missingFileRe = RegExp(
-    r'\bENOENT\b|no such file or directory',
-    caseSensitive: false,
-  );
-
-  /// The desktop's over-limit reads answer the "…file is too large for
-  /// inline preview" family (see FileServicePort.readMedia).
-  static final _tooLargeRe = RegExp(r'too large', caseSensitive: false);
-
   static _PdfFailure _classifyError(Object error) {
-    final message = '$error';
-    if (_missingFileRe.hasMatch(message)) return _PdfFailure.notFound;
-    if (_tooLargeRe.hasMatch(message)) return _PdfFailure.tooLarge;
-    return _PdfFailure.readFailed;
+    switch (classifyReadFailure('$error')) {
+      case FileReadFailure.notFound:
+        return _PdfFailure.notFound;
+      case FileReadFailure.tooLarge:
+        return _PdfFailure.tooLarge;
+      default:
+        return _PdfFailure.readFailed;
+    }
   }
 
   /// `pdfRange(path, offset, length)` → base64 bytes of THIS page's path.
