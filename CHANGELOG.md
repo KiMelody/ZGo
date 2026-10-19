@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.5] - 2026-10-20
+
+### Added
+
+- **File preview system**: chat file previews render by type — markdown
+  (AppMarkdown + highlighting), SVG (sandboxed zero-bridge WebView),
+  source code (`re_highlight` 24 grammars on the ZInk palette, 32 KiB
+  linear-render threshold), and PDF (pdf.js 5.4.296 in a sandboxed
+  WebView; dataUrl / whole-read / range transport, three read-only
+  handlers, 8 s watchdog). Text files get graded rendering: 2 MiB cap
+  with 96 KiB line-aligned chunked SelectionArea virtualization.
+- **Chunked file reads**: reads loop in 256 KB steps up to a 2 MiB cap,
+  defeating the server-side silent truncation above 256 KB; a
+  five-state `FileReadFailure` classification (ENOENT / isBinary /
+  empty / tooLarge) with a binary-extension fallback dispatch replaces
+  the single-shot read.
+- **Preview entry points**: the task-search file tab and the Git review
+  panel route through the same `ChatPreview` dispatch, which moved out
+  of the shared timeline.
+- **readFileRange protocol endpoint**: byte-range reads with TextChunk
+  metadata (Uint8Array direct payload, empty payload = terminator),
+  wired through ChatGateway/DeviceSession; live probes under `tool/`.
+
+### Changed
+
+- **Edit-and-resend inline card**: global button tokens converged
+  (reset = constant gray outline, direct send; send = solid white short
+  label); the card goes full-width with the 56 dp gutter removed and
+  the three actions on a single row on narrow screens.
+
+### Fixed
+
+- **Android high refresh rate**: MainActivity requests the preferred
+  display mode, unlocking 120 Hz panels that were pinned to 60 Hz.
+- **Timeline row order**: cold-restored wire rows re-sort within their
+  `assistantResponseId` group and non-execute rows flush buffered text,
+  fixing inverted/stalled rows after cold resume.
+
 ## [1.14.3] - 2026-10-17
 
 ### Added
