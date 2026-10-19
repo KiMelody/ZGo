@@ -45,4 +45,23 @@ void main() {
       expect(p.group, isNull);
     }
   });
+
+  test('pending text flushes above a non-execute tool row', () {
+    final parts = assistantTurnParts([
+      {'kind': 'assistantText', 'text': 'before'},
+      tool('readFile'),
+      {'kind': 'assistantText', 'text': 'after'},
+    ]).parts;
+    expect(parts.map((p) => p.kind), ['text', 'row', 'text']);
+    expect(parts[0].text, 'before');
+    expect(parts[2].text, 'after');
+  });
+
+  test('pending text flushes above a reasoning row too', () {
+    final parts = assistantTurnParts([
+      {'kind': 'assistantText', 'text': 'before'},
+      {'kind': 'reasoning', 'text': 'think'},
+    ]).parts;
+    expect(parts.map((p) => p.kind), ['text', 'row']);
+  });
 }

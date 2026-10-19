@@ -492,6 +492,11 @@ AssistantTurnParts assistantTurnParts(List<Map<String, dynamic>> rows) {
       flushText();
       executeRun.add(row);
     } else {
+      // Any non-text row — Read/Edit/Agent cards, reasoning, markers —
+      // ends the pending text segment: without this flush the text
+      // renders below the card and even merges across messages
+      // (acceptance 2026-10-19, task 10-19-timeline-row-order-repair).
+      flushText();
       flushExecuteRun();
       parts.add((
         kind: 'row',
@@ -507,6 +512,94 @@ AssistantTurnParts assistantTurnParts(List<Map<String, dynamic>> rows) {
   return (parts: parts, header: header, streaming: sawStreaming);
 }
 
+/// Repairs the persisted-order row inversion (task
+/// 10-19-timeline-row-order-repair): the desktop persists a message's tool
+/// parts at call start but flushes its reasoning/text parts later, and the
+/// cold-resume materialization (also forced mid-session on any subscribe
+/// after large-payload event drops — running conversations included)
+/// replays that persist order, so one message's rows arrive as
+/// [toolCall, reasoning, assistantText] instead of the live
+/// [reasoning, assistantText, toolCall]. Live-probed 2026-10-19, desktop
+/// 3.15.3.8237; official web/desktop render the same inverted snapshots.
+///
+/// Within each run of consecutive rows sharing an `assistantResponseId`
+/// (the message id, carried by reasoning/assistantText/toolCall rows),
+/// rows are stable-sorted by class reasoning < assistantText < toolCall.
+/// Keyless rows inside a run (subagent mirrors, timeline markers, unknown
+/// kinds) inherit the preceding row's class, so attachments travel with
+/// their host; keyless rows outside any run and turnHeader/userInput
+/// boundaries pass through in place — cross-message and cross-turn order
+/// is never touched, and canonically ordered input comes back unchanged.
+List<Map<String, dynamic>> repairInvertedToolOrder(
+  List<Map<String, dynamic>> rows,
+) {
+  if (rows.length < 2) return rows;
+  final out = <Map<String, dynamic>>[];
+  var run = <Map<String, dynamic>>[];
+  var runKey = '';
+
+  void flushRun() {
+    if (run.isEmpty) return;
+    out.addAll(_messageClassSort(run));
+    run = <Map<String, dynamic>>[];
+  }
+
+  for (final row in rows) {
+    final kind = row['kind'];
+    if (kind == 'turnHeader' || kind == 'userInput') {
+      flushRun();
+      runKey = '';
+      out.add(row);
+      continue;
+    }
+    final key = '${row['assistantResponseId'] ?? ''}';
+    if (key.isEmpty) {
+      if (run.isEmpty) {
+        // Outside any run (before the first message or right after a
+        // boundary) — nothing to attach to; the next keyed row starts a
+        // fresh run after it.
+        out.add(row);
+      } else {
+        run.add(row);
+      }
+      continue;
+    }
+    if (run.isNotEmpty && key != runKey) flushRun();
+    runKey = key;
+    run.add(row);
+  }
+  flushRun();
+  return out;
+}
+
+/// Stable class sort for one [repairInvertedToolOrder] message run
+/// (equal keys keep input order; index tie-break makes it deterministic).
+List<Map<String, dynamic>> _messageClassSort(List<Map<String, dynamic>> run) {
+  if (run.length < 2) return run;
+  final keys = List<int>.filled(run.length, 0);
+  var prevClass = 0;
+  var sorted = true;
+  for (var i = 0; i < run.length; i++) {
+    final kind = run[i]['kind'];
+    final cls = kind == 'reasoning'
+        ? 0
+        : kind == 'assistantText'
+        ? 1
+        : kind == 'toolCall'
+        ? 2
+        : prevClass;
+    keys[i] = cls;
+    if (i > 0 && cls < keys[i - 1]) sorted = false;
+    prevClass = cls;
+  }
+  if (sorted) return run;
+  final order = List<int>.generate(run.length, (i) => i);
+  order.sort(
+    (a, b) => keys[a] != keys[b] ? keys[a].compareTo(keys[b]) : a - b,
+  );
+  return [for (final i in order) run[i]];
+}
+
 /// Groups rows into turns (like the web timeline): a user message starts
 /// a new group; assistant text/reasoning/tool rows that follow belong to
 /// the same turn and render as ONE message instead of many bubbles.
@@ -518,7 +611,7 @@ AssistantTurnParts assistantTurnParts(List<Map<String, dynamic>> rows) {
 List<List<Map<String, dynamic>>> groupChatRows(List<Map<String, dynamic>> rows) {
   final groups = <List<Map<String, dynamic>>>[];
   List<Map<String, dynamic>>? current;
-  for (final row in rows) {
+  for (final row in repairInvertedToolOrder(rows)) {
     final kind = row['kind'];
     if (kind == 'timelineMarker') {
       current = null;
@@ -547,11 +640,13 @@ List<List<Map<String, dynamic>>> groupChatRows(List<Map<String, dynamic>> rows) 
 List<Map<String, dynamic>> childSessionRows(
   Iterable<Map<String, dynamic>> rows,
 ) {
-  return rows.where((row) {
-    if (row['kind'] != 'timelineMarker') return true;
-    final marker = row['marker'];
-    return marker is! Map || marker['type'] != 'modelChange';
-  }).toList();
+  return repairInvertedToolOrder(
+    rows.where((row) {
+      if (row['kind'] != 'timelineMarker') return true;
+      final marker = row['marker'];
+      return marker is! Map || marker['type'] != 'modelChange';
+    }).toList(),
+  );
 }
 
 /// The row's display timestamp: the first positive numeric among the
