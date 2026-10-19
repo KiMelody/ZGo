@@ -105,13 +105,13 @@ class ChatPreview {
     'pdf': 'application/pdf',
   };
 
-  /// App-side text cap: 2 MiB per file, aligned with the assembler's
-  /// per-file cap (html_assembly). The desktop clamps one `readTextFile`
+  /// App-side text cap ([previewReadCapBytes], shared with the PDF
+  /// whole-read cutoff). The desktop clamps one `readTextFile`
   /// call to 256 KiB (research/official-large-text §1, client bundle and
   /// asar alike), so this cap is only ever reached through the 256 KiB
   /// read loop in [readText] — the pre-S2 single 2 MiB request made the
   /// server cut every >256 KiB file silently at the first chunk.
-  static const _maxTextBytes = 2 * 1024 * 1024;
+  static const _maxTextBytes = previewReadCapBytes;
 
   /// One wire read step: the desktop server-side clamp
   /// (`clampReadLength`, 256 KiB) as the request size, so every step comes
@@ -270,17 +270,12 @@ class ChatPreview {
     }
   }
 
-  /// Official `f6` classifier (research/official-pdf-integration §2 error
-  /// table): a missing file surfaces as ENOENT / "no such file or
-  /// directory" in the error text.
-  static final _missingFileRe = RegExp(
-    r'\bENOENT\b|no such file or directory',
-    caseSensitive: false,
-  );
-
-  /// The desktop's over-limit reads answer the "…file is too large for
-  /// inline preview" family (see [FileServicePort.readMedia]).
-  static final _tooLargeRe = RegExp(r'too large', caseSensitive: false);
+  /// ENOENT first, then the desktop's over-limit channel, everything else
+  /// unknown (design §2). The regex family lives in
+  /// [classifyReadFailure] (file_read_result.dart), shared with the PDF
+  /// page's own classifier.
+  static FileReadFailure _classifyReadError(Object error) =>
+      classifyReadFailure('$error');
 
   /// Reads [path] whole and classifies the outcome (design §1.3 + §2).
   ///
@@ -348,15 +343,6 @@ class ChatPreview {
       totalBytes: totalBytes,
       truncated: truncated,
     );
-  }
-
-  /// ENOENT first, then the desktop's over-limit channel, everything else
-  /// unknown (design §2).
-  static FileReadFailure _classifyReadError(Object error) {
-    final message = '$error';
-    if (_missingFileRe.hasMatch(message)) return FileReadFailure.notFound;
-    if (_tooLargeRe.hasMatch(message)) return FileReadFailure.tooLarge;
-    return FileReadFailure.readFailed;
   }
 
   Future<String?> _readMediaDataUrl(String ws, String path) async {
