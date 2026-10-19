@@ -5,11 +5,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/file_service.dart';
 import 'package:zgo/protocol/git_service.dart';
+import 'package:zgo/ui/chat/chat_preview.dart';
 import 'package:zgo/ui/chat/diff_view.dart';
+import 'package:zgo/ui/chat/file_preview_page.dart';
 import 'package:zgo/ui/chat/git_panel.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
+
+import '../../helpers/recording_chat_gateway.dart';
 
 /// Records every wire call the port makes and answers from [_handler].
 class _FakeGit {
@@ -575,6 +580,131 @@ void main() {
       expect(find.byType(DiffView), findsOneWidget);
       expect(find.text('+new'), findsOneWidget);
       expect(find.text('Diff 已截断'), findsOneWidget);
+    });
+  });
+
+  group('GitReviewPanel preview entry (S7/R8b)', () {
+    /// The `_repoHandler` changed set widened with the dispatch boundary
+    /// family (PRD R2-L3): extension-less name, dot-file, double extension
+    /// and a blacklist representative — one row per gating verdict.
+    Future<dynamic> mixedChangesHandler(
+        String method, List<Object?> args) async {
+      if (method == 'getChanges') {
+        return <Object?>[
+          for (final rel in const [
+            'lib/a.dart',
+            'Makefile',
+            '.gitignore',
+            'bundle.tar.gz',
+            'assets/font.woff2',
+          ])
+            {
+              'path': '/repo/$rel',
+              'workspaceRelativePath': rel,
+              'kind': 'modified',
+              'section': 'unstaged',
+              'added': 1,
+            },
+        ];
+      }
+      return _repoHandler(method, args);
+    }
+
+    testWidgets('dispatchable rows grow the open icon and it dispatches '
+        'through the chat rows\' own routing table', (tester) async {
+      _tallView(tester);
+      final fake = _FakeGit(mixedChangesHandler);
+      final c = _controller(fake);
+      await c.reload();
+      final gateway = RecordingChatGateway()
+        ..fileReadTextResult = const TextChunk(
+          text: 'void main() {}',
+          bytesRead: 14,
+          totalBytes: 14,
+          hasMore: false,
+        );
+      await tester.pumpWidget(
+        _wrap(GitReviewPanel(controller: c, preview: ChatPreview(gateway))),
+      );
+      await _flush(tester);
+
+      // The icon set IS the shared judgment's verdict — asserted against
+      // the same function the chat rows consult (one source, two entries).
+      final openable = const [
+        'lib/a.dart',
+        'Makefile',
+        '.gitignore',
+        'bundle.tar.gz',
+        'assets/font.woff2',
+      ].where((p) => ChatPreview.dispatchable('/repo/$p')).toList();
+      expect(openable, ['lib/a.dart', 'Makefile', '.gitignore']);
+      expect(
+        find.byIcon(Icons.visibility_outlined),
+        findsNWidgets(openable.length),
+      );
+
+      await tester.tap(find.byIcon(Icons.visibility_outlined).first);
+      await _flush(tester);
+
+      // Row order: the unstaged section renders the changed set as given,
+      // so `.first` is lib/a.dart — a plainText source preview over the
+      // panel, leaving the review sheet behind.
+      expect(find.byType(FilePreviewPage), findsOneWidget);
+      expect(
+        tester.widget<FilePreviewPage>(find.byType(FilePreviewPage)).render,
+        FilePreviewRender.plainText,
+      );
+      expect(find.textContaining('void main'), findsWidgets);
+      expect(
+        gateway.calls.where((x) => x.$1 == 'fileReadText').single.$2,
+        containsAllInOrder(['/repo/app', '/repo/lib/a.dart']),
+      );
+    });
+
+    testWidgets('a host without a preview renders no icon and keeps the '
+        'diff-only row', (tester) async {
+      _tallView(tester);
+      final fake = _FakeGit(mixedChangesHandler);
+      final c = _controller(fake);
+      await c.reload();
+      await tester.pumpWidget(_wrap(GitReviewPanel(controller: c)));
+      await _flush(tester);
+
+      expect(find.byIcon(Icons.visibility_outlined), findsNothing);
+
+      await tester.tap(find.text('lib/a.dart'));
+      await _flush(tester);
+      expect(find.byType(DiffView), findsOneWidget);
+    });
+
+    testWidgets('with the preview wired, the primary tap and the stage '
+        'button keep their own paths', (tester) async {
+      _tallView(tester);
+      final fake = _FakeGit(mixedChangesHandler);
+      final c = _controller(fake);
+      await c.reload();
+      await tester.pumpWidget(
+        _wrap(
+          GitReviewPanel(
+            controller: c,
+            preview: ChatPreview(RecordingChatGateway()),
+          ),
+        ),
+      );
+      await _flush(tester);
+
+      // Primary tap → the diff path, untouched by the new icon.
+      await tester.tap(find.text('lib/a.dart'));
+      await _flush(tester);
+      expect(find.byType(DiffView), findsOneWidget);
+      expect(find.byType(FilePreviewPage), findsNothing);
+
+      // Back out of the diff, then stage through the button beside the icon.
+      await tester.tap(find.byIcon(Icons.arrow_back));
+      await _flush(tester);
+      await tester.tap(find.widgetWithText(TextButton, '暂存').first);
+      await _flush(tester);
+      expect(fake.countOf('stagePaths'), greaterThanOrEqualTo(1));
     });
   });
 

@@ -7,6 +7,7 @@ import '../../protocol/git_service.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
 import 'chat_page.dart' show commandErrorCopy;
+import 'chat_preview.dart';
 import 'diff_view.dart';
 
 /// Workspace Git UI for the chat page: the status-panel 「Git 工具」 group
@@ -207,7 +208,11 @@ GitChangeStats? statsFromFileChanges(Object? changes) {
 class GitStatusGroup extends StatefulWidget {
   final GitWorkspaceController controller;
 
-  const GitStatusGroup({super.key, required this.controller});
+  /// Host's workspace-file dispatch plumbing (S7/R8b), forwarded to the
+  /// review panel it opens; null keeps the pre-S7 panel shape.
+  final ChatPreview? preview;
+
+  const GitStatusGroup({super.key, required this.controller, this.preview});
 
   @override
   State<GitStatusGroup> createState() => _GitStatusGroupState();
@@ -362,7 +367,8 @@ class _GitStatusGroupState extends State<GitStatusGroup> {
                 icon: Icons.edit_note_outlined,
                 label: tr(context, 'git.changes.label'),
                 trailing: _statsSpan(context, stats),
-                onTap: () => showGitReviewPanel(context, c),
+                onTap: () =>
+                    showGitReviewPanel(context, c, preview: widget.preview),
               ),
               _GitStatusRow(
                 icon: Icons.alt_route_outlined,
@@ -461,7 +467,8 @@ class _GitStatusGroupState extends State<GitStatusGroup> {
                 children: [
                   _capsuleLink(context, Icons.edit_note_outlined,
                       tr(context, 'git.changes.label'),
-                      () => showGitReviewPanel(context, c)),
+                      () => showGitReviewPanel(context, c,
+                          preview: widget.preview)),
                   _capsuleDivider(context),
                   _capsuleLink(
                       context,
@@ -799,10 +806,16 @@ class ChangeCapsule extends StatelessWidget {
 
 /// Opens the review panel for [controller] as a full-height modal sheet (the
 /// mobile form of the official side panel; design D4 "全屏 sheet 按形态").
+///
+/// [preview] is the host's workspace-file dispatch plumbing (S7/R8b, the
+/// chat page injects its shared [ChatPreview]): with it, dispatchable file
+/// rows grow the trailing open affordance that routes through the SAME
+/// vector as the chat rows. Hosts without one render the pre-S7 shape.
 Future<void> showGitReviewPanel(
   BuildContext context,
-  GitWorkspaceController controller,
-) {
+  GitWorkspaceController controller, {
+  ChatPreview? preview,
+}) {
   unawaited(controller.reload());
   return showModalBottomSheet<void>(
     context: context,
@@ -812,7 +825,7 @@ Future<void> showGitReviewPanel(
     builder: (sheetCtx) => SafeArea(
       child: FractionallySizedBox(
         heightFactor: 0.92,
-        child: GitReviewPanel(controller: controller),
+        child: GitReviewPanel(controller: controller, preview: preview),
       ),
     ),
   );
@@ -824,7 +837,13 @@ Future<void> showGitReviewPanel(
 class GitReviewPanel extends StatefulWidget {
   final GitWorkspaceController controller;
 
-  const GitReviewPanel({super.key, required this.controller});
+  /// Workspace-file dispatch plumbing of the host page (S7/R8b): a non-null
+  /// value puts the trailing open icon on dispatchable file rows, routing
+  /// through [ChatPreview.open] — the chat rows' own vector. Null-safe:
+  /// null hosts and blacklisted paths keep the diff-only row.
+  final ChatPreview? preview;
+
+  const GitReviewPanel({super.key, required this.controller, this.preview});
 
   @override
   State<GitReviewPanel> createState() => _GitReviewPanelState();
@@ -1067,6 +1086,11 @@ class _GitReviewPanelState extends State<GitReviewPanel> {
 
   Widget _fileRow(BuildContext context, GitChangeEntry entry) {
     final kindKey = _kindKey(entry.kind);
+    // Preview entry (S7/R8b): gated by the chat rows' own judgment
+    // ([ChatPreview.dispatchable]) and routed by [ChatPreview.open] —
+    // same vector, no local copy. The row's primary tap stays the diff.
+    final preview = widget.preview;
+    final openable = preview != null && ChatPreview.dispatchable(entry.path);
     return InkWell(
       onTap: () => _openDiff(entry),
       child: Padding(
@@ -1103,7 +1127,23 @@ class _GitReviewPanelState extends State<GitReviewPanel> {
               ),
               style: ZType.caption.copyWith(color: ZInk.muted(context)),
             ),
-            const SizedBox(width: 4),
+            if (openable)
+              SizedBox(
+                width: zTouchWidth,
+                height: zTouchHeight,
+                child: IconButton(
+                  padding: EdgeInsets.zero,
+                  iconSize: 18,
+                  tooltip: tr(context, 'chat.preview.openFile'),
+                  icon: Icon(
+                    Icons.visibility_outlined,
+                    color: ZInk.muted(context),
+                  ),
+                  onPressed: () => preview.open(context, entry.path),
+                ),
+              )
+            else
+              const SizedBox(width: 4),
             TextButton(
               onPressed: () => _toggleStage(entry),
               child: Text(

@@ -10,7 +10,7 @@ import 'markdown_view.dart';
 import 'source_highlight.dart';
 
 /// Source-view grading thresholds, grouped the way the read side groups its
-/// step constants (timeline.dart `_readStepBytes`). At or below
+/// step constants (chat_preview.dart `_readStepBytes`). At or below
 /// [monolithMaxBytes] (the cap shared with syntax highlighting,
 /// source_highlight.dart) the source renders as one selectable text; above it
 /// the view cuts line-aligned ~[_chunkBytes] blocks and renders them lazily (a
@@ -20,7 +20,7 @@ import 'source_highlight.dart';
 const int _chunkBytes = 96 * 1024;
 
 /// The read cap the truncation banner's "first N" names. The cap itself is
-/// timeline.dart's `_maxTextBytes` (2 MiB), private to that library — this
+/// chat_preview.dart's `_maxTextBytes` (2 MiB), private to that library — this
 /// page only knows the number it must print.
 const String _readCapLabel = '2.0 MiB';
 
@@ -112,7 +112,7 @@ class FilePreviewPage extends StatefulWidget {
   final String path;
 
   /// Which surface renders the file (design §4.1). The routing table that
-  /// picks it per extension is `ChatPreview.open` (timeline.dart).
+  /// picks it per extension is `ChatPreview.open` (chat_preview.dart).
   final FilePreviewRender render;
 
   /// Text reads (the main file + css/js resources). The main-file result

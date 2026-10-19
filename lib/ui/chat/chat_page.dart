@@ -2922,7 +2922,9 @@ class _ChatPageState extends State<ChatPage> {
         children: [
           // Git group first (official mwt partition order: environment →
           // goal → todo → agents). Self-hides on a non-repository workspace.
-          GitStatusGroup(controller: _git),
+          // The page's shared preview rides along (S7/R8b): review-panel
+          // file rows dispatch through the same vector as the chat rows.
+          GitStatusGroup(controller: _git, preview: _preview),
           _GoalBanner(state: state),
           _GoalProcessPanel(
             state: state,
