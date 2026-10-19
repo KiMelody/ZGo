@@ -7,6 +7,7 @@ import '../protocol/conversation.dart';
 import '../protocol/file_service.dart';
 import '../state/device_session.dart';
 import '../state/task_directory.dart';
+import 'chat/chat_preview.dart';
 import 'slash_items.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
@@ -70,6 +71,13 @@ class _TaskSearchPageState extends State<TaskSearchPage>
   bool _filesLoading = false;
   Timer? _fileDebounce;
   Object? _fileError;
+
+  /// Workspace-file dispatch plumbing of the file tab (R8): the page-level
+  /// instance over the same session, routing through the chat rows' own
+  /// vector ([ChatPreview]) — no local copy of the blacklist or routing
+  /// table. The session is the [ChatGateway] the page already searches
+  /// with, so the preview's workspace resolution matches the search root.
+  late final ChatPreview _preview = ChatPreview(widget.session);
 
   @override
   void initState() {
@@ -456,6 +464,13 @@ class _TaskSearchPageState extends State<TaskSearchPage>
     ].join(' · ');
   }
 
+  /// File rows (R8): non-directory rows dispatch into the preview surfaces
+  /// via the shared [ChatPreview.open] routing table — the chat rows' own
+  /// vector, gated by nothing but the directory flag (design 10-18 §6: a
+  /// blacklisted file tapped here is explicit intent and lands on the
+  /// read's honest verdict, like a markdown link). Directory rows stay
+  /// inert (PRD R8/M3): a directory carries no extension, so the fallback
+  /// dispatch would pass it and the read would land on an absurd error.
   List<Widget> _fileRows(List<WorkspaceFileEntry> files) => [
         for (final f in files)
           ListTile(
@@ -473,9 +488,10 @@ class _TaskSearchPageState extends State<TaskSearchPage>
               overflow: TextOverflow.ellipsis,
               style: ZType.body.copyWith(fontFamily: 'monospace'),
             ),
-            // Display-only for now (design D6): the official tap opens the
-            // desktop editor — ZGo has no editor surface to hand off to.
-            onTap: null,
+            // The path is absolute (root-joined by the port); `open`
+            // handles it as-is and the pushed preview covers this page —
+            // the back stack returns to the results.
+            onTap: f.isDirectory ? null : () => _preview.open(context, f.path),
           ),
       ];
 }

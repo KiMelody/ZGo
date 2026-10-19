@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:zgo/protocol/connection_params.dart';
 import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/state/device_session.dart';
+import 'package:zgo/ui/chat/file_preview_page.dart';
 import 'package:zgo/ui/chat/subagent_detail_page.dart';
 import 'package:zgo/ui/chat/subagent_feed.dart';
 import 'package:zgo/ui/theme.dart';
@@ -22,6 +23,8 @@ class _FakeSubagentGateway extends FakeDeviceSession {
     this.totalCount,
     this.rangeResult,
     this.config,
+    super.workspaces,
+    super.channelHandler,
   }) : super(deviceId: 'd1', params: _params);
 
   static final _params = RemoteConnectionParams.parse(
@@ -967,5 +970,52 @@ void main() {
     // Reopen: a second subscribe went out and the transcript lands.
     expect(gateway.subscribed.length, 2);
     expect(find.text('调研 Flutter 国内镜像可用性'), findsOneWidget);
+  });
+
+  testWidgets('child-transcript file names dispatch into the preview '
+      'surfaces (S7/R8b: shared-renderer inheritance)', (tester) async {
+    final gateway = _FakeSubagentGateway(
+      rows: _childRows,
+      workspaces: const [
+        {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+      ],
+      channelHandler: (channel, method, args) async {
+        if (method != 'readTextFile') return null;
+        return {
+          'content': 'void main() {}',
+          'offset': 0,
+          'bytesRead': 14,
+          'totalBytes': 14,
+          'truncated': false,
+        };
+      },
+    );
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // The Edit row's file name is a tappable segment of the shared tool
+    // row (ChatRow → _titleText): the preview entry is inherited, not
+    // re-implemented, so the child view behaves like the main chat.
+    await tester.tap(find.text('a.dart'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(FilePreviewPage), findsOneWidget);
+    expect(
+      tester.widget<FilePreviewPage>(find.byType(FilePreviewPage)).render,
+      FilePreviewRender.plainText,
+    );
+    expect(find.textContaining('void main'), findsWidgets);
   });
 }
