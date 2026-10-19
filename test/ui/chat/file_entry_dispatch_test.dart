@@ -11,6 +11,8 @@ import 'package:zgo/protocol/file_service.dart';
 import 'package:zgo/ui/chat/chat_page.dart';
 import 'package:zgo/ui/chat/file_preview_page.dart';
 import 'package:zgo/ui/chat/image_viewer_page.dart';
+import 'package:zgo/ui/chat/pdf_preview_page.dart';
+import 'package:zgo/ui/chat/timeline.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
@@ -59,6 +61,20 @@ class _HoldTextGateway extends FakeChatGateway {
   Future<TextChunk> fileReadText(String workspacePath, String path,
       {int offset = 0, required int length}) {
     textCalls.add([workspacePath, path, offset, length]);
+    return completer.future;
+  }
+}
+
+/// Holds `fileStat` so the pdf page stays in its loading phase — same
+/// reason as [_HoldTextGateway]: the pdf WebView (and its 1 MB assets) must
+/// not be reached in a widget test.
+class _HoldStatGateway extends FakeChatGateway {
+  final completer = Completer<FileStat>();
+  final List<List<Object?>> statCalls = [];
+
+  @override
+  Future<FileStat> fileStat(String workspacePath, String path) {
+    statCalls.add([workspacePath, path]);
     return completer.future;
   }
 }
@@ -159,24 +175,133 @@ void main() {
       expect(find.byType(ImageViewerPage), findsNothing);
       // Loading phase held: the assembler's main-file read is pending.
       expect(find.byType(CircularProgressIndicator), findsWidgets);
+      // First loop step: 256 KiB (the server's own clamp) — the pre-S2
+      // single 2 MiB request was what the server silently cut at 256 KiB.
       expect(gateway.textCalls.single,
-          ['/repo/app', 'C:/w/page.html', 0, 2 * 1024 * 1024]);
+          ['/repo/app', 'C:/w/page.html', 0, 256 * 1024]);
     });
 
-    testWidgets('md write row: the title stays inert (no dispatch surface)',
-        (tester) async {
-      final gateway = FakeChatGateway();
+    testWidgets('md write row: tapping opens the markdown render kind '
+        'through the read loop', (tester) async {
+      final gateway = _HoldTextGateway();
       await _pumpToolRow(tester, gateway, path: 'C:/w/notes.md');
 
-      await tester.tap(find.text('已写入 notes.md'));
-      await tester.pumpAndSettle();
+      await tester.tap(find.text('notes.md'));
+      await tester.pump();
+      await tester.pump();
 
+      expect(find.byType(FilePreviewPage), findsOneWidget);
       expect(find.byType(ImageViewerPage), findsNothing);
+      expect(
+        tester.widget<FilePreviewPage>(find.byType(FilePreviewPage)).render,
+        FilePreviewRender.markdown,
+      );
+      expect(gateway.textCalls.single,
+          ['/repo/app', 'C:/w/notes.md', 0, 256 * 1024]);
+    });
+
+    testWidgets('svg write row dispatches into the svg render kind',
+        (tester) async {
+      final gateway = _HoldTextGateway();
+      await _pumpToolRow(tester, gateway, path: 'C:/w/logo.svg');
+
+      await tester.tap(find.text('logo.svg'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(FilePreviewPage), findsOneWidget);
+      expect(
+        tester.widget<FilePreviewPage>(find.byType(FilePreviewPage)).render,
+        FilePreviewRender.svg,
+      );
+      expect(gateway.textCalls.single,
+          ['/repo/app', 'C:/w/logo.svg', 0, 256 * 1024]);
+    });
+
+    testWidgets('pdf write row: tapping pushes PdfPreviewPage through the '
+        'stat probe', (tester) async {
+      final gateway = _HoldStatGateway();
+      await _pumpToolRow(tester, gateway, path: 'C:/w/doc.pdf');
+
+      // The name segment is a tappable span once the row is dispatchable
+      // (S6 turned pdf on; before, the whole title was inert plain text).
+      await tester.tap(find.text('doc.pdf'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(PdfPreviewPage), findsOneWidget);
       expect(find.byType(FilePreviewPage), findsNothing);
-      // No dead fetch either: nothing extension-dispatchable, no RPC.
+      expect(find.byType(ImageViewerPage), findsNothing);
+      // The pdf page's three-state read starts with the official stat probe
+      // (the mode fork); bytes travel through fileReadRange behind the
+      // document's own bridge — never the text/media reads.
+      expect(gateway.statCalls.single, ['/repo/app', 'C:/w/doc.pdf']);
       expect(gateway.calls.where((c) => c.$1 == 'fileReadMedia'), isEmpty);
       expect(gateway.calls.where((c) => c.$1 == 'fileReadText'), isEmpty);
+      // Loading phase held: the stat probe is still pending.
+      expect(find.byType(CircularProgressIndicator), findsWidgets);
     });
+  });
+
+  group('dispatchable matrix (design §3)', () {
+    // Blacklist by class representative (design §3.1) + the boundary set
+    // (R2-L3): extension-less names, dot-files, double extensions (last
+    // segment), case, and directory-shaped paths (folded in as-is — the
+    // directory exclusion lives at the entry point, R8/M3, not here).
+    const cases = <String, bool>{
+      // render / text surfaces all stay dispatchable
+      'C:/w/a.png': true,
+      'C:/w/a.webp': true,
+      'C:/w/page.html': true,
+      'C:/w/page.htm': true,
+      'C:/w/notes.md': true,
+      'C:/w/notes.markdown': true,
+      'C:/w/logo.svg': true,
+      'C:/w/doc.pdf': true, // S6: pdf opens its own PdfPreviewPage
+      'C:/w/data.json': true,
+      'C:/w/run.py': true,
+      'C:/w/style.css': true,
+      // archives
+      'C:/w/bundle.zip': false,
+      'C:/w/bundle.tar.gz': false,
+      'C:/w/BUNDLE.ZIP': false,
+      'C:/w/app.jar': false,
+      // binaries
+      'C:/w/tool.exe': false,
+      'C:/w/lib.so': false,
+      'C:/w/mod.wasm': false,
+      'C:/w/data.sqlite': false,
+      // office containers
+      'C:/w/report.docx': false,
+      'C:/w/sheet.xlsx': false,
+      'C:/w/deck.pptx': false,
+      // media
+      'C:/w/clip.mp4': false,
+      'C:/w/voice.mp3': false,
+      'C:/w/scene.mkv': false,
+      // bitmaps Flutter cannot decode
+      'C:/w/scan.tiff': false,
+      'C:/w/shot.heic': false,
+      'C:/w/favicon.ico': false,
+      // fonts
+      'C:/w/font.woff2': false,
+      'C:/w/font.ttf': false,
+      // disk images / installers
+      'C:/w/installer.dmg': false,
+      'C:/w/app.apk': false,
+      'C:/w/app.hap': false,
+      // boundary set
+      'C:/w/Makefile': true,
+      'C:/w/.gitignore': true,
+      'C:/w/sub/dir': true,
+      'C:/w/sub/dir/': true,
+    };
+
+    for (final entry in cases.entries) {
+      test('dispatchable(${entry.key}) == ${entry.value}', () {
+        expect(ChatPreview.dispatchable(entry.key), entry.value);
+      });
+    }
   });
 
   group('markdown body integration', () {
@@ -247,6 +372,36 @@ void main() {
 
       expect(find.byType(FilePreviewPage), findsOneWidget);
       expect(gateway.textCalls, hasLength(1));
+    });
+
+    testWidgets('a markdown link to a blacklisted file reaches the '
+        'cannot-preview state (links stay ungated, design §0 L1)',
+        (tester) async {
+      final gateway = FakeChatGateway()
+        ..fileReadTextResult = const TextChunk(
+          text: '',
+          bytesRead: 262144,
+          totalBytes: 262144,
+          hasMore: true,
+          isBinary: true,
+        );
+      await tester.pumpWidget(
+        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {
+          'rowId': 1,
+          'kind': 'assistantText',
+          'text': '[zip](C:/w/bundle.zip)\n\ndone',
+        },
+      ]);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('zip'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(FilePreviewPage), findsOneWidget);
+      expect(find.text('二进制文件，无文本预览'), findsOneWidget);
     });
 
     testWidgets('markdown http link launches the system browser',
