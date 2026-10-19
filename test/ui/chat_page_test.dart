@@ -3625,7 +3625,7 @@ void main() {
     expect(find.text('帮我修复登录'), findsOneWidget);
     // R1 regression: the button must read the table copy, never the raw
     // (dotted) key.
-    expect(find.widgetWithText(FilledButton, '编辑并重发'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, '发送'), findsOneWidget);
     expect(find.text('chat.action.edit.resend'), findsNothing);
     expect(gateway.calls.where((c) => c.$1 == 'editUserQuery'), isEmpty);
 
@@ -5290,7 +5290,7 @@ void main() {
       return gateway;
     }
 
-    testWidgets('rewind toggle ON → workspaceMode:"rewind" on the wire, '
+    testWidgets('rewind direct-send → workspaceMode:"rewind" on the wire, '
         'editor closes', (tester) async {
       final gateway = await pumpEditable(tester);
 
@@ -5298,9 +5298,9 @@ void main() {
         find.byKey(const ValueKey('inline-edit-input')),
         '改后的消息',
       );
-      await tester.tap(chipOf('对话 + 文件重置'));
-      await tester.pump();
-      await tester.tap(find.widgetWithText(FilledButton, '编辑并重发'));
+      await tester.tap(
+        find.widgetWithText(OutlinedButton, '对话 + 文件重置'),
+      );
       await tester.pumpAndSettle();
 
       final edit = gateway.transport.edits.single;
@@ -5312,7 +5312,7 @@ void main() {
       expect(find.byKey(const ValueKey('inline-edit-input')), findsNothing);
     });
 
-    testWidgets('rewind toggle OFF → the field stays OFF the wire '
+    testWidgets('preserve send → the field stays OFF the wire '
         '(preserve is the desktop default)', (tester) async {
       final gateway = await pumpEditable(tester);
 
@@ -5320,14 +5320,14 @@ void main() {
         find.byKey(const ValueKey('inline-edit-input')),
         '保留对话',
       );
-      await tester.tap(find.widgetWithText(FilledButton, '编辑并重发'));
+      await tester.tap(find.widgetWithText(FilledButton, '发送'));
       await tester.pumpAndSettle();
 
       expect(gateway.transport.edits.single.workspaceMode, isNull);
       expect(gateway.transport.edits.single.newText, '保留对话');
     });
 
-    testWidgets('running session: the rewind chip is disabled but a '
+    testWidgets('running session: the rewind button is disabled but a '
         'preserve edit still sends', (tester) async {
       final gateway = _EditGateway();
       gateway.snapshotExtra = {
@@ -5343,14 +5343,20 @@ void main() {
       await tester.tap(find.byIcon(Icons.edit_outlined));
       await tester.pumpAndSettle();
 
-      final chip = tester.widget<FilterChip>(chipOf('对话 + 文件重置'));
-      expect(chip.onSelected, isNull); // grey state
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.widgetWithText(OutlinedButton, '对话 + 文件重置'),
+            )
+            .onPressed,
+        isNull, // grey state
+      );
 
       await tester.enterText(
         find.byKey(const ValueKey('inline-edit-input')),
         '运行中编辑',
       );
-      await tester.tap(find.widgetWithText(FilledButton, '编辑并重发'));
+      await tester.tap(find.widgetWithText(FilledButton, '发送'));
       await tester.pumpAndSettle();
 
       expect(gateway.transport.edits.single.workspaceMode, isNull);
@@ -5365,7 +5371,7 @@ void main() {
         find.byKey(const ValueKey('inline-edit-input')),
         '失败的编辑',
       );
-      await tester.tap(find.widgetWithText(FilledButton, '编辑并重发'));
+      await tester.tap(find.widgetWithText(FilledButton, '发送'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('编辑失败'), findsOneWidget);

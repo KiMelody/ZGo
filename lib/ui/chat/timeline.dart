@@ -1581,17 +1581,18 @@ class _UserBubbleState extends State<_UserBubble> {
 }
 
 /// Inline edit-resend card (D1, official 09 shoot): the user bubble becomes
-/// an edit area with a `×取消` / `对话 + 文件重置`（rewind 开关，运行中禁用）/
-/// `↑发送` tool row. Holds its own controller; the send action rides the
-/// page callback ([_ChatPageState._sendUserEdit]) — the card never touches
-/// gateway commands. Replaces the bubble INSIDE its turn group, so the
-/// Scaffold Column structure is untouched (keyboard contract §8-1) and the
-/// stable `turn-<rowId>` key keeps this State alive across rebuilds.
+/// an edit area with a `取消` / `对话 + 文件重置`（rewind direct-send, greyed
+/// while running）/ `发送` action row — both action buttons send immediately,
+/// there is no toggle state. Holds its own controller; the send actions ride
+/// the page callback ([_ChatPageState._sendUserEdit]) — the card never
+/// touches gateway commands. Replaces the bubble INSIDE its turn group, so
+/// the Scaffold Column structure is untouched (keyboard contract §8-1) and
+/// the stable `turn-<rowId>` key keeps this State alive across rebuilds.
 class _InlineEditCard extends StatefulWidget {
   final String initialText;
 
-  /// True while the conversation runs — the rewind switch greys out
-  /// (official) while the send stays available for a preserve edit.
+  /// True while the conversation runs — the rewind direct-send greys out
+  /// (official) while the preserve send stays available.
   final bool rewindDisabled;
   final VoidCallback onCancel;
   final Future<void> Function(String newText, bool rewind) onSend;
@@ -1611,7 +1612,6 @@ class _InlineEditCardState extends State<_InlineEditCard> {
   late final TextEditingController _controller = TextEditingController(
     text: widget.initialText,
   );
-  bool _rewind = false;
   bool _sending = false;
 
   @override
@@ -1629,12 +1629,12 @@ class _InlineEditCardState extends State<_InlineEditCard> {
     super.dispose();
   }
 
-  Future<void> _send() async {
+  Future<void> _send(bool rewind) async {
     final text = _controller.text.trim();
     if (text.isEmpty || _sending) return;
     setState(() => _sending = true);
     try {
-      await widget.onSend(text, _rewind);
+      await widget.onSend(text, rewind);
     } finally {
       // The page closes the editor on success (notifier → null); on failure
       // the edit state stays so the user can retry — just un-busy.
@@ -1644,13 +1644,17 @@ class _InlineEditCardState extends State<_InlineEditCard> {
 
   @override
   Widget build(BuildContext context) {
+    final textEmpty = _controller.text.trim().isEmpty;
     return Container(
-      margin: const EdgeInsets.only(left: 56, top: 8, bottom: 8),
+      // No 56dp gutter: the editor is an edit surface (like the bottom
+      // composer), not a chat bubble — full width keeps cancel / reset /
+      // send on one line at 360dp. The gutter belongs to _UserBubble.
+      margin: const EdgeInsets.only(top: 8, bottom: 8),
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: ZInk.card(context),
         borderRadius: BorderRadius.circular(ZRadius.tile),
-        border: Border.all(color: ZColors.sky500.withValues(alpha: 0.5)),
+        border: Border.all(color: ZInk.cardBorder(context)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1669,18 +1673,11 @@ class _InlineEditCardState extends State<_InlineEditCard> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               TextButton(
-                style: TextButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  minimumSize: Size.zero,
-                ),
                 onPressed: _sending ? null : widget.onCancel,
-                child: Text(
-                  tr(context, 'common.cancel'),
-                  style: ZType.sub,
-                ),
+                child: Text(tr(context, 'common.cancel')),
               ),
-              // The chip + send wrap to a second line on narrow screens
-              // (390px zh: three labels on one row overflow ~10px).
+              // The two send actions wrap to a second line on narrow screens
+              // / long locales (en 'Chat + file reset').
               Expanded(
                 child: Align(
                   alignment: Alignment.centerRight,
@@ -1690,44 +1687,28 @@ class _InlineEditCardState extends State<_InlineEditCard> {
                     alignment: WrapAlignment.end,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      FilterChip(
-                        label: Text(
-                          tr(context, 'chat.action.rewindToggle'),
-                          style: ZType.caption,
-                        ),
-                        selected: _rewind,
-                        // Running turns refuse the rewind (official grey
-                        // state).
-                        onSelected: widget.rewindDisabled || _sending
-                            ? null
-                            : (v) => setState(() => _rewind = v),
-                      ),
-                      FilledButton.icon(
-                        style: FilledButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                          minimumSize: Size.zero,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 8,
+                      // OutlinedButton must carry the shape explicitly: its
+                      // M3 default (stadium) is not on the radius ladder.
+                      OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          shape: RoundedRectangleBorder(
+                            borderRadius:
+                                BorderRadius.circular(ZRadius.field),
                           ),
                         ),
+                        // Running turns refuse the rewind direct-send
+                        // (official grey state).
                         onPressed:
-                            _controller.text.trim().isEmpty || _sending
+                            widget.rewindDisabled || _sending || textEmpty
                             ? null
-                            : _send,
-                        icon: _sending
-                            ? const SizedBox(
-                                width: 12,
-                                height: 12,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 1.5,
-                                ),
-                              )
-                            : const Icon(Icons.arrow_upward, size: 14),
-                        label: Text(
-                          tr(context, 'chat.action.editResend'),
-                          style: ZType.sub,
-                        ),
+                            : () => _send(true),
+                        child: Text(tr(context, 'chat.action.rewindToggle')),
+                      ),
+                      FilledButton(
+                        onPressed: textEmpty || _sending
+                            ? null
+                            : () => _send(false),
+                        child: Text(tr(context, 'chat.action.editSend')),
                       ),
                     ],
                   ),
