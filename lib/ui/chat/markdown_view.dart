@@ -6,6 +6,7 @@ import 'package:markdown/markdown.dart' as md;
 import '../theme.dart';
 import '../ui_settings.dart';
 import 'image_viewer_page.dart';
+import 'source_highlight.dart';
 
 /// Markdown renderer matching the web client look: selectable
 /// body text, inline code on a pill background, fenced code blocks with a
@@ -36,6 +37,12 @@ class AppMarkdown extends StatelessWidget {
   /// keeps the previous full-bleed prose.
   final double proseRightInset;
 
+  /// Fenced code blocks get syntax highlighting (task 10-18-file-preview
+  /// S4, design §4.3). Off by default so every chat call site keeps its
+  /// current plain rendering; the preview's markdown render view is the
+  /// intended `true` caller (S5).
+  final bool highlight;
+
   const AppMarkdown(
     this.data, {
     super.key,
@@ -44,6 +51,7 @@ class AppMarkdown extends StatelessWidget {
     this.imageResolver,
     this.onLinkTap,
     this.proseRightInset = 0,
+    this.highlight = false,
   });
 
   @override
@@ -96,7 +104,7 @@ class AppMarkdown extends StatelessWidget {
       selectable: selectable,
       styleSheet: styleSheet,
       builders: {
-        'code': _CodeBlockBuilder(codeStyle: code),
+        'code': _CodeBlockBuilder(codeStyle: code, highlight: highlight),
       },
       softLineBreak: true,
       sizedImageBuilder: imageResolver == null
@@ -218,7 +226,11 @@ class _MarkdownImageState extends State<_MarkdownImage> {
 class _CodeBlockBuilder extends MarkdownElementBuilder {
   final TextStyle codeStyle;
 
-  _CodeBlockBuilder({required this.codeStyle});
+  /// Shared [AppMarkdown.highlight]; false keeps the plain body exactly as
+  /// before the parameter existed.
+  final bool highlight;
+
+  _CodeBlockBuilder({required this.codeStyle, required this.highlight});
 
   @override
   Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
@@ -234,7 +246,11 @@ class _CodeBlockBuilder extends MarkdownElementBuilder {
       // inline code: default styling
       return null;
     }
-    return _CodeBlock(code: code, language: language, codeStyle: codeStyle);
+    return _CodeBlock(
+        code: code,
+        language: language,
+        codeStyle: codeStyle,
+        highlight: highlight);
   }
 }
 
@@ -245,11 +261,13 @@ class _CodeBlock extends StatefulWidget {
   final String code;
   final String language;
   final TextStyle codeStyle;
+  final bool highlight;
 
   const _CodeBlock({
     required this.code,
     required this.language,
     required this.codeStyle,
+    required this.highlight,
   });
 
   @override
@@ -342,18 +360,30 @@ class _CodeBlockState extends State<_CodeBlock> {
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.all(ZTile.headPadding),
-              child: SelectableText(
-                code.endsWith('\n')
-                    ? code.substring(0, code.length - 1)
-                    : code,
-                style: widget.codeStyle.copyWith(
-                  height: 1.5,
-                  color: ZInk.codeText(context),
-                ),
-              ),
+              child: _body(context),
             ),
         ],
       ),
     );
+  }
+
+  /// Expanded body: the plain [SelectableText] the chat has always rendered,
+  /// or its rich twin when highlighting is on and the language resolves to a
+  /// registered grammar (source_highlight.dart). Both keep the horizontal
+  /// scroll, the trimmed trailing newline and selection.
+  Widget _body(BuildContext context) {
+    final code = widget.code;
+    final text =
+        code.endsWith('\n') ? code.substring(0, code.length - 1) : code;
+    final style = widget.codeStyle.copyWith(
+      height: 1.5,
+      color: ZInk.codeText(context),
+    );
+    final span = widget.highlight
+        ? highlightSpan(context,
+            text: text, language: widget.language, base: style)
+        : null;
+    if (span == null) return SelectableText(text, style: style);
+    return SelectableText.rich(span, style: style);
   }
 }

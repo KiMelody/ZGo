@@ -65,6 +65,10 @@ dependencies:
   # to ^1.x, which keeps the umbrella on 9.x (10.x needs ^2.x).
   flutter_secure_storage: '>=9.2.0 <10.0.0'
   flutter_secure_storage_ohos: '>=1.0.0 <2.0.0'
+  # Source syntax highlighting (hljs v11.9 grammar port, MIT). Languages are
+  # imported one file at a time — never `all.dart` — so tree-shaking keeps
+  # unregistered grammars out of the build (see lib/ui/chat/source_highlight.dart).
+  re_highlight: '>=0.0.3 <0.1.0'
 
 dev_dependencies:
   flutter_test:
@@ -110,6 +114,12 @@ flutter:
     # OFL-1.1 / Apache-2.0 texts are declared here explicitly.
     - assets/fonts/OFL-NotoSansSC.txt
     - assets/fonts/LICENSE-MaterialSymbolsRounded.txt
+    # pdf.js 5.4.296 (matches the official mobile/desktop bundle — see
+    # .trellis/tasks/10-18-file-preview-formats/research/spike-notes.md for
+    # provenance hashes). Assets never ship as separate files: the preview
+    # page reads them, inlines them into a sandboxed loadData document.
+    - assets/pdfjs/pdf.min.mjs
+    - assets/pdfjs/pdf.worker.min.mjs
 
   # Bundled CJK UI font — subset built by tool/font_subset.py.
   fonts:
