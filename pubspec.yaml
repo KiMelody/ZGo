@@ -47,6 +47,12 @@ dependencies:
   zxing2: '>=0.2.0 <0.3.0'
   image: '>=4.0.0 <5.0.0'
   shared_preferences: '>=2.2.0 <3.0.0'
+  # Chat draft attachment bytes on disk. The ohos implementation is the
+  # pub.dev path_provider_ohos package (OpenHarmony TPC port, federated):
+  # app code only ever imports the umbrella — same wiring as
+  # flutter_secure_storage below.
+  path_provider: '>=2.1.0 <3.0.0'
+  path_provider_ohos: '>=2.2.0 <3.0.0'
   crypto: '>=3.0.0 <4.0.0'
   web_socket_channel: '>=2.4.0 <4.0.0'
   package_info_plus: '>=6.0.0 <10.0.0'

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Directory, Platform;
 
 import 'package:app_links/app_links.dart';
 import 'package:flutter/foundation.dart';
@@ -6,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:home_widget/home_widget.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'notifications/keepalive_controller.dart';
 import 'notifications/notification_service.dart';
@@ -92,6 +94,16 @@ class _ZGoAppState extends State<ZGoApp>
   final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
   late final DeviceSessionHub _hub = DeviceSessionHub(
     nativeListEnabled: () => _ui.nativeListEnabled,
+    // Composer-draft attachment bytes (lib/state stays plugin-free — the
+    // resolver is injected here). App-support, not cache: drafts must
+    // survive restarts, and allowBackup=false already keeps the tree out
+    // of cloud backups.
+    draftsRoot: () async {
+      final support = await getApplicationSupportDirectory();
+      return Directory(
+        '${support.path}${Platform.pathSeparator}chat_drafts',
+      );
+    },
   );
   late final MessageScheduler _scheduler = MessageScheduler(
     store: _scheduled,

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Directory;
 
 import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
@@ -22,6 +23,7 @@ import '../protocol/relay_client.dart';
 import '../protocol/remote_client.dart';
 import '../protocol/task_commands.dart';
 import '../protocol/task_groups.dart';
+import 'chat_draft_store.dart';
 import 'device_store.dart';
 import 'entitlement_poller.dart';
 import 'link_supervisor.dart';
@@ -207,6 +209,12 @@ abstract interface class ChatGateway
   String? get chatWorkspaceId;
   String? get workspacePath;
 
+  /// Composer-draft persistence for this device's chat pages (text +
+  /// attachment metadata in SharedPreferences, attachment bytes under the
+  /// hub-injected root). Pages restore once on init and debounce writes
+  /// into it; failures degrade to no persistence, never blocking chat.
+  ChatDraftStore get chatDraftStore;
+
   /// Original remote-control URL (for "copy task link").
   String? get remoteUrl;
 
@@ -368,6 +376,7 @@ class DeviceSession extends ChangeNotifier
     required this.params,
     this.preferredWorkspaceKey,
     this.onWorkspaceOpened,
+    this.draftsRoot,
     this.clientFactory,
     this.timings = const StallTimings(),
   }) : _homeStore = TaskHomeStore(deviceId: deviceId) {
@@ -380,7 +389,24 @@ class DeviceSession extends ChangeNotifier
       // notify; an empty/cold store must not add noise notifies.
       if (!_disposed && _homeStore.hasPersistedState) notifyListeners();
     }));
+    // Composer drafts (design 10-20): fire-and-forget warm-up like the
+    // home store; page ops await the load themselves, so this only
+    // front-runs the first restore. No notify — nothing listens.
+    unawaited(_chatDraftStore.load());
   }
+
+  /// Composer-draft attachment root resolver (hub-injected so lib/state
+  /// stays free of platform plugins — production resolves
+  /// `<appSupport>/chat_drafts` via path_provider in main).
+  final Future<Directory?> Function()? draftsRoot;
+
+  late final ChatDraftStore _chatDraftStore = ChatDraftStore(
+    deviceId: deviceId,
+    attachmentRoot: draftsRoot,
+  );
+
+  @override
+  ChatDraftStore get chatDraftStore => _chatDraftStore;
 
   RemoteClient? _client;
   BridgeSession? _bridge;
@@ -2458,7 +2484,11 @@ class DeviceSessionHub extends ChangeNotifier {
   final Map<String, String> _lastWorkspaceKey = {};
   bool _disposed = false;
 
-  DeviceSessionHub({required this.nativeListEnabled});
+  DeviceSessionHub({required this.nativeListEnabled, this.draftsRoot});
+
+  /// Composer-draft attachment root, threaded into every [ensure]d
+  /// session's [ChatDraftStore].
+  final Future<Directory?> Function()? draftsRoot;
 
   DeviceSession? sessionOf(String deviceId) => _sessions[deviceId];
 
@@ -2493,6 +2523,7 @@ class DeviceSessionHub extends ChangeNotifier {
       params: params,
       preferredWorkspaceKey: _lastWorkspaceKey[device.id],
       onWorkspaceOpened: (key) => _lastWorkspaceKey[device.id] = key,
+      draftsRoot: draftsRoot,
     );
     _sessions[device.id] = session;
     session.addListener(_onSessionChanged);

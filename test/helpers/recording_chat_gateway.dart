@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/protocol/file_service.dart';
 import 'package:zgo/protocol/git_service.dart';
+import 'package:zgo/state/chat_draft_store.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/state/entitlement_poller.dart';
 import 'package:zgo/state/quota_reset.dart';
@@ -186,6 +187,12 @@ class RecordingConversationTransport implements ConversationTransport {
 /// negative assertions ("no command must be sent"); opt in explicitly and
 /// name the test with a `[strict]` prefix.
 class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
+  /// Composer-draft store (design 10-20): default is a detached instance
+  /// (no attachment root, SharedPreferences swallowed) — tests that care
+  /// assign their own with mock prefs + a temp dir.
+  @override
+  ChatDraftStore chatDraftStore = ChatDraftStore(deviceId: 'rec');
+
   @override
   DeviceStatus status = DeviceStatus.connected;
   @override
