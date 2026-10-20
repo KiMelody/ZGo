@@ -741,7 +741,7 @@ packages:
     source: hosted
     version: "1.9.1"
   path_provider:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: path_provider
       sha256: a7f4874f987173da295a61c181b8ee71dab59b332a486b391babf26a1b884825
@@ -772,6 +772,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.2.2"
+  path_provider_ohos:
+    dependency: "direct main"
+    description:
+      name: path_provider_ohos
+      sha256: "6b479a99543743a9e0882f69521345b1ec78ceacb50ba155dffd43d01b1f84d0"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.2.1"
   path_provider_platform_interface:
     dependency: transitive
     description:

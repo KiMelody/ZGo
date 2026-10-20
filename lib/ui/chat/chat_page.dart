@@ -181,6 +181,19 @@ class _ChatPageState extends State<ChatPage> {
   /// measurements (see [_measureAnchor] / [_compensateAnchor]).
   final GlobalKey _listKey = GlobalKey();
   String? _sessionId;
+
+  /// Composer-draft persistence key: the session once created, else a
+  /// workspace-scoped placeholder that dies with the first successful
+  /// send (design 10-20). Follows [_sessionId] live so a draft page that
+  /// fails its follow-up send after createSession keeps its text under
+  /// the new key.
+  String get _draftKey =>
+      _sessionId ?? 'draft.${widget.gateway.chatWorkspaceId ?? ''}';
+
+  /// Debounce for draft writes (500ms): the only reliable persistence
+  /// window on mobile is during editing — an OS kill fires no lifecycle
+  /// callback, so saves cannot wait for dispose.
+  Timer? _draftPersistTimer;
   String? _error;
   bool _sending = false;
 
@@ -509,6 +522,10 @@ class _ChatPageState extends State<ChatPage> {
     final initial = widget.initialComposerText;
     if (initial != null && initial.isNotEmpty) {
       _inputController.text = initial;
+    } else {
+      // Composer-draft restore (design 10-20): list-page prefills win over
+      // a stored draft; the store degrades to a no-op when empty.
+      unawaited(_restoreDraft());
     }
     _scrollController.addListener(_onScroll);
     if (_sessionId != null) {
@@ -526,7 +543,45 @@ class _ChatPageState extends State<ChatPage> {
         setState(() => _showSlash = show);
       }
       _maybeOpenMentionPicker(text);
+      _scheduleDraftPersist();
     });
+  }
+
+  /// Reads the stored draft into the composer. Guards against clobbering
+  /// anything the user managed to type/pick before the async load landed.
+  Future<void> _restoreDraft() async {
+    final snapshot = await widget.gateway.chatDraftStore.restore(_draftKey);
+    if (!mounted || snapshot == null) return;
+    if (snapshot.text.isNotEmpty && _inputController.text.isEmpty) {
+      _inputController.text = snapshot.text;
+      _inputController.selection = TextSelection.collapsed(
+        offset: snapshot.text.length,
+      );
+    }
+    if (snapshot.files.isNotEmpty && _pendingFiles.isEmpty) {
+      setState(() {
+        _pendingFiles.addAll([
+          for (final f in snapshot.files) _PendingFile(f.name, f.mime, f.bytes),
+        ]);
+      });
+    }
+  }
+
+  /// Debounced draft upsert; an emptied composer (the `_send()` success
+  /// paths all clear it) converges here into an entry removal.
+  void _scheduleDraftPersist() {
+    _draftPersistTimer?.cancel();
+    _draftPersistTimer = Timer(const Duration(milliseconds: 500), () {
+      unawaited(_persistDraft());
+    });
+  }
+
+  Future<void> _persistDraft() {
+    return widget.gateway.chatDraftStore.saveText(
+      _draftKey,
+      _inputController.text,
+      _pendingFiles.length,
+    );
   }
 
   /// D2: resolve the off-peak queue position bound to this session. The
@@ -877,6 +932,13 @@ class _ChatPageState extends State<ChatPage> {
     _feed.dispose();
     _git.dispose();
     _editingRowId.dispose();
+    // Draft flush: a non-empty composer survives page death (back-out,
+    // pane switch, hot restart); an already-cleared one was removed by
+    // the debounced write after the send that cleared it.
+    _draftPersistTimer?.cancel();
+    if (_inputController.text.isNotEmpty || _pendingFiles.isNotEmpty) {
+      unawaited(_persistDraft());
+    }
     _inputController.dispose();
     _scrollController.dispose();
     _frozenFrame?.dispose();
@@ -1291,6 +1353,7 @@ class _ChatPageState extends State<ChatPage> {
       );
       if (result == null) return;
       var rejected = 0;
+      final before = _pendingFiles.length;
       setState(() {
         for (final file in result.files) {
           final bytes = file.bytes;
@@ -1306,6 +1369,21 @@ class _ChatPageState extends State<ChatPage> {
           );
         }
       });
+      // Persist the newly-landed attachments immediately (design 10-20):
+      // byte writes are one-shot per pick, no debounce.
+      final store = widget.gateway.chatDraftStore;
+      for (var i = before; i < _pendingFiles.length; i++) {
+        final f = _pendingFiles[i];
+        unawaited(
+          store.putAttachment(
+            _draftKey,
+            i,
+            name: f.fileName,
+            mime: f.mime,
+            bytes: f.bytes,
+          ),
+        );
+      }
       if (rejected > 0 && mounted) {
         _toast(trP(context, 'chat.attach.tooLarge', ['30']));
       }
@@ -1411,6 +1489,11 @@ class _ChatPageState extends State<ChatPage> {
           config: _buildDraftConfig(),
         );
         if (!mounted) return;
+        // The draft placeholder entry dies the moment the session exists —
+        // its content continues under the session key via the debounced
+        // writes, and a stale placeholder must not resurface in the next
+        // new-task page (design 10-20).
+        unawaited(widget.gateway.chatDraftStore.remove('draft.$workspaceId'));
         _sessionId = sessionId;
         // 2) subscribe in the background — must NOT block sending
         setState(() => _progress = null);
@@ -3403,7 +3486,15 @@ class _ChatPageState extends State<ChatPage> {
               _PendingFilesBar(
                 files: _pendingFiles,
                 uploadProgress: _uploadProgress,
-                onRemove: (i) => setState(() => _pendingFiles.removeAt(i)),
+                onRemove: (i) {
+                  setState(() => _pendingFiles.removeAt(i));
+                  unawaited(
+                    widget.gateway.chatDraftStore.removeAttachmentAt(
+                      _draftKey,
+                      i,
+                    ),
+                  );
+                },
               ),
             // Locally-queued replayable messages (3.12.3): sits directly
             // above the composer like the pendingCommands cards.
