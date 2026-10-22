@@ -1818,9 +1818,10 @@ class _TaskListPageState extends State<TaskListPage>
   /// The current (latest running / most recent) row gets the
   /// rounded white/10 highlight. Rows of other workspaces carry [workspace]
   /// so opening them re-points the bridge (web: workspace-bridge-open with
-  /// taskId). Tags: 「等待确认」(pending interaction) and the
-  /// unread dot (`unreadAt`). [groupDot] marks a task-group member with its
-  /// group's palette dot — the same marker the timeline headers render (B8).
+  /// taskId). Tags: 「等待确认」(pending interaction), 「对话」
+  /// (conversation workspace) and the unread dot (`unreadAt`). [groupDot]
+  /// marks a task-group member with its group's palette dot — the same
+  /// marker the timeline headers render (B8).
   Widget _taskRow(
     BuildContext context,
     DeviceSession session,
@@ -1840,6 +1841,10 @@ class _TaskListPageState extends State<TaskListPage>
     ].join(' · ');
     final awaiting = entry.pendingInteraction != null;
     final unread = entry.raw['unreadAt'] != null;
+    // Conversation rows merged into the default card (draft-* workspaces)
+    // keep their own workspace map, so the row can name its type.
+    final conversation =
+        workspace != null && _isConversationWorkspace(workspace);
     return Padding(
       padding: const EdgeInsets.symmetric(
           horizontal: 8, vertical: ZListRow.gap),
@@ -1904,6 +1909,13 @@ class _TaskListPageState extends State<TaskListPage>
                           children: [
                             if (awaiting) ...[
                               _awaitingTag(context),
+                              const SizedBox(width: 6),
+                            ],
+                            // Type (constant) after state (transient), and a
+                            // neutral chip so it never competes with the
+                            // awaiting warning tone.
+                            if (conversation) ...[
+                              _conversationTag(context),
                               const SizedBox(width: 6),
                             ],
                             Expanded(
@@ -2004,6 +2016,24 @@ class _TaskListPageState extends State<TaskListPage>
           fontWeight: FontWeight.w500,
           color: ZInk.warningTone(context),
         ),
+      ),
+    );
+  }
+
+  /// Row-level 「对话」 chip for conversation (draft-*) sessions that the
+  /// directory merges into the default card. Same neutral shape as the card
+  /// header's [_kindBadge]: the row type is constant information, not a
+  /// warning state.
+  Widget _conversationTag(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: ZInk.tile(context),
+        borderRadius: BorderRadius.circular(ZRadius.mini),
+      ),
+      child: Text(
+        tr(context, 'tasks.workspaceKind.conversation'),
+        style: ZType.caption.copyWith(color: ZInk.faint(context)),
       ),
     );
   }

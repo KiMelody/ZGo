@@ -196,6 +196,136 @@ void main() {
   });
 
   testWidgets(
+      'a conversation row merged into the default card carries the 「对话」 '
+      'chip', (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: const [],
+      workspaces: [
+        {
+          'workspacePath': '/home/default',
+          'workspaceIdentity': 'default-id',
+          'label': 'default',
+        },
+        {
+          'workspacePath': '/home/.zcode/workspace/draft-1',
+          'label': 'draft-1',
+        },
+      ],
+      relayTasks: [
+        {
+          'taskId': 'draft-session',
+          'title': '纯对话',
+          'workspacePath': '/home/.zcode/workspace/draft-1',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('纯对话'), findsOneWidget);
+    // Row-level chip only: the default card header keeps its own kind.
+    expect(find.text('对话'), findsOneWidget);
+    expect(find.text('本地'), findsOneWidget);
+  });
+
+  testWidgets('an ordinary task row carries no 「对话」 chip', (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 's1',
+          'title': '普通任务',
+          'phase': 'idle',
+          'lastActivityAt': now,
+        },
+      ],
+      workspaces: [
+        {'workspacePath': '/repo/app'},
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('普通任务'), findsOneWidget);
+    expect(find.text('对话'), findsNothing);
+  });
+
+  testWidgets('awaiting + conversation renders 「等待确认」 → 「对话」 → time',
+      (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 'awaiting-draft',
+          'title': '等待确认的会话',
+          'phase': 'running',
+          'lastActivityAt': now,
+          'pendingInteraction': {'kind': 'permission'},
+          'workspacePath': '/home/.zcode/workspace/draft-1',
+        },
+      ],
+      workspaces: [
+        {
+          'workspacePath': '/home/default',
+          'workspaceIdentity': 'default-id',
+          'label': 'default',
+        },
+        {
+          'workspacePath': '/home/.zcode/workspace/draft-1',
+          'label': 'draft-1',
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final awaiting = find.text('等待确认');
+    final chip = find.text('对话');
+    final time = find.text('刚刚');
+    expect(awaiting, findsOneWidget);
+    expect(chip, findsOneWidget);
+    expect(time, findsOneWidget);
+    expect(
+      tester.getTopLeft(awaiting).dx,
+      lessThan(tester.getTopLeft(chip).dx),
+    );
+    expect(tester.getTopLeft(chip).dx, lessThan(tester.getTopLeft(time).dx));
+  });
+
+  testWidgets(
       'desktop sidebar hides purpose-marked conversation workspace folders',
       (tester) async {
     useDesktop(tester);
