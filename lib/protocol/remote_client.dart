@@ -154,6 +154,13 @@ class RemoteClient {
 
   final Set<BridgeSession> _recoveringBridges = {};
 
+  /// Workspaces the desktop answered `success:false` + "不在当前窗口" for.
+  /// That reply is deterministic: a reconnect-request can never succeed for
+  /// these keys, so later recoveries go straight to the reopen path. Kept
+  /// for the process lifetime — reopen succeeds even after the window is
+  /// switched back, so there is no cheaper state to return to.
+  final Set<String> _windowMissedWorkspaces = {};
+
   /// Retries bridge recovery until it succeeds, so a degraded bridge never
   /// strands commands ("can't send after reconnect"). A relay re-drop during
   /// the retries just prolongs the loop.
@@ -180,19 +187,30 @@ class RemoteClient {
       return true;
     }
     session.markDegraded('recovering');
-    // 1) cheap path: workspace-reconnect-request
-    try {
-      final res = await reconnectWorkspace(
-        workspaceKey,
-      ).timeout(const Duration(seconds: 15));
-      if (res['success'] == true) {
-        _log('[bridge] reconnected $workspaceKey');
-        session.degraded.value = null;
-        session.recovered.value += 1;
-        return true;
+    // 1) cheap path: workspace-reconnect-request. Skipped once the desktop
+    // has told us this workspace is not in its current window.
+    if (_windowMissedWorkspaces.contains(workspaceKey)) {
+      _log('[bridge] skip reconnect (window-missed remembered): $workspaceKey');
+    } else {
+      try {
+        final res = await reconnectWorkspace(
+          workspaceKey,
+        ).timeout(const Duration(seconds: 15));
+        if (res['success'] == true) {
+          _log('[bridge] reconnected $workspaceKey');
+          session.degraded.value = null;
+          session.recovered.value += 1;
+          return true;
+        }
+        final error = res['error'];
+        if (res['success'] == false &&
+            error is String &&
+            error.contains('不在当前窗口')) {
+          _windowMissedWorkspaces.add(workspaceKey);
+        }
+      } catch (e) {
+        _log('[bridge] reconnect-request failed: $e');
       }
-    } catch (e) {
-      _log('[bridge] reconnect-request failed: $e');
     }
     // 2) full reopen: new workspace-bridge-open, swap the transport stack
     // into the SAME BridgeSession so open pages keep working.

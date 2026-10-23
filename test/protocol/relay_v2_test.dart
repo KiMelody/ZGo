@@ -518,4 +518,131 @@ void main() {
       await transport.dispose();
     });
   });
+
+  group('RelayV2Transport token failure policy', () {
+    Future<void> expectStartReason(
+      RelayV2Transport transport,
+      String reason,
+    ) =>
+        expectLater(
+          transport.start(),
+          throwsA(
+            isA<RelayV2StartException>()
+                .having((e) => e.reason, 'reason', reason),
+          ),
+        );
+
+    test('repeated non-401 token rejections escalate to auth-required',
+        () async {
+      final logs = <String>[];
+      final transport = RelayV2Transport(
+        v2Params(),
+        jwtProvider: () async => 'expired-jwt',
+        onLog: logs.add,
+        // The expired-JWT shape actually emitted by the live server is
+        // unobserved (the probe only produced HTTP 401). Cover the other
+        // form: 200 + a business code that is not 401/403.
+        httpClient: MockClient((_) async => http.Response(
+          jsonEncode({'code': 50001, 'message': 'credential expired'}),
+          200,
+        )),
+        webSocketFactory: FakeV2Backend().socketFactory,
+      );
+
+      await expectStartReason(transport, 'relay-unavailable');
+      await expectStartReason(transport, 'relay-unavailable');
+      await expectStartReason(transport, 'auth-required');
+      expect(transport.state, RelayState.error);
+
+      // The rejection shape is logged for the next live occurrence, with
+      // the credential kept out of every line.
+      expect(
+        logs.any((line) =>
+            line.contains('token rejected: HTTP 200 code=50001') &&
+            line.contains('msg=credential expired')),
+        isTrue,
+      );
+      expect(logs.where((line) => line.contains('expired-jwt')), isEmpty);
+
+      await transport.dispose();
+    });
+
+    test('a successful token fetch resets the rejection streak', () async {
+      final responses = [
+        {'code': 50001, 'message': 'expired'},
+        {'code': 50001, 'message': 'expired'},
+        {'code': 0, 'data': {'token': 'tok-ok', 'expires_in': 60}},
+        {'code': 50001, 'message': 'expired'},
+        {'code': 50001, 'message': 'expired'},
+        {'code': 50001, 'message': 'expired'},
+      ];
+      var next = 0;
+      final backend = FakeV2Backend();
+      final transport = RelayV2Transport(
+        v2Params(),
+        jwtProvider: () async => FakeV2Backend.jwt,
+        httpClient: MockClient((_) async =>
+            http.Response(jsonEncode(responses[next++]), 200)),
+        webSocketFactory: backend.socketFactory,
+      );
+
+      await expectStartReason(transport, 'relay-unavailable');
+      await expectStartReason(transport, 'relay-unavailable');
+      // Successful fetch clears the count — the link dials normally.
+      await transport.start();
+      expect(transport.state, RelayState.authenticating);
+
+      // Two failures after the reset are back to square one; only the third
+      // one trips the breaker.
+      await expectStartReason(transport, 'relay-unavailable');
+      await expectStartReason(transport, 'relay-unavailable');
+      await expectStartReason(transport, 'auth-required');
+
+      await transport.dispose();
+    });
+
+    test('5xx and timeouts never advance the auth circuit breaker', () async {
+      final script = <Object>[
+        http.Response('boom', 503),
+        http.Response('boom', 503),
+        TimeoutException('token request timed out'),
+        http.Response('boom', 503),
+        http.Response(jsonEncode({'code': 50001, 'message': 'no token'}), 200),
+        http.Response(jsonEncode({'code': 50001, 'message': 'no token'}), 200),
+        http.Response(jsonEncode({'code': 50001, 'message': 'no token'}), 200),
+      ];
+      var next = 0;
+      final transport = RelayV2Transport(
+        v2Params(),
+        jwtProvider: () async => FakeV2Backend.jwt,
+        httpClient: MockClient((_) async {
+          final response = script[next++];
+          if (response is TimeoutException) throw response;
+          return response as http.Response;
+        }),
+        webSocketFactory: FakeV2Backend().socketFactory,
+      );
+
+      // R4: server errors and transport timeouts stay relay-unavailable and
+      // leave the streak untouched, so only the three non-5xx rejections at
+      // the end can escalate.
+      await expectStartReason(transport, 'relay-unavailable');
+      await expectStartReason(transport, 'relay-unavailable');
+      await expectStartReason(transport, 'relay-unavailable');
+      await expectStartReason(transport, 'relay-unavailable');
+      await expectStartReason(transport, 'relay-unavailable');
+      await expectStartReason(transport, 'relay-unavailable');
+      await expectStartReason(transport, 'auth-required');
+
+      await transport.dispose();
+    });
+
+    test('reconnect backoff drops to 60s once attempts pile up', () {
+      expect(RelayV2Transport.reconnectDelay(0), const Duration(seconds: 1));
+      expect(RelayV2Transport.reconnectDelay(4), const Duration(seconds: 15));
+      expect(RelayV2Transport.reconnectDelay(7), const Duration(seconds: 15));
+      expect(RelayV2Transport.reconnectDelay(8), const Duration(seconds: 60));
+      expect(RelayV2Transport.reconnectDelay(20), const Duration(seconds: 60));
+    });
+  });
 }

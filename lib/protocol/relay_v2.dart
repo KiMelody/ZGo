@@ -120,6 +120,14 @@ class RelayV2Transport implements RelayTransport {
   bool _intentionallyClosed = false;
   bool _disposed = false;
   int _reconnectAttempt = 0;
+
+  /// Consecutive token-endpoint responses that carried no token and were not
+  /// server errors. Three in a row is enough to call the credential dead:
+  /// the live server's expired-JWT shape has never been observed (the probe
+  /// only ever produced HTTP 401), so a 200 + non-zero business code must
+  /// not keep the link in the 15s relay-unavailable retry loop forever.
+  int _tokenRejectStreak = 0;
+  static const _tokenRejectLimit = 3;
   DateTime _lastInboundAt = DateTime.fromMillisecondsSinceEpoch(0);
   String? _lastFailureReason;
   String? _lastFailureMessage;
@@ -322,19 +330,33 @@ class RelayV2Transport implements RelayTransport {
     if (token is String &&
         token.isNotEmpty &&
         (code == null || code == 0)) {
+      _tokenRejectStreak = 0;
       return token;
     }
     final message = body?['message'] ?? body?['msg'];
     final text = message is String && message.isNotEmpty
         ? message
         : 'token request failed (HTTP ${res.statusCode})';
+    // Failure-shape evidence: the expired-JWT form this server actually
+    // emits is unobserved, and the next occurrence must be pinned down
+    // without the credential ever reaching the log (see [_redact]).
+    _log('[relay-v2] token rejected: HTTP ${res.statusCode} code=$code '
+        'msg=${_excerpt(text)}');
     final rejected = res.statusCode == 401 ||
         res.statusCode == 403 ||
         code == 401 ||
         code == 403;
-    if (rejected) throw _TokenFailure('auth-required', text);
+    // Timeouts/transport errors never get an HTTP response and therefore
+    // never reach this counter (R4: they stay relay-unavailable).
+    if (res.statusCode < 500) _tokenRejectStreak += 1;
+    if (rejected || _tokenRejectStreak >= _tokenRejectLimit) {
+      throw _TokenFailure('auth-required', text);
+    }
     throw _TokenFailure('relay-unavailable', text);
   }
+
+  static String _excerpt(String text, [int max = 160]) =>
+      text.length <= max ? text : '${text.substring(0, max)}…';
 
   Uri _wsUri(String token) {
     final base = params.relayWsUri;
@@ -573,15 +595,27 @@ class RelayV2Transport implements RelayTransport {
 
   void _stopHeartbeat() => _heartbeatTimer?.cancel();
 
+  /// Reconnect backoff: 1s doubling to the 15s cap, and once a link keeps
+  /// failing (8 attempts in a row) each retry drops to a fixed 60s. The
+  /// link still self-heals when the network returns — it just stops the
+  /// 15s-endless-retry noise/ battery drain observed over an hour.
+  @visibleForTesting
+  static Duration reconnectDelay(int attempt) {
+    if (attempt >= 8) return const Duration(milliseconds: 60000);
+    return Duration(
+      milliseconds: (1000 * (1 << attempt.clamp(0, 4))).clamp(1000, 15000),
+    );
+  }
+
   void _scheduleReconnect() {
     if (_disposed || _intentionallyClosed) return;
     _setState(RelayState.reconnecting);
-    final delayMs =
-        (1000 * (1 << _reconnectAttempt.clamp(0, 4))).clamp(1000, 15000);
+    final delay = reconnectDelay(_reconnectAttempt);
     _reconnectAttempt += 1;
-    _log('[relay-v2] reconnect in ${delayMs}ms (attempt $_reconnectAttempt)');
+    _log('[relay-v2] reconnect in ${delay.inMilliseconds}ms '
+        '(attempt $_reconnectAttempt)');
     _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
+    _reconnectTimer = Timer(delay, () {
       if (!_disposed) unawaited(_reconnect());
     });
   }

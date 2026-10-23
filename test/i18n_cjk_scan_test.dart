@@ -84,6 +84,12 @@ const List<Exemption> exemptions = [
         'refusal (「会话正在进行中，稍后再试」), never rendered by the app',
   ),
   Exemption(
+    file: 'lib/protocol/remote_client.dart',
+    literal: '不在当前窗口',
+    reason: 'bridge recovery: classifies the raw desktop workspace-reconnect '
+        'window-missed refusal for failure memory, never rendered by the app',
+  ),
+  Exemption(
     file: 'lib/ui/remote_page.dart',
     literal: '(function () {',
     reason: 'injected deep-link JS: matches the desktop web DOM text '
