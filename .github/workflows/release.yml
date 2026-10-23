@@ -13,6 +13,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Fail fast before build tooling is installed: exit 1 (advisory hit)
+      # fails the release; exit 2 (OSV unreachable) retries once, then
+      # degrades to a warning — a flaky external API must not block shipping.
+      - name: Dependency vulnerability audit (OSV)
+        run: |
+          for attempt in 1 2; do
+            python3 tool/osv_audit.py && exit 0
+            code=$?
+            if [ "$code" -eq 1 ]; then exit 1; fi
+          done
+          echo "::warning::OSV unreachable — audit skipped this run"
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
