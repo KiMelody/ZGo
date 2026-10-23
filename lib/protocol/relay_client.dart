@@ -7,51 +7,16 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'connection_params.dart';
 import 'device_info.dart';
 import 'proof.dart';
+import 'relay_transport.dart';
 
-enum RelayState {
-  idle,
-  connecting,
-  authenticating,
-  waiting,
-  paired,
-  reconnecting,
-  error,
-  kicked,
-  closed,
-}
-
-class RelayFailure {
-  final String reason;
-  final String? message;
-  const RelayFailure(this.reason, [this.message]);
-
-  @override
-  String toString() => message == null ? reason : '$reason: $message';
-}
-
-/// Close-code mapping.
-String? relayCloseReason(int code) {
-  switch (code) {
-    case 4004:
-      return 'session-not-found';
-    case 4009:
-      return 'session-conflict';
-    case 4010:
-      return 'desktop-disconnected';
-    case 4011:
-      return 'session-expired';
-    case 4012:
-      return 'workspace-closed';
-    case 4013:
-      return 'invalid-mobile-connection';
-    default:
-      return null;
-  }
-}
+export 'relay_transport.dart' show RelayState, RelayFailure, relayCloseReason;
 
 /// Reimplementation of the relay terminal socket (`pen` class in the web
 /// client). JSON text frames over `wss://<host>/ws`.
-class RelayClient {
+///
+/// V1 only: the proof handshake (`auth_challenge` → `auth_response`) needs
+/// the link's `hash`/`t`. V2 links route to `RelayV2Transport` instead.
+class RelayClient implements RelayTransport {
   final RemoteConnectionParams params;
   final void Function(String line)? onLog;
 
@@ -64,14 +29,18 @@ class RelayClient {
   StreamSubscription? _socketSub;
 
   final _state = ValueNotifier<RelayState>(RelayState.idle);
+  @override
   ValueListenable<RelayState> get stateListenable => _state;
+  @override
   RelayState get state => _state.value;
 
   final _payloadController =
       StreamController<Map<String, dynamic>>.broadcast();
+  @override
   Stream<Map<String, dynamic>> get payloads => _payloadController.stream;
 
   final _failureController = StreamController<RelayFailure>.broadcast();
+  @override
   Stream<RelayFailure> get failures => _failureController.stream;
 
   bool _wasPaired = false;
@@ -117,6 +86,7 @@ class RelayClient {
     });
   }
 
+  @override
   Future<void> start() async {
     _disposed = false;
     _intentionallyClosed = false;
@@ -181,6 +151,7 @@ class RelayClient {
   /// caller hangs until timeout.
   final _outboundQueue = <Map<String, dynamic>>[];
 
+  @override
   void sendPayload(Map<String, dynamic> payload) {
     if (state != RelayState.paired || _socket == null) {
       if (_outboundQueue.length < 100) {
@@ -224,6 +195,7 @@ class RelayClient {
   /// the web-environment fields (visibilityState / online /
   /// hiddenDurationMs) are omitted — ZGo is a native client (OQ4). Any
   /// failure is swallowed so diagnostics never perturb the main link.
+  @override
   void sendMobileDiagnostic(String event, [Map<String, dynamic>? fields]) {
     try {
       final payload = <String, dynamic>{
@@ -268,7 +240,7 @@ class RelayClient {
           'type': 'auth_response',
           'device_sid': params.deviceSid,
           'proof': calculateProof(
-            passHash: params.passHash,
+            passHash: params.passHash ?? '',
             nonce: frame['nonce'] as String? ?? '',
             role: 'terminal',
             deviceSid: params.deviceSid,
@@ -463,6 +435,7 @@ class RelayClient {
   void debugHandleRelayError(String? code, String? message) =>
       _handleRelayError(code, message);
 
+  @override
   Future<void> dispose() async {
     _disposed = true;
     _intentionallyClosed = true;

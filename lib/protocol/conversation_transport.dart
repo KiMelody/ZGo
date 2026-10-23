@@ -74,6 +74,13 @@ class ConversationTransport {
   /// Injectable so tests can shrink it (protocol tests are fake_async-free).
   final Duration subscribeAckTimeout;
 
+  /// Desktop project id for a workspace path (3.16.2 project attribution,
+  /// design 10-21 Part 2) — consulted ONLY by [createSession], whose outer
+  /// channel parameters accept `projectId` as a sibling of `workspacePath`
+  /// (the desktop's own createTask v4 shape). Null disables the feature:
+  /// pre-3.16.2 desktops and every non-create command keep the old payload.
+  final Future<String?> Function(String workspacePath)? projectIdFor;
+
   final String clientId = generateUuid();
   bool _handshaken = false;
   Future<void>? _handshakeFuture;
@@ -87,6 +94,7 @@ class ConversationTransport {
     this.appVersion = '3.6.5',
     this.workspaceHookReviewUi = false,
     this.subscribeAckTimeout = const Duration(seconds: 10),
+    this.projectIdFor,
     this.onLog,
     this.onLinkLevelFailure,
     this.onChannelSuccess,
@@ -260,6 +268,7 @@ class ConversationTransport {
     String type,
     Map<String, dynamic> payload, {
     Duration timeout = const Duration(seconds: 30),
+    Map<String, dynamic>? channelExtra,
   }) async {
     // The ledger hooks bracket the whole path (handshake + health gate +
     // wire call): a TimeoutException or channel-missing rejection anywhere
@@ -290,7 +299,7 @@ class ConversationTransport {
         'issuedAt': DateTime.now().millisecondsSinceEpoch,
       };
       log('[v4] command $type');
-      var res = await _sendCommandWithRetry(envelope, timeout);
+      var res = await _sendCommandWithRetry(envelope, timeout, channelExtra);
       // Runtime events (turn completion etc.) also bump the revision, so a
       // CAS base can go stale even with ack tracking. The stale ack tells
       // the server's current revision — retry once with it (stale-revision
@@ -310,7 +319,7 @@ class ConversationTransport {
           'baseRevision': serverRevision,
           'issuedAt': DateTime.now().millisecondsSinceEpoch,
         };
-        res = await _sendCommandWithRetry(retryEnvelope, timeout);
+        res = await _sendCommandWithRetry(retryEnvelope, timeout, channelExtra);
       }
       if (sessionId != null &&
           res is Map &&
@@ -355,12 +364,17 @@ class ConversationTransport {
   /// everything else with a fresh one.
   Future<dynamic> _sendCommandWithRetry(
     Map<String, dynamic> envelope,
-    Duration timeout,
-  ) async {
+    Duration timeout, [
+    Map<String, dynamic>? channelExtra,
+  ]) async {
     final sendStart = DateTime.now();
     try {
       return await channels.call(channel, 'sendConversationCommandV4', [
-        {...scope, 'envelope': envelope},
+        {
+          ...scope,
+          if (channelExtra != null) ...channelExtra,
+          'envelope': envelope,
+        },
       ], timeout: timeout);
     } on TimeoutException {
       // Retry only when a relay drop plausibly ate the response: the bridge
@@ -388,7 +402,11 @@ class ConversationTransport {
               'issuedAt': DateTime.now().millisecondsSinceEpoch,
             };
       return channels.call(channel, 'sendConversationCommandV4', [
-        {...scope, 'envelope': fresh},
+        {
+          ...scope,
+          if (channelExtra != null) ...channelExtra,
+          'envelope': fresh,
+        },
       ], timeout: timeout);
     }
   }
@@ -399,6 +417,15 @@ class ConversationTransport {
   /// or on `duplicate`, the retryAck replay of a command that reached the
   /// server but lost its response (same commandId retry), which carries
   /// the original result.
+  ///
+  /// 3.16.2 project attribution (design 10-21 Part 2): when [projectIdFor]
+  /// answers an id, it rides the OUTER channel parameters as `projectId` —
+  /// the desktop's own `createTask` v4 shape, a sibling of `workspacePath`
+  /// and outside the envelope. The desktop's `reserveCreatedTask` then
+  /// inserts the row with that project. If the desktop rejects the mapping
+  /// (stale index → `project.cwd-not-in-roots`, or any other `project.*`
+  /// reason), the command is resent ONCE without the field so creation can
+  /// never fail because of this feature.
   Future<String> createSession(
     String workspaceId, {
     String? firstText,
@@ -408,7 +435,7 @@ class ConversationTransport {
     List<String>? mcpServers,
     Duration timeout = const Duration(seconds: 90),
   }) async {
-    final res = await sendCommand(null, 'createSession', {
+    final payload = {
       'workspaceId': workspaceId,
       if (firstText != null)
         'firstInput': {
@@ -419,7 +446,42 @@ class ConversationTransport {
       if (config != null) 'config': config,
       if (runtimeModel != null) 'runtimeModel': runtimeModel,
       if (mcpServers != null && mcpServers.isNotEmpty) 'mcpServers': mcpServers,
-    }, timeout: timeout);
+    };
+    final projectId = await _resolveProjectId();
+    Future<dynamic> send(String? projectId) => sendCommand(
+          null,
+          'createSession',
+          payload,
+          timeout: timeout,
+          channelExtra: projectId == null ? null : {'projectId': projectId},
+        );
+
+    dynamic res;
+    var retriedWithoutProject = false;
+    try {
+      res = await send(projectId);
+    } on Object catch (e) {
+      // A thrown channel error carrying the desktop's `project.*` reason is
+      // the same validation refusal — one retry without the field, then the
+      // second answer (or this error) is final.
+      if (projectId == null || !_isProjectFailure('$e')) rethrow;
+      log('[v4] createSession failed on project attribution ($e), '
+          'retrying without projectId');
+      res = await send(null);
+      retriedWithoutProject = true;
+    }
+    // The ack-rejection resend runs OUTSIDE the catch's protection: each
+    // form (rejected ack, thrown error) fires at most ONE resend, and the
+    // resend's own failure is final — repeating a payload that already
+    // lacks the field cannot help.
+    if (!retriedWithoutProject) {
+      final rejection = projectId == null ? null : _projectRejection(res);
+      if (rejection != null) {
+        log('[v4] createSession rejected by project attribution '
+            '($rejection), retrying without projectId');
+        res = await send(null);
+      }
+    }
     final map = res is Map ? res.cast<String, dynamic>() : null;
     final status = map?['status'];
     if (status != 'accepted' && status != 'duplicate') {
@@ -433,6 +495,44 @@ class ConversationTransport {
       throw StateError('createSession: missing sessionId in result');
     }
     return sessionId;
+  }
+
+  /// Project id for the transport scope, or null when the feature is
+  /// disabled / unavailable. Never throws: attribution must never block a
+  /// creation.
+  Future<String?> _resolveProjectId() async {
+    final resolve = projectIdFor;
+    if (resolve == null) return null;
+    final workspacePath = scope['workspacePath'];
+    if (workspacePath is! String || workspacePath.isEmpty) return null;
+    try {
+      return await resolve(workspacePath);
+    } catch (e) {
+      log('[v4] project resolution failed ($e) — creating without projectId');
+      return null;
+    }
+  }
+
+  /// The desktop's `project.*` validation family (reserveCreatedTask).
+  static final _projectCode = RegExp(r'^[a-z][a-z-]*');
+
+  static bool _isProjectFailure(String message) {
+    final at = message.indexOf('project.');
+    if (at < 0) return false;
+    // Require an identifier-shaped tail so free text mentioning a dot does
+    // not trigger a pointless retry.
+    return at + 8 < message.length &&
+        _projectCode.hasMatch(message.substring(at + 8));
+  }
+
+  /// The rejection reason of a non-accepted ack when it is a project
+  /// validation refusal, else null.
+  static String? _projectRejection(Object? res) {
+    if (res is! Map) return null;
+    final status = res['status'];
+    if (status == 'accepted' || status == 'duplicate') return null;
+    final reason = '${res['reasonCode'] ?? ''} ${res['message'] ?? ''}';
+    return _isProjectFailure(reason) ? reason.trim() : null;
   }
 
   /// Creates a selection-side (auxiliary) chat attached to [parentSessionId]

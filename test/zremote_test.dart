@@ -20,19 +20,22 @@ void main() {
       expect(p.source.host, 'zcode.z.ai');
     });
 
-    test('returns null when required params are missing', () {
+    test('returns null when sid is missing or the URL is garbage', () {
       expect(RemoteConnectionParams.parse('https://zcode.z.ai/remote/v4'),
-          isNull);
-      expect(
-          RemoteConnectionParams.parse(
-              'https://zcode.z.ai/remote/v4?sid=a&hash=b'),
-          isNull);
-      expect(
-          RemoteConnectionParams.parse(
-              'https://zcode.z.ai/remote/v4?sid=a&hash=b&t=notanumber'),
           isNull);
       expect(RemoteConnectionParams.parse('not a url'), isNull);
       expect(RemoteConnectionParams.parse(''), isNull);
+    });
+
+    test('a sid with half V1 credentials parses as a V2 link', () {
+      final halfHash =
+          RemoteConnectionParams.parse('https://zcode.z.ai/remote/v4?sid=a&hash=b');
+      expect(halfHash, isNotNull);
+      expect(halfHash!.v2, isTrue);
+      final badTimestamp = RemoteConnectionParams.parse(
+          'https://zcode.z.ai/remote/v4?sid=a&hash=b&t=notanumber');
+      expect(badTimestamp, isNotNull);
+      expect(badTimestamp!.v2, isTrue);
     });
 
     test('trims surrounding whitespace', () {

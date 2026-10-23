@@ -196,6 +196,7 @@ class _SendPathBridge implements BridgeSession {
     void Function(String line)? onLog,
     void Function(String channel, Object error)? onLinkLevelFailure,
     void Function(String channel)? onChannelSuccess,
+    Future<String?> Function(String workspacePath)? projectIdFor,
   }) {
     return ConversationTransport(
       session: this,
@@ -203,6 +204,7 @@ class _SendPathBridge implements BridgeSession {
       onLog: onLog,
       onLinkLevelFailure: onLinkLevelFailure,
       onChannelSuccess: onChannelSuccess,
+      projectIdFor: projectIdFor,
     );
   }
 

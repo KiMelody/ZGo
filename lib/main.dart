@@ -94,6 +94,15 @@ class _ZGoAppState extends State<ZGoApp>
   final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
   late final DeviceSessionHub _hub = DeviceSessionHub(
     nativeListEnabled: () => _ui.nativeListEnabled,
+    // Relay V2 terminal auth (desktop 3.16.2+) reads the ZCode account JWT
+    // through this seam — the protocol/state layers never touch lib/plan.
+    // loadIdentity is the no-network (idempotent) token read; a fresh
+    // sign-in updates PlanController's in-memory token, so the next connect
+    // picks it up without awaiting the billing refresh.
+    jwtProvider: () async {
+      await _plan.loadIdentity();
+      return _plan.token;
+    },
     // Composer-draft attachment bytes (lib/state stays plugin-free — the
     // resolver is injected here). App-support, not cache: drafts must
     // survive restarts, and allowBackup=false already keeps the tree out

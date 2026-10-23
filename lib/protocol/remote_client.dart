@@ -11,6 +11,8 @@ import 'conversation.dart';
 import 'device_info.dart';
 import 'id.dart';
 import 'relay_client.dart';
+import 'relay_transport.dart';
+import 'relay_v2.dart';
 import 'rpc_transport.dart';
 
 String _reqId(String prefix) => generateRequestId(prefix);
@@ -48,7 +50,19 @@ class RemoteClient {
   final RemoteConnectionParams params;
   final void Function(String line)? onLog;
 
-  late final RelayClient relay;
+  /// ZCode account JWT seam for the V2 relay. The protocol layer never
+  /// imports the plan layer — the state layer injects this callback.
+  final Future<String?> Function()? jwtProvider;
+
+  /// Test seam: overrides the transport construction (a fake
+  /// [RelayTransport] drives the payload layer without a socket).
+  @visibleForTesting
+  final RelayTransport Function(RemoteConnectionParams params)? transportFactory;
+
+  /// V1 (`RelayClient`, proof handshake) or V2 (`RelayV2Transport`,
+  /// account-JWT auth), picked from the link shape. Everything above the
+  /// transport is shared: the payload layer is identical on both relays.
+  late final RelayTransport relay;
   final _pendingMatchers = <String, bool Function(Map<String, dynamic>)>{};
   final _pendingCompleters = <String, Completer<Map<String, dynamic>>>{};
 
@@ -65,8 +79,16 @@ class RemoteClient {
   final _appErrorController = StreamController<RemoteAppError>.broadcast();
   Stream<RemoteAppError> get appErrors => _appErrorController.stream;
 
-  RemoteClient(this.params, {this.onLog}) {
-    relay = RelayClient(params, onLog: onLog);
+  RemoteClient(
+    this.params, {
+    this.onLog,
+    this.jwtProvider,
+    this.transportFactory,
+  }) {
+    relay = transportFactory?.call(params) ??
+        (params.v2
+            ? RelayV2Transport(params, jwtProvider: jwtProvider, onLog: onLog)
+            : RelayClient(params, onLog: onLog));
     _payloadSub = relay.payloads.listen(_dispatchPayload);
     relay.stateListenable.addListener(_onRelayState);
   }
@@ -612,6 +634,7 @@ class BridgeSession {
     void Function(String line)? onLog,
     void Function(String channel, Object error)? onLinkLevelFailure,
     void Function(String channel)? onChannelSuccess,
+    Future<String?> Function(String workspacePath)? projectIdFor,
   }) {
     final key = '${scope['workspaceIdentity'] ?? scope['workspacePath']}';
     return _conversations.putIfAbsent(
@@ -623,6 +646,7 @@ class BridgeSession {
         workspaceHookReviewUi: workspaceHookReviewUi,
         onLinkLevelFailure: onLinkLevelFailure,
         onChannelSuccess: onChannelSuccess,
+        projectIdFor: projectIdFor,
       ),
     );
   }

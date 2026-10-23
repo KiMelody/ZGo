@@ -133,6 +133,171 @@ void main() {
     expect(find.textContaining('1 个工作区 · 2 个任务'), findsOneWidget);
   });
 
+  testWidgets(
+      'conversation workspaces own no card; rows merge into default and '
+      'open under their own draft scope', (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: const [],
+      workspaces: [
+        {
+          'workspacePath': '/home/default',
+          'workspaceIdentity': 'default-id',
+          'label': 'default',
+        },
+        // Live 3.16.2 shape (acceptance round 1, 2026-10-22): draft rows
+        // carry NO workspacePurpose — the path is the only signal.
+        {
+          'workspacePath': '/home/.zcode/workspace/draft-1',
+          'label': 'draft-1',
+        },
+      ],
+      relayTasks: [
+        {
+          'taskId': 'draft-session',
+          'title': '',
+          'workspacePath': '/home/.zcode/workspace/draft-1',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // Only the default workspace card exists — the draft directory is a
+    // display group member, not a card of its own.
+    expect(find.text('default'), findsOneWidget);
+    expect(find.text('draft-1'), findsNothing);
+    // Empty title renders the official untitled placeholder, not a filter.
+    expect(find.text('未命名任务'), findsOneWidget);
+
+    await tester.tap(find.text('未命名任务'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    // The row keeps its true draft workspace for the bridge scope (opening
+    // under the display group would dead-end commands).
+    expect(session.openWorkspaceCalls, hasLength(1));
+    final (ws, taskId) = session.openWorkspaceCalls.single;
+    expect(workspaceKeyOf(ws), '/home/.zcode/workspace/draft-1');
+    expect(taskId, 'draft-session');
+    expect(find.byType(ChatPage), findsOneWidget);
+  });
+
+  testWidgets(
+      'desktop sidebar hides purpose-marked conversation workspace folders',
+      (tester) async {
+    useDesktop(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: const [],
+      workspaces: [
+        {
+          'workspacePath': '/home/default',
+          'workspaceIdentity': 'default-id',
+          'label': 'default',
+        },
+        // Future-compat shape: a desktop that DOES carry the schema enum
+        // outside the draft- path convention must still merge. The live
+        // 3.16.2 shape (no purpose) is covered by the test above.
+        {
+          'workspacePath': '/home/conv-workspace',
+          'workspacePurpose': 'conversation',
+          'label': 'conv-workspace',
+        },
+      ],
+      relayTasks: [
+        {
+          'taskId': 'draft-session',
+          'title': '对话行',
+          'workspacePath': '/home/conv-workspace',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('default'), findsOneWidget);
+    expect(find.text('conv-workspace'), findsNothing);
+    expect(find.text('对话行'), findsOneWidget);
+  });
+
+  testWidgets(
+      'a project-root workspace completed from the resolver owns a card',
+      (tester) async {
+    // research/07 方案 A: bootstrap misses workspaces of other desktop
+    // windows; DeviceSession appends project roots as synthetic entries.
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: const [],
+      workspaces: [
+        {
+          'workspacePath': '/home/default',
+          'workspaceIdentity': 'default-id',
+          'label': 'default',
+        },
+        {
+          'kind': 'local',
+          'label': 'chat',
+          'workspacePath': r'F:\chat',
+          'workspacePurpose': 'project',
+        },
+      ],
+      relayTasks: [
+        {
+          'taskId': 'chat-task',
+          'title': '来自其他窗口的任务',
+          'workspacePath': r'F:\chat',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('chat'), findsWidgets,
+        reason: 'the card label is the project name');
+    // Only the active workspace starts expanded; open the completed card.
+    await tester.tap(find.text('chat').first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('来自其他窗口的任务'), findsOneWidget);
+    expect(find.textContaining('2 个工作区'), findsOneWidget);
+  });
+
   testWidgets('tapping a task pushes the native ChatPage (no suspend)',
       (tester) async {
     usePhone(tester);

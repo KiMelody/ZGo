@@ -200,6 +200,15 @@ class _TaskListPageState extends State<TaskListPage>
       identical(session.activeWorkspace, ws) ||
       workspaceKeyOf(ws) == workspaceKeyOf(session.activeWorkspace ?? const {});
 
+  /// 3.16.2 conversation workspaces (desktop "New task" drafts,
+  /// `.zcode/workspace/draft-*`) own no card: the desktop hides them from
+  /// its workspace list (`Bbt` default) and their rows display under the
+  /// default group through the session's key aliases (design 10-21 A2a).
+  /// Live 3.16.2 frames carry no `workspacePurpose` for drafts, so the
+  /// shared predicate also matches the path convention.
+  static bool _isConversationWorkspace(Map<String, dynamic> ws) =>
+      isConversationWorkspace(ws);
+
   /// Shared expand state for the mobile card and the desktop sidebar folder:
   /// manual override wins, otherwise the active workspace is expanded.
   bool _isWorkspaceExpanded(String key, {required bool isActive}) =>
@@ -500,7 +509,8 @@ class _TaskListPageState extends State<TaskListPage>
                         children: [
                           ..._desktopPinned(context, session),
                           for (final ws in session.workspaces)
-                            _desktopWorkspaceFolder(context, session, ws),
+                            if (!_isConversationWorkspace(ws))
+                              _desktopWorkspaceFolder(context, session, ws),
                         ],
                       ),
                     ),
@@ -645,7 +655,10 @@ class _TaskListPageState extends State<TaskListPage>
               e,
               selected: e.sessionId == _paneSessionId,
               indent: true,
-              workspace: ws,
+              // Per-row resolution: conversation rows display in this
+              // folder but still open under their own draft workspace.
+              workspace:
+                  TaskDirectory.workspaceForKey(session.workspaces, e, dirKey),
               groupDot: groupDotOf[e.sessionId],
             ),
           // Empty-group feedback (B7); the archive filter keeps its own copy.
@@ -961,10 +974,11 @@ class _TaskListPageState extends State<TaskListPage>
               ..._timelineGroups(context, session)
             else
               for (final ws in session.workspaces)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: ZSpacing.cardGap),
-                  child: _workspaceCard(context, session, ws),
-                ),
+                if (!_isConversationWorkspace(ws))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: ZSpacing.cardGap),
+                    child: _workspaceCard(context, session, ws),
+                  ),
           ],
         ];
         // The replace window: while a reload RPC is in flight the list is
@@ -1509,6 +1523,9 @@ class _TaskListPageState extends State<TaskListPage>
     final widgets = <Widget>[];
     var total = 0;
     for (final ws in session.workspaces) {
+      // Conversation rows are keyed to the default group; their archived
+      // rows already surface under that group below (no draft header).
+      if (_isConversationWorkspace(ws)) continue;
       final dirKey = workspaceKeyOf(ws);
       final entries = _sortedEntries(dirKey == null
           ? const <SessionEntry>[]
@@ -1536,7 +1553,13 @@ class _TaskListPageState extends State<TaskListPage>
           for (final e in entries)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
-              child: _taskRow(context, session, e, workspace: ws),
+              child: _taskRow(
+                context,
+                session,
+                e,
+                workspace:
+                    TaskDirectory.workspaceForKey(session.workspaces, e, dirKey),
+              ),
             ),
         ]);
     }
@@ -1705,10 +1728,15 @@ class _TaskListPageState extends State<TaskListPage>
                   highlight:
                       current != null &&
                       entries[i].sessionId == current.sessionId,
-                  // Always the owning card workspace: for the active one the
-                  // identical check below skips the reopen, for the others
-                  // opening rides workspace-bridge-open.
-                  workspace: ws,
+                  // Resolved per row: a conversation row displays in the
+                  // default card but opens under its own draft workspace;
+                  // normal rows resolve back to this card's workspace (the
+                  // active-workspace identical check still skips the reopen).
+                  workspace: TaskDirectory.workspaceForKey(
+                    session.workspaces,
+                    entries[i],
+                    dirKey,
+                  ),
                   groupDot: groupDotOf[entries[i].sessionId],
                 ),
           ],
@@ -1736,8 +1764,7 @@ class _TaskListPageState extends State<TaskListPage>
 
   /// Workspace-kind badge (web `workspaceKind.local/conversation/remote`).
   Widget _kindBadge(BuildContext context, Map<String, dynamic> ws) {
-    final purpose = ws['workspacePurpose'];
-    final kind = purpose == 'conversation'
+    final kind = _isConversationWorkspace(ws)
         ? 'conversation'
         : (ws['kind'] == 'remote' ? 'remote' : 'local');
     return Container(
