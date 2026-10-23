@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] - 2026-10-23
+
+### Added
+
+- **ZCode 3.16.2 adaptation**: Relay V2 account authentication (token API
+  + ws2 transport + auth_init; link-shape fallback keeps hash-link V1
+  desktops on the old path). The task overview rebuilds on `listTaskList`
+  three legs (timeline / pinned / archived) with dual-read row form
+  (`displayStatus ?? status`) after bootstrap stopped carrying tasks.
+  Project-layer ownership: `ProjectResolver` learns root→projectId from
+  the desktop tasks-index.sqlite through a pure-Dart paged reader (8 reads
+  / 28 KiB on a 24.9 MB index; the sqlite3 dependency is gone), and
+  `createSession` injects the outer projectId. Workspace completion:
+  bootstrap's single-window workspace registry is unioned with project
+  roots (`mergeProjectWorkspaces`; wire entries first, path-normalized
+  dedup, zero-allocation no-op on old desktops), and conversation draft
+  workspaces fold into the default card (draft- path predicate) instead
+  of spawning orphan cards.
+- **Cloud device catalog**: devices in the account connect one-tap from
+  the devices page (GET /device, mid dedup, three-state partition
+  listing not-added devices only).
+- **Chat draft persistence**: composer text and attachments survive app
+  restarts — `ChatDraftStore` keeps metadata in prefs and bytes under
+  appSupport, with 20-entry / 32 KiB / 64 MiB oldest-first caps, orphan
+  sweep, and 500 ms debounced writes.
+- **Conversation badge**: session rows inside default cards carry a
+  conversation-type marker.
+
+### Changed
+
+- **Release gate**: CI now runs an OSV dependency vulnerability audit
+  (`tool/osv_audit.py`, 140 packages incl. pdf.js probing) before
+  building artifacts; transient network failures retry then degrade to
+  a warning.
+
+### Fixed
+
+- **Relay V2 auth-failure convergence**: token rejection reaches a
+  circuit-breaker terminal state with backoff re-ratio and login
+  self-heal instead of retry storms.
+- **Bridge restore failure memory**: reconnects doomed by missing
+  workspace windows are remembered and skipped.
+- **Resolver home derivation**: falls back to the last successful value
+  when the single-window registry lacks a workspace entry.
+
 ## [1.14.5] - 2026-10-20
 
 ### Added
