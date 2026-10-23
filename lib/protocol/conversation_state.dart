@@ -146,10 +146,12 @@ class SessionEntry {
       pendingInteraction = (raw['pendingInteraction'] as Map?)
           ?.cast<String, dynamic>();
 
-  /// Adapts a relay task (`Dg` model from bootstrap / workspace-list-updated)
-  /// into a row entry so the task list can render non-active workspaces and
-  /// the archive view from the relay overview. `displayStatus`
-  /// (idle|running|completed|error) maps onto the phase-pill vocabulary.
+  /// Adapts a relay task (`Dg` model from bootstrap / workspace-list-updated
+  /// / 3.16.2 `listTaskList`) into a row entry so the task list can render
+  /// non-active workspaces and the archive view from the relay overview.
+  /// `displayStatus` (legacy) and `status` (3.16.2 timeline rows) both map
+  /// onto the phase-pill vocabulary — the older field wins when both exist
+  /// (dual-read, design 10-21-drift-3162 R4).
   factory SessionEntry.fromRelayTask(Map<String, dynamic> task) {
     const statusToPhase = {
       'idle': 'idle',
@@ -157,7 +159,7 @@ class SessionEntry {
       'completed': 'completedSuccess',
       'error': 'error',
     };
-    final status = '${task['displayStatus'] ?? 'idle'}';
+    final status = '${task['displayStatus'] ?? task['status'] ?? 'idle'}';
     return SessionEntry({
       'sessionId': task['taskId'],
       'title': task['title'],
@@ -165,6 +167,10 @@ class SessionEntry {
       'createdAt': task['createdAt'],
       'lastActivityAt': task['updatedAt'],
       'pinned': task['pinned'],
+      // The relay `archived` bit is the sole authority; consumers (swipe /
+      // action sheet) read it off `entry.raw`, so it must survive the
+      // whitelist rebuild (3.16.2 archived leg rows are tagged on merge).
+      'archived': task['archived'],
       'unreadAt': task['unreadAt'],
       'workspacePath': task['workspacePath'],
       'workspaceIdentity': task['workspaceIdentity'],

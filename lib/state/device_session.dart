@@ -19,7 +19,9 @@ import '../protocol/git_service.dart';
 import '../protocol/method_probe.dart';
 import '../protocol/model_selection.dart' show parseModelSelectionCatalog;
 import '../protocol/off_peak.dart';
+import '../protocol/project_resolver.dart';
 import '../protocol/relay_client.dart';
+import '../protocol/relay_v2.dart' show RelayV2StartException;
 import '../protocol/remote_client.dart';
 import '../protocol/task_commands.dart';
 import '../protocol/task_groups.dart';
@@ -32,6 +34,14 @@ import 'quota_watch.dart' show QuotaWatchSource;
 import 'task_directory.dart';
 import 'task_home_store.dart';
 
+/// Fixed group key for conversation workspaces (3.16.2 desktop "New task"
+/// drafts: `.zcode/workspace/draft-<uuid>`). Their rows display under the
+/// default workspace group; when no default workspace is listed they group
+/// under this synthetic key instead — NEVER under the first conversation
+/// path, which would drift with frame order and drag anchor matching along
+/// (design 10-21 Part 1 decision 1).
+const String conversationsWorkspaceKey = '__conversations';
+
 String workspaceTitle(Map<String, dynamic> w) {
   final label = w['label'] as String?;
   if (label != null && label.isNotEmpty) return label;
@@ -43,6 +53,57 @@ String workspaceTitle(Map<String, dynamic> w) {
   final identity = w['workspaceIdentity'] as String?;
   if (identity != null && identity.isNotEmpty) return identity;
   return workspaceKeyOf(w) ?? '?';
+}
+
+/// Completes the wire workspace list with the desktop's project roots
+/// (research/07 方案 A, 3.16.2): `getAvailableWorkspaces` answers only the
+/// bound window's registry ∪ the active workspace, so workspaces of other
+/// (or closed) windows never reach the wire — and their task rows never
+/// reach the overview, because the listTaskList scopes are built from this
+/// list too. The resolver's `projects ⋈ project_roots` rows cover the
+/// project workspaces the registry misses.
+///
+/// Each root whose normalized path is not already listed becomes a
+/// synthetic entry with `kind:'local'`, `label` = the project name,
+/// `workspacePath` = the root path and `workspacePurpose:'project'`.
+/// Wire entries always win the dedupe — they
+/// carry the desktop's label/identity (and conversation entries must keep
+/// their own shape). Entries are appended, never reordered: the first
+/// listed workspace stays the auto-open target.
+///
+/// Returns [workspaces] itself when nothing was appended, so the pre-merge
+/// behavior (and the object identity of the list) is preserved exactly.
+///
+/// Known upstream limit (P2-3, not fixed here): the desktop's window gate
+/// may refuse to OPEN a session of a workspace outside the bound window
+/// (「远程 workspace 不在当前窗口中」). Task-row visibility is this
+/// completion's goal; opening those rows may still be refused desktop-side
+/// and that is accepted.
+List<Map<String, dynamic>> mergeProjectWorkspaces(
+  List<Map<String, dynamic>> workspaces,
+  Iterable<ProjectRoot> roots,
+) {
+  final seen = <String>{};
+  for (final ws in workspaces) {
+    final path = ws['workspacePath'];
+    if (path is String && path.isNotEmpty) {
+      seen.add(ProjectResolver.normalizeProjectRoot(path));
+    }
+  }
+  List<Map<String, dynamic>>? merged;
+  for (final root in roots) {
+    final path = root.rootPath;
+    if (path.isEmpty) continue;
+    if (!seen.add(ProjectResolver.normalizeProjectRoot(path))) continue;
+    merged ??= List<Map<String, dynamic>>.of(workspaces);
+    merged.add({
+      'kind': 'local',
+      'label': root.name,
+      'workspacePath': path,
+      'workspacePurpose': 'project',
+    });
+  }
+  return merged ?? workspaces;
 }
 
 /// Health-gated workspace RPC surface behind [DeviceSession.callChannel].
@@ -367,6 +428,24 @@ class DeviceSession extends ChangeNotifier
   @visibleForTesting
   final RemoteClient Function()? clientFactory;
 
+  /// Test seam: builds the lazily created [ProjectResolver]. The production
+  /// resolver reads through the file channel (which needs an open bridge),
+  /// so state-level tests inject one that answers from a local fixture. The
+  /// callback parameter is the RAW bootstrap workspace list the resolver
+  /// derives the desktop home from — never the merged view (a merged-input
+  /// resolver would form a cycle with its own output).
+  @visibleForTesting
+  final ProjectResolver Function(
+    List<Map<String, dynamic>> Function() bootstrapWorkspaces,
+  )? projectResolverFactory;
+
+  /// ZCode account JWT seam for the V2 relay (desktop 3.16.2+): the
+  /// protocol layer must never import `lib/plan`, so the composition root
+  /// injects this callback. Null means an account-authenticated (V2) link
+  /// cannot connect — [connect] fails with `auth-required` instead of
+  /// silently dialing. Required only for [RemoteConnectionParams.v2] links.
+  final Future<String?> Function()? jwtProvider;
+
   /// Tunable stall-defense durations (tests shrink the defaults).
   @visibleForTesting
   final StallTimings timings;
@@ -378,6 +457,8 @@ class DeviceSession extends ChangeNotifier
     this.onWorkspaceOpened,
     this.draftsRoot,
     this.clientFactory,
+    this.projectResolverFactory,
+    this.jwtProvider,
     this.timings = const StallTimings(),
   }) : _homeStore = TaskHomeStore(deviceId: deviceId) {
     // Persisted task-home anchors + local delete tombstones (design
@@ -461,6 +542,20 @@ class DeviceSession extends ChangeNotifier
   String? _error;
 
   DeviceStatus _status = DeviceStatus.disconnected;
+
+  /// Raw wire workspace list (bootstrap / `workspace-list-updated`). The
+  /// desktop reports only the registry of its BOUND window (3.16.2
+  /// `getAvailableWorkspaces`, research/07), so [workspaces] adds the
+  /// project roots read by [ProjectResolver] on top. THIS list stays the
+  /// raw set on purpose: the resolver derives the desktop home from it,
+  /// and feeding the merged view back would be circular (the merged list
+  /// depends on the resolver's answer).
+  List<Map<String, dynamic>> _bootstrapWorkspaces = [];
+
+  /// Workspaces the UI and the listTaskList scopes see: [_bootstrapWorkspaces]
+  /// completed with the desktop's project roots (3.16.2 only, research/07
+  /// 方案 A). Wire entries keep their original label/identity and order;
+  /// synthetic project-root entries are appended.
   List<Map<String, dynamic>> _workspaces = [];
   Map<String, dynamic>? _activeWorkspace;
 
@@ -553,6 +648,231 @@ class DeviceSession extends ChangeNotifier
   @override
   List<Map<String, dynamic>> get relayTasks => _relayTasks;
 
+  /// Whether the latest bootstrap carried an authoritative `tasks` list
+  /// (legacy V1 wire, desktops ≤3.15). 3.16.2 dropped the field — the task
+  /// list then rides the channel leg (`zcode-task.listTaskList`) instead.
+  /// Kept private; the leg decision lives in [_applyRelayOverview] /
+  /// [_refreshRelayTasksFromChannel].
+  bool _tasksFromBootstrap = false;
+
+  /// In-flight dedup for the channel task leg.
+  Future<void>? _tasksRefresh;
+
+  /// In-flight dedup for the cross-workspace pinned-id merge.
+  Future<void>? _pinnedMerge;
+
+  /// `zcode-task.listTaskList` scopes assembled from [workspaces] — the
+  /// wire list completed with the desktop's project roots on 3.16.2
+  /// (research/07), so workspaces outside the bound window are still
+  /// pulled. The desktop throws (`reading 'map'`) on an empty scope
+  /// list, so callers MUST skip the call when this is empty. Only the
+  /// fields the wire requires go out: `workspacePath` is mandatory,
+  /// `workspaceIdentity` is optional (and often absent in 3.16.2's
+  /// workspace maps).
+  List<Map<String, dynamic>> _relayTaskScopes() {
+    final scopes = <Map<String, dynamic>>[];
+    final seen = <String>{};
+    for (final ws in workspaces) {
+      final path = ws['workspacePath'];
+      if (path is! String || path.isEmpty) continue;
+      if (!seen.add(path)) continue;
+      final identity = ws['workspaceIdentity'];
+      scopes.add({
+        'workspacePath': path,
+        if (identity is String && identity.trim().isNotEmpty)
+          'workspaceIdentity': identity.trim(),
+      });
+    }
+    return scopes;
+  }
+
+  /// Injects the missing `workspaceIdentity` from the workspace list by
+  /// `workspacePath` (3.16.2 relay rows carry no identity — the desktop's
+  /// `Dg` schema made it optional and stopped emitting it). Rows that
+  /// already carry an identity and rows whose path matches no listed
+  /// workspace pass through untouched.
+  List<Map<String, dynamic>> _normalizeRelayTasks(
+    Iterable<Map<String, dynamic>> rows,
+  ) {
+    final identityByPath = <String, String>{};
+    for (final ws in workspaces) {
+      final path = ws['workspacePath'];
+      final identity = ws['workspaceIdentity'];
+      if (path is String &&
+          path.isNotEmpty &&
+          identity is String &&
+          identity.trim().isNotEmpty) {
+        identityByPath.putIfAbsent(path, () => identity.trim());
+      }
+    }
+    final normalized = <Map<String, dynamic>>[];
+    for (final row in rows) {
+      final current = row['workspaceIdentity'];
+      if (current is String && current.trim().isNotEmpty) {
+        normalized.add(row);
+        continue;
+      }
+      final path = row['workspacePath'];
+      final identity = path is String ? identityByPath[path] : null;
+      normalized.add(
+        identity == null ? row : {...row, 'workspaceIdentity': identity},
+      );
+    }
+    return normalized;
+  }
+
+  /// Channel task leg (desktop 3.16.2+): `zcode-task.listTaskList`
+  /// `{kind, workspaceScopes:[non-empty]}` → `{items,total,hasMore}`.
+  /// The desktop's queryTaskList SQL filters by kind (3.16.2 asar
+  /// @278543112): `timeline` is `pinned = 0 AND archived = 0`, while
+  /// `pinned`/`archived` only ever appear under their own kind — a
+  /// timeline-only pull loses both classes from the overview. The rows use
+  /// the same shape as the legacy methods (`status` instead of
+  /// `displayStatus`, no pinned/archived/unreadAt), so the leg itself is
+  /// the only evidence: pinned/archived rows are tagged on merge and the
+  /// result is consumed through the dual-read parsing layer.
+  ///
+  /// Any failure (method missing on an old desktop, no bridge yet, desktop
+  /// error) keeps the previous rows — never an empty overwrite, so a
+  /// transient miss cannot wipe the list or seed false tombstones. A failed
+  /// leg aborts the whole round for the same reason: committing a
+  /// timeline-only merge would drop pinned/archived rows again.
+  Future<void> _refreshRelayTasksFromChannel() {
+    if (_tasksFromBootstrap) return Future.value();
+    final pending = _tasksRefresh;
+    if (pending != null) return pending;
+    final future = () async {
+      final client = _client;
+      try {
+        final scopes = _relayTaskScopes();
+        // Empty scopes throw desktop-side (`reading 'map'`) — skip and keep
+        // the last overview until workspaces are available.
+        if (scopes.isEmpty) return;
+        final rows = <Map<String, dynamic>>[];
+        for (final kind in const ['timeline', 'pinned', 'archived']) {
+          final res = await _overviewProbe.run(
+            'listTaskList',
+            const ['listTaskList'],
+            argsOf: (method) => [
+              {'kind': kind, 'workspaceScopes': scopes},
+            ],
+          );
+          final items = res is Map ? res['items'] : null;
+          if (items is! List) {
+            throw StateError('listTaskList($kind) returned no items');
+          }
+          for (final t in items) {
+            if (t is! Map) continue;
+            final row = t.cast<String, dynamic>();
+            // 3.16.2 wire rows carry no pinned/archived bits (asar
+            // rowToTaskListItem + live ITEM0); the leg's SQL is the only
+            // evidence, so tag here. The pinned leg's rows are guaranteed
+            // pinned=1 AND archived=0, which keeps the pinned section
+            // populated even when listPinnedTaskIds fails.
+            if (kind == 'pinned') {
+              rows.add({...row, 'pinned': true});
+            } else if (kind == 'archived') {
+              rows.add({...row, 'archived': true});
+            } else {
+              rows.add(row);
+            }
+          }
+        }
+        if (_disposed || _client != client) return;
+        // A legacy bootstrap carrying tasks may have landed while the legs
+        // were in flight — its authoritative list must not be overwritten.
+        if (_tasksFromBootstrap) return;
+        // The legs are disjoint by SQL, but a task can still repeat across
+        // them; first occurrence wins (timeline, then pinned, archived).
+        final deduped = <String, Map<String, dynamic>>{};
+        for (final row in rows) {
+          deduped.putIfAbsent(
+            '${row['taskId'] ?? ''}|${row['workspacePath'] ?? ''}|'
+            '${row['workspaceIdentity'] ?? ''}',
+            () => row,
+          );
+        }
+        _relayTasks = _normalizeRelayTasks(deduped.values);
+        reconcileTaskHomes();
+        notifyListeners();
+        await _mergePinnedTaskFlags();
+      } catch (e) {
+        _log('[session] listTaskList failed (kept old tasks): $e');
+      }
+    }();
+    _tasksRefresh = future;
+    // Clear only our own entry: an early (synchronous) completion must not
+    // leave a finished Future in the field, or every later refresh would
+    // join it and never retry.
+    return future.whenComplete(() {
+      if (identical(_tasksRefresh, future)) _tasksRefresh = null;
+    });
+  }
+
+  /// Pinned flags of the channel overview rows: 3.16.2's `listTaskList`
+  /// items carry no `pinned` field (the pinned leg already tagged its rows
+  /// on merge). The cross-workspace `listPinnedTaskIds` (no args) stays the
+  /// authority on top — a successful answer overrides whatever the rows
+  /// carried, and a failure keeps the flags tagged by the legs.
+  ///
+  /// Only the CHANNEL leg merges: legacy bootstrap rows carry their own
+  /// `pinned` bit, and the old desktop's cross-workspace semantics of
+  /// `listPinnedTaskIds` are not probed (it may only cover the active
+  /// workspace, which would wrongly clear other workspaces' pins).
+  Future<void> _mergePinnedTaskFlags() {
+    final pending = _pinnedMerge;
+    if (pending != null) return pending;
+    final future = () async {
+      final client = _client;
+      try {
+        if (_tasksFromBootstrap) return;
+        if (_relayTasks.isEmpty) return;
+        final res = await _overviewProbe.run(
+          'listPinnedTaskIds',
+          const ['listPinnedTaskIds'],
+        );
+        if (_disposed || _client != client || res is! List) return;
+        final ids = {
+          for (final id in res)
+            if (id is String && id.isNotEmpty) id,
+        };
+        _relayTasks = [
+          for (final row in _relayTasks)
+            {...row, 'pinned': ids.contains('${row['taskId'] ?? ''}')},
+        ];
+        notifyListeners();
+      } catch (e) {
+        _log('[session] listPinnedTaskIds failed (kept pinned flags): $e');
+      }
+    }();
+    _pinnedMerge = future;
+    // Same early-completion guard as [_refreshRelayTasksFromChannel]: an
+    // empty overview returns before the first await, and a finished Future
+    // parked in the field would disable the merge for good.
+    return future.whenComplete(() {
+      if (identical(_pinnedMerge, future)) _pinnedMerge = null;
+    });
+  }
+
+  /// Silently-bound `zcode-task` RPCs for the task overview. These are
+  /// best-effort polls: they must NOT feed the link supervisor (a miss here
+  /// escalates nothing — the 30s cadence retries naturally, and a refresh
+  /// failure is contractually silent).
+  late final MethodProbe _overviewProbe = MethodProbe(
+    (method, args) => _callChannelQuiet(Channels.zcodeTask, method, args),
+  );
+
+  Future<dynamic> _callChannelQuiet(
+    String channel,
+    String method,
+    List<Object?> args,
+  ) async {
+    final gate = _testGate ?? _liveGate();
+    if (gate == null) throw StateError('not connected');
+    await gate.waitHealthy(timeout: timings.healthyWaitTimeout);
+    return gate.call(channel, method, args).timeout(timings.rpcTimeout);
+  }
+
   /// Merged task directory (relay overview ⊕ live sessions-index),
   /// recomputed on every read — see [TaskDirectory]. Anchors and local
   /// delete tombstones read live off [_homeStore], so a write re-merges
@@ -566,8 +886,44 @@ class DeviceSession extends ChangeNotifier
         locallyDeletedTaskIds: _homeStore.locallyDeletedTaskIds,
         confirmedHomeKeys: _homeStore.homeKeys,
         keyAliases: _workspaceKeyAliases,
+        groupKeyAliases: _workspaceGroupAliases,
         cachedSessions: _liveSnapshots,
       );
+
+  /// The display group of every 3.16.2 conversation workspace: the default
+  /// workspace's canonical key, else the fixed synthetic key. Computed off
+  /// the VIRTUAL [workspaces] getter (fake sessions seed it through the
+  /// override), so the group can never drift from the listed entry set.
+  String get _conversationGroupKey {
+    for (final ws in workspaces) {
+      if (isConversationWorkspace(ws)) continue;
+      if (ws['label'] == 'default') {
+        final key = workspaceKeyOf(ws);
+        if (key != null) return key;
+      }
+    }
+    return conversationsWorkspaceKey;
+  }
+
+  /// Group-key aliases for the merged directory's row ownership: only
+  /// conversation workspaces are redirected (design 10-21 A2a). Kept
+  /// separate from [_workspaceKeyAliases] so general path↔identity
+  /// canonicalization stays out of group assignment — a path-spelled row of
+  /// an identity-spelled workspace keeps its old group (and its old
+  /// open-scope fallback), while conversation rows merge into default.
+  Map<String, String> get _workspaceGroupAliases {
+    final groupKey = _conversationGroupKey;
+    final aliases = <String, String>{};
+    for (final ws in workspaces) {
+      if (!isConversationWorkspace(ws)) continue;
+      final key = workspaceKeyOf(ws);
+      if (key != null) aliases[key] = groupKey;
+      final path = ws['workspacePath'];
+      if (path is String && path.isNotEmpty) aliases[path] = groupKey;
+    }
+    aliases.putIfAbsent(conversationsWorkspaceKey, () => groupKey);
+    return aliases;
+  }
 
   /// Workspace key alias table (check P1-2, 2026-10-15): every listed
   /// workspace contributes `workspacePath → workspaceKeyOf(ws)` plus the
@@ -579,15 +935,27 @@ class DeviceSession extends ChangeNotifier
   /// as a move. Computed at every use point off the VIRTUAL [workspaces]
   /// getter (the fake session seeds it through the override) — always
   /// fresh, no staleness window of its own.
+  ///
+  /// 3.16.2 conversation workspaces additionally alias to the default
+  /// workspace group (design 10-21 A2a): the desktop hides them from
+  /// workspace pickers by default, so their rows merge into the default
+  /// card instead of each draft directory owning one. The group key is the
+  /// FIXED [conversationsWorkspaceKey] when no default workspace is
+  /// listed — never the first conversation path (frame order must not move
+  /// the group). The synthetic key itself maps to the same target so
+  /// normalization is idempotent whichever spelling a caller starts from.
   Map<String, String> get _workspaceKeyAliases {
+    final conversationKey = _conversationGroupKey;
     final aliases = <String, String>{};
     for (final ws in workspaces) {
       final key = workspaceKeyOf(ws);
       if (key == null) continue;
-      aliases[key] = key;
       final path = ws['workspacePath'];
-      if (path is String && path.isNotEmpty) aliases[path] = key;
+      final target = isConversationWorkspace(ws) ? conversationKey : key;
+      aliases[key] = target;
+      if (path is String && path.isNotEmpty) aliases[path] = target;
     }
+    aliases.putIfAbsent(conversationsWorkspaceKey, () => conversationKey);
     return aliases;
   }
 
@@ -826,7 +1194,11 @@ class DeviceSession extends ChangeNotifier
   /// True while a workspace bridge + sessions-index open is in flight.
   bool get openingWorkspace => _openingWorkspace;
 
-  /// Workspaces reported by bootstrap (raw maps).
+  /// Workspaces reported by bootstrap, completed with the desktop's project
+  /// roots on 3.16.2 (research/07 方案 A; see [mergeProjectWorkspaces]).
+  /// Every consumer — workspace cards, task search, listTaskList scopes —
+  /// reads this merged view; the raw wire list stays private for the
+  /// resolver's home derivation.
   List<Map<String, dynamic>> get workspaces => _workspaces;
   Map<String, dynamic>? get activeWorkspace => _activeWorkspace;
 
@@ -860,10 +1232,26 @@ class DeviceSession extends ChangeNotifier
     _error = null;
     _failureReason = null;
     _setStatus(DeviceStatus.connecting);
+    // V2 links authenticate with the ZCode account JWT. Without the seam
+    // there is nothing to dial: fail with the explicit auth-required state
+    // so the UI can point the user at the account page (A2). A test-built
+    // client bypasses this (clientFactory owns its own wire).
+    if (params.v2 && jwtProvider == null && clientFactory == null) {
+      _failureReason = 'auth-required';
+      _error =
+          'auth-required: sign in to your ZCode account to use this remote link';
+      _connecting = false;
+      _setStatus(DeviceStatus.error);
+      return;
+    }
     final sw = Stopwatch()..start();
     final client = clientFactory != null
         ? clientFactory!()
-        : RemoteClient(params, onLog: _log);
+        : RemoteClient(
+            params,
+            onLog: _log,
+            jwtProvider: jwtProvider,
+          );
     _failureSub = client.relay.failures.listen(_onRelayFailure);
     try {
       // socket.ready has no internal timeout: a black-holed dial would park
@@ -893,11 +1281,19 @@ class DeviceSession extends ChangeNotifier
       if (_activeWorkspace == null && _workspaces.isNotEmpty) {
         await openWorkspace(_preferredWorkspace ?? _workspaces.first);
       }
+      // 3.16.2 bootstrap carries no tasks: pull the channel leg now that a
+      // bridge may exist. On legacy links the bootstrap leg already won and
+      // this is a no-op; any failure keeps the last overview.
+      if (_bridge != null) await _refreshRelayTasksFromChannel();
       _setStatus(DeviceStatus.connected);
       // Status must read connected before arming: the watchdog only guards
       // the healthy-looking-but-never-ready state.
       _armListWatchdog();
     } catch (e) {
+      // The relay's failure stream is async and this catch cancels the
+      // listener before the event lands; carry the typed start failure's
+      // reason over explicitly so `auth-required` survives to the banner.
+      if (e is RelayV2StartException) _failureReason ??= e.reason;
       await _failureSub?.cancel();
       _failureSub = null;
       await _wsListSub?.cancel();
@@ -967,19 +1363,21 @@ class DeviceSession extends ChangeNotifier
     if (_disposed || result is! Map) return;
     final list = result['workspaces'];
     if (list is List) {
-      _workspaces = [
+      _setBootstrapWorkspaces([
         for (final w in list)
           if (w is Map) w.cast<String, dynamic>(),
-      ];
+      ]);
     }
     final tasks = result['tasks'];
     if (tasks is List) {
-      _relayTasks = [
+      _relayTasks = _normalizeRelayTasks([
         for (final t in tasks)
           if (t is Map) t.cast<String, dynamic>(),
-      ];
+      ]);
       // Push frames carry a fresh task overview: same anchor reconcile as
-      // [_applyRelayOverview] (design 10-15 §1.1).
+      // [_applyRelayOverview] (design 10-15 §1.1). The rows keep their own
+      // `pinned` bits — the cross-workspace pinned merge belongs to the
+      // 3.16.2 channel leg only.
       reconcileTaskHomes();
     }
     notifyListeners();
@@ -1065,8 +1463,16 @@ class DeviceSession extends ChangeNotifier
   /// equivalent 'session-conflict' on this outbound line only — relay
   /// close code 4009 is the same event.
   void _diag(String event, [Map<String, dynamic>? fields]) {
-    if (fields != null && fields['failureReason'] == 'kicked') {
-      fields = {...fields, 'failureReason': 'session-conflict'};
+    if (fields != null) {
+      final reason = fields['failureReason'];
+      if (reason == 'kicked') {
+        fields = {...fields, 'failureReason': 'session-conflict'};
+      } else if (reason == 'auth-required') {
+        // D3 is a closed 11-value enum and has no auth value; the V2
+        // account gate is a client-side state, so the wire keeps the
+        // generic value while the UI keeps the precise reason.
+        fields = {...fields, 'failureReason': 'unexpected-error'};
+      }
     }
     _client?.sendMobileDiagnostic(event, fields);
   }
@@ -1170,6 +1576,7 @@ class DeviceSession extends ChangeNotifier
       final conversation = bridge.conversation(
         scope,
         onLog: _log,
+        projectIdFor: _projectIdForCreate,
         // Chat sends feed the same failure ledger callChannel uses
         // (ADR-0009 covers every send path).
         onLinkLevelFailure: _onTransportLinkLevelFailure,
@@ -1183,6 +1590,18 @@ class DeviceSession extends ChangeNotifier
       }
       _sessionsSub = sub;
       sub.state.subscribedWorkspaceKey = key;
+      // 3.16.2 project prewarm + workspace-list completion (acceptance
+      // round 1 P1-2; research/07 方案 A): read the desktop's project
+      // index off the createSession critical path — a handful of pages, so
+      // the first create hits the cache instead of paying the read on its
+      // own 30 s RPC budget — and complete the workspace list with the
+      // project roots the single-window bootstrap registry omits.
+      // Fire-and-forget: the resolver never throws; a create landing
+      // mid-read shares the in-flight future, and a failed read leaves both
+      // consumers in their pre-feature shape.
+      if (params.atLeast(3, 16, 2)) {
+        unawaited(_refreshProjectWorkspaces());
+      }
       // Deleted-task tombstones for the live-index filter (Addendum 2):
       // probed once per open; any failure (old desktop without the method,
       // channel gone) degrades to an empty set and must never block
@@ -1357,6 +1776,9 @@ class DeviceSession extends ChangeNotifier
         _activeWorkspace ?? _preferredWorkspace ?? _workspaces.firstOrNull;
     if (target != null) {
       await openWorkspace(target);
+      // Same leg decision as [connect]: bootstrap tasks win on legacy
+      // links, otherwise refresh the channel overview.
+      if (_bridge != null) await _refreshRelayTasksFromChannel();
     } else {
       // Nothing to open (no workspace on the desktop) — just repaint.
       notifyListeners();
@@ -1371,21 +1793,132 @@ class DeviceSession extends ChangeNotifier
   /// both.
   void _applyRelayOverview(Map<String, dynamic> bootstrap) {
     final list = bootstrap['workspaces'];
-    _workspaces = [
+    _setBootstrapWorkspaces([
       if (list is List)
         for (final w in list)
           if (w is Map) w.cast<String, dynamic>(),
-    ];
+    ]);
     final tasks = bootstrap['tasks'];
-    _relayTasks = [
-      if (tasks is List)
+    if (tasks is List) {
+      // Legacy overview leg (V1 links / desktops ≤3.15). An empty list is
+      // authoritative here — never fall through to the channel leg and
+      // resurrect rows the desktop just cleared.
+      _relayTasks = _normalizeRelayTasks([
         for (final t in tasks)
           if (t is Map) t.cast<String, dynamic>(),
-    ];
+      ]);
+      // Legacy rows keep their own `pinned` bit: the cross-workspace
+      // `listPinnedTaskIds` authority only applies to the 3.16.2 channel
+      // leg (see [_mergePinnedTaskFlags]).
+      _tasksFromBootstrap = true;
+    } else {
+      // 3.16.2 dropped `tasks` from bootstrap (live-probed: key absent).
+      // Keep the previous rows; the channel leg replaces them on answer.
+      _tasksFromBootstrap = false;
+    }
     // Fresh overview = fresh anchor evidence: tombstone expiry, single-copy
     // reconcile, absence prune (design 10-15 §1.1).
     reconcileTaskHomes();
   }
+
+  /// Stores a raw wire workspace list and recomputes the merged view from
+  /// whatever the resolver has loaded so far. A bootstrap frame landing
+  /// after the mapping resolved (reconnects, the 30 s overview cadence)
+  /// gets the completion without waiting for another read.
+  void _setBootstrapWorkspaces(List<Map<String, dynamic>> list) {
+    _bootstrapWorkspaces = list;
+    _mergeResolvedProjectWorkspaces();
+  }
+
+  /// Recomputes [_workspaces] as RAW list ∪ resolver project roots
+  /// (3.16.2 only — older desktops have no project layer, so the merged
+  /// view is the raw list itself and behavior stays byte-identical).
+  /// Answers whether the merged list changed.
+  bool _mergeResolvedProjectWorkspaces() {
+    final merged = params.atLeast(3, 16, 2)
+        ? mergeProjectWorkspaces(
+            _bootstrapWorkspaces,
+            _projectResolver.projectRoots,
+          )
+        : _bootstrapWorkspaces;
+    if (_sameWorkspaces(_workspaces, merged)) return false;
+    _workspaces = merged;
+    return true;
+  }
+
+  /// Value comparison for the merge's change detection: the synthetic
+  /// entries are rebuilt on every recompute, so identity is not enough.
+  static bool _sameWorkspaces(
+    List<Map<String, dynamic>> a,
+    List<Map<String, dynamic>> b,
+  ) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      final x = a[i];
+      final y = b[i];
+      if (identical(x, y)) continue;
+      if (x.length != y.length) return false;
+      for (final entry in x.entries) {
+        if (y[entry.key] != entry.value) return false;
+      }
+    }
+    return true;
+  }
+
+  /// Publishes a workspace-list change caused by a LATE resolver answer:
+  /// notify the card lists, then re-pull the task overview so the new
+  /// workspaces' rows land through the usual three legs. Awaits the
+  /// refresh; callers that must not block a command fire it unawaited.
+  Future<void> _applyProjectWorkspaceCompletion() async {
+    if (!_mergeResolvedProjectWorkspaces() || _disposed) return;
+    notifyListeners();
+    await _refreshTaskScopesAfterMerge();
+  }
+
+  /// Resolves (or joins) the project mapping and applies the completion.
+  /// Triggered by the workspace-open prewarm and by the first createSession
+  /// that lands before it — the two points where the mapping read has a
+  /// live file channel.
+  Future<void> _refreshProjectWorkspaces() async {
+    if (!params.atLeast(3, 16, 2) || _disposed) return;
+    final client = _client;
+    try {
+      await _projectResolver.mapping();
+    } catch (_) {
+      // The resolver's contract is "never throws"; stay defensive anyway —
+      // a completion failure must not disturb the workspace open.
+      return;
+    }
+    // The read can outlive the link: suspend() clears the workspace state
+    // (session-lifecycle §2), and completing the EMPTY raw list would
+    // resurrect synthetic-only workspaces after it. Same late-answer guard
+    // as [refreshTaskOverview].
+    if (_disposed || _client != client) return;
+    await _applyProjectWorkspaceCompletion();
+  }
+
+  /// Pulls the task overview again with the completed scope list. A round
+  /// already in flight was built from the OLD scopes; the channel helper's
+  /// dedup would hand back that stale future, so wait it out before
+  /// dialing again.
+  Future<void> _refreshTaskScopesAfterMerge() async {
+    final pending = _tasksRefresh;
+    if (pending != null) {
+      try {
+        await pending;
+      } catch (_) {}
+    }
+    if (_disposed) return;
+    await _refreshRelayTasksFromChannel();
+  }
+
+  /// Test seam: runs the project completion round exactly like the
+  /// workspace-open prewarm does. The live trigger needs an open bridge,
+  /// which the stub-client harness cannot provide.
+  @visibleForTesting
+  Future<void> debugRefreshProjectWorkspacesForTest() =>
+      _refreshProjectWorkspaces();
 
   /// In-flight dedup for [refreshTaskOverview].
   Future<void>? _overviewRefresh;
@@ -1413,6 +1946,11 @@ class DeviceSession extends ChangeNotifier
         // flight — a late answer must not resurrect state suspend cleared.
         if (_disposed || _client != client) return;
         _applyRelayOverview(bootstrap);
+        // 3.16.2: bootstrap carries no tasks — the cadence pulls the
+        // `listTaskList` leg here (a legacy bootstrap leg short-circuits
+        // inside the helper). Failure keeps the old rows.
+        await _refreshRelayTasksFromChannel();
+        if (_disposed || _client != client) return;
         notifyListeners();
       } catch (e) {
         _log('[session] overview refresh failed (kept old values): $e');
@@ -1696,7 +2234,14 @@ class DeviceSession extends ChangeNotifier
     // 即锚定到活动工作区 —— 注册表行落地前（甚至被镜像污染前）home 已定。
     final ws = _activeWorkspace;
     final key = ws == null ? null : workspaceKeyOf(ws);
-    if (key != null) _homeStore.anchorHome(id, key, now: clock.now());
+    // Same alias canonicalization as anchor sources ②③④ (spec §3.8): a
+    // conversation active workspace must anchor at its DISPLAY group key —
+    // a raw draft-path spelling would fail bestRelayRow's canonicalized
+    // anchor matching until the next reconcile.
+    if (key != null) {
+      final aliases = _workspaceKeyAliases;
+      _homeStore.anchorHome(id, aliases[key] ?? key, now: clock.now());
+    }
     return id;
   }
 
@@ -1847,6 +2392,55 @@ class DeviceSession extends ChangeNotifier
   late final FileServicePort fileService = FileServicePort(
     (method, args) => callChannel(Channels.file, method, args),
   );
+
+  /// 3.16.2 project attribution (design 10-21 Part 2): learns the desktop's
+  /// `rootPath → projectId` map — and its project list, which completes the
+  /// workspace list (research/07) — from its own `tasks-index.sqlite` over
+  /// the file channel, so `createSession` can carry the outer `projectId`
+  /// the desktop's `reserveCreatedTask` expects. Prewarmed fire-and-forget
+  /// after a workspace opens (the read is a handful of pages, acceptance
+  /// round 1); transient failures retry on the next creation, every failure
+  /// degrades to null (the old NULL-project payload), never to an error.
+  late final ProjectResolver _projectResolver =
+      projectResolverFactory?.call(() => _bootstrapWorkspaces) ??
+          ProjectResolver(
+            // RAW list, never the merged view: see [_bootstrapWorkspaces].
+            workspaces: () => _bootstrapWorkspaces,
+            readRange: _readProjectIndexRange,
+            onLog: _log,
+          );
+
+  /// The seam's failure contract: a channel error/timeout THROWS (the
+  /// resolver retries it on the next creation); a successful read answers
+  /// whatever bytes the desktop returned, possibly empty/short at EOF.
+  Future<Uint8List> _readProjectIndexRange(
+    String path,
+    int offset,
+    int length,
+  ) async {
+    final ws = _activeWorkspace?['workspacePath'];
+    final range = await fileService.readFileRange(
+      ws is String ? ws : path,
+      path,
+      offset: offset,
+      length: length,
+    );
+    return range.bytes;
+  }
+
+  /// `createSession`'s project id — the transport consults it only there.
+  /// Explicit 3.16.2 gate (design decision 1): older desktops have no
+  /// project layer, so nothing is read and the payload stays unchanged.
+  ///
+  /// A create can be the FIRST resolver consumer (no workspace opened, so
+  /// the prewarm never ran): the mapping that just landed also completes
+  /// the workspace list, fired without blocking the create.
+  Future<String?> _projectIdForCreate(String workspacePath) async {
+    if (!params.atLeast(3, 16, 2)) return null;
+    final projectId = await _projectResolver.projectIdFor(workspacePath);
+    if (!_disposed) unawaited(_applyProjectWorkspaceCompletion());
+    return projectId;
+  }
 
   /// Workspace Git operations on the `git` channel (status-panel Git group,
   /// review panel, branch/commit/push writes). Late final like the ports
@@ -2426,8 +3020,12 @@ class DeviceSession extends ChangeNotifier
     _sessionsSub = null;
     _chatSubs.clear();
     _activeWorkspace = null;
+    _bootstrapWorkspaces = [];
     _workspaces = [];
     _relayTasks = [];
+    _tasksFromBootstrap = false;
+    _tasksRefresh = null;
+    _pinnedMerge = null;
     // Snapshot cache dies with the rest of the directory state — a rebuild
     // is a cold start (design §清点). Retry loops don't pass through here,
     // so a flapping link keeps its cached rows.
@@ -2484,11 +3082,21 @@ class DeviceSessionHub extends ChangeNotifier {
   final Map<String, String> _lastWorkspaceKey = {};
   bool _disposed = false;
 
-  DeviceSessionHub({required this.nativeListEnabled, this.draftsRoot});
+  DeviceSessionHub({
+    required this.nativeListEnabled,
+    this.draftsRoot,
+    this.jwtProvider,
+  });
 
   /// Composer-draft attachment root, threaded into every [ensure]d
   /// session's [ChatDraftStore].
   final Future<Directory?> Function()? draftsRoot;
+
+  /// ZCode account JWT seam for the V2 relay, threaded into every
+  /// [DeviceSession] this hub creates (see
+  /// [DeviceSession.jwtProvider]). Null on hosts without the plan plane —
+  /// V2 links then fail with `auth-required` instead of dialing.
+  final Future<String?> Function()? jwtProvider;
 
   DeviceSession? sessionOf(String deviceId) => _sessions[deviceId];
 
@@ -2524,6 +3132,7 @@ class DeviceSessionHub extends ChangeNotifier {
       preferredWorkspaceKey: _lastWorkspaceKey[device.id],
       onWorkspaceOpened: (key) => _lastWorkspaceKey[device.id] = key,
       draftsRoot: draftsRoot,
+      jwtProvider: jwtProvider,
     );
     _sessions[device.id] = session;
     session.addListener(_onSessionChanged);

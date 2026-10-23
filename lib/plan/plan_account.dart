@@ -117,7 +117,7 @@ class PlanController extends ChangeNotifier {
 
   String? _token;
   bool _loaded = false;
-  bool _identityLoaded = false;
+  Future<void>? _identityLoad;
   bool _signedIn = false;
   bool _authExpired = false;
   bool _fetching = false;
@@ -132,6 +132,11 @@ class PlanController extends ChangeNotifier {
   DateTime? _memoExpiry;
 
   bool get signedIn => _signedIn;
+
+  /// In-memory ZCode JWT (the same credential persisted under
+  /// `zgo_plan_token`). Exposed ONLY as the relay-V2 terminal-auth seam —
+  /// never log, display or persist it elsewhere.
+  String? get token => _token;
 
   /// 401 has been seen since the last successful fetch → the UI prompts
   /// for re-login; stale data stays visible.
@@ -186,9 +191,17 @@ class PlanController extends ChangeNotifier {
   /// Reads only the persisted identity (no network) — the app-root calls
   /// this once so the settings entry row shows the real signed-in state;
   /// the actual fetch waits for the page entry (R3: fetch on page open).
-  Future<void> loadIdentity() async {
-    if (_identityLoaded || _disposed) return;
-    _identityLoaded = true;
+  ///
+  /// Concurrent callers share one in-flight Future: the app root fires this
+  /// unawaited while the relay-V2 `jwtProvider` awaits it on the first
+  /// connection, and a second call must not return before `_token` is set
+  /// (cold-start false `auth-required`).
+  Future<void> loadIdentity() {
+    if (_disposed) return Future.value();
+    return _identityLoad ??= _readIdentity();
+  }
+
+  Future<void> _readIdentity() async {
     // The expiry memo rides the same boot path as the token so an empty
     // snapshot right after startup can already be classified. A failed
     // read silently degrades to no memory (never-throw contract).
@@ -197,7 +210,16 @@ class PlanController extends ChangeNotifier {
     } catch (_) {
       _memoExpiry = null;
     }
-    final token = await _store.readToken();
+    String? token;
+    try {
+      token = await _store.readToken();
+    } catch (_) {
+      // Same never-throw contract as the memo read. The shared
+      // [_identityLoad] Future must not cache the failure: a boot-time
+      // read error would otherwise keep jwtProvider permanently
+      // auth-required and a later sign-in could never repair the relay.
+      token = null;
+    }
     if (_disposed) return;
     if (token == null || token.isEmpty) {
       notifyListeners();

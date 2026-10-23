@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -26,9 +27,23 @@ class FakeTokenStore implements PlanTokenStore {
   String? mid;
   int writes = 0;
   int clears = 0;
+  int reads = 0;
+
+  /// When set, [readToken] parks on it — lets a test hold the first read
+  /// open while a second [PlanController.loadIdentity] call lands.
+  Completer<void>? readGate;
+
+  /// Simulates an unreadable secure store (MissingPluginException et al).
+  bool throwOnRead = false;
 
   @override
-  Future<String?> readToken() async => token;
+  Future<String?> readToken() async {
+    reads++;
+    final gate = readGate;
+    if (gate != null) await gate.future;
+    if (throwOnRead) throw StateError('secure storage unavailable');
+    return token;
+  }
 
   @override
   Future<void> writeToken(String value) async {
@@ -228,6 +243,59 @@ void main() {
       // Idempotent: a second ensure does not refetch.
       await c.ensureLoaded();
       expect(api.requests, hasLength(1));
+    });
+
+    test('concurrent loadIdentity calls share the in-flight token read',
+        () async {
+      final store = FakeTokenStore()..token = makeJwt();
+      final gate = Completer<void>();
+      store.readGate = gate;
+      final c = PlanController(store: store, api: FakeApi().build());
+
+      final a = c.loadIdentity();
+      final b = c.loadIdentity();
+      // The second call must ride the same read, not resolve against the
+      // half-loaded identity (old implementation returned here immediately).
+      var done = false;
+      unawaited(b.then((_) => done = true));
+      await Future<void>.delayed(Duration.zero);
+      expect(done, isFalse);
+      gate.complete();
+      await b;
+      expect(c.token, isNotNull);
+      await a;
+      expect(store.reads, 1);
+    });
+
+    test('a finished loadIdentity never reads the store again', () async {
+      final store = FakeTokenStore()..token = makeJwt();
+      final c = PlanController(store: store, api: FakeApi().build());
+
+      await c.loadIdentity();
+      await c.loadIdentity();
+
+      expect(store.reads, 1);
+      expect(c.token, makeJwt());
+    });
+
+    test('an unreadable store degrades to signed out and does not poison '
+        'the shared identity future', () async {
+      final store = FakeTokenStore()
+        ..token = makeJwt()
+        ..throwOnRead = true;
+      final c = PlanController(store: store, api: FakeApi().build());
+
+      await c.loadIdentity(); // never throws
+
+      expect(c.token, isNull);
+      expect(c.signedIn, isFalse);
+
+      // Sign-in repairs the account state; the shared future must not hold
+      // the boot failure hostage (the relay jwtProvider reads this later).
+      store.throwOnRead = false;
+      expect(await c.signIn(makeJwt(userId: 'u-recover')), isTrue);
+      await c.loadIdentity();
+      expect(c.token, makeJwt(userId: 'u-recover'));
     });
 
     test('signIn trims, persists, fetches', () async {

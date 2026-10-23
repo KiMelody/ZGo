@@ -16,6 +16,34 @@ String? workspaceKeyOf(Map<String, dynamic> w) {
   return null;
 }
 
+/// Whether a workspace path names a 3.16.2 conversation (draft) workspace:
+/// `<home>/.zcode/workspace/draft-*`.
+///
+/// Live 3.16.2 bootstrap frames do NOT carry `workspacePurpose` for draft
+/// workspaces (acceptance round 1, 2026-10-22: draft rows are
+/// `{kind:'local', label:'draft-…', workspacePath}`; only project rows carry
+/// `workspacePurpose:'project'`), so the path is the only durable signal.
+/// The marker matches the desktop's own task-area filter semantics
+/// (`root_path NOT GLOB '*/.zcode/workspace/*'`, tool/design/
+/// fix_task_project.py's DRAFT_DIR_MARK): slash-normalized `indexOf`, so
+/// both Windows and POSIX spellings match. `~/.zcode/workspace/default` has
+/// no `draft-` prefix and stays an ordinary group.
+bool isConversationWorkspacePath(String path) {
+  final normalized = path.replaceAll(r'\', '/');
+  const marker = '/.zcode/workspace/draft-';
+  return normalized.contains(marker);
+}
+
+/// Whether a listed workspace is a 3.16.2 conversation workspace: the
+/// `workspacePurpose` marker (schema enum — future desktops may populate it)
+/// OR the draft path convention (the live 3.16.2 shape). Single gate shared
+/// by the merge layer, the card construction and the 「对话」 badge.
+bool isConversationWorkspace(Map<String, dynamic> ws) {
+  if (ws['workspacePurpose'] == 'conversation') return true;
+  final path = ws['workspacePath'];
+  return path is String && path.isNotEmpty && isConversationWorkspacePath(path);
+}
+
 /// Merged view of every task on one device — the one home of the
 /// 「relay 任务总览打底、live 会话索引按 Task id 胜出；同 id 多副本分层定
 /// home（持久锚 → 冷启动稳定 pick），displayStatus 字段级合成」rule
@@ -75,6 +103,15 @@ class TaskDirectory {
   /// raw comparison (every pre-existing call site's behavior unchanged).
   final Map<String, String> keyAliases;
 
+  /// Group-key aliases: row ownership keys → display group keys. Used ONLY
+  /// by the group assignment in [_merge] / [pinnedEntries]: 3.16.2
+  /// conversation workspace paths redirect to the default group (design
+  /// 10-21 A2a). Distinct from [keyAliases] on purpose — the latter also
+  /// canonicalizes path/identity spellings for ANCHOR matching, a
+  /// normalization that must not change a row's group (or its open-scope
+  /// fallback). Defaults to empty = raw keys (pre-existing behavior).
+  final Map<String, String> groupKeyAliases;
+
   /// Cached last live sessions-index snapshot per workspace key (design
   /// 10-15-task-live-snapshot-cache): the merge layer's gap filler. A row
   /// participates ONLY when neither the relay layer nor the ACTIVE live
@@ -93,6 +130,7 @@ class TaskDirectory {
     this.locallyDeletedTaskIds = const {},
     this.confirmedHomeKeys = const {},
     this.keyAliases = const {},
+    this.groupKeyAliases = const {},
     this.cachedSessions = const {},
   });
 
@@ -163,20 +201,22 @@ class TaskDirectory {
       // the WHOLE group ([displayStatusWinner]) — the same selection
       // DeviceSession.taskDisplayStatus reads, the two former picks merged.
       final status = displayStatusWinner(rows, id);
-      final entry = SessionEntry.fromRelayTask({
-        ...task,
-        // The winner's exact value: a null (missing on the winning copy)
-        // erases the home copy's own field so the phase derives as
-        // running-class exactly like the M1 rules.
-        'displayStatus': status,
-      });
+      // The winner's exact value: a null (missing on the winning copy)
+      // erases the home copy's own fields so the phase derives as
+      // running-class exactly like the M1 rules. `status` is removed too —
+      // the dual-read fallback would otherwise resurrect the home copy's
+      // 3.16.2 value when the synthesized `displayStatus` is null.
+      final synthesized = {...task, 'displayStatus': status}..remove('status');
+      final entry = SessionEntry.fromRelayTask(synthesized);
       // Group key: the anchor pins it even when no copy carries the
       // anchored key anymore (transient — the relay-reconcile self-heal in
       // DeviceSession.reconcileTaskHomes follows the single-copy
       // evidence); otherwise the home copy's own key. The live loop below
-      // still outranks a pinned key whenever the index is ready.
-      final key = confirmedHomeKeys[id] ?? relayKeyOf(task);
-      byId[id] = (entry, key, task['archived'] == true);
+      // still outranks a pinned key whenever the index is ready. Group
+      // keys canonicalize through [groupKeyAliases] (conversation paths
+      // merge into the default group — design 10-21 A2a).
+      final rawKey = confirmedHomeKeys[id] ?? relayKeyOf(task);
+      byId[id] = (entry, _canonicalKey(rawKey), task['archived'] == true);
     }
     if (sessions?.ready == true) {
       for (final entry in sessions!.list) {
@@ -213,8 +253,26 @@ class TaskDirectory {
           final relayKey = byId[id]?.$2;
           key = relayKey == null ? null : keyAliases[relayKey] ?? relayKey;
         }
-        key ??= liveKeyOf(entry, sessions!.subscribedWorkspaceKey);
-        byId[id] = (entry, key, byId[id]?.$3 ?? false);
+        final membershipKey =
+            liveKeyOf(entry, sessions!.subscribedWorkspaceKey);
+        key ??= membershipKey;
+        // Canonicalize membership keys too: a conversation workspace's
+        // index is subscribed under its own draft path, yet its rows
+        // display in the default group (design 10-21 A2a).
+        key = _canonicalKey(key);
+        // The live frame owns none of the archived bit (probed 3.12.1: the
+        // field is absent, and a stray one is untrusted) — carry the relay
+        // authority into the replacement row's raw so consumers reading
+        // `entry.raw['archived']` (swipe / action sheet) still see it.
+        final archived = byId[id]?.$3 ?? false;
+        byId[id] = (
+          SessionEntry({
+            ..._stampedEntry(entry, membershipKey).raw,
+            'archived': archived
+          }),
+          key,
+          archived,
+        );
       }
     }
     // Cached snapshots (third layer): gap filler only — any id the relay
@@ -229,7 +287,19 @@ class TaskDirectory {
         if (locallyDeletedTaskIds.contains(id)) continue;
         if (byId.containsKey(id)) continue;
         sessionOnlyIds.add(id);
-        byId[id] = (entry, liveKeyOf(entry, cacheKey), false);
+        // No relay anchor → not archived. Stamp the raw bit too: the
+        // cached row is live-derived and consumers read archived off
+        // `entry.raw`, so an unstamped row would offer a bogus
+        // 「取消归档」 that no registry row can resolve. The draft-path
+        // stamp keeps a cached conversation row openable (see
+        // [_stampedEntry]).
+        final cacheRowKey = liveKeyOf(entry, cacheKey);
+        byId[id] = (
+          SessionEntry(
+              {..._stampedEntry(entry, cacheRowKey).raw, 'archived': false}),
+          _canonicalKey(cacheRowKey),
+          false,
+        );
       }
     }
     return (rows: byId.values.toList(), sessionOnlyIds: sessionOnlyIds);
@@ -286,21 +356,36 @@ class TaskDirectory {
   /// carries go into the map (path required — every scoped wire call needs
   /// it); null means ownership is undeterminable and the caller must not
   /// open the chat.
+  ///
+  /// Conversation rows are the exception to key-first matching: their
+  /// [key] is the DEFAULT group (design 10-21 A2a display merge), but the
+  /// session still lives under its own `.zcode/workspace/draft-*` scope.
+  /// Resolving them by the display key would subscribe the default
+  /// workspace and dead-end every command, so the row's own path wins
+  /// whenever it names a listed conversation workspace.
   static Map<String, dynamic>? workspaceForKey(
     List<Map<String, dynamic>> workspaces,
     SessionEntry entry,
     String? key,
   ) {
+    final originPath = entry.raw['workspacePath'];
+    if (originPath is String && originPath.isNotEmpty) {
+      for (final ws in workspaces) {
+        if (isConversationWorkspace(ws) &&
+            ws['workspacePath'] == originPath) {
+          return ws;
+        }
+      }
+    }
     for (final ws in workspaces) {
       if (key != null && workspaceKeyOf(ws) == key) return ws;
     }
     // No directory anchor (archived rows are filtered out of allEntries,
     // session-only rows never had one): the row's own origin fields still
     // say where it belongs — cross-workspace rows keep their chip.
-    final path = entry.raw['workspacePath'];
-    if (path is! String || path.isEmpty) return null;
+    if (originPath is! String || originPath.isEmpty) return null;
     return {
-      'workspacePath': path,
+      'workspacePath': originPath,
       if (entry.raw['workspaceIdentity'] != null)
         'workspaceIdentity': entry.raw['workspaceIdentity'],
     };
@@ -370,7 +455,10 @@ class TaskDirectory {
     ({bool terminal, int updatedAt, String workspace, String status}) rankOf(
       Map<String, dynamic> task,
     ) {
-      final status = task['displayStatus'] as String?;
+      // Dual-read (design 10-21-drift-3162 R4): 3.16.2 timeline rows carry
+      // `status`, legacy bootstrap rows `displayStatus`; the legacy field
+      // keeps precedence when both exist.
+      final status = (task['displayStatus'] ?? task['status']) as String?;
       return (
         terminal: terminalStatuses.contains(status),
         updatedAt: (task['updatedAt'] as num?)?.toInt() ?? 0,
@@ -402,7 +490,9 @@ class TaskDirectory {
         bestRank = rank;
       }
     }
-    return best?['displayStatus'] as String?;
+    return best == null
+        ? null
+        : (best['displayStatus'] ?? best['status']) as String?;
   }
 
   /// The home relay row for [taskId] among its duplicates (desktop
@@ -431,6 +521,8 @@ class TaskDirectory {
   }) {
     final anchor = homeKeys[taskId];
     Map<String, dynamic>? anchorRow;
+    SessionEntry? anchorEntry;
+    String? anchorKey;
     Map<String, dynamic>? best;
     SessionEntry? bestEntry;
     String? bestKey;
@@ -441,10 +533,16 @@ class TaskDirectory {
       final entry = SessionEntry.fromRelayTask(task);
       if (entry.sessionId.isEmpty) continue;
       final key = relayKeyOf(task);
-      if (anchor != null &&
-          anchorRow == null &&
-          (keyAliases[key] ?? key) == anchor) {
-        anchorRow = task;
+      if (anchor != null && (keyAliases[key] ?? key) == anchor) {
+        // Several copies can canonicalize to one anchor now that
+        // conversation paths alias to their display group; pick among them
+        // with the same stable rule instead of frame order.
+        if (anchorRow == null ||
+            _relayRowBeats(entry, key, anchorEntry!, anchorKey)) {
+          anchorRow = task;
+          anchorEntry = entry;
+          anchorKey = key;
+        }
       }
       if (best == null || _relayRowBeats(entry, key, bestEntry!, bestKey)) {
         best = task;
@@ -458,6 +556,33 @@ class TaskDirectory {
     return anchorRow ?? best;
   }
 
+  /// Canonicalizes a row / group key through [groupKeyAliases]: relay rows
+  /// spell a workspace as `workspacePath`, live rows and folders in the
+  /// [workspaceKeyOf] form, and 3.16.2 conversation paths alias to the
+  /// default group. A miss keeps the raw key (aliases empty = old behavior).
+  String? _canonicalKey(String? key) =>
+      key == null ? null : groupKeyAliases[key] ?? key;
+
+  /// Stamps the pre-canonicalization ownership key back into a LIVE / cached
+  /// row's raw when the display merge rewrote its group: 3.16.2 live index
+  /// rows carry no `workspacePath` (probe3162_p1 schema), so once the row
+  /// merges into the default group nothing in its body names the draft
+  /// workspace anymore — [workspaceForKey]'s conversation branch would fall
+  /// through to the DEFAULT workspace and dead-end every command
+  /// (proto.sessionNotFound). Only fires when the key was actually rewritten
+  /// by [groupKeyAliases] (conversation workspaces carry no identity, so the
+  /// raw key IS the path) and the raw lacks a path; every other row keeps
+  /// its exact pre-merge body.
+  SessionEntry _stampedEntry(SessionEntry entry, String? rawKey) {
+    final raw = entry.raw;
+    if (rawKey == null ||
+        groupKeyAliases[rawKey] == null ||
+        raw['workspacePath'] is String) {
+      return entry;
+    }
+    return SessionEntry({...raw, 'workspacePath': rawKey});
+  }
+
   /// Entries of one workspace, merged; archived rows in or out per
   /// [includeArchived].
   List<(SessionEntry, String?)> entriesFor(
@@ -466,14 +591,12 @@ class TaskDirectory {
   }) =>
       [
         for (final (entry, key, archived) in _rows())
-          if (key == workspaceKey && archived == includeArchived)
-            (entry, key),
+          if (key == workspaceKey && archived == includeArchived) (entry, key),
       ];
 
   /// Every non-archived task of the device — the page-wide set (timeline
   /// grouping et al).
-  List<(SessionEntry, String?)> allEntries() =>
-      [
+  List<(SessionEntry, String?)> allEntries() => [
         for (final (entry, key, archived) in _rows())
           if (!archived) (entry, key),
       ];
@@ -505,12 +628,12 @@ class TaskDirectory {
       );
       if (task == null) continue;
       final status = displayStatusWinner(rows, id);
-      final entry = SessionEntry.fromRelayTask({
-        ...task,
-        'displayStatus': status,
-      });
-      // Same anchor-pins-the-group rule as [_merge].
-      byId[id] = (entry, confirmedHomeKeys[id] ?? relayKeyOf(task));
+      final synthesized = {...task, 'displayStatus': status}..remove('status');
+      final entry = SessionEntry.fromRelayTask(synthesized);
+      // Same anchor-pins-the-group rule as [_merge], canonicalized through
+      // [groupKeyAliases] so a conversation copy lands in the default group.
+      final rawKey = confirmedHomeKeys[id] ?? relayKeyOf(task);
+      byId[id] = (entry, _canonicalKey(rawKey));
     }
     if (sessions?.ready == true) {
       // Multi-copy attribution needs the FULL relay set: this projection's
@@ -555,7 +678,7 @@ class TaskDirectory {
           }
         }
         key ??= liveKeyOf(entry, sessions!.subscribedWorkspaceKey);
-        byId[id] = (entry, key);
+        byId[id] = (entry, _canonicalKey(key));
       }
     }
     // Cached snapshots: same gap-filler rule as [_merge] — without this a
@@ -567,7 +690,10 @@ class TaskDirectory {
         if (locallyDeletedTaskIds.contains(entry.sessionId)) continue;
         if (byId.containsKey(entry.sessionId)) continue;
         if (entry.raw['pinned'] == true) {
-          byId[entry.sessionId] = (entry, liveKeyOf(entry, cacheKey));
+          byId[entry.sessionId] = (
+            entry,
+            _canonicalKey(liveKeyOf(entry, cacheKey)),
+          );
         }
       }
     }

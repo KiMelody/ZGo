@@ -95,6 +95,97 @@ void main() {
     });
   });
 
+  group('V2 link shape (3.16.2, no hash/t)', () {
+    test('sid-only link parses as V2 and keeps sid/mid/name', () {
+      final params = RemoteConnectionParams.parse(
+        'https://zcode.z.ai/remote/v4?sid=s&mid=m&name=desk&app_version=3.16.2',
+      );
+      expect(params, isNotNull);
+      expect(params!.v2, isTrue);
+      expect(params.deviceSid, 's');
+      expect(params.deviceMid, 'm');
+      expect(params.deviceName, 'desk');
+      expect(params.passHash, isNull);
+      expect(params.timestamp, isNull);
+    });
+
+    test('relayWsUri points at the V2 ws2 endpoint with mid', () {
+      final params = RemoteConnectionParams.parse(
+        'https://zcode.z.ai/remote/v4?sid=s&mid=m',
+      )!;
+      expect(
+        params.relayWsUri.toString(),
+        'wss://zcode.z.ai/api/v1/remote/ws2?mid=m',
+      );
+    });
+
+    test('V2 ws2 keeps a custom port and http downgrade', () {
+      final secure = RemoteConnectionParams.parse(
+        'https://zcode.z.ai:8443/remote/v4?sid=s',
+      )!;
+      expect(
+        secure.relayWsUri.toString(),
+        'wss://zcode.z.ai:8443/api/v1/remote/ws2',
+      );
+      final insecure = RemoteConnectionParams.parse(
+        'http://localhost:3000/remote/v4?sid=s&mid=m',
+      )!;
+      expect(
+        insecure.relayWsUri.toString(),
+        'ws://localhost:3000/api/v1/remote/ws2?mid=m',
+      );
+    });
+
+    test('relayTokenUri follows the link host/scheme', () {
+      final params = RemoteConnectionParams.parse(
+        'https://zcode.z.ai/remote/v4?sid=s',
+      )!;
+      expect(
+        params.relayTokenUri.toString(),
+        'https://zcode.z.ai/api/v1/remote/token',
+      );
+      final local = RemoteConnectionParams.parse(
+        'http://localhost:3000/remote/v4?sid=s',
+      )!;
+      expect(
+        local.relayTokenUri.toString(),
+        'http://localhost:3000/api/v1/remote/token',
+      );
+    });
+
+    test('hash without t is still V2 (partial credentials dropped)', () {
+      final params = RemoteConnectionParams.parse(
+        'https://zcode.z.ai/remote/v4?sid=s&hash=h',
+      );
+      expect(params, isNotNull);
+      expect(params!.v2, isTrue);
+      expect(params.passHash, isNull);
+      expect(params.timestamp, isNull);
+      expect(params.relayWsUri.toString(),
+          'wss://zcode.z.ai/api/v1/remote/ws2');
+    });
+
+    test('t without hash is still V2', () {
+      final params = RemoteConnectionParams.parse(
+        'https://zcode.z.ai/remote/v4?sid=s&t=123',
+      );
+      expect(params, isNotNull);
+      expect(params!.v2, isTrue);
+      expect(params.passHash, isNull);
+      expect(params.timestamp, isNull);
+    });
+
+    test('V1 link (hash + numeric t) stays V1', () {
+      final params = RemoteConnectionParams.parse(
+        'https://zcode.z.ai/remote/v4?sid=s&hash=h&t=123&mid=m',
+      )!;
+      expect(params.v2, isFalse);
+      expect(params.passHash, 'h');
+      expect(params.timestamp, 123);
+      expect(params.relayWsUri.toString(), 'wss://zcode.z.ai/ws?mid=m');
+    });
+  });
+
   group('parse edge cases', () {
     test('missing sid returns null', () {
       expect(
@@ -104,28 +195,26 @@ void main() {
       );
     });
 
-    test('missing hash returns null', () {
-      expect(
-        RemoteConnectionParams.parse(
-            'https://zcode.z.ai/remote/v4?sid=s&t=1'),
-        isNull,
-      );
+    test('missing hash parses as a V2 link', () {
+      final params = RemoteConnectionParams.parse(
+          'https://zcode.z.ai/remote/v4?sid=s&t=1');
+      expect(params, isNotNull);
+      expect(params!.v2, isTrue);
     });
 
-    test('missing t returns null', () {
-      expect(
-        RemoteConnectionParams.parse(
-            'https://zcode.z.ai/remote/v4?sid=s&hash=h'),
-        isNull,
-      );
+    test('missing t parses as a V2 link', () {
+      final params = RemoteConnectionParams.parse(
+          'https://zcode.z.ai/remote/v4?sid=s&hash=h');
+      expect(params, isNotNull);
+      expect(params!.v2, isTrue);
     });
 
-    test('invalid timestamp returns null', () {
-      expect(
-        RemoteConnectionParams.parse(
-            'https://zcode.z.ai/remote/v4?sid=s&hash=h&t=abc'),
-        isNull,
-      );
+    test('invalid timestamp with hash parses as a V2 link', () {
+      final params = RemoteConnectionParams.parse(
+          'https://zcode.z.ai/remote/v4?sid=s&hash=h&t=abc');
+      expect(params, isNotNull);
+      expect(params!.v2, isTrue);
+      expect(params.timestamp, isNull);
     });
 
     test('trimmed query values', () {

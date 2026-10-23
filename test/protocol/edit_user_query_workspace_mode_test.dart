@@ -68,6 +68,7 @@ class _RecordingTransport extends ConversationTransport {
     String type,
     Map<String, dynamic> payload, {
     Duration timeout = const Duration(seconds: 30),
+    Map<String, dynamic>? channelExtra,
   }) async {
     commands.add((type, payload));
     return const {'status': 'accepted'};

@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zgo/protocol/connection_params.dart';
+import 'package:zgo/protocol/relay_client.dart';
 import 'package:zgo/protocol/remote_client.dart';
 import 'package:zgo/state/device_session.dart';
 
@@ -63,12 +64,15 @@ void main() {
   test('relay KICKED reaches the kicked state machine but leaves the wire '
       'as session-conflict', () async {
     final (session, stub) = await connectedSession();
+    // The generic payload stack holds a RelayTransport; this diagnostic
+    // test drives the V1 RelayClient's debug seams directly.
+    final relay = stub.relay as RelayClient;
     final relayFailures = <String>[];
-    stub.relay.failures.listen((f) => relayFailures.add(f.reason));
+    relay.failures.listen((f) => relayFailures.add(f.reason));
     final captured = <Map<String, dynamic>>[];
-    stub.relay.debugDiagnosticSink = captured.add;
+    relay.debugDiagnosticSink = captured.add;
 
-    stub.relay.debugHandleRelayError('KICKED', 'another terminal took over');
+    relay.debugHandleRelayError('KICKED', 'another terminal took over');
     // Broadcast streams deliver asynchronously — let the failure land in
     // both listeners before asserting.
     await pumpEventQueue();
@@ -89,12 +93,13 @@ void main() {
 
   test('in-enum failure reasons pass through untouched', () async {
     final (session, stub) = await connectedSession();
+    final relay = stub.relay as RelayClient;
     final captured = <Map<String, dynamic>>[];
-    stub.relay.debugDiagnosticSink = captured.add;
+    relay.debugDiagnosticSink = captured.add;
 
     // debugDropSocket on an unpaired client surfaces 'relay-unavailable'
     // — one of the desktop's 11 enum values, must not be rewritten.
-    await stub.relay.debugDropSocket();
+    await relay.debugDropSocket();
     await pumpEventQueue();
 
     final diag = captured.singleWhere((p) => p['event'] == 'failure');

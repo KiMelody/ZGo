@@ -1,13 +1,23 @@
-/// Parses a ZCode web-remote connection URL, e.g.
-/// https://zcode.z.ai/remote/v4?sid=...&hash=...&t=...&mid=...&name=...&app_version=...
+import 'package:flutter/foundation.dart';
+
+/// Parses a ZCode web-remote connection URL.
+///
+/// Two link generations exist (desktop 3.16.2, 2026-10-19):
+/// - V1: `https://zcode.z.ai/remote/v4?sid=...&hash=...&t=...&mid=...`
+///   (proof-of-knowledge auth over `wss://<host>/ws`);
+/// - V2: `https://zcode.z.ai/remote/v4?sid=...&mid=...&name=...&app_version=...`
+///   (account-JWT auth over `wss://<host>/api/v1/remote/ws2`). The link is
+///   pure routing — the token is fetched at connect time.
 ///
 /// Parses the connection URL. The URL also derives the relay
 /// websocket endpoint; if the URL shape changes, the raw URL is still stored
 /// verbatim by the device store and stays openable in the WebView.
 class RemoteConnectionParams {
   final String deviceSid;
-  final String passHash;
-  final int timestamp;
+
+  /// V1 only: password hash + timestamp pair. Both null on a V2 link.
+  final String? passHash;
+  final int? timestamp;
   final String? deviceMid;
   final String? deviceName;
   final String? appVersion;
@@ -38,13 +48,24 @@ class RemoteConnectionParams {
       return null;
     }
     final sid = _get(uri, 'sid');
+    if (sid == null) return null;
     final hash = _get(uri, 'hash');
-    final t = int.tryParse(_get(uri, 't') ?? '');
-    if (sid == null || hash == null || t == null) return null;
+    final rawTimestamp = _get(uri, 't');
+    final timestamp = rawTimestamp == null ? null : int.tryParse(rawTimestamp);
+    // V1 needs BOTH hash and t. A half-carrying link is still a V2 link
+    // (the desktop 3.16 V2 shape never carries either); the partial
+    // credential is dropped so `v2` cannot be fooled by a stray `hash`.
+    final v1 = hash != null && timestamp != null;
+    if (!v1 && (hash != null || rawTimestamp != null)) {
+      debugPrint(
+        '[connection] incomplete V1 credentials (hash=${hash != null}, '
+        't=$rawTimestamp) — treating the link as V2',
+      );
+    }
     return RemoteConnectionParams(
       deviceSid: sid,
-      passHash: hash,
-      timestamp: t,
+      passHash: v1 ? hash : null,
+      timestamp: v1 ? timestamp : null,
       deviceMid: _get(uri, 'mid'),
       deviceName: _get(uri, 'name'),
       appVersion: _get(uri, 'app_version'),
@@ -53,19 +74,35 @@ class RemoteConnectionParams {
     );
   }
 
-  /// Relay websocket URL:
-  /// `ws(s)://<host>/ws` plus `?mid=` when present.
+  /// V2 relay link: no legacy proof credentials. `hash + t` present means
+  /// the V1 relay (`/ws` + challenge/proof); otherwise the account-JWT V2
+  /// relay (`/api/v1/remote/ws2`).
+  bool get v2 => passHash == null;
+
+  /// Relay websocket base URL (the V2 transport appends `token` when it
+  /// connects — the 60s token is fetched per (re)connect and never stored):
+  /// - V1: `ws(s)://<host>/ws` plus `?mid=` when present;
+  /// - V2: `ws(s)://<host>/api/v1/remote/ws2` plus `?mid=` when present.
   Uri get relayWsUri {
     final scheme = uriSchemeIsSecure ? 'wss' : 'ws';
     final base = Uri(
       scheme: scheme,
       host: source.host,
       port: source.hasPort ? source.port : null,
-      path: '/ws',
+      path: v2 ? '/api/v1/remote/ws2' : '/ws',
     );
     if (deviceMid == null) return base;
     return base.replace(queryParameters: {'mid': deviceMid});
   }
+
+  /// V2 terminal-token endpoint (`POST {"role":"terminal"}`, Bearer = the
+  /// ZCode account JWT). Same host as the link.
+  Uri get relayTokenUri => Uri(
+    scheme: uriSchemeIsSecure ? 'https' : 'http',
+    host: source.host,
+    port: source.hasPort ? source.port : null,
+    path: '/api/v1/remote/token',
+  );
 
   bool get uriSchemeIsSecure =>
       source.scheme == 'https' || source.scheme == 'wss';

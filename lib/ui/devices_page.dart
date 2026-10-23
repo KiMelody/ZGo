@@ -149,6 +149,26 @@ class _DevicesPageState extends State<DevicesPage>
   /// WebView remote page otherwise.
   Future<void> _open(Device device) async {
     final session = widget.hub.sessionOf(device.id);
+    // V2 links need the ZCode account: a signed-out device can neither
+    // connect natively nor usefully fall back to the WebView, so tap shows
+    // the login guidance instead of silently failing (A2).
+    if (session?.failureReason == 'auth-required') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(tr(context, 'remote.failure.auth-required')),
+          action: SnackBarAction(
+            label: tr(context, 'common.retry'),
+            // Signing in happens in Settings; without this the tap always
+            // hits the same failure branch and there is no way back.
+            onPressed: () {
+              if (!mounted) return;
+              widget.hub.ensure(device);
+            },
+          ),
+        ),
+      );
+      return;
+    }
     if (widget.ui.nativeListEnabled &&
         session != null &&
         session.status != DeviceStatus.error) {
@@ -758,9 +778,11 @@ class _DevicesPageState extends State<DevicesPage>
           : (tr(context, 'status.online'), ZInk.successTone(context)),
       DeviceStatus.connecting =>
         (tr(context, 'status.connecting'), ZColors.sky500),
-      DeviceStatus.error => session?.kicked == true
-          ? (tr(context, 'status.kicked'), ZInk.dangerTone(context))
-          : (tr(context, 'status.error'), ZInk.dangerTone(context)),
+      DeviceStatus.error => session?.failureReason == 'auth-required'
+          ? (tr(context, 'status.authRequired'), ZInk.dangerTone(context))
+          : session?.kicked == true
+              ? (tr(context, 'status.kicked'), ZInk.dangerTone(context))
+              : (tr(context, 'status.error'), ZInk.dangerTone(context)),
       _ => (tr(context, 'status.offline'), ZInk.ghost(context)),
     };
     // B14: while connected, the live status segment (在线 / 任务进行中 N)

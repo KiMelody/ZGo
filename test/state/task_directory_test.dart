@@ -121,6 +121,9 @@ void main() {
     );
     expect(dir.allEntries(), hasLength(1));
     expect(dir.entriesFor('alpha', includeArchived: true), isEmpty);
+    // The replacement row's raw must carry the relay bit UNCHANGED — the
+    // live frame's stray `archived: true` is not trusted.
+    expect(dir.allEntries().single.$1.raw['archived'], isFalse);
     expect(dir.notificationRows(), hasLength(1));
   });
 
@@ -142,6 +145,13 @@ void main() {
     );
     expect(dir.allEntries(), isEmpty);
     expect(dir.entriesFor('alpha', includeArchived: true), hasLength(1));
+    // Consumers (swipe / long-press sheet) read archived off `entry.raw` —
+    // the live override must hand the relay bit through, else the archived
+    // view offers 「归档」 instead of 「取消归档」.
+    expect(
+      dir.entriesFor('alpha', includeArchived: true).single.$1.raw['archived'],
+      isTrue,
+    );
     expect(dir.notificationRows(), hasLength(1));
   });
 

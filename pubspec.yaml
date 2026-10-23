@@ -90,6 +90,15 @@ dev_dependencies:
   flutter_lints: '>=4.0.0 <7.0.0'
   flutter_launcher_icons: '>=0.13.0 <0.15.0'
   web: '>=1.0.0 <2.0.0'
+  # Test-only: builds the SQLite fixture databases for
+  # test/protocol/project_resolver_test.dart. The app itself never imports
+  # sqlite3 — lib/protocol/project_resolver.dart is a pure-Dart page reader
+  # (acceptance round 1, 2026-10-22: the live index is ~25 MB, so the old
+  # full-pull + sqlite3 + temp-file design timed out every creation and the
+  # native-library packaging went away with it). Hosts fall back to the OS
+  # SQLite (Windows: winsqlite3.dll). 2.x keeps the Dart 3.4 floor the ohos
+  # fork needs.
+  sqlite3: '>=2.4.0 <3.0.0'
 
 # Launcher icons — regenerate with: dart run flutter_launcher_icons
 # Source art is produced by tool/icon_gen.dart.

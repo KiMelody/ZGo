@@ -162,6 +162,8 @@ const _zh = {
   'remote.failure.relay-unavailable': '外部 relay 连接不可用，请确认桌面端在线后重试。',
   'remote.failure.unsupported-action': '当前是 Web 远程控制模式，只支持访问桌面端当前窗口已经打开的工作区。',
   'remote.failure.unexpected-error': '无法启动移动端远程控制，请回到桌面端重试。',
+  'remote.failure.auth-required': '这个设备的远控需要 ZCode 账号。请先在「设置 → 套餐」登录，然后重试连接。',
+  'status.authRequired': '需要登录 ZCode 账号',
   // ---- chat (native conversation) ----
   'chat.appBar': '任务会话',
   'chat.copy': '复制',
@@ -1437,6 +1439,9 @@ const _en = {
       'Web remote control mode can only open workspaces that are already open in the current desktop window.',
   'remote.failure.unexpected-error':
       'Could not start mobile remote control. Try again from desktop.',
+  'remote.failure.auth-required':
+      'This device requires a ZCode account. Sign in under Settings → Coding plan, then retry the connection.',
+  'status.authRequired': 'Sign in required',
   // ---- chat (native conversation) ----
   'chat.appBar': 'Task session',
   'chat.copy': 'Copy',
