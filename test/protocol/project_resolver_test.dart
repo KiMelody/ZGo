@@ -358,6 +358,88 @@ void main() {
       expect(ProjectResolver.desktopHomeFor(''), isNull);
     });
   });
+
+  group('cached desktop home (resolver-home-fallback)', () {
+    test('wire lists no .zcode/workspace path: the cached home reads the '
+        'index (16-card regression)', () async {
+      final bytes = _fixture(
+        projects: [
+          for (var i = 0; i < 16; i++)
+            {'id': 'project-$i', 'name': 'proj-$i', 'host': 'local', 'deleted': 0},
+        ],
+        roots: [
+          for (var i = 0; i < 16; i++) ['project-$i', 'D:\\proj-$i'],
+        ],
+      );
+      final index = _FakeIndex(bytes);
+      final requested = <String>[];
+      final resolver = ProjectResolver(
+        // The single-window registry only holds the bound ZLinker workspace —
+        // no draft/default row, so desktopHome() derives nothing.
+        workspaces: () => const [
+          {'workspacePath': r'F:\ZLinker'},
+        ],
+        readRange: (path, offset, length) {
+          requested.add(path);
+          return index.read(path, offset, length);
+        },
+        loadCachedHome: () => 'C:/Users/Melody',
+      );
+
+      expect(await resolver.mapping(), isNotNull);
+      expect(resolver.projectRoots, hasLength(16),
+          reason: 'the cached home recovers every root the wire list omits');
+      expect(await resolver.projectIdFor(r'D:\proj-0'), 'project-0');
+      expect(requested, isNotEmpty);
+      expect(
+        requested.every((p) => p.startsWith('C:/Users/Melody\\')),
+        isTrue,
+        reason: 'the cached home feeds the unchanged index path',
+      );
+    });
+
+    test('a wire-derived home refreshes the cache', () async {
+      final bytes = _fixture(
+        projects: [
+          {'id': 'p1', 'host': 'local', 'deleted': 0},
+        ],
+        roots: [
+          ['p1', r'F:\ZLinker'],
+        ],
+      );
+      final saved = <String>[];
+      final resolver = ProjectResolver(
+        workspaces: () => _workspaces,
+        readRange: _FakeIndex(bytes).read,
+        loadCachedHome: () => r'D:\Stale',
+        saveCachedHome: (home) async => saved.add(home),
+      );
+
+      expect(await resolver.mapping(), isNotNull);
+      expect(saved, ['C:/Users/Melody'],
+          reason: 'the wire home wins and is persisted for the next '
+              'connection');
+    });
+
+    test('a stale cached home degrades to an empty mapping, never throws',
+        () async {
+      final saved = <String>[];
+      final resolver = ProjectResolver(
+        workspaces: () => const [
+          {'workspacePath': r'F:\ZLinker'},
+        ],
+        readRange: (path, offset, length) async => Uint8List(0),
+        loadCachedHome: () => r'D:\Gone',
+        saveCachedHome: (home) async => saved.add(home),
+      );
+
+      expect(await resolver.mapping(), isNull,
+          reason: 'a wrong home lands in the existing format-failure path');
+      expect(resolver.projectRoots, isEmpty);
+      expect(saved, isEmpty,
+          reason: 'wire derived nothing, so nothing is persisted');
+    });
+  });
 }
 
 /// Live 3.16.2 shape: draft rows carry no `workspacePurpose` (the resolver

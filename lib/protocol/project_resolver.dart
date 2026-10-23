@@ -102,13 +102,28 @@ class ProjectResolver {
     required List<Map<String, dynamic>> Function() workspaces,
     required ProjectIndexRead readRange,
     void Function(String line)? onLog,
+    String? Function()? loadCachedHome,
+    Future<void> Function(String home)? saveCachedHome,
   })  : _workspaces = workspaces,
         _readRange = readRange,
-        _log = onLog;
+        _log = onLog,
+        _loadCachedHome = loadCachedHome,
+        _saveCachedHome = saveCachedHome;
 
   final List<Map<String, dynamic>> Function() _workspaces;
   final ProjectIndexRead _readRange;
   final void Function(String line)? _log;
+
+  /// Desktop-home cache seam (resolver-home-fallback, 2026-10-23): the
+  /// single-window workspace registry can list no `.zcode/workspace` path at
+  /// all (no draft/default session open on the desktop), and then
+  /// [desktopHome] has nothing to derive from. A home a PREVIOUS connection
+  /// learned still names the same desktop's index. Nothing validates it
+  /// here — the db is authoritative, so a stale home fails inside the normal
+  /// read path and degrades exactly like a wrong wire-derived home. Injected
+  /// by the composition root (lib/protocol stays plugin-free).
+  final String? Function()? _loadCachedHome;
+  final Future<void> Function(String home)? _saveCachedHome;
 
   /// The loaded mapping. Null until a read succeeded.
   ProjectMapping? _loaded;
@@ -155,7 +170,16 @@ class ProjectResolver {
   }
 
   Future<ProjectMapping?> _readMapping() async {
-    final home = desktopHome();
+    // Wire first: a listed draft/default workspace names the CURRENT home.
+    // Only when the registry lists none (empty single-window registry) does
+    // the last persisted home stand in — see [_loadCachedHome].
+    final wireHome = desktopHome();
+    final home = wireHome ?? _cachedHome();
+    if (wireHome != null) {
+      await _rememberHome(wireHome);
+    } else if (home != null) {
+      _log?.call('[project] home from cache (wire listed none)');
+    }
     if (home == null) {
       _log?.call('[project] no .zcode/workspace path listed — project '
           'attribution disabled');
@@ -185,6 +209,30 @@ class ProjectResolver {
       // creation only; the next one retries.
       _log?.call('[project] tasks-index read failed ($e) — will retry on '
           'the next creation');
+      return null;
+    }
+  }
+
+  /// Persists a wire-derived home for the next connection (R2). A failed
+  /// save is logged and ignored: the mapping never depends on the cache,
+  /// only the next cold registry does.
+  Future<void> _rememberHome(String home) async {
+    final save = _saveCachedHome;
+    if (save == null) return;
+    try {
+      await save(home);
+    } catch (e) {
+      _log?.call('[project] cached home save failed ($e)');
+    }
+  }
+
+  /// The last persisted home, when the seam carries one. A throwing seam
+  /// degrades like any other failure — the resolver never throws.
+  String? _cachedHome() {
+    try {
+      return _loadCachedHome?.call();
+    } catch (e) {
+      _log?.call('[project] cached home read failed ($e)');
       return null;
     }
   }

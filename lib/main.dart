@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:home_widget/home_widget.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'notifications/keepalive_controller.dart';
 import 'notifications/notification_service.dart';
@@ -113,6 +114,19 @@ class _ZGoAppState extends State<ZGoApp>
         '${support.path}${Platform.pathSeparator}chat_drafts',
       );
     },
+    // Desktop-home cache for the project resolver (resolver-home-fallback,
+    // 10-23): the desktop's single-window registry can list no draft
+    // workspace at all, leaving the resolver with no home to derive — the
+    // home a previous connection learned is the only local signal. A stale
+    // value lands in the resolver's existing degrade path, so it is stored
+    // verbatim. shared_preferences is composed here — the protocol layer
+    // stays plugin-free.
+    loadCachedHome: () => _prefs?.getString(_resolverHomePrefsKey),
+    saveCachedHome: (home) async {
+      final prefs = _prefs ?? await SharedPreferences.getInstance();
+      _prefs = prefs;
+      await prefs.setString(_resolverHomePrefsKey, home);
+    },
   );
   late final MessageScheduler _scheduler = MessageScheduler(
     store: _scheduled,
@@ -154,6 +168,18 @@ class _ZGoAppState extends State<ZGoApp>
   StreamSubscription? _appLinkSub;
   final _appLinks = AppLinks();
 
+  /// Last account token seen by [_onPlanChanged] — a re-login must retry
+  /// links parked on the terminal `auth-required` state, while a token
+  /// refresh of the same identity stays a no-op.
+  String? _lastPlanToken;
+
+  /// Pre-loaded for the resolver's synchronous desktop-home cache read
+  /// (resolver-home-fallback, 10-23). SharedPreferences reads are sync once
+  /// the instance is loaded; a cold miss only skips the fallback for the
+  /// first mapping attempt — the pre-fix behavior.
+  SharedPreferences? _prefs;
+  static const _resolverHomePrefsKey = 'resolver_desktop_home';
+
   @override
   void initState() {
     super.initState();
@@ -164,6 +190,13 @@ class _ZGoAppState extends State<ZGoApp>
     _theme.load();
     final uiLoaded = _ui.load();
     _scheduled.load();
+    // Warm the resolver's synchronous home-cache read (see [_prefs]).
+    unawaited(SharedPreferences.getInstance().then((p) => _prefs = p));
+    // The relay V2 transport treats auth-required as terminal and only reads
+    // the JWT at connect time; a fresh sign-in has to pull the parked links
+    // back up (R3), so the account notifier drives that from here — the
+    // protocol/state layers never see lib/plan.
+    _plan.addListener(_onPlanChanged);
     unawaited(_plan.loadIdentity());
     unawaited(_store.load().then((_) {
       HomeWidgetBridge.syncDevices(_store.devices);
@@ -270,6 +303,27 @@ class _ZGoAppState extends State<ZGoApp>
 
   void _syncNotifyHub() {
     if (mounted) _notifyHub.syncWith(_hub.activeSessions);
+  }
+
+  /// Login self-heal (R3): `auth-required` is a terminal relay state — the
+  /// transport never redials on its own, and the jwtProvider is only read at
+  /// connect time. When a usable account token appears (or changes identity),
+  /// reconnect every session parked on that state; the user has done all the
+  /// repair the link needs. Token refreshes of the same identity are no-ops.
+  void _onPlanChanged() {
+    final token = _plan.token;
+    if (!_plan.signedIn || token == null || token.isEmpty) {
+      _lastPlanToken = null;
+      return;
+    }
+    if (token == _lastPlanToken) return;
+    _lastPlanToken = token;
+    for (final session in _hub.activeSessions.toList()) {
+      if (session.failureReason != 'auth-required') continue;
+      final device =
+          _store.devices.where((d) => d.id == session.deviceId).firstOrNull;
+      if (device != null) _hub.ensure(device);
+    }
   }
 
   /// Pushes the settings节 values into the watch (no-op when unchanged).
@@ -423,6 +477,7 @@ class _ZGoAppState extends State<ZGoApp>
     _appLinkSub?.cancel();
     _notifyHub.dispose();
     _ui.removeListener(_applyQuotaWatchSettings);
+    _plan.removeListener(_onPlanChanged);
     _quotaWatch.dispose();
     _hub.removeListener(_syncNotifyHub);
     _scheduler.dispose();

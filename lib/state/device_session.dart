@@ -439,6 +439,15 @@ class DeviceSession extends ChangeNotifier
     List<Map<String, dynamic>> Function() bootstrapWorkspaces,
   )? projectResolverFactory;
 
+  /// Desktop-home cache seam for the project resolver
+  /// (resolver-home-fallback, 10-23): `loadCachedHome` answers the home a
+  /// previous connection learned, `saveCachedHome` persists a wire-derived
+  /// one. Injected by the composition root so the protocol layer stays
+  /// plugin-free; the resolver only consults the cache when the workspace
+  /// list carries no `.zcode/workspace` path.
+  final String? Function()? loadCachedHome;
+  final Future<void> Function(String home)? saveCachedHome;
+
   /// ZCode account JWT seam for the V2 relay (desktop 3.16.2+): the
   /// protocol layer must never import `lib/plan`, so the composition root
   /// injects this callback. Null means an account-authenticated (V2) link
@@ -459,6 +468,8 @@ class DeviceSession extends ChangeNotifier
     this.clientFactory,
     this.projectResolverFactory,
     this.jwtProvider,
+    this.loadCachedHome,
+    this.saveCachedHome,
     this.timings = const StallTimings(),
   }) : _homeStore = TaskHomeStore(deviceId: deviceId) {
     // Persisted task-home anchors + local delete tombstones (design
@@ -1343,7 +1354,15 @@ class DeviceSession extends ChangeNotifier
   void _onRelayFailure(RelayFailure failure) {
     if (_disposed) return;
     _error = '$failure';
-    _failureReason ??= failure.reason;
+    // A terminal credential failure must supersede the retryable reasons the
+    // transport reports on earlier reconnect rounds (`??=` would pin the
+    // first relay-unavailable): the banner and the login self-heal key on
+    // auth-required.
+    if (failure.reason == 'auth-required') {
+      _failureReason = failure.reason;
+    } else {
+      _failureReason ??= failure.reason;
+    }
     _kicked = _kicked || failure.reason == 'kicked';
     if (_kicked) {
       // Another terminal took over; stay quiet until the user acts.
@@ -2408,6 +2427,8 @@ class DeviceSession extends ChangeNotifier
             workspaces: () => _bootstrapWorkspaces,
             readRange: _readProjectIndexRange,
             onLog: _log,
+            loadCachedHome: loadCachedHome,
+            saveCachedHome: saveCachedHome,
           );
 
   /// The seam's failure contract: a channel error/timeout THROWS (the
@@ -3086,7 +3107,14 @@ class DeviceSessionHub extends ChangeNotifier {
     required this.nativeListEnabled,
     this.draftsRoot,
     this.jwtProvider,
+    this.loadCachedHome,
+    this.saveCachedHome,
   });
+
+  /// Desktop-home cache seam, threaded into every [ensure]d session's project
+  /// resolver (see [DeviceSession.loadCachedHome]).
+  final String? Function()? loadCachedHome;
+  final Future<void> Function(String home)? saveCachedHome;
 
   /// Composer-draft attachment root, threaded into every [ensure]d
   /// session's [ChatDraftStore].
@@ -3133,6 +3161,8 @@ class DeviceSessionHub extends ChangeNotifier {
       onWorkspaceOpened: (key) => _lastWorkspaceKey[device.id] = key,
       draftsRoot: draftsRoot,
       jwtProvider: jwtProvider,
+      loadCachedHome: loadCachedHome,
+      saveCachedHome: saveCachedHome,
     );
     _sessions[device.id] = session;
     session.addListener(_onSessionChanged);
