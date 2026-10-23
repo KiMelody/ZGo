@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../notifications/keepalive_controller.dart';
 import '../plan/plan_account.dart';
+import '../plan/remote_device_api.dart';
 import '../protocol/connection_params.dart';
 import '../state/device_session.dart';
 import '../state/device_store.dart';
@@ -38,6 +39,10 @@ class DevicesPage extends StatefulWidget {
   /// Plan-account controller handed to the settings section (null when
   /// the feature is not wired).
   final PlanController? plan;
+
+  /// Cloud device-directory client (task 10-22). Null on hosts without the
+  /// feature — the cloud section is then never rendered.
+  final RemoteDeviceApi? cloudApi;
   const DevicesPage({
     super.key,
     required this.store,
@@ -48,6 +53,7 @@ class DevicesPage extends StatefulWidget {
     required this.keepalive,
     this.quotaWatch,
     this.plan,
+    this.cloudApi,
   });
 
   @override
@@ -60,6 +66,12 @@ class _DevicesPageState extends State<DevicesPage>
   /// don't spam the snackbar on every resume.
   String? _clipboardHandled;
 
+  /// Cloud device directory (R2). Null = not fetched / failed / signed
+  /// out — the section stays hidden. [_cloudToken] is the account the
+  /// cached list belongs to: one fetch per identity, no polling.
+  List<RemoteDeviceEntry>? _cloudDevices;
+  String? _cloudToken;
+
   @override
   void initState() {
     super.initState();
@@ -71,6 +83,10 @@ class _DevicesPageState extends State<DevicesPage>
     });
     widget.store.addListener(_onStoreChanged);
     widget.ui.addListener(_syncConnections);
+    widget.plan?.addListener(_onPlanChanged);
+    // Boot may still be reading the persisted identity — the listener above
+    // fetches as soon as sign-in is known.
+    _maybeLoadCloudDevices();
   }
 
   @override
@@ -78,12 +94,78 @@ class _DevicesPageState extends State<DevicesPage>
     WidgetsBinding.instance.removeObserver(this);
     widget.store.removeListener(_onStoreChanged);
     widget.ui.removeListener(_syncConnections);
+    widget.plan?.removeListener(_onPlanChanged);
     super.dispose();
   }
 
   void _onStoreChanged() {
     _syncConnections();
     _syncHomeWidget();
+  }
+
+  /// Sign-in/out and token refreshes drive the directory: the cloud list
+  /// belongs to the account, so signing out drops it and a later sign-in
+  /// fetches again. Same-identity notifications are no-ops.
+  void _onPlanChanged() {
+    if (!mounted) return;
+    if (widget.plan?.signedIn != true) {
+      _cloudToken = null;
+      if (_cloudDevices != null) setState(() => _cloudDevices = null);
+      return;
+    }
+    _maybeLoadCloudDevices();
+  }
+
+  /// R2: fetch the cloud directory once per account (no polling); failures
+  /// collapse silently. The account token rides the plan controller — the
+  /// same `zgo_plan_token` the relay V2 handshake uses.
+  Future<void> _maybeLoadCloudDevices() async {
+    final plan = widget.plan;
+    final api = widget.cloudApi;
+    final token = plan?.token;
+    if (api == null ||
+        plan == null ||
+        !plan.signedIn ||
+        token == null ||
+        token.isEmpty) {
+      return;
+    }
+    // A new account's fetch must not be swallowed by an in-flight one for a
+    // stale token — last writer wins (sign-in switch without sign-out).
+    if (_cloudToken == token) return;
+    _cloudToken = token;
+    try {
+      final entries = await api.list(token: token);
+      // A concurrent token change replaced this fetch; its response belongs
+      // to the previous account and must not render here.
+      if (!mounted || _cloudToken != token) return;
+      setState(() => _cloudDevices = entries);
+    } catch (_) {
+      // Silent collapse: no snackbar, and the cached token keeps a failed
+      // attempt from turning into a retry loop.
+    }
+  }
+
+  /// Account-directory entries not yet in the local list (R1): the section
+  /// is discovery-only, so mid-matched rows never render.
+  List<RemoteDeviceEntry> get _cloudUnadded {
+    final devices = _cloudDevices;
+    if (devices == null) return const [];
+    return [
+      for (final entry in devices)
+        if (!_isCloudEntryAdded(entry)) entry,
+    ];
+  }
+
+  bool get _cloudVisible =>
+      (widget.plan?.signedIn ?? false) && _cloudUnadded.isNotEmpty;
+
+  /// Adds the entry's V2 link and opens it through the existing card tap
+  /// path (native task list when the link is healthy, WebView otherwise).
+  Future<void> _connectCloud(RemoteDeviceEntry entry) async {
+    final device = await widget.store.addUrl(entry.remoteUrl.toString());
+    if (!mounted) return;
+    await _open(device);
   }
 
   @override
@@ -474,6 +556,9 @@ class _DevicesPageState extends State<DevicesPage>
               // pull gesture for the refresh indicator.
               physics: const AlwaysScrollableScrollPhysics(),
               padding: zScreenPadding(context, bottom: 96),
+              // 账号设备 rides below the local cards (R2), inside the same
+              // scroll view so pull-to-refresh keeps working.
+              footer: _cloudSection(context),
               itemCount: devices.length,
               // The row keeps no permanent drag handle (R8): reordering is a
               // long press anywhere on the card, on every platform.
@@ -525,41 +610,194 @@ class _DevicesPageState extends State<DevicesPage>
     return RefreshIndicator(
       onRefresh: _refresh,
       child: LayoutBuilder(
-        builder: (context, constraints) => ListView(
+        builder: (context, constraints) => SingleChildScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
-          children: [
-            ConstrainedBox(
-              constraints: BoxConstraints(minHeight: constraints.maxHeight),
-              child: Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(ZSpacing.emptyState),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 72,
-                        height: 72,
-                        decoration: BoxDecoration(
-                          color: ZColors.sky500.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(ZRadius.field),
+          child: Column(
+            // Stretch so the cloud card spans the row width instead of
+            // shrink-wrapping to its text.
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ConstrainedBox(
+                // With cloud devices present the hint shrinks to its own
+                // height instead of centering over a full page — the
+                // account directory must not start below the fold.
+                constraints: BoxConstraints(
+                  minHeight: _cloudVisible ? 0 : constraints.maxHeight,
+                ),
+                child: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(ZSpacing.emptyState),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 72,
+                          height: 72,
+                          decoration: BoxDecoration(
+                            color: ZColors.sky500.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(ZRadius.field),
+                          ),
+                          child: const Icon(Icons.devices,
+                              size: 36, color: ZColors.sky500),
                         ),
-                        child: const Icon(Icons.devices,
-                            size: 36, color: ZColors.sky500),
-                      ),
-                      const SizedBox(height: 20),
-                      Text(tr(context, 'devices.empty.title'),
+                        const SizedBox(height: 20),
+                        Text(tr(context, 'devices.empty.title'),
+                            style: ZType.title
+                                .copyWith(color: ZInk.solid(context))),
+                        const SizedBox(height: 8),
+                        Text(
+                          tr(context, 'devices.empty.body'),
+                          textAlign: TextAlign.center,
                           style:
-                              ZType.title.copyWith(color: ZInk.solid(context))),
-                      const SizedBox(height: 8),
-                      Text(
-                        tr(context, 'devices.empty.body'),
-                        textAlign: TextAlign.center,
-                        style:
-                            ZType.body.copyWith(color: ZInk.faint(context)),
-                      ),
-                    ],
+                              ZType.body.copyWith(color: ZInk.faint(context)),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
+              ),
+              if (_cloudVisible)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                      ZSpacing.screen, 0, ZSpacing.screen, 96),
+                  child: _cloudSection(context),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 账号设备分区 (R2/R3): a faint section title over one card of account
+  /// devices. Discovery-only — already-added entries never render, so each
+  /// row is either online (connect) or offline (disabled).
+  Widget _cloudSection(BuildContext context) {
+    if (!_cloudVisible) return const SizedBox.shrink();
+    final entries = _cloudUnadded;
+    return Padding(
+      padding: const EdgeInsets.only(top: ZSpacing.cardGap),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+            child: Row(
+              children: [
+                Icon(Icons.cloud_outlined,
+                    size: ZTile.iconSize, color: ZInk.ghost(context)),
+                const SizedBox(width: 6),
+                Text(
+                  tr(context, 'devices.cloud.title'),
+                  style: ZType.body.copyWith(
+                    color: ZInk.ghost(context),
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  '·',
+                  style: ZType.caption.copyWith(color: ZInk.ghost(context)),
+                ),
+                const SizedBox(width: 4),
+                Flexible(
+                  child: Text(
+                    tr(context, 'devices.cloud.subtitle'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: ZType.caption.copyWith(color: ZInk.ghost(context)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Card(
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              children: [
+                for (var i = 0; i < entries.length; i++) ...[
+                  if (i > 0)
+                    Divider(height: 1, color: ZInk.hairline(context)),
+                  _cloudRow(context, entries[i]),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// R4: dedupe against the local list on `device_mid` — the same value the
+  /// V2 link carries as `mid`. V1 links have no mid, so they never match.
+  bool _isCloudEntryAdded(RemoteDeviceEntry entry) => widget.store.devices
+      .any((d) => d.params?.deviceMid == entry.deviceMid);
+
+  Widget _cloudRow(BuildContext context, RemoteDeviceEntry entry) {
+    final metaLine = [
+      if (entry.platform.isNotEmpty) entry.platform,
+      if (entry.version.isNotEmpty) entry.version,
+    ].join(' · ');
+    return Padding(
+      padding: ZListRow.padding,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: ZListRow.twoLineHeight),
+        child: Row(
+          children: [
+            // The same status-dot language as the local cards.
+            Container(
+              width: ZListRow.dot,
+              height: ZListRow.dot,
+              decoration: BoxDecoration(
+                color: entry.online
+                    ? ZInk.successTone(context)
+                    : ZInk.ghost(context),
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    entry.name.isEmpty
+                        ? tr(context, 'devices.unnamed')
+                        : entry.name,
+                    style:
+                        ZType.bodyStrong.copyWith(color: ZInk.solid(context)),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (metaLine.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      metaLine,
+                      style: ZType.caption.copyWith(color: ZInk.faint(context)),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.tonal(
+              // Offline entries keep the button but disable it (R3).
+              onPressed: entry.online ? () => _connectCloud(entry) : null,
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                visualDensity: VisualDensity.compact,
+              ),
+              child: Text(
+                tr(
+                  context,
+                  entry.online
+                      ? 'devices.cloud.connect'
+                      : 'devices.cloud.offline',
+                ),
+                style: ZType.sub,
               ),
             ),
           ],

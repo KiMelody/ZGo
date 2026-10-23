@@ -14,6 +14,7 @@ import 'notifications/keepalive_controller.dart';
 import 'notifications/notification_service.dart';
 import 'notifications/quota_watch_presenter.dart';
 import 'plan/plan_account.dart';
+import 'plan/remote_device_api.dart';
 import 'state/device_session.dart';
 import 'state/device_store.dart';
 import 'state/notification_hub.dart';
@@ -163,6 +164,10 @@ class _ZGoAppState extends State<ZGoApp>
   // Plan account (z.ai billing plane, task 10-11): identity only at boot —
   // the data fetch happens when the plan page opens (R3, no polling).
   final PlanController _plan = PlanController();
+  // Cloud device directory (task 10-22): the account's registered devices.
+  // Read-only REST on the same host/token as the plan plane; the devices
+  // page fetches once per entry (no polling).
+  final RemoteDeviceApi _remoteDevices = RemoteDeviceApi();
   static const _quotaWatchChannel = MethodChannel('zgo/quota_watch');
   StreamSubscription? _widgetClickSub;
   StreamSubscription? _appLinkSub;
@@ -533,6 +538,7 @@ class _ZGoAppState extends State<ZGoApp>
             keepalive: _keepAlive,
             quotaWatch: _quotaWatch,
             plan: _plan,
+            cloudApi: _remoteDevices,
           ),
         );
       },
