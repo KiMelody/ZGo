@@ -41,9 +41,11 @@ class DeviceUsagePage extends StatefulWidget {
 }
 
 class _DeviceUsagePageState extends State<DeviceUsagePage> {
-  /// Last entitlement view from the session-wide poller (null = first
-  /// fetch still in flight).
-  EntitlementView? _view;
+  /// Last snapshot routes from the session-wide pollers (null = first
+  /// fetch still in flight): one group per entitled plan family — the
+  /// subscription (coding) representative first, then the Start
+  /// representative — or the single fallback route (design 10-25).
+  List<EntitlementSnapshotRoute>? _routes;
 
   /// App-usage snapshot (`getAppUsageSnapshot {range, timeZone}`) — the
   /// local-session-based estimation tab of the web settings usage page,
@@ -119,22 +121,23 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
     await _loadCodingPlan();
   }
 
-  /// codingPlan usage fetch — gated on the entitlement view reporting a
-  /// coding-plan connection (the `account:(zai|bigmodel)-*` id shape
-  /// [DeviceSession.parsePlanAccess] matches); args reuse the same
-  /// `{preferredProviderId, accountAccess}` pair the entitlement wire
-  /// sends. Failures degrade to a hidden card, never an error surface.
+  /// codingPlan usage fetch — gated on the subscription (coding-plan) route:
+  /// the plan is that group representative's access (design 10-25); a
+  /// Start-only account has no subscription group and keeps the card
+  /// hidden. On the legacy wire the route carries no plan, so the
+  /// snapshot's own provider id still parses (pre-10-25 behavior). Args
+  /// reuse the same `{preferredProviderId, accountAccess}` pair the
+  /// entitlement wire sends. Failures degrade to a hidden card, never an
+  /// error surface.
   Future<void> _loadCodingPlan() async {
     if (!mounted) return;
-    final view = _view;
-    if (view == null) return;
-    if (view.phase != EntitlementPhase.ok) {
+    final route = _subscriptionRoute;
+    if (route == null || route.view.phase != EntitlementPhase.ok) {
       _clearCodingPlan();
       return;
     }
-    final providerId = view.resetScopeProviderId;
-    final plan =
-        providerId == null ? null : DeviceSession.parsePlanAccess(providerId);
+    final plan = route.plan ??
+        DeviceSession.parsePlanAccess(route.view.resetScopeProviderId ?? '');
     if (plan == null) {
       _clearCodingPlan();
       return;
@@ -172,6 +175,25 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
     }
   }
 
+  /// The subscription (coding-plan) group among the rendered routes — the
+  /// first coding plan in route order. The legacy single route (null plan)
+  /// also qualifies: its snapshot provider id is the only plan evidence
+  /// there, exactly as before 10-25.
+  EntitlementSnapshotRoute? get _subscriptionRoute {
+    final routes = _routes ?? const <EntitlementSnapshotRoute>[];
+    for (final route in routes) {
+      final access = route.plan?['accountAccess'];
+      final kind = access is Map ? access['planKind'] : null;
+      if (kind == 'individual-coding-plan' ||
+          kind == 'team-coding-plan') {
+        return route;
+      }
+    }
+    return routes.length == 1 && routes.single.plan == null
+        ? routes.single
+        : null;
+  }
+
   /// Drops a previously rendered codingPlan card: a failed fetch, an
   /// entitlement degradation, or a provider switch must not leave the
   /// stale card on screen (the page owns the conditional display).
@@ -183,27 +205,48 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
     });
   }
 
-  /// Entitlement via the session-wide poller: opening reuses the cache
-  /// within the staleness window, refresh (button / pull) forces a fetch.
-  /// The call never throws — failures land in the view as phase=error.
-  /// The reset-opportunity scope rides the session's [DeviceSession.
-  /// entitlementSnapshot] (injected there); the plain refresh below picks
-  /// the pools up.
+  /// Entitlement via the session's per-provider pollers: opening reuses
+  /// each route's cache within the staleness window, refresh (button /
+  /// pull) forces every group (design 10-25). The call never throws —
+  /// failures land in each view as phase=error. The reset-opportunity scope
+  /// rides [DeviceSession.entitlementSnapshots] (injected there from the
+  /// primary route); the plain refresh below picks the pools up.
   Future<void> _load({bool force = false}) async {
-    final view = await widget.session.entitlementSnapshot(force: force);
+    final routes = await widget.session.entitlementSnapshots(force: force);
     if (!mounted) return;
-    setState(() => _view = view);
+    setState(() => _routes = routes);
     await _reset.refresh(force: force);
-    // Always reconcile the coding-plan card: a non-ok phase now clears a
-    // previously rendered card instead of leaving it stale.
+    // Always reconcile the coding-plan card: no subscription group (or a
+    // non-ok view) now clears a previously rendered card instead of
+    // leaving it stale.
     await _loadCodingPlan();
+  }
+
+  /// The page's primary route — the subscription group when both families
+  /// render, the single fallback route otherwise. Drives the status screen
+  /// and the single reset card, mirroring the scope the session injects.
+  EntitlementView? get _primaryView {
+    final routes = _routes;
+    return routes == null || routes.isEmpty ? null : routes.first.view;
   }
 
   QuotaResetController get _reset => widget.session.quotaResetController;
 
-  String _fmtTime(Object? millis) {
-    if (millis is! num) return '-';
-    final t = DateTime.fromMillisecondsSinceEpoch(millis.toInt()).toLocal();
+  /// Plan timestamp as `yyyy-MM-dd HH:mm` (local). Both wire shapes land
+  /// here: coding-plan snapshots answer millisecond epoch numbers, Start
+  /// snapshots answer ISO strings (research §3) — an unparseable string
+  /// stays verbatim, anything else reads `-`.
+  String _fmtTime(Object? value) {
+    final DateTime? t;
+    if (value is num) {
+      t = DateTime.fromMillisecondsSinceEpoch(value.toInt()).toLocal();
+    } else if (value is String) {
+      t = DateTime.tryParse(value)?.toLocal();
+      if (t == null) return value;
+    } else {
+      t = null;
+    }
+    if (t == null) return '-';
     return '${t.year}-${t.month.toString().padLeft(2, '0')}-'
         '${t.day.toString().padLeft(2, '0')} '
         '${t.hour.toString().padLeft(2, '0')}:'
@@ -238,21 +281,25 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
   }
 
   Widget _buildEntitlementBody() {
-    final view = _view;
-    if (view == null || view.phase == EntitlementPhase.loading) {
+    final routes = _routes;
+    if (routes == null || routes.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
-    switch (view.phase) {
-      case EntitlementPhase.notConfigured:
-      case EntitlementPhase.noPlan:
-      case EntitlementPhase.loginRequired:
-      case EntitlementPhase.error:
-        return _statusView(view);
-      case EntitlementPhase.ok:
-        return _buildBody(view.data ?? const {});
-      case EntitlementPhase.loading:
+    // Groups are independent (design 10-25): one route's failure must not
+    // hide another's data. Only when nothing is renderable does the page
+    // fall back to the primary route's status copy.
+    final okRoutes = [
+      for (final route in routes)
+        if (route.view.phase == EntitlementPhase.ok) route,
+    ];
+    if (okRoutes.isEmpty) {
+      final primary = routes.first.view;
+      if (primary.phase == EntitlementPhase.loading) {
         return const Center(child: CircularProgressIndicator());
+      }
+      return _statusView(primary);
     }
+    return _buildBody(okRoutes);
   }
 
   /// Status copy + retry for the four non-data phases (design.md table) —
@@ -292,20 +339,10 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
     );
   }
 
-  Widget _buildBody(Map<String, dynamic> data) {
-    final context_ = data['context'];
-    final provider = data['provider'];
-    final remaining = data['remaining'];
-    final subscription = data['subscription'];
-    final quota = data['quota'];
-    final mcpQuota = data['mcpQuota'];
-    final mcpAggregate = mcpQuota is Map && mcpQuota['aggregate'] is Map
-        ? Map<String, dynamic>.from(mcpQuota['aggregate'] as Map)
-        : null;
-
+  Widget _buildBody(List<EntitlementSnapshotRoute> routes) {
     return RefreshIndicator(
       onRefresh: () async {
-        await _load();
+        await _load(force: true);
         await _loadAppUsage();
       },
       // Bounded card list: a plain scroll column (not a lazy ListView) so
@@ -318,108 +355,150 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
         child: Column(
           children: [
             _appUsageBlock(context),
-            const SizedBox(height: ZSpacing.cardGap),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 44,
-                      height: 44,
-                      decoration: BoxDecoration(
-                        color: ZColors.sky500.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(ZRadius.tile),
-                      ),
-                      child: const Icon(Icons.bolt, color: ZColors.sky500),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            context_ is Map
-                                ? '${context_['displayName'] ?? '-'}'
-                                : '-',
-                            style: ZType.heading,
-                          ),
-                          Text(
-                            [
-                              if (provider is Map) '${provider['name'] ?? ''}',
-                              if (quota is Map && quota['level'] != null)
-                                '${quota['level']}',
-                            ].join(' · '),
-                            style:
-                                ZType.sub.copyWith(color: ZInk.faint(context)),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: ZSpacing.cardGap),
-            if (remaining is Map && remaining['isShow'] == true)
-              _remainingCard(remaining.cast<String, dynamic>()),
-            if ((quota is Map && quota['limits'] is List) ||
-                mcpAggregate != null) ...[
+            for (final route in routes) ...[
               const SizedBox(height: ZSpacing.cardGap),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(tr(context, 'usageRpc.limits'),
-                          style: ZType.bodyStrong),
-                      const SizedBox(height: 8),
-                      if (quota is Map && quota['limits'] is List)
-                        for (final limit in quota['limits'] as List)
-                          if (limit is Map)
-                            UsageLimitRow(limit: limit.cast<String, dynamic>()),
-                      if (mcpAggregate != null)
-                        UsageLimitRow(
-                          limit: mcpAggregate,
-                          label: tr(context, 'usageRpc.serverMcp'),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-            if (subscription is Map &&
-                subscription['details'] is List &&
-                (subscription['details'] as List).isNotEmpty) ...[
-              const SizedBox(height: ZSpacing.cardGap),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(tr(context, 'usageRpc.subscription'),
-                          style: ZType.bodyStrong),
-                      const SizedBox(height: 8),
-                      for (final d in subscription['details'] as List)
-                        if (d is Map) ...[
-                          _kv(tr(context, 'usageRpc.product'),
-                              '${d['productName'] ?? '-'}'),
-                          _kv(tr(context, 'usageRpc.billing'),
-                              '${d['billingCycle'] ?? '-'}'),
-                          _kv(tr(context, 'usageRpc.renew'),
-                              '${d['renewTime'] ?? '-'}'),
-                          _kv(tr(context, 'usageRpc.expire'),
-                              '${d['expireTime'] ?? '-'}'),
-                        ],
-                    ],
-                  ),
-                ),
-              ),
+              ..._entitlementGroup(route),
             ],
             const SizedBox(height: ZSpacing.cardGap),
             _resetCard(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// One plan family's card sequence (design 10-25): Plan summary →
+  /// remaining → limits → subscription. Inter-card gaps live here;
+  /// inter-group gaps are the caller's.
+  List<Widget> _entitlementGroup(EntitlementSnapshotRoute route) {
+    final data = route.view.data ?? const <String, dynamic>{};
+    final context_ = data['context'];
+    final provider = data['provider'];
+    final remaining = data['remaining'];
+    final subscription = data['subscription'];
+    final quota = data['quota'];
+    final mcpQuota = data['mcpQuota'];
+    final mcpAggregate = mcpQuota is Map && mcpQuota['aggregate'] is Map
+        ? Map<String, dynamic>.from(mcpQuota['aggregate'] as Map)
+        : null;
+    final limits = quota is Map && quota['limits'] is List
+        ? quota['limits'] as List
+        : null;
+    final details = subscription is Map && subscription['details'] is List
+        ? subscription['details'] as List
+        : null;
+    // A Start snapshot's context carries only `{scope:'personal'}` — fall
+    // back to the provider name (research §3) instead of a bare '-'.
+    final displayName = context_ is Map
+        ? context_['displayName'] ??
+            (provider is Map ? provider['name'] : null)
+        : null;
+
+    return [
+      _planCard(displayName: displayName, provider: provider, quota: quota),
+      if (remaining is Map && remaining['isShow'] == true) ...[
+        const SizedBox(height: ZSpacing.cardGap),
+        _remainingCard(remaining.cast<String, dynamic>(), route.view),
+      ],
+      if (limits != null || mcpAggregate != null) ...[
+        const SizedBox(height: ZSpacing.cardGap),
+        _limitsCard(limits, mcpAggregate),
+      ],
+      if (details != null && details.isNotEmpty) ...[
+        const SizedBox(height: ZSpacing.cardGap),
+        _subscriptionCard(details),
+      ],
+    ];
+  }
+
+  Widget _planCard({
+    required Object? displayName,
+    required Object? provider,
+    required Object? quota,
+  }) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: ZColors.sky500.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(ZRadius.tile),
+              ),
+              child: const Icon(Icons.bolt, color: ZColors.sky500),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${displayName ?? '-'}',
+                    style: ZType.heading,
+                  ),
+                  Text(
+                    [
+                      if (provider is Map) '${provider['name'] ?? ''}',
+                      if (quota is Map && quota['level'] != null)
+                        '${quota['level']}',
+                    ].join(' · '),
+                    style: ZType.sub.copyWith(color: ZInk.faint(context)),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _limitsCard(List? limits, Map<String, dynamic>? mcpAggregate) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(tr(context, 'usageRpc.limits'), style: ZType.bodyStrong),
+            const SizedBox(height: 8),
+            if (limits != null)
+              for (final limit in limits)
+                if (limit is Map)
+                  UsageLimitRow(limit: limit.cast<String, dynamic>()),
+            if (mcpAggregate != null)
+              UsageLimitRow(
+                limit: mcpAggregate,
+                label: tr(context, 'usageRpc.serverMcp'),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _subscriptionCard(List details) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(tr(context, 'usageRpc.subscription'),
+                style: ZType.bodyStrong),
+            const SizedBox(height: 8),
+            for (final d in details)
+              if (d is Map) ...[
+                _kv(tr(context, 'usageRpc.product'),
+                    '${d['productName'] ?? '-'}'),
+                _kv(tr(context, 'usageRpc.billing'),
+                    '${d['billingCycle'] ?? '-'}'),
+                _kv(tr(context, 'usageRpc.renew'), _fmtTime(d['renewTime'])),
+                _kv(tr(context, 'usageRpc.expire'), _fmtTime(d['expireTime'])),
+              ],
           ],
         ),
       ),
@@ -433,9 +512,9 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
   /// `remaining` block is only a fallback ([_remainingMirrorCard]):
   /// its count/bar are the TIME_LIMIT aggregate and mislead as「0 + 100%」
   /// on plans without a monthly tool quota.
-  Widget _remainingCard(Map<String, dynamic> remaining) {
-    final primary = _view?.primaryLimit;
-    if (primary == null) return _remainingMirrorCard(remaining);
+  Widget _remainingCard(Map<String, dynamic> remaining, EntitlementView view) {
+    final primary = view.primaryLimit;
+    if (primary == null) return _remainingMirrorCard(remaining, view);
 
     final used = primary.percentage!;
     final left = (100 - used).clamp(0.0, 100.0);
@@ -485,8 +564,10 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
             ClipRRect(
               borderRadius: BorderRadius.circular(ZRadius.mini),
               child: LinearProgressIndicator(
-                value: (used / 100).clamp(0.0, 1.0),
-                minHeight: 6,
+                // Bar = what's LEFT (remaining semantics), matching the
+                // big number above and every other bar on the page.
+                value: (left / 100).clamp(0.0, 1.0),
+                minHeight: ZSpacing.progressBar,
                 backgroundColor: ZInk.barTrack(context),
                 valueColor: const AlwaysStoppedAnimation(ZColors.sky500),
               ),
@@ -505,7 +586,21 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
   /// Fallback rendering (limits empty / no rankable row): the
   /// top-level `remaining` count + bar, reset time still anchored on the
   /// earliest usable reset opportunity.
-  Widget _remainingMirrorCard(Map<String, dynamic> remaining) {
+  Widget _remainingMirrorCard(
+    Map<String, dynamic> remaining,
+    EntitlementView view,
+  ) {
+    final count = remaining['count'];
+    // The mirror reads the coding-plan scale (0..100 used percent) and
+    // flips it to remaining so the caption and the bar agree with the rest
+    // of the page. (A Start response always carries its quota rows — its
+    // empty shape has `remaining: null` too — so this fallback is not its
+    // path.)
+    final percentage = remaining['percentage'];
+    final left = percentage is num
+        ? (100 - percentage).clamp(0.0, 100.0).toDouble()
+        : null;
+    final pctText = left != null ? _fmtPct(left) : '${percentage ?? '-'}';
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -517,7 +612,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
               children: [
                 Text(tr(context, 'usageRpc.remaining'), style: ZType.body),
                 Text(
-                  '${remaining['count'] ?? '-'}',
+                  count is num ? fmtTokenCount(count) : '${count ?? '-'}',
                   style: ZType.display.copyWith(
                     color: ZColors.sky500,
                   ),
@@ -528,8 +623,9 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
             ClipRRect(
               borderRadius: BorderRadius.circular(ZRadius.mini),
               child: LinearProgressIndicator(
-                value: ((remaining['percentage'] as num?) ?? 0) / 100,
-                minHeight: 6,
+                // Bar = what's LEFT (the raw value is used percent).
+                value: (left ?? 0) / 100,
+                minHeight: ZSpacing.progressBar,
                 backgroundColor: ZInk.barTrack(context),
                 valueColor: const AlwaysStoppedAnimation(ZColors.sky500),
               ),
@@ -540,14 +636,12 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
               // the plan can actually use — a hidden card never
               // drives the summary's「重置」time.
               final expiry =
-                  _view?.earliestResetExpiry(_reset.pools)?.millisecondsSinceEpoch;
+                  view.earliestResetExpiry(_reset.pools)?.millisecondsSinceEpoch;
               return Text(
                 expiry == null
-                    ? trP(context, 'usageRpc.remainingNoReset', [
-                        '${remaining['percentage'] ?? '-'}',
-                      ])
+                    ? trP(context, 'usageRpc.remainingNoReset', [pctText])
                     : trP(context, 'usageRpc.remainingDetail', [
-                        '${remaining['percentage'] ?? '-'}',
+                        pctText,
                         relativeTime(context, expiry),
                       ]),
                 style: ZType.caption.copyWith(color: ZInk.faint(context)),
@@ -600,7 +694,7 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
           listenable: _reset,
           builder: (context, _) {
             final pools = _reset.pools;
-            final resettable = _view?.resettablePools(pools) ?? const [];
+            final resettable = _primaryView?.resettablePools(pools) ?? const [];
             final fiveHour =
                 resettable.any((r) => r.type == quotaResetTypeFiveHour);
             final week = resettable.any((r) => r.type == quotaResetTypeWeek);

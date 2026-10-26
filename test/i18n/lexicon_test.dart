@@ -31,6 +31,33 @@ void main() {
     });
   });
 
+  group('usage primary-left copy (10-25)', () {
+    test('the template carries no percent sign — the argument already has one',
+        () {
+      // The call site passes `_fmtPct` (e.g. '94.9%'); a '%' in the template
+      // renders '剩 94.9%%' (the acceptance report's double-percent bug).
+      expect(zhTable['usageRpc.primaryLeft'], '剩 \$0');
+      expect(enTable['usageRpc.primaryLeft'], '\$0 left');
+    });
+  });
+
+  group('Start-plan quota copy (10-24 C)', () {
+    test('the auto-switch toast and the expiry banner are bilingual', () {
+      expect(zhTable['chat.quota.autoSwitched'], 'Start 套餐已不可用，已切换到 \$0');
+      expect(
+        enTable['chat.quota.autoSwitched'],
+        'Start plan is no longer available — switched to \$0',
+      );
+      expect(zhTable['chat.quota.expiredTitle'], '套餐已到期');
+      expect(enTable['chat.quota.expiredTitle'], 'Plan expired');
+      expect(zhTable['chat.quota.expiredBody'], '当前套餐已到期，可切换模型继续');
+      expect(
+        enTable['chat.quota.expiredBody'],
+        'Your current plan has expired — switch model to continue',
+      );
+    });
+  });
+
   group('off-peak official key family (D5)', () {
     test('the 11 official keys carry the desktop values verbatim', () {
       const zh = {

@@ -237,6 +237,30 @@ class ProjectResolver {
     }
   }
 
+  /// The desktop home this resolver knows synchronously: the wire-derived
+  /// one first (a listed `<home>/.zcode/workspace/...` path), else the home a
+  /// previous connection persisted. Null while neither source names one.
+  /// Read-only seam for the default-workspace synthesis (10-26 D1) — it
+  /// never triggers a read and adds no state.
+  String? get knownHome => desktopHome() ?? _cachedHome();
+
+  /// `<home>/.zcode/workspace/default` in [home]'s own separator conventions
+  /// (Windows drives/backslashes keep `\`, POSIX keeps `/`) — the same rule
+  /// [_indexPath] uses. The synthesized entry is sent as a listTaskList
+  /// scope, i.e. as a `workspace_key` filter value, so it must match the
+  /// desktop's native spelling.
+  static String defaultWorkspacePath(String home) {
+    final normalized = home.replaceAll(r'\', '/');
+    var trimmed = normalized;
+    while (trimmed.length > 1 && trimmed.endsWith('/')) {
+      trimmed = trimmed.substring(0, trimmed.length - 1);
+    }
+    final sep =
+        _driveLetter.hasMatch(home) || home.contains(r'\') ? r'\' : '/';
+    return [trimmed.replaceAll('/', sep), '.zcode', 'workspace', 'default']
+        .join(sep);
+  }
+
   /// Desktop home derived from any listed workspace path carrying a
   /// `<home>/.zcode/workspace/...` segment (3.16.2 draft workspaces always
   /// do when such a workspace is listed). The listed workspace paths are

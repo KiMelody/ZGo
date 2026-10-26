@@ -87,10 +87,14 @@ void main() {
     // hard (this also proves the fixture still exercises the narrow path)…
     expect(rendered[0], lessThan(natural[0] - 20));
     // …the clock caption never truncates, and the right value may only
-    // lose ellipsis-glyph pixels (「45.0%」→「45.…」on device), never a
-    // whole run — the quantified sacrifice order (check P1-1 decision A).
+    // lose tail glyph(s), never the whole run — the quantified sacrifice
+    // order (check P1-1 decision A). The tolerance covers the 10-24 font
+    // bump (right caption now renders at ZType.sub) plus the 10-25
+    // remaining copy growing two glyphs (「100.0%」 vs the old used
+    // 「0.0%」): measured 28.2dp of tail truncation, still far from the
+    // full caption.
     expect(rendered[1], closeTo(natural[1], 0.01));
-    expect(natural[2] - rendered[2], lessThan(8));
+    expect(natural[2] - rendered[2], lessThan(32));
   });
 }
 
@@ -218,10 +222,9 @@ final Map<String, dynamic> _monthlyTools = {
 final List<String> kQuotaRowCopy = [
   '月度内置工具用量',
   '10-31 00:04',
-  // The component's own formatting: trP padding + `'$percentage%'`, and
-  // native Dart prints integral doubles with one decimal (0 → 0.0) — the
-  // report's 「0%」 is shorthand for this caption.
-  '用量 100 · 剩余 55 · 0.0%',
+  // The component's own formatting: trP padding + remaining percent
+  // (`100 - percentage`) at one decimal — used 0 → '100.0%'.
+  '用量 100 · 剩余 55 · 100.0%',
 ];
 
 /// The reported row inside the page's 配额限制 card context. With
@@ -234,7 +237,8 @@ Widget _quotaRow({bool saturated = false}) => usageCard(UsageLimitRow(
               ..._monthlyTools,
               'usage': '1,234,567',
               'remaining': '9,999,999',
-              'percentage': 100.0,
+              // 0 used → the widest remaining caption (100.0%).
+              'percentage': 0.0,
             }
           : _monthlyTools,
     ));

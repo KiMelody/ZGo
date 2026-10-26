@@ -228,6 +228,7 @@ class QuotaResetController extends ChangeNotifier {
   QuotaResetPools? _pools;
   DateTime? _fetchedAt;
   String? _scopeProviderId;
+  Map<String, dynamic>? _scopePlan;
   final Set<String> _processing = {};
   String? _error;
   Future<void>? _inFlight;
@@ -251,16 +252,33 @@ class QuotaResetController extends ChangeNotifier {
   /// null (the UI shows the degraded copy instead of hiding the entry).
   String? get scopeProviderId => _scopeProviderId;
 
+  /// The full `{providerId, accountAccess}` pair the scope was injected
+  /// with (routed wire); null when only a bare provider id was supplied
+  /// (legacy wire / callers without a plan). The session forwards the
+  /// reset RPCs from this pair so `preferredProviderId` and
+  /// `accountAccess` can never disagree (design 10-25).
+  Map<String, dynamic>? get scopePlan => _scopePlan;
+
   bool get _cacheFresh {
     final at = _fetchedAt;
     return at != null && clock.now().difference(at) < staleness;
   }
 
-  /// Called after each entitlement fetch: injects the provider id and
-  /// drops stale state when it changes. Same value is a no-op.
-  void updateScope(String? preferredProviderId) {
-    if (_scopeProviderId == preferredProviderId) return;
+  /// Called after each entitlement fetch: injects the provider id and,
+  /// on the routed wire, the plan access it was fetched for, dropping
+  /// stale state when the scope changes. A parsed plan is deterministic
+  /// per provider id, so comparing the ids keeps same-value calls a
+  /// no-op (no notify storm).
+  void updateScope(
+    String? preferredProviderId, {
+    Map<String, dynamic>? plan,
+  }) {
+    if (_scopeProviderId == preferredProviderId &&
+        '${_scopePlan?['providerId']}' == '${plan?['providerId']}') {
+      return;
+    }
     _scopeProviderId = preferredProviderId;
+    _scopePlan = plan;
     _pools = null;
     _fetchedAt = null;
     _error = null;

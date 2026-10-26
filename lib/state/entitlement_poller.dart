@@ -47,6 +47,44 @@ class Limit {
 /// `useCodingPlanReset` argument) with its live pool numbers.
 typedef ResettablePool = ({String type, QuotaResetPool pool});
 
+/// Normalizes a Start-level snapshot onto the coding-plan percentage
+/// semantics in one place (design 10-24 §4). Start-plan `quota.limits` rows
+/// carry `percentage` as the REMAINING ratio in 0..1 — the asar
+/// `normalizeZaiStartPlanBalanceLimits` computes `remaining_units /
+/// total_units` with no ×100 — and label `type` with the entitlement id
+/// (research §3): the opposite dimension AND scale of the coding-plan path's
+/// 0..100 used percent. Rewrite each row's percentage to used percent
+/// (`clamp((1 - p) * 100, 0, 100)`) so the projection's single render path
+/// (`remainingPercent` = `100 - p`) stays untouched; token-class membership
+/// is handled by [EntitlementView._isTokenClass].
+///
+/// A non-Start snapshot (or a malformed quota / non-list limits) passes
+/// through unchanged. Null / non-numeric percentages stay as they are — the
+/// projection hides them either way.
+Map<String, dynamic> normalizeStartQuota(Map<String, dynamic> data) {
+  final quota = data['quota'];
+  if (quota is! Map || quota['level'] != 'Start') return data;
+  final limits = quota['limits'];
+  if (limits is! List) return data;
+  return {
+    ...data,
+    'quota': {
+      ...quota,
+      'limits': [
+        for (final row in limits)
+          if (row is Map)
+            {
+              for (final entry in row.entries) entry.key: entry.value,
+              if (row['percentage'] case final num p)
+                'percentage': ((1 - p) * 100).clamp(0.0, 100.0),
+            }
+          else
+            row,
+      ],
+    },
+  };
+}
+
 /// Immutable result of one entitlement fetch, shared by the usage page and
 /// the chat warning banner.
 class EntitlementView {
@@ -74,6 +112,21 @@ class EntitlementView {
   /// (research/entitlement-limits-probe.md).
   static const _tokenLimitTypes = {'TOKENS_LIMIT', 'CREDIT_LIMIT'};
 
+  /// Whether the snapshot is a Start-level one (`quota.level == 'Start'`).
+  /// A Start row labels `type` with its entitlement id instead of the limit
+  /// type set, but after [normalizeStartQuota] the whole row set IS the
+  /// plan's token quota — every row counts for the banner/window filters.
+  bool get _startLevel {
+    final quota = data?['quota'];
+    return quota is Map && quota['level'] == 'Start';
+  }
+
+  /// Token-class membership shared by [exhausted] / [chatBottleneckLimit] /
+  /// [windowRow]: the token/credit types, or every row of a Start-level
+  /// snapshot.
+  bool _isTokenClass(Map row) =>
+      _startLevel || _tokenLimitTypes.contains(row['type']);
+
   /// Whether the snapshot reports a token/credit limit topped out.
   ///
   /// The top-level `remaining` block is the `TIME_LIMIT` aggregate copy
@@ -84,7 +137,7 @@ class EntitlementView {
     if (quota is! Map || quota['limits'] is! List) return false;
     for (final limit in quota['limits'] as List) {
       if (limit is! Map) continue;
-      if (!_tokenLimitTypes.contains(limit['type'])) continue;
+      if (!_isTokenClass(limit)) continue;
       final percentage = limit['percentage'];
       if (percentage is num && percentage >= 100) return true;
     }
@@ -162,7 +215,7 @@ class EntitlementView {
   /// low-quota alert. Null when no token/credit row ranks.
   Limit? get chatBottleneckLimit => _rankMostTense([
         for (final e in _limits ?? const [])
-          if (e is Map && _tokenLimitTypes.contains(e['type']))
+          if (e is Map && _isTokenClass(e))
             Limit(e.cast<String, dynamic>()),
       ]);
 
@@ -198,7 +251,7 @@ class EntitlementView {
     if (limits == null) return null;
     for (final e in limits) {
       if (e is! Map) continue;
-      if (!_tokenLimitTypes.contains(e['type'])) continue;
+      if (!_isTokenClass(e)) continue;
       final candidate = Limit(e.cast<String, dynamic>());
       if (candidate.kind == kind) return candidate;
     }
@@ -309,6 +362,13 @@ class EntitlementPoller extends ValueNotifier<EntitlementView> {
     return clock.now().difference(at) < staleness;
   }
 
+  /// Public read of the cache predicate for the one caller that must not
+  /// touch the wire to decide: [DeviceSession.entitlementSnapshot] reuses
+  /// the last resolved main route while its poller is still fresh (the
+  /// pre-10-25 request profile — a cache hit issues no plan-resolution
+  /// RPCs).
+  bool get isFresh => _cacheFresh;
+
   /// Returns the cached snapshot within the staleness window, otherwise
   /// fetches a fresh one. [force] bypasses the cache. Concurrent callers
   /// share one in-flight fetch.
@@ -329,7 +389,7 @@ class EntitlementPoller extends ValueNotifier<EntitlementView> {
       if (res is! Map) {
         throw StateError('entitlement: unexpected payload');
       }
-      final data = Map<String, dynamic>.from(res);
+      final data = normalizeStartQuota(Map<String, dynamic>.from(res));
       value = EntitlementView(
         phase: phaseOf(data),
         data: data,

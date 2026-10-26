@@ -299,8 +299,22 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('12'), findsOneWidget); // mirror count
-    expect(find.text('剩余 40%'), findsOneWidget); // mirror caption
+    expect(find.text('剩余 60%'), findsOneWidget); // mirror caption: 100 - 40
+    // The mirror bar is remaining fullness as well (40% used → 60% left).
+    expect(
+      tester
+          .widget<LinearProgressIndicator>(
+            find.byType(LinearProgressIndicator),
+          )
+          .value,
+      closeTo(0.6, 0.001),
+    );
     expect(find.text('其他限额'), findsNothing); // no projection label
+    // Summary bar height is the shared 6dp usage-page token (2026-10-25).
+    expect(
+      tester.getSize(find.byType(LinearProgressIndicator)).height,
+      6,
+    );
   });
 
   testWidgets('light theme: the summary track is the translucent light '
@@ -315,7 +329,8 @@ void main() {
       find.byType(LinearProgressIndicator).first,
     );
     expect(lightBar.backgroundColor, const Color(0x0D0D0D0D)); // 5% black
-    expect(lightBar.value, closeTo(0.55, 0.001)); // used percent, not 100%
+    // Remaining semantics: 55% used → the bar is 45% full.
+    expect(lightBar.value, closeTo(0.45, 0.001));
 
     final dark = sessionWith(() async => okPayload());
     addTearDown(dark.dispose);
@@ -655,5 +670,268 @@ void main() {
       expect(find.textContaining('no_bigmodel_api_key'), findsNothing);
       expect(find.textContaining('coding_plan_api_key_required'), findsNothing);
     }
+  });
+
+  // ------------------------------------------ dual plan groups (10-25)
+  //
+  // The usage page renders one card group per entitled plan family
+  // (subscription + Start) from the session's per-provider pollers. The
+  // semantics contracts: coding percentages are 0..100 used read directly,
+  // Start percentages are 0..1 remaining normalized by the poller.
+
+  RemoteConnectionParams versionedParams() => RemoteConnectionParams.parse(
+        'https://zcode.z.ai/remote/v4?sid=s&hash=h&t=123&mid=m&name=test'
+        '&app_version=3.16.2',
+      )!;
+
+  Map<String, dynamic> providerView(Map<String, bool> entitledById) => {
+        'revision': '[1,1]',
+        'providerTemplates': <Object>[],
+        'providerOrder': <Object>[],
+        'providers': [
+          for (final entry in entitledById.entries)
+            {
+              'providerId': entry.key,
+              'providerName': entry.key,
+              'enabled': true,
+              'executable': true,
+              'accountState': {
+                'access': {'type': 'zhipu-account'},
+              },
+              'effectiveConfig': {
+                'access': {
+                  'type': 'zhipu-account',
+                  'entitled': entry.value,
+                },
+              },
+              'issues': <Object>[],
+              'models': <Object>[],
+            },
+        ],
+      };
+
+  Map<String, dynamic> codingSnapshot() => {
+        'authenticated': true,
+        'context': {'displayName': '订阅方案'},
+        'provider': {
+          'id': 'account:zai-individual-coding-plan',
+          'name': 'Z.AI Individual Coding Plan',
+        },
+        'remaining': {'count': 12, 'percentage': 40, 'isShow': true},
+        'quota': {
+          'level': 'pro',
+          'limits': [
+            {'type': 'TOKENS_LIMIT', 'unit': 3, 'number': 5, 'percentage': 51},
+          ],
+        },
+        'subscription': null,
+      };
+
+  Map<String, dynamic> startSnapshot() => {
+        'authenticated': true,
+        // A Start snapshot's context carries only {scope:'personal'} — the
+        // plan card falls back to provider.name.
+        'context': {'scope': 'personal'},
+        'provider': {'id': 'account:zai-start-plan', 'name': 'Start Plan'},
+        'remaining': {
+          'count': 300000000,
+          'percentage': 0.9493,
+          'isShow': true,
+        },
+        'quota': {
+          'level': 'Start',
+          'limits': [
+            {'type': 'ent-zcode-v3-start-plan-1024-1', 'percentage': 0.9493},
+          ],
+        },
+        'subscription': null,
+      };
+
+  /// Session on the 3.12.3+ routed wire: provider-settings gates the
+  /// routes, each snapshot request is answered by [snapshotFor].
+  FakeDeviceSession routedSession({
+    required Object? Function() view,
+    required Map<String, dynamic> Function(String providerId) snapshotFor,
+    List<Map<String, dynamic>> relayTasks = const [],
+    Map<String, dynamic>? selection,
+    List<String>? snapshotLog,
+  }) {
+    return FakeDeviceSession(
+      deviceId: 'd1',
+      params: versionedParams(),
+      relayTasks: relayTasks,
+      channelHandler: (channel, method, args) async {
+        switch (method) {
+          case 'getView':
+            return view();
+          case 'getTaskModelSelection':
+            return selection;
+          case 'getEntitlementSnapshot':
+            final providerId =
+                '${(args.single as Map)['preferredProviderId']}';
+            snapshotLog?.add(providerId);
+            return snapshotFor(providerId);
+          case 'getCodingPlanResetStatus':
+            return null;
+          case 'getAppUsageSnapshot':
+            return {'dailyModelUsage': []};
+          case 'getCodingPlanUsageSnapshot':
+            // The normal「未配置 BigModel」shape: the card stays hidden.
+            throw StateError('no_bigmodel_api_key');
+        }
+        return null;
+      },
+    );
+  }
+
+  int decoyCodingPlanCalls(FakeDeviceSession session) => session.channelCalls
+      .where((c) => c.$2 == 'getCodingPlanUsageSnapshot')
+      .length;
+
+  testWidgets('dual entitlement renders both groups with their own numbers '
+      '(coding direct, Start normalized)', (tester) async {
+    final snapshotIds = <String>[];
+    final session = routedSession(
+      view: () => providerView({
+        'account:zai-individual-coding-plan': true,
+        'account:zai-start-plan': true,
+      }),
+      snapshotFor: (providerId) => providerId == 'account:zai-start-plan'
+          ? startSnapshot()
+          : codingSnapshot(),
+      snapshotLog: snapshotIds,
+    );
+    addTearDown(session.dispose);
+    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
+    await tester.pumpAndSettle();
+
+    // Two complete card groups on one page.
+    expect(find.text('剩余额度'), findsNWidgets(2));
+    expect(find.text('配额限制'), findsNWidgets(2));
+    expect(find.text('订阅方案'), findsOneWidget); // coding group title
+    expect(find.text('Start Plan'), findsOneWidget); // Start fallback title
+    // Coding: 51% used read directly → 49% left (card) / 49.0% (row).
+    expect(find.text('49%'), findsOneWidget);
+    expect(find.text('49.0%'), findsOneWidget);
+    // Start: wire 0.9493 remaining ratio → used 5.07% → 94.93% left; the
+    // summary big number and the limit row both read remaining.
+    expect(find.text('94.9%'), findsNWidgets(2));
+    // Every bar is remaining fullness: coding group (summary + row) 49%,
+    // Start group (summary + row) 94.93%.
+    final bars = tester
+        .widgetList<LinearProgressIndicator>(
+          find.byType(LinearProgressIndicator),
+        )
+        .map((bar) => bar.value!)
+        .toList();
+    expect(bars, hasLength(4));
+    expect(bars[0], closeTo(0.49, 0.001));
+    expect(bars[1], closeTo(0.49, 0.001));
+    expect(bars[2], closeTo(0.9493, 0.001));
+    expect(bars[3], closeTo(0.9493, 0.001));
+    // One probe per route, in the official order (coding then Start).
+    expect(snapshotIds, [
+      'account:zai-individual-coding-plan',
+      'account:zai-start-plan',
+    ]);
+    // The coding-plan usage card belongs to the subscription group only.
+    expect(decoyCodingPlanCalls(session), 1);
+  });
+
+  testWidgets('refresh forces every group (both pollers re-fetch)',
+      (tester) async {
+    final snapshotIds = <String>[];
+    final session = routedSession(
+      view: () => providerView({
+        'account:zai-individual-coding-plan': true,
+        'account:zai-start-plan': true,
+      }),
+      snapshotFor: (providerId) => providerId == 'account:zai-start-plan'
+          ? startSnapshot()
+          : codingSnapshot(),
+      snapshotLog: snapshotIds,
+    );
+    addTearDown(session.dispose);
+    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.refresh));
+    await tester.pumpAndSettle();
+
+    expect(snapshotIds, [
+      'account:zai-individual-coding-plan',
+      'account:zai-start-plan',
+      'account:zai-individual-coding-plan',
+      'account:zai-start-plan',
+    ]);
+  });
+
+  testWidgets('starter-only account renders only the Start group',
+      (tester) async {
+    final snapshotIds = <String>[];
+    final session = routedSession(
+      view: () => providerView({
+        'account:zai-individual-coding-plan': false,
+        'account:zai-start-plan': true,
+      }),
+      snapshotFor: (_) => startSnapshot(),
+      snapshotLog: snapshotIds,
+    );
+    addTearDown(session.dispose);
+    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('剩余额度'), findsOneWidget);
+    expect(find.text('Start Plan'), findsOneWidget);
+    expect(find.text('订阅方案'), findsNothing);
+    expect(snapshotIds, ['account:zai-start-plan']);
+    // No subscription group → the coding-plan card is never fetched.
+    expect(decoyCodingPlanCalls(session), 0);
+  });
+
+  testWidgets('coding-only account renders only the subscription group',
+      (tester) async {
+    final snapshotIds = <String>[];
+    final session = routedSession(
+      view: () => providerView({
+        'account:zai-individual-coding-plan': true,
+        'account:zai-start-plan': false,
+      }),
+      snapshotFor: (_) => codingSnapshot(),
+      snapshotLog: snapshotIds,
+    );
+    addTearDown(session.dispose);
+    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('剩余额度'), findsOneWidget);
+    expect(find.text('订阅方案'), findsOneWidget);
+    expect(find.text('Start Plan'), findsNothing);
+    expect(snapshotIds, ['account:zai-individual-coding-plan']);
+  });
+
+  testWidgets('a failing provider-settings view falls back to the single '
+      'main route', (tester) async {
+    final session = routedSession(
+      view: () => throw StateError('provider-settings unavailable'),
+      snapshotFor: (_) => startSnapshot(),
+      relayTasks: [
+        {'taskId': 't1', 'workspacePath': '/repo'},
+      ],
+      selection: {'providerId': 'account:zai-start-plan'},
+    );
+    addTearDown(session.dispose);
+    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('剩余额度'), findsOneWidget);
+    expect(find.text('Start Plan'), findsOneWidget);
+    // Single degraded route — no dual fan-out.
+    expect(
+      session.channelCalls
+          .where((c) => c.$2 == 'getEntitlementSnapshot')
+          .length,
+      1,
+    );
   });
 }

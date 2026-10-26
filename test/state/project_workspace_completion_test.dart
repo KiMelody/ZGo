@@ -87,30 +87,37 @@ class _FakeGate implements WorkspaceGate {
   }
 }
 
-/// Answers the mapping without touching the file channel; counts calls so
-/// the version gate can be asserted (an old desktop must never build it).
+/// Answers the mapping without touching the file channel; models the real
+/// resolver's one-shot cache (`_resolved`), so [mappingCalls] counts READS
+/// and the bootstrap trigger cannot fake extra work. [home] stands in for
+/// the wire/cache-derived desktop home the default synthesis consumes.
 class _StubResolver extends ProjectResolver {
-  _StubResolver(this.mappingResult)
+  _StubResolver(this.mappingResult, {this.home})
       : super(
           workspaces: () => const [],
           readRange: (path, offset, length) async => Uint8List(0),
         );
 
   final ProjectMapping? mappingResult;
+  final String? home;
   int mappingCalls = 0;
-  bool _resolved = false;
+  bool _loaded = false;
+
+  @override
+  String? get knownHome => home;
 
   @override
   Future<ProjectMapping?> mapping() async {
+    if (_loaded) return mappingResult;
+    _loaded = true;
     mappingCalls++;
-    _resolved = true;
     return mappingResult;
   }
 
   /// Models the real resolver: roots exist only AFTER the read answered.
   @override
   List<ProjectRoot> get projectRoots =>
-      _resolved ? mappingResult?.roots ?? const <ProjectRoot>[] : const [];
+      _loaded ? mappingResult?.roots ?? const <ProjectRoot>[] : const [];
 }
 
 /// A resolver whose read parks until the test answers it — the real read
@@ -147,6 +154,8 @@ Future<DeviceSession> _connected(
   _StubClient stub, {
   ProjectResolver Function(List<Map<String, dynamic>> Function())?
   resolverFactory,
+  WorkspaceGate? gate,
+  void Function(DeviceSession)? onCreated,
 }) async {
   final session = DeviceSession(
     deviceId: 'd1',
@@ -155,8 +164,20 @@ Future<DeviceSession> _connected(
     clientFactory: () => stub,
     projectResolverFactory: resolverFactory,
   );
+  // Attach before connect so the bootstrap-triggered completion (10-26 D3)
+  // rides the gate exactly like the live channel does.
+  if (gate != null) session.debugAttachGateForTest(gate);
+  onCreated?.call(session);
   await session.connect();
   return session;
+}
+
+/// Drains the event loop a few turns: unawaited triggers (bootstrap project
+/// read, merge-triggered task pull) land through microtasks + zero timers.
+Future<void> _settle() async {
+  for (var i = 0; i < 10; i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
 }
 
 Map<String, dynamic> _legResponse({
@@ -305,6 +326,145 @@ void main() {
       expect(groups['draft-task'], 'default-id',
           reason: 'the conversation merge is untouched by the completion');
     });
+
+    group('default workspace synthesis (10-26 D2)', () {
+      test('a known home appends the default entry after the roots', () {
+        final merged = mergeProjectWorkspaces(
+          [
+            {'workspacePath': '/home/me/project', 'label': 'project'},
+            {
+              'workspacePath': '/home/me/.zcode/workspace/draft-1',
+              'label': 'draft-1',
+            },
+          ],
+          const [
+            ProjectRoot(
+              projectId: 'p1',
+              name: 'chat',
+              rootPath: '/home/me/chat',
+            ),
+          ],
+          home: '/home/me',
+        );
+
+        expect(merged.map((w) => w['workspacePath']), [
+          '/home/me/project',
+          '/home/me/.zcode/workspace/draft-1',
+          '/home/me/chat',
+          '/home/me/.zcode/workspace/default',
+        ], reason: 'synthetic roots first, the default entry last');
+        expect(merged.last, {
+          'kind': 'local',
+          'label': 'default',
+          'workspacePath': '/home/me/.zcode/workspace/default',
+        });
+        final session = FakeDeviceSession(
+          deviceId: 'd1',
+          params: _params('3.16.2'),
+          workspaces: merged,
+          relayTasks: [
+            {
+              'taskId': 'draft-task',
+              'title': 'draft',
+              'workspacePath': '/home/me/.zcode/workspace/draft-1',
+              'displayStatus': 'idle',
+              'updatedAt': 1,
+            },
+          ],
+        );
+        expect(
+          session.taskDirectory.allEntries().single.$2,
+          '/home/me/.zcode/workspace/default',
+          reason: 'the synthesized entry is the draft merge anchor',
+        );
+      });
+
+      test('a wire-listed default is never synthesized twice', () {
+        final wire = [
+          {
+            'workspacePath': r'C:\Users\Me\.zcode\workspace\default',
+            'label': 'default',
+          },
+        ];
+        expect(
+          identical(
+            mergeProjectWorkspaces(wire, const [], home: 'C:/Users/me'),
+            wire,
+          ),
+          isTrue,
+          reason: 'dedupe folds case and slash spellings',
+        );
+      });
+
+      test('a user-registered default root is never synthesized twice', () {
+        final wire = [
+          {'workspacePath': '/repo', 'label': 'repo'},
+        ];
+        expect(
+          identical(
+            mergeProjectWorkspaces(
+              wire,
+              const [
+                ProjectRoot(
+                  projectId: 'p1',
+                  name: 'default',
+                  rootPath: '/home/me/.zcode/workspace/default',
+                ),
+              ],
+              home: '/home/me',
+            ),
+            wire,
+          ),
+          isFalse,
+          reason: 'the root row still gets appended as a project entry',
+        );
+        expect(
+          mergeProjectWorkspaces(
+            wire,
+            const [
+              ProjectRoot(
+                projectId: 'p1',
+                name: 'default',
+                rootPath: '/home/me/.zcode/workspace/default',
+              ),
+            ],
+            home: '/home/me',
+          ).map((w) => w['workspacePath']),
+          ['/repo', '/home/me/.zcode/workspace/default'],
+          reason: 'the registered root wins, no duplicate default follows',
+        );
+      });
+
+      test('no home means no default entry', () {
+        final wire = [
+          {'workspacePath': '/repo', 'label': 'repo'},
+        ];
+        expect(
+          identical(mergeProjectWorkspaces(wire, const [], home: null), wire),
+          isTrue,
+        );
+        expect(
+          identical(mergeProjectWorkspaces(wire, const [], home: ''), wire),
+          isTrue,
+        );
+      });
+
+      test('Windows homes keep the native separators the desktop keys by',
+          () {
+        expect(
+          ProjectResolver.defaultWorkspacePath('C:/Users/Melody'),
+          r'C:\Users\Melody\.zcode\workspace\default',
+        );
+        expect(
+          ProjectResolver.defaultWorkspacePath(r'D:\work'),
+          r'D:\work\.zcode\workspace\default',
+        );
+        expect(
+          ProjectResolver.defaultWorkspacePath('/Users/melody/'),
+          '/Users/melody/.zcode/workspace/default',
+        );
+      });
+    });
   });
 
   group('DeviceSession completion', () {
@@ -320,15 +480,6 @@ void main() {
         ),
       );
       late List<Map<String, dynamic>> Function() resolverWorkspaces;
-      final session = await _connected(
-        stub,
-        resolverFactory: (bootstrap) {
-          resolverWorkspaces = bootstrap;
-          return resolver;
-        },
-      );
-      addTearDown(session.dispose);
-
       final gate = _FakeGate()
         ..handler = (method, args) async {
           if (method == 'listPinnedTaskIds') return <String>[];
@@ -338,9 +489,17 @@ void main() {
           }
           return _emptyLeg();
         };
-      session.debugAttachGateForTest(gate);
       var notified = 0;
-      session.addListener(() => notified++);
+      final session = await _connected(
+        stub,
+        gate: gate,
+        resolverFactory: (bootstrap) {
+          resolverWorkspaces = bootstrap;
+          return resolver;
+        },
+        onCreated: (s) => s.addListener(() => notified++),
+      );
+      addTearDown(session.dispose);
 
       await session.debugRefreshProjectWorkspacesForTest();
 
@@ -357,11 +516,17 @@ void main() {
 
       final legCalls =
           gate.calls.where((c) => c.$2 == 'listTaskList').toList();
+      expect(legCalls.length, greaterThanOrEqualTo(3),
+          reason: 'the completion re-pulls the three legs');
+      // The bootstrap frame lands with the raw list; the completion then
+      // re-dials after the merge. Only the LAST round is the completed
+      // scope list (an earlier round may have carried the raw scopes).
+      final lastRound = legCalls.sublist(legCalls.length - 3);
       expect(
-        legCalls.map((c) => (c.$3.single as Map)['kind']),
+        lastRound.map((c) => (c.$3.single as Map)['kind']),
         ['timeline', 'pinned', 'archived'],
       );
-      for (final call in legCalls) {
+      for (final call in lastRound) {
         final scopes =
             ((call.$3.single as Map)['workspaceScopes'] as List)
                 .cast<Map<String, dynamic>>();
@@ -477,6 +642,235 @@ void main() {
       await round;
 
       expect(session.workspaces, isEmpty);
+    });
+
+    test('the first bootstrap starts the project read (no open, no create)',
+        () async {
+      final stub = _StubClient(_params('3.16.2'));
+      final resolver = _StubResolver(
+        const ProjectMapping(
+          byRootPath: {},
+          roots: [
+            ProjectRoot(projectId: 'p1', name: 'chat', rootPath: r'F:\chat'),
+          ],
+        ),
+      );
+      final session = await _connected(
+        stub,
+        resolverFactory: (_) => resolver,
+      );
+      addTearDown(session.dispose);
+
+      // Pure task-page browsing: connect auto-open FAILS in this harness
+      // (openBridge throws), so the workspace-open prewarm never runs and
+      // nothing here calls createSession or the debug seam.
+      await _settle();
+
+      expect(resolver.mappingCalls, 1,
+          reason: 'the bootstrap landing is the connection-init trigger');
+      expect(session.workspaces.map((w) => w['workspacePath']), [
+        '/home/.zcode/workspace/default',
+        r'F:\chat',
+      ], reason: 'the completed list reaches the UI without any open');
+    });
+
+    test('later bootstrap frames join the one-shot project read', () async {
+      final stub = _StubClient(_params('3.16.2'));
+      final resolver = _StubResolver(
+        const ProjectMapping(
+          byRootPath: {},
+          roots: [
+            ProjectRoot(projectId: 'p1', name: 'chat', rootPath: r'F:\chat'),
+          ],
+        ),
+      );
+      final session = await _connected(
+        stub,
+        resolverFactory: (_) => resolver,
+      );
+      addTearDown(session.dispose);
+      await _settle();
+
+      stub.workspaceUpdates.add({
+        'workspaces': [
+          {'workspacePath': '/repo/new', 'label': 'new'},
+        ],
+      });
+      await _settle();
+
+      expect(resolver.mappingCalls, 1,
+          reason: 'the resolver cache answers every later frame');
+      expect(session.workspaces.map((w) => w['workspacePath']), [
+        '/repo/new',
+        r'F:\chat',
+      ], reason: 'the push frame re-merges from the cached roots');
+    });
+
+    test('a relay push that grows the list re-pulls the merged scopes',
+        () async {
+      final stub = _StubClient(_params('3.16.2'));
+      final resolver = _StubResolver(
+        const ProjectMapping(
+          byRootPath: {},
+          roots: [
+            ProjectRoot(projectId: 'p1', name: 'chat', rootPath: r'F:\chat'),
+          ],
+        ),
+      );
+      final rounds = <List<String>>[];
+      final gate = _FakeGate()
+        ..handler = (method, args) async {
+          if (method == 'listPinnedTaskIds') return <String>[];
+          final arg = args.single as Map;
+          final paths = ((arg['workspaceScopes'] as List).cast<Map>())
+              .map((s) => s['workspacePath'] as String)
+              .toList();
+          rounds.add(paths);
+          return arg['kind'] == 'timeline'
+              ? _legResponse(taskId: 'tl-1', workspacePath: paths.first)
+              : _emptyLeg();
+        };
+      final session = await _connected(
+        stub,
+        gate: gate,
+        resolverFactory: (_) => resolver,
+      );
+      addTearDown(session.dispose);
+      await session.debugRefreshProjectWorkspacesForTest();
+      rounds.clear();
+
+      // The push lands with the resolver already resolved: the merge grows
+      // the list, and the tasks of the new scope must follow at once — this
+      // path used to wait for the next 30 s cadence (Bug B).
+      stub.workspaceUpdates.add({
+        'workspaces': [
+          {'workspacePath': '/wire/new', 'label': 'new'},
+        ],
+      });
+      await _settle();
+
+      expect(rounds, isNotEmpty, reason: 'a push merge must trigger a pull');
+      expect(rounds.last, ['/wire/new', r'F:\chat'],
+          reason: 'the re-dial uses the merged scope list');
+    });
+
+    test('a push merging while an old-scope round is in flight re-dials the '
+        'merged scopes', () async {
+      final stub = _StubClient(_params('3.16.2'));
+      stub.bootstrapResult = {
+        'workspaces': [
+          {'workspacePath': '/wire/a', 'label': 'a'},
+        ],
+      };
+      final resolver = _StubResolver(
+        const ProjectMapping(
+          byRootPath: {},
+          roots: [
+            ProjectRoot(projectId: 'p1', name: 'chat', rootPath: r'F:\chat'),
+          ],
+        ),
+      );
+      final park = Completer<void>();
+      var parked = false;
+      final rounds = <List<String>>[];
+      final gate = _FakeGate()
+        ..handler = (method, args) async {
+          if (method == 'listPinnedTaskIds') return <String>[];
+          final arg = args.single as Map;
+          final paths = ((arg['workspaceScopes'] as List).cast<Map>())
+              .map((s) => s['workspacePath'] as String)
+              .toList();
+          rounds.add(paths);
+          if (!parked) {
+            parked = true;
+            await park.future;
+          }
+          return arg['kind'] == 'timeline'
+              ? _legResponse(taskId: 'tl-1', workspacePath: paths.first)
+              : _emptyLeg();
+        };
+      final session = await _connected(
+        stub,
+        gate: gate,
+        resolverFactory: (_) => resolver,
+      );
+      addTearDown(session.dispose);
+      await session.debugRefreshProjectWorkspacesForTest();
+      rounds.clear();
+
+      // A cadence round built from the CURRENT scopes parks mid-flight.
+      final pending = session.refreshTaskOverview();
+      await Future<void>.delayed(Duration.zero);
+      expect(rounds, isNotEmpty, reason: 'the overview round is in flight');
+
+      // The push grows the list while that round still carries the old
+      // scopes. The merge handler must wait it out and dial again.
+      stub.workspaceUpdates.add({
+        'workspaces': [
+          {'workspacePath': '/wire/c', 'label': 'c'},
+        ],
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      park.complete();
+      await pending;
+      await _settle();
+
+      expect(rounds.last, ['/wire/c', r'F:\chat'],
+          reason: 'the in-flight old-scope round is followed by a merged one');
+    });
+
+    test('a known home synthesizes the default scope on connect', () async {
+      final stub = _StubClient(_params('3.16.2'));
+      stub.bootstrapResult = {
+        'workspaces': [
+          {'workspacePath': '/home/me/foo', 'label': 'foo'},
+        ],
+      };
+      final resolver = _StubResolver(
+        const ProjectMapping(
+          byRootPath: {},
+          roots: [
+            ProjectRoot(
+              projectId: 'p1',
+              name: 'chat',
+              rootPath: '/home/me/chat',
+            ),
+          ],
+        ),
+        home: '/home/me',
+      );
+      final rounds = <List<String>>[];
+      final gate = _FakeGate()
+        ..handler = (method, args) async {
+          if (method == 'listPinnedTaskIds') return <String>[];
+          final arg = args.single as Map;
+          final paths = ((arg['workspaceScopes'] as List).cast<Map>())
+              .map((s) => s['workspacePath'] as String)
+              .toList();
+          rounds.add(paths);
+          return arg['kind'] == 'timeline'
+              ? _legResponse(taskId: 'tl-1', workspacePath: paths.first)
+              : _emptyLeg();
+        };
+      final session = await _connected(
+        stub,
+        gate: gate,
+        resolverFactory: (_) => resolver,
+      );
+      addTearDown(session.dispose);
+      await session.debugRefreshProjectWorkspacesForTest();
+      await _settle();
+
+      expect(session.workspaces.map((w) => w['workspacePath']), [
+        '/home/me/foo',
+        '/home/me/chat',
+        '/home/me/.zcode/workspace/default',
+      ]);
+      expect(rounds.last, [
+        '/home/me/foo',
+        '/home/me/chat',
+        '/home/me/.zcode/workspace/default',
+      ], reason: 'the synthesized default is a task scope like any other');
     });
   });
 }

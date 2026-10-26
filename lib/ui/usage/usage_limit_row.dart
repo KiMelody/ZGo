@@ -4,6 +4,24 @@ import '../../state/entitlement_poller.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
 
+/// Human token count: `15202462` → `"15.2M"`, `284797538` → `"284.8M"`,
+/// `15202` → `"15.2k"`, `9999` → `"9999"`. The 1e4/1e6/1e9 magnitudes keep
+/// one decimal; anything below 1e4 stays the plain integer (which is where
+/// the monthly tool-call counts live). A negative value keeps its sign.
+String fmtTokenCount(num v) {
+  final sign = v < 0 ? '-' : '';
+  final abs = v.abs();
+  if (abs >= 1e9) return '$sign${(abs / 1e9).toStringAsFixed(1)}B';
+  if (abs >= 1e6) return '$sign${(abs / 1e6).toStringAsFixed(1)}M';
+  if (abs >= 1e4) return '$sign${(abs / 1e3).toStringAsFixed(1)}k';
+  return '$sign${abs.round()}';
+}
+
+/// A row value as copy: numbers ride [fmtTokenCount], strings (pre-formatted
+/// values) pass through verbatim, null reads `-`.
+String _fmtValue(Object? value) =>
+    value is num ? fmtTokenCount(value) : '${value ?? '-'}';
+
 /// One 「配额限制」row (web `settings.usage` quota limits; extracted from
 /// device_usage_page in 10-16-narrow-screen-overflow so the narrow-width
 /// smoke test can cover the surface directly).
@@ -55,6 +73,10 @@ class UsageLimitRow extends StatelessWidget {
         _semanticLabel(context, limit) ??
         '$type · unit ${limit['unit'] ?? '-'}';
     final percentage = (limit['percentage'] as num?)?.toDouble();
+    // The wire percentage is USED percent; the row copy and the bar both
+    // show what's LEFT (entitlement-quota-semantics.md §1).
+    final left =
+        percentage == null ? null : (100 - percentage).clamp(0.0, 100.0);
     final usageDetails = limit['usageDetails'];
     // Window-rollover clock via the projection's single formatting copy
     // (「重置」stays reserved for reset opportunities, 2026-09-16).
@@ -98,12 +120,14 @@ class UsageLimitRow extends StatelessWidget {
                 child: Text(
                   [
                     if (limit['usage'] != null)
-                      trP(context, 'usageRpc.used', ['${limit['usage']}']),
+                      trP(context, 'usageRpc.used',
+                          [_fmtValue(limit['usage'])]),
                     if (limit['remaining'] != null)
-                      trP(context, 'usageRpc.left', ['${limit['remaining']}']),
-                    if (percentage != null) '$percentage%',
+                      trP(context, 'usageRpc.left',
+                          [_fmtValue(limit['remaining'])]),
+                    if (left != null) '${left.toStringAsFixed(1)}%',
                   ].join(' · '),
-                  style: ZType.caption.copyWith(color: ZInk.muted(context)),
+                  style: ZType.sub.copyWith(color: ZInk.muted(context)),
                   textAlign: TextAlign.end,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -116,12 +140,16 @@ class UsageLimitRow extends StatelessWidget {
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(ZRadius.mini),
                 child: LinearProgressIndicator(
-                  value: (percentage / 100).clamp(0.0, 1.0),
-                  minHeight: 4,
+                  // Bar = what's LEFT; danger tracks the raw used percent,
+                  // i.e. a short red bar means remaining is running low.
+                  value: (left! / 100).clamp(0.0, 1.0),
+                  minHeight: ZSpacing.progressBar,
                   backgroundColor:
                       Theme.of(context).colorScheme.surfaceContainerHighest,
                   valueColor: AlwaysStoppedAnimation(
-                    percentage > 80 ? ZInk.dangerTone(context) : ZColors.sky500,
+                    percentage > 80
+                        ? ZInk.dangerTone(context)
+                        : ZColors.sky500,
                   ),
                 ),
               ),
@@ -132,7 +160,8 @@ class UsageLimitRow extends StatelessWidget {
               child: Text(
                 usageDetails
                     .whereType<Map>()
-                    .map((u) => '${u['modelCode']}: ${u['usage']}')
+                    .map((u) =>
+                        '${u['modelCode']}: ${_fmtValue(u['usage'])}')
                     .join('  '),
                 style:
                     ZType.caption.copyWith(color: ZInk.faint(context)),

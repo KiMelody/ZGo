@@ -113,6 +113,10 @@ abstract final class ZSpacing {
 
   /// Whitespace around a centered empty / error / unavailable state.
   static const double emptyState = 32;
+
+  /// Height of every usage-page progress bar (summary, mirror, limit row,
+  /// personal-plan column — one shared value; 2026-10-25 fixed at 6).
+  static const double progressBar = 6;
 }
 
 /// Wide-screen content-column cap for secondary pages (device usage,

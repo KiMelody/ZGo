@@ -166,13 +166,19 @@ class CodingPlanUsageCard extends StatelessWidget {
               ),
               style: ZType.caption.copyWith(color: ZInk.faint(context)),
             ),
-          ],
+          ] else
+            // Equal-height stand-in for the clock row: a window with no
+            // reset time (e.g. 「每周」) keeps its bar level with the two
+            // neighbours (2026-10-25 acceptance fix). 17 = the 2 gap + one
+            // [ZType.caption] line box (measured 15 for fontSize 11 ×
+            // height 1.4).
+            const SizedBox(height: 17),
           const SizedBox(height: 6),
           ClipRRect(
             borderRadius: BorderRadius.circular(ZRadius.mini),
             child: LinearProgressIndicator(
               value: remaining == null ? 0 : (remaining / 100).clamp(0.0, 1.0),
-              minHeight: 5,
+              minHeight: ZSpacing.progressBar,
               backgroundColor: ZInk.barTrack(context),
               valueColor: AlwaysStoppedAnimation(
                 ZInk.usageChart(context, card.colorIndex),

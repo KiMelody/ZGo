@@ -473,6 +473,9 @@ const _zh = {
   'chat.plans.failed': '获取计划失败: \$0',
   'chat.quota.exhaustedTitle': '套餐额度已用尽',
   'chat.quota.exhaustedBody': '当前套餐额度已用尽或受限，可切换模型继续',
+  'chat.quota.expiredTitle': '套餐已到期',
+  'chat.quota.expiredBody': '当前套餐已到期，可切换模型继续',
+  'chat.quota.autoSwitched': 'Start 套餐已不可用，已切换到 \$0',
   'chat.quota.switchModel': '切换模型',
   'chat.quota.viewUsage': '查看用量',
   'chat.quota.useReset': '使用重置券',
@@ -751,8 +754,8 @@ const _zh = {
   'usageRpc.appUsageFailed': '应用用量加载失败',
   'usageRpc.loadFailed': '加载失败: \$0',
   'usageRpc.remaining': '剩余额度',
-  'usageRpc.remainingDetail': '剩余 \$0% · 重置机会 \$1过期',
-  'usageRpc.remainingNoReset': '剩余 \$0%',
+  'usageRpc.remainingDetail': '剩余 \$0 · 重置机会 \$1过期',
+  'usageRpc.remainingNoReset': '剩余 \$0',
   'usageRpc.limits': '配额限制',
   'usageRpc.limitToken5h': '5 小时 token 窗口',
   'usageRpc.limitTokenWeek': '周 token 窗口',
@@ -774,7 +777,7 @@ const _zh = {
   'usageRpc.primaryToolCalls': '工具调用',
   'usageRpc.primaryTokens': 'Token 限额',
   'usageRpc.primaryOther': '其他限额',
-  'usageRpc.primaryLeft': '剩 \$0%',
+  'usageRpc.primaryLeft': '剩 \$0',
   'usageRpc.primaryCount': '\$0 次',
   // 用量页新形态（10-08-parity-usage D7/D8）。官方原文出处:
   // settings.usage.{range.*,lifetimeTotalTokens,lifetimePeakTokens,
@@ -1772,6 +1775,11 @@ const _en = {
   'chat.quota.exhaustedTitle': 'Plan quota exhausted',
   'chat.quota.exhaustedBody':
       'Your plan quota is used up or limited — switch model to continue',
+  'chat.quota.expiredTitle': 'Plan expired',
+  'chat.quota.expiredBody':
+      'Your current plan has expired — switch model to continue',
+  'chat.quota.autoSwitched':
+      'Start plan is no longer available — switched to \$0',
   'chat.quota.switchModel': 'Switch model',
   'chat.quota.viewUsage': 'View usage',
   'chat.quota.useReset': 'Use reset opportunity',
@@ -2067,8 +2075,8 @@ const _en = {
   'usageRpc.appUsageFailed': 'App usage failed to load',
   'usageRpc.loadFailed': 'Load failed: \$0',
   'usageRpc.remaining': 'Remaining quota',
-  'usageRpc.remainingDetail': '\$0% left · reset chances expire \$1',
-  'usageRpc.remainingNoReset': '\$0% left',
+  'usageRpc.remainingDetail': '\$0 left · reset chances expire \$1',
+  'usageRpc.remainingNoReset': '\$0 left',
   'usageRpc.limits': 'Quota limits',
   'usageRpc.limitToken5h': '5-hour token window',
   'usageRpc.limitTokenWeek': 'Weekly token window',
@@ -2090,7 +2098,7 @@ const _en = {
   'usageRpc.primaryToolCalls': 'Tool calls',
   'usageRpc.primaryTokens': 'Token limit',
   'usageRpc.primaryOther': 'Other limit',
-  'usageRpc.primaryLeft': '\$0% left',
+  'usageRpc.primaryLeft': '\$0 left',
   'usageRpc.primaryCount': '\$0 left',
   // Usage-page parity batch (10-08-parity-usage D7/D8). zh values are the
   // official settings.usage.* strings (verbatim); English counterparts not

@@ -8,6 +8,26 @@ import '../state/device_session.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 
+/// Display name of a provider row: the desktop names both 智谱 families'
+/// start-plan entries bare "Start Plan", so `account:bigmodel-*` rows carry
+/// the brand prefix when the wire name lacks it (zero i18n — brand word).
+/// Shared by the list rows and the detail page's account card.
+String _accountDisplayName(ProviderEntry p) {
+  if (p.providerName.isEmpty) return p.providerName;
+  if (p.providerId.startsWith('account:bigmodel-') &&
+      !p.providerName.startsWith('BigModel')) {
+    return 'BigModel ${p.providerName}';
+  }
+  // The desktop names both families' start plans the bare "Start Plan" (the
+  // coding plans carry their family prefix) — stamp the zai family the same
+  // way so the two sibling rows stay distinguishable (user acceptance 10-24).
+  if (p.providerId.startsWith('account:zai-') &&
+      !p.providerName.startsWith('Z.AI')) {
+    return 'Z.AI ${p.providerName}';
+  }
+  return p.providerName;
+}
+
 /// API format choices of the provider form — labels over the
 /// certified provider-settings wire values (notes.md 附录 item 1).
 const _apiFormats = [
@@ -290,7 +310,7 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Text(
-                      p.providerName,
+                      _accountDisplayName(p),
                       style: ZType.body.copyWith(color: ink),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -963,7 +983,9 @@ class _ProviderDetailPageState extends State<_ProviderDetailPage> {
   @override
   Widget build(BuildContext context) {
     final entry = _entry;
-    final name = entry?.providerName ?? widget.providerId;
+    final name = entry != null
+        ? _accountDisplayName(entry)
+        : widget.providerId;
     return Scaffold(
       appBar: AppBar(
         title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -1035,7 +1057,7 @@ class _ProviderDetailPageState extends State<_ProviderDetailPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(entry.providerName, style: ZType.bodyStrong),
+                  Text(_accountDisplayName(entry), style: ZType.bodyStrong),
                   if (mode.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 2),

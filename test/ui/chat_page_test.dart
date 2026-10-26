@@ -105,6 +105,57 @@ WorkspacePrep barePrep() => WorkspacePrep.fromMap(const {
   'slashCommands': <Map<String, dynamic>>[],
 });
 
+/// prepareWorkspace with the research §5 plan catalog — four `account:*`
+/// plan groups plus the personal provider (幻城), every option carrying the
+/// wire `modelProviderId` the entitlement filter keys on.
+WorkspacePrep planCatalogPrep() {
+  Map<String, dynamic> option(
+    String providerId,
+    String providerName,
+    String model,
+  ) => {
+    'value': '$providerId/$model',
+    'name': model,
+    'modelProviderId': providerId,
+    'modelProviderName': providerName,
+  };
+  return WorkspacePrep.fromMap({
+    'configOptions': [
+      {
+        'id': 'model',
+        'name': 'Model',
+        'currentValue': 'account:zai-start-plan/GLM-5.3',
+        'options': [
+          option('account:zai-individual-coding-plan',
+              'Z.AI Individual Coding Plan', 'GLM-5.3'),
+          option('account:zai-individual-coding-plan',
+              'Z.AI Individual Coding Plan', 'GLM-5.3-Flash'),
+          option('account:zai-start-plan', 'Start Plan', 'GLM-5.3'),
+          option('account:zai-start-plan', 'Start Plan', 'GLM-5.3-Flash'),
+          option('account:zai-off-peak', 'Z.AI Idle plan', 'GLM-5.3'),
+          option('account:zai-off-peak', 'Z.AI Idle plan', 'GLM-5.3-Flash'),
+          option('account:zai-highspeed-card', 'Z.AI Highspeed card', 'GLM-5.3'),
+          option('account:zai-highspeed-card', 'Z.AI Highspeed card',
+              'GLM-5.3-Flash'),
+          option('personal-huancheng', '幻城', 'deepseek-v4-flash'),
+        ],
+      },
+    ],
+    'slashCommands': <Map<String, dynamic>>[],
+  });
+}
+
+/// Snapshot-level `config` for the live-session model sheet tests — the
+/// current provider drives the entitlement filter's exemption.
+Map<String, dynamic> snapshotModelConfig(String provider) => {
+  'config': {
+    'provider': provider,
+    'model': 'GLM-5.3',
+    'thought': 'enabled',
+    'mode': 'build',
+  },
+};
+
 /// prepareWorkspace with a thought option but NO currentValue — the cold
 /// fallback scenario (nothing to inherit, createSession must ship 'max').
 WorkspacePrep prepWithoutThoughtCurrent() => WorkspacePrep.fromMap(const {
@@ -3327,6 +3378,48 @@ void main() {
         },
       );
 
+  /// Start-plan snapshot (task 10-24 C, research §7): the normalized Start
+  /// row carries the USED percent, so a drained bucket reads `exhausted`.
+  EntitlementView startPlanExhausted() => EntitlementView(
+        phase: EntitlementPhase.ok,
+        data: {
+          'authenticated': true,
+          'provider': {'id': 'account:zai-start-plan', 'name': 'Start Plan'},
+          'remaining': {'count': 0, 'isShow': true, 'percentage': 0},
+          'quota': {
+            'level': 'Start',
+            'limits': [
+              {'type': 'ent-start-1', 'percentage': 100},
+            ],
+          },
+        },
+      );
+
+  /// Expired Start-plan shape: provider stays, quota/remaining are empty and
+  /// `startPlanExpired` is the only terminal marker.
+  EntitlementView startPlanExpired() => EntitlementView(
+        phase: EntitlementPhase.ok,
+        data: {
+          'authenticated': true,
+          'provider': {'id': 'account:zai-start-plan', 'name': 'Start Plan'},
+          'remaining': null,
+          'quota': null,
+          'subscription': null,
+          'unavailableReason': 'no_plan',
+          'startPlanExpired': true,
+        },
+      );
+
+  /// Snapshot-level config for a live Start-plan session (auto switch input).
+  Map<String, dynamic> startPlanConfig({String model = 'GLM-5.3'}) => {
+        'config': {
+          'provider': 'account:zai-start-plan',
+          'model': model,
+          'thought': 'enabled',
+          'mode': 'build',
+        },
+      };
+
   Future<void> pumpWithQuota(
     WidgetTester tester,
     FakeChatGateway gateway, {
@@ -3412,6 +3505,20 @@ void main() {
     await tester.tap(find.text('切换模型'));
     await tester.pumpAndSettle();
     expect(find.textContaining('GLM-5.2'), findsWidgets);
+  });
+
+  testWidgets('expired Start-plan snapshot lights the warning banner with '
+      'expiry copy (previously silent)', (tester) async {
+    final gateway = FakeChatGateway()..entitlementResult = startPlanExpired();
+    await pumpWithQuota(tester, gateway);
+
+    expect(find.text('套餐已到期'), findsOneWidget);
+    expect(find.text('当前套餐已到期，可切换模型继续'), findsOneWidget);
+    // The exhausted wording would be wrong for an expiry.
+    expect(find.text('套餐额度已用尽'), findsNothing);
+    expect(find.textContaining('已用尽或受限'), findsNothing);
+    // Manual entries stay.
+    expect(find.text('切换模型'), findsOneWidget);
   });
 
   testWidgets('healthy quota snapshot clears the banner on the next open', (
@@ -3829,6 +3936,203 @@ void main() {
     expect(gateway.modelProviderCatalogCalls, 1);
     expect(find.textContaining('当前模型'), findsOneWidget);
     expect(find.textContaining('GLM-5.3'), findsNothing);
+  });
+
+  // ------------------------------------ model catalog entitlement (10-24 B)
+
+  testWidgets('model sheet hides unentitled account groups, keeps the '
+      'personal provider and the group order', (tester) async {
+    final gateway = _SwitchGateway(_SwitchTransport(), prep: planCatalogPrep())
+      ..entitlementResult = okQuota(
+        {'count': 0, 'percentage': 100, 'isShow': true},
+        tokenPercentage: 100,
+      )
+      ..entitledProviderIdsResult = {'account:zai-start-plan'}
+      ..snapshotExtra = snapshotModelConfig('account:zai-start-plan');
+    await pumpWithQuota(tester, gateway);
+
+    await tester.tap(find.byIcon(Icons.memory_outlined));
+    await tester.pumpAndSettle();
+
+    // One read at page open (the Start-plan auto switch hook, 10-24 C) plus
+    // the sheet's own prefetch on open.
+    expect(gateway.entitledProviderIdsCalls, 2);
+    // One header + one subtitle per option in the surviving groups.
+    expect(find.text('Start Plan'), findsNWidgets(3));
+    expect(find.text('幻城'), findsNWidgets(2));
+    expect(find.text('Z.AI Individual Coding Plan'), findsNothing);
+    expect(find.text('Z.AI Idle plan'), findsNothing);
+    expect(find.text('Z.AI Highspeed card'), findsNothing);
+    // Order: Start Plan renders above 幻城 (first hit = the group header).
+    expect(
+      tester.getTopLeft(find.text('Start Plan').first).dy,
+      lessThan(tester.getTopLeft(find.text('幻城').first).dy),
+    );
+  });
+
+  testWidgets('model sheet keeps the group holding the current model even '
+      'when the account is not entitled to it', (tester) async {
+    final gateway = _SwitchGateway(_SwitchTransport(), prep: planCatalogPrep())
+      ..entitlementResult = okQuota(
+        {'count': 0, 'percentage': 100, 'isShow': true},
+        tokenPercentage: 100,
+      )
+      ..entitledProviderIdsResult = {'account:zai-start-plan'}
+      // The session currently runs a model of an unentitled idle plan —
+      // the exemption keeps that group visible (PRD §2 exception).
+      ..snapshotExtra = snapshotModelConfig('account:zai-off-peak');
+    await pumpWithQuota(tester, gateway);
+
+    await tester.tap(find.byIcon(Icons.memory_outlined));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Start Plan'), findsNWidgets(3));
+    expect(find.text('Z.AI Idle plan'), findsNWidgets(3));
+    expect(find.text('Z.AI Individual Coding Plan'), findsNothing);
+    expect(find.text('Z.AI Highspeed card'), findsNothing);
+  });
+
+  testWidgets('model sheet degrades to the full catalog when the provider '
+      'view cannot be read (PRD §3)', (tester) async {
+    final gateway = _SwitchGateway(_SwitchTransport(), prep: planCatalogPrep())
+      ..entitlementResult = okQuota(
+        {'count': 0, 'percentage': 100, 'isShow': true},
+        tokenPercentage: 100,
+      )
+      ..entitledProviderIdsError = StateError('provider-settings unavailable')
+      ..snapshotExtra = snapshotModelConfig('account:zai-start-plan');
+    await pumpWithQuota(tester, gateway);
+
+    await tester.tap(find.byIcon(Icons.memory_outlined));
+    await tester.pumpAndSettle();
+
+    // Page-open auto-switch read + the sheet's own prefetch; both see the
+    // failing view and degrade to no filtering.
+    expect(gateway.entitledProviderIdsCalls, 2);
+    for (final header in const [
+      'Z.AI Individual Coding Plan',
+      'Start Plan',
+      'Z.AI Idle plan',
+      'Z.AI Highspeed card',
+    ]) {
+      expect(find.text(header), findsNWidgets(3));
+    }
+    expect(find.text('幻城'), findsNWidgets(2));
+  });
+
+  // ------------------------- Start-plan auto switch (10-24 C)
+
+  testWidgets('Start-plan auto switch: a drained Start plan switches the '
+      'live session to the entitled coding plan (same modelId preferred) and '
+      'toasts once', (tester) async {
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport, prep: planCatalogPrep())
+      ..entitlementResult = startPlanExhausted()
+      ..entitledProviderIdsResult = {
+        'account:zai-start-plan',
+        'account:zai-individual-coding-plan',
+      }
+      // The live session runs GLM-5.3-Flash under the Start plan: the target
+      // must prefer the coding plan's SAME model over its first option.
+      ..snapshotExtra = startPlanConfig(model: 'GLM-5.3-Flash');
+    await pumpWithQuota(tester, gateway);
+
+    expect(transport.switches, hasLength(1));
+    expect(
+      transport.switches.single.provider,
+      'account:zai-individual-coding-plan',
+    );
+    expect(transport.switches.single.model, 'GLM-5.3-Flash');
+    expect(transport.switches.single.thought, 'enabled');
+    // One auto-switch toast; the sheet's pending toast is sheet-only and
+    // must not fire here.
+    expect(
+      find.text('Start 套餐已不可用，已切换到 Z.AI Individual Coding Plan'),
+      findsOneWidget,
+    );
+    expect(find.text('已切换，下一条消息生效'), findsNothing);
+    // The exhausted banner stays as the manual fallback.
+    expect(find.text('套餐额度已用尽'), findsOneWidget);
+  });
+
+  testWidgets('Start-plan auto switch: an expired Start plan uses the same '
+      'chain', (tester) async {
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport, prep: planCatalogPrep())
+      ..entitlementResult = startPlanExpired()
+      ..entitledProviderIdsResult = {
+        'account:zai-start-plan',
+        'account:zai-individual-coding-plan',
+      }
+      ..snapshotExtra = startPlanConfig();
+    await pumpWithQuota(tester, gateway);
+
+    expect(transport.switches, hasLength(1));
+    expect(transport.switches.single.model, 'GLM-5.3');
+    expect(
+      find.text('Start 套餐已不可用，已切换到 Z.AI Individual Coding Plan'),
+      findsOneWidget,
+    );
+    // Expiry copy, not the exhausted copy.
+    expect(find.text('套餐已到期'), findsOneWidget);
+  });
+
+  testWidgets('Start-plan auto switch: no entitled coding plan leaves the '
+      'session alone and keeps the banner', (tester) async {
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport, prep: planCatalogPrep())
+      ..entitlementResult = startPlanExhausted()
+      ..entitledProviderIdsResult = {'account:zai-start-plan'}
+      ..snapshotExtra = startPlanConfig();
+    await pumpWithQuota(tester, gateway);
+
+    expect(transport.switches, isEmpty);
+    expect(find.text('套餐额度已用尽'), findsOneWidget);
+  });
+
+  testWidgets('Start-plan auto switch failure is not retried on the next '
+      'entitlement refresh', (tester) async {
+    final transport = _SwitchTransport(results: [
+      const {'status': 'rejected', 'reasonCode': 'proto.staleRevision'},
+    ]);
+    final gateway = _SwitchGateway(transport, prep: planCatalogPrep())
+      ..entitlementResult = startPlanExhausted()
+      ..entitledProviderIdsResult = {
+        'account:zai-start-plan',
+        'account:zai-individual-coding-plan',
+      }
+      ..snapshotExtra = startPlanConfig();
+    await pumpWithQuota(tester, gateway);
+
+    expect(transport.switches, hasLength(1));
+    // A rejected command is not a switch: no success toast, banner stays.
+    expect(find.textContaining('Start 套餐已不可用'), findsNothing);
+    expect(find.text('套餐额度已用尽'), findsOneWidget);
+
+    // The usage sheet re-runs `_loadEntitlement`; the session-level marker
+    // must suppress a second command even though the trigger still holds.
+    await tester.tap(find.text('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('用量统计'));
+    await tester.pumpAndSettle();
+    expect(gateway.entitlementCalls, 2);
+    expect(transport.switches, hasLength(1));
+  });
+
+  testWidgets('draft pages never auto-switch (no live session to rewrite)', (
+    tester,
+  ) async {
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport, prep: planCatalogPrep())
+      ..entitlementResult = startPlanExhausted()
+      ..entitledProviderIdsResult = {
+        'account:zai-start-plan',
+        'account:zai-individual-coding-plan',
+      };
+    await tester.pumpWidget(wrap(ChatPage(gateway: gateway, title: 't')));
+    await tester.pumpAndSettle();
+
+    expect(transport.switches, isEmpty);
   });
 
   testWidgets('sheet switch: lost ack lands the optimistic patch and closes '
