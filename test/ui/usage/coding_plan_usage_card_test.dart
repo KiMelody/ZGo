@@ -107,4 +107,62 @@ void main() {
     expect(find.text('常用模型'), findsOneWidget);
     expect(find.text('用量趋势'), findsOneWidget);
   });
+
+  testWidgets('quota bars use the shared 6dp usage-page height',
+      (tester) async {
+    final snapshot = parseCodingPlanUsageSnapshot(const {
+      'quota': {
+        'limits': [
+          {'type': 'TOKENS_LIMIT', 'unit': 3, 'number': 5, 'percentage': 10},
+          {'type': 'TOKENS_LIMIT', 'unit': 6, 'percentage': 30},
+          {'type': 'TIME_LIMIT', 'unit': 5, 'number': 1, 'percentage': 100},
+        ],
+      },
+    });
+    await tester.pumpWidget(wrap(CodingPlanUsageCard(snapshot: snapshot)));
+    await tester.pumpAndSettle();
+
+    final bars = find.byType(LinearProgressIndicator);
+    expect(bars, findsNWidgets(3));
+    for (var i = 0; i < 3; i++) {
+      expect(tester.getSize(bars.at(i)).height, 6);
+    }
+  });
+
+  testWidgets('a quota window without a reset clock keeps its bar level',
+      (tester) async {
+    // 「每周」(unit 6) is absent from the projection: its remaining is null
+    // and it has no reset clock. The caption placeholder must leave all
+    // three bars on one line (2026-10-25 real-device bug).
+    final snapshot = parseCodingPlanUsageSnapshot(const {
+      'quota': {
+        'limits': [
+          {
+            'type': 'TOKENS_LIMIT',
+            'unit': 3,
+            'number': 5,
+            'percentage': 10,
+            'nextResetTime': 1793000000000,
+          },
+          {
+            'type': 'TIME_LIMIT',
+            'unit': 5,
+            'number': 1,
+            'percentage': 40,
+            'nextResetTime': 1793000000000,
+          },
+        ],
+      },
+    });
+    await tester.pumpWidget(wrap(CodingPlanUsageCard(snapshot: snapshot)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('--'), findsOneWidget); // weekly column, no value
+    final bars = find.byType(LinearProgressIndicator);
+    expect(bars, findsNWidgets(3));
+    // Order: 5h, weekly, tools — weekly is the middle (no clock) column.
+    final top = tester.getTopLeft(bars.at(0)).dy;
+    expect(tester.getTopLeft(bars.at(1)).dy, top);
+    expect(tester.getTopLeft(bars.at(2)).dy, top);
+  });
 }

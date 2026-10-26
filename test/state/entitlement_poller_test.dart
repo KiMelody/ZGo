@@ -4,6 +4,7 @@ import 'package:clock/clock.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zgo/state/entitlement_poller.dart';
+import 'package:zgo/state/quota_reset.dart' show QuotaWindowKind;
 
 /// Fixtures use only the live-probed snapshot structure.
 void main() {
@@ -277,5 +278,144 @@ void main() {
       },
     );
     expect(view.exhausted, isFalse);
+  });
+
+  // ------------------------------------------- Start-level normalization
+
+  /// research §7 live fixture shape: two one-time buckets whose wire
+  /// `percentage` is the REMAINING ratio in 0..1 (asar
+  /// `normalizeZaiStartPlanBalanceLimits`: `remaining_units / total_units`,
+  /// no ×100 — 1.0 = untouched, 0.0 = drained).
+  Map<String, dynamic> startSnapshot({
+    List<num> percentages = const [1.0, 1.0],
+  }) =>
+      {
+        'authenticated': true,
+        'provider': {
+          'id': 'account:zai-start-plan',
+          'name': 'ZCode 1024 Dev Day',
+        },
+        'remaining': {'count': 2, 'isShow': true, 'percentage': 1.0},
+        'quota': {
+          'level': 'Start',
+          'limits': [
+            for (var i = 0; i < percentages.length; i++)
+              {
+                'bucketId': 'bucket_$i',
+                'type': 'ent-zcode-v3-start-plan-1024-${i + 1}',
+                'unit': 300000000 - i * 100000000,
+                'number': 300000000 - i * 100000000,
+                'usage': 0,
+                'remaining':
+                    percentages[i] * (300000000 - i * 100000000),
+                'percentage': percentages[i],
+                'nextResetTime': 1792976400000,
+              },
+          ],
+        },
+      };
+
+  test('normalizeStartQuota flips the Start remaining ratio into used percent',
+      () {
+    final source = startSnapshot();
+    final data = normalizeStartQuota(source);
+    final view = EntitlementView(phase: EntitlementPhase.ok, data: data);
+
+    // Pure helper: the wire payload is not rewritten in place.
+    expect(((source['quota'] as Map)['limits'] as List)[0]['percentage'], 1.0);
+
+    // 0 used → used 0 → remaining 100%.
+    expect(view.primaryLimit, isNotNull);
+    expect(view.primaryLimit!.percentage, 0);
+    expect(view.remainingPercent(view.primaryLimit), 100.0);
+    expect(view.exhausted, isFalse);
+    // Start rows are token-class even though `type` is an entitlement id.
+    expect(view.chatBottleneckLimit, isNotNull);
+    // One-time buckets match no reset window — the reset surfaces stay off.
+    expect(view.windowRow(QuotaWindowKind.fiveHour), isNull);
+    expect(view.windowRow(QuotaWindowKind.week), isNull);
+  });
+
+  test('normalizeStartQuota maps the live 0..1 ratio onto used percent '
+      '(0.9493 remaining → 5.07 used)', () {
+    final view = EntitlementView(
+      phase: EntitlementPhase.ok,
+      data: normalizeStartQuota(
+        startSnapshot(percentages: const [0.9493, 1.0]),
+      ),
+    );
+    final limit = ((view.data!['quota'] as Map)['limits'] as List)[0] as Map;
+    expect((limit['percentage'] as num).toDouble(), closeTo(5.07, 0.0001));
+    expect(view.remainingPercent(view.primaryLimit), closeTo(94.93, 0.0001));
+    expect(view.exhausted, isFalse);
+  });
+
+  test('a drained Start bucket (wire remaining ratio 0.0) reads exhausted',
+      () {
+    final view = EntitlementView(
+      phase: EntitlementPhase.ok,
+      data: normalizeStartQuota(startSnapshot(percentages: const [0.0, 1.0])),
+    );
+    expect(view.exhausted, isTrue);
+  });
+
+  test('coding-plan snapshots pass through normalizeStartQuota unchanged', () {
+    final data = <String, dynamic>{
+      'authenticated': true,
+      'quota': {
+        'level': 'pro',
+        'limits': [
+          {'type': 'TOKENS_LIMIT', 'unit': 3, 'number': 5, 'percentage': 40},
+        ],
+      },
+    };
+    // No Start level → the very same map comes back (no reversal).
+    expect(normalizeStartQuota(data), same(data));
+
+    final view = EntitlementView(phase: EntitlementPhase.ok, data: data);
+    expect(view.remainingPercent(view.primaryLimit), 60.0);
+    expect(view.exhausted, isFalse);
+  });
+
+  test('Start rows without a numeric percentage stay unreadable', () {
+    final data = normalizeStartQuota({
+      'quota': {
+        'level': 'Start',
+        'limits': [
+          {'type': 'ent-1', 'percentage': null},
+          {'type': 'ent-2'},
+        ],
+      },
+    });
+    final limits = (data['quota'] as Map)['limits'] as List;
+    expect((limits[0] as Map)['percentage'], isNull);
+    expect((limits[1] as Map).containsKey('percentage'), isFalse);
+
+    final view = EntitlementView(phase: EntitlementPhase.ok, data: data);
+    expect(view.primaryLimit, isNull);
+    expect(view.exhausted, isFalse);
+  });
+
+  test('the poller normalizes a Start snapshot before projecting', () async {
+    final poller = pollerOf(() async => startSnapshot());
+    final view = await poller.refresh();
+
+    expect(view.phase, EntitlementPhase.ok);
+    final limit = ((view.data!['quota'] as Map)['limits'] as List)[0] as Map;
+    expect(limit['percentage'], 0);
+    expect(view.remainingPercent(view.primaryLimit), 100.0);
+  });
+
+  test('phaseOf keeps a Start snapshot with a provider in the ok phase '
+      '(regression)', () {
+    expect(
+      EntitlementPoller.phaseOf({
+        'authenticated': true,
+        'provider': {'id': 'account:zai-start-plan'},
+        'remaining': null,
+        'quota': {'level': 'Start', 'limits': <Object>[]},
+      }),
+      EntitlementPhase.ok,
+    );
   });
 }

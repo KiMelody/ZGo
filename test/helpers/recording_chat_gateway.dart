@@ -396,6 +396,24 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
     return modelProviderCatalogResult;
   }
 
+  /// Programmed [ChatGateway.entitledProviderIds] answer. Null (default) =
+  /// the provider-settings view is unreachable, so the model sheet shows
+  /// every group — the pre-filter behavior all earlier sheet tests assume.
+  Set<String>? entitledProviderIdsResult;
+
+  /// Thrown by [entitledProviderIds] when set (the page must degrade to no
+  /// filtering, PRD 10-24 §3).
+  Object? entitledProviderIdsError;
+  int entitledProviderIdsCalls = 0;
+
+  @override
+  Future<Set<String>?> entitledProviderIds() async {
+    entitledProviderIdsCalls++;
+    final err = entitledProviderIdsError;
+    if (err != null) throw err;
+    return entitledProviderIdsResult;
+  }
+
   @override
   String? chatWorkspaceId = 'ws-1';
   @override

@@ -209,6 +209,20 @@ class _ChatPageState extends State<ChatPage> {
   /// in [_onConfigMaybeReverted]. Null until a sheet switch happens.
   _LastSwitch? _lastSwitch;
 
+  /// Session ids that already got the one-shot Start-plan auto switch
+  /// (design 10-24 §4, PRD §6). A successful switch stops matching the
+  /// trigger on its own (the provider is no longer a Start plan); this
+  /// marker exists for the failure case, where the trigger would otherwise
+  /// fire again on every entitlement refresh. Once marked, the banner and
+  /// the manual sheet remain the recovery path.
+  final Set<String> _autoSwitched = {};
+
+  /// Entitled `account:*` provider ids read alongside the last entitlement
+  /// snapshot (design 10-24 §2). Null = not read yet or the provider
+  /// settings view was unreachable — [StartPlanAutoSwitch.evaluate] then
+  /// declines to judge.
+  Set<String>? _entitledProviderIds;
+
   /// History paging decisions (entry gate, fetch, identity guard, DRAG HOLD
   /// parking, prepend commit, chain generation) — a pure Dart command class
   /// (task 10-01-history-pager-extract). The measurement chain below
@@ -895,7 +909,12 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _loadPrep() async {
     try {
       final prep = await widget.gateway.prepareWorkspace();
-      if (mounted) setState(() => _prep = prep);
+      if (mounted) {
+        setState(() => _prep = prep);
+        // Model options are the auto switch's target pool (design 10-24 §4);
+        // they usually land after the entitlement snapshot.
+        _maybeAutoSwitchStartPlan();
+      }
     } catch (_) {}
     if (mounted) setState(() => _skillsLoading = true);
     try {
@@ -1006,6 +1025,12 @@ class _ChatPageState extends State<ChatPage> {
       // The snapshot may already be applied when the handle resolves —
       // seed the directory now (the memo key makes a redundant call free).
       _refreshQueryDirectory();
+      // Start-plan auto switch (design 10-24 §4): the handle's first
+      // snapshot may not carry `config` yet — re-check once when it does.
+      if (handle.state.config == null) {
+        handle.state.addListener(_autoSwitchWhenConfigReady);
+      }
+      _maybeAutoSwitchStartPlan();
       // Terminal-hysteresis memory rides the parent conversation (subagent
       // rows + backgroundWorks).
       _feed.observe(handle.state);
@@ -1291,6 +1316,72 @@ class _ChatPageState extends State<ChatPage> {
     last.patch();
     if (!mounted) return;
     _toast(tr(context, 'chat.sheet.switchRetrying'));
+  }
+
+  /// Switches the live session to [option] — the config sheet's model-tap
+  /// branch, extracted so the Start-plan auto switch rides the exact same
+  /// chain (design 10-24 §4): thought-validity fallback, optimistic patch,
+  /// lost-ack revert trace and the one-shot retry record.
+  ///
+  /// [closeSheet] is the sheet's own choreography (pop + pending toast). The
+  /// auto switch runs on the page's context outside any sheet, so it keeps
+  /// the sheet open and reports with its own toast; nothing else differs.
+  /// Returns whether the command was accepted or optimistically applied
+  /// (a transport failure on the lost-ack path counts as pending), false on
+  /// an explicit rejection.
+  Future<bool> switchModel(
+    ConfigOptionValue option, {
+    bool closeSheet = true,
+  }) async {
+    final sid = _sessionId;
+    final state = _state;
+    if (sid == null || sid.isEmpty || state == null) return false;
+    final (provider, model) = _splitModelValue(option.value);
+    // thought must be valid for the target model: keep current if
+    // supported, else fall back to the thought option's currentValue.
+    final currentThought = state.currentThought;
+    final thoughtOption = _prep?.option('thought_level');
+    final thought =
+        currentThought.isNotEmpty &&
+            (thoughtOption?.options.any((o) => o.value == currentThought) ??
+                false)
+        ? currentThought
+        : '${thoughtOption?.currentValue ?? (currentThought.isNotEmpty ? currentThought : 'enabled')}';
+    // Config exactly as the switch leaves it — the optimistic patch lands
+    // it, the lost-ack path arms the revert trace with the same value.
+    Map<String, dynamic> switchedConfig() => {
+      ...?state.config,
+      'provider': provider,
+      'model': model,
+      'thought': thought,
+    };
+    void patch() => state.optimisticPatch({'config': switchedConfig()});
+    _lastSwitch = _LastSwitch(sid, provider, model, thought, patch);
+    return _apply(
+      context,
+      () => widget.gateway.conversationCommands.switchModelConfig(
+        sid,
+        provider: provider,
+        model: model,
+        thought: thought,
+      ),
+      // Accepted (design 10-02 Step 3): clear any trace armed earlier —
+      // old-config snapshots from here on are the desktop's pending
+      // semantics, never a lost command.
+      onAccepted: () {
+        state.clearConfigRevertTrace();
+        patch();
+      },
+      // PRD 09-19: a lost ack (bridge reconnect window) is not a rejection
+      // — land the patch anyway and ARM the revert trace: an authoritative
+      // snapshot still carrying the old config is now evidence of a
+      // swallowed command (design 10-02 Step 3).
+      onTimeoutOptimistic: () {
+        patch();
+        state.armConfigRevertTrace({'config': switchedConfig()});
+      },
+      closeSheet: closeSheet,
+    );
   }
 
   Future<void> _run(String errorPrefix, Future<dynamic> Function() run) async {
@@ -2263,26 +2354,101 @@ class _ChatPageState extends State<ChatPage> {
   /// limited. The fetch happens once per page open, so the banner persists
   /// for the page's lifetime and the next open re-evaluates it against the
   /// shared poller's freshest ok snapshot.
+  ///
+  /// 10-24 C: the expired Start-plan shape (provider present, quota/remaining
+  /// empty, `startPlanExpired:true`) carries no percentage to read, so the
+  /// explicit flag lights the same banner (PRD §5 — previously silent).
   bool get _showQuotaWarning {
     final view = _entitlement;
     return view != null &&
         view.phase == EntitlementPhase.ok &&
-        view.exhausted;
+        (view.exhausted || view.data?['startPlanExpired'] == true);
+  }
+
+  /// Whether the visible warning is the expiry form — its copy differs from
+  /// the exhausted form (「额度已用尽」 would be wrong for an expiry).
+  bool get _quotaExpired {
+    final view = _entitlement;
+    return view != null &&
+        view.phase == EntitlementPhase.ok &&
+        view.data?['startPlanExpired'] == true;
   }
 
   Future<void> _loadEntitlement() async {
     try {
       final view = await widget.gateway.entitlementSnapshot();
+      // The Start-plan auto switch needs the entitled provider set at the
+      // same moment (design 10-24 §3). A failed read is null = entitlement
+      // unknown, and the auto switch declines to judge.
+      Set<String>? entitledIds;
+      try {
+        entitledIds = await widget.gateway.entitledProviderIds();
+      } catch (_) {
+        entitledIds = null;
+      }
       if (!mounted) return;
-      setState(() => _entitlement = view);
+      setState(() {
+        _entitlement = view;
+        _entitledProviderIds = entitledIds;
+      });
       // The reset scope rides the snapshot (injected by the session's
       // entitlementSnapshot); this plain refresh picks the pools up — a
       // no-op without a provider id (the banner action never shows).
       unawaited(widget.gateway.quotaResetController.refresh());
+      _maybeAutoSwitchStartPlan();
     } catch (_) {
       // Gateways may reject; the banner then stays hidden and the chat is
       // not disturbed.
     }
+  }
+
+  /// One-shot Start-plan auto switch (design 10-24 §4, PRD §1-6): judge the
+  /// last entitlement snapshot against the live session's current model and
+  /// switch to an entitled coding plan when the Start plan is spent,
+  /// expired, or no longer entitled.
+  ///
+  /// Called from every readiness edge of the page-open path —
+  /// [_loadEntitlement] (snapshot), [_loadPrep] (model options) and the
+  /// live snapshot's config — because the three async loads land in no
+  /// fixed order. The guard below keeps repeated calls free.
+  void _maybeAutoSwitchStartPlan() {
+    if (!mounted) return;
+    final sessionId = _sessionId;
+    if (sessionId == null || sessionId.isEmpty) return; // draft: never
+    if (_autoSwitched.contains(sessionId)) return;
+    final view = _entitlement;
+    final state = _state;
+    final prep = _prep;
+    if (view == null || state == null || prep == null) return;
+    final provider = state.config?['provider'];
+    final plan = StartPlanAutoSwitch.evaluate(
+      view: view,
+      entitledIds: _entitledProviderIds,
+      currentProviderId: provider is String ? provider : null,
+      currentModelId: state.currentModel,
+      modelOptions: prep.option('model')?.options ?? const [],
+    );
+    if (plan == null) return;
+    if (!_autoSwitched.add(sessionId)) return;
+    unawaited(_runStartPlanAutoSwitch(plan));
+  }
+
+  Future<void> _runStartPlanAutoSwitch(StartPlanSwitchPlan plan) async {
+    final switched = await switchModel(plan.targetOption, closeSheet: false);
+    if (!mounted || !switched) return;
+    _toast(trP(context, 'chat.quota.autoSwitched', [
+      plan.targetOption.modelProviderName ?? plan.targetOption.name,
+    ]));
+  }
+
+  /// The live snapshot's config lands after [_subscribe] resolves, so a
+  /// page-open hook can run before there is any current provider to judge.
+  /// Re-run once on the first frame that carries one, then detach.
+  void _autoSwitchWhenConfigReady() {
+    final state = _handle?.state;
+    if (state == null || state.config == null) return;
+    state.removeListener(_autoSwitchWhenConfigReady);
+    _maybeAutoSwitchStartPlan();
   }
 
   /// Banner「使用重置券」入口 removed (PRD: the sheet is the single
@@ -2303,6 +2469,21 @@ class _ChatPageState extends State<ChatPage> {
     await _loadEntitlement();
   }
 
+  /// Provider id of the model the config sheet treats as currently selected
+  /// (the entitlement filter's exemption, design 10-24 §3): the draft pick's
+  /// provider segment, else the live session config's provider. Null when
+  /// nothing is selected.
+  String? get _sheetCurrentProviderId {
+    if (_sessionId == null || _sessionId!.isEmpty) {
+      final draftModel = _draftConfig['model'] ?? '';
+      if (draftModel.isEmpty) return null;
+      final (provider, _) = _splitModelValue(draftModel);
+      return provider.isEmpty ? null : provider;
+    }
+    final provider = _state?.config?['provider'];
+    return provider is String && provider.isNotEmpty ? provider : null;
+  }
+
   Future<void> _showModelSheet() async {
     // PRD 09-19: sessions created with an empty default model config can
     // ship no usable model options from prepareWorkspace — fetch the
@@ -2312,6 +2493,16 @@ class _ChatPageState extends State<ChatPage> {
     final modelOption = _prep?.option('model');
     if (modelOption == null || modelOption.options.isEmpty) {
       catalog = await widget.gateway.modelProviderCatalog();
+    }
+    // Design 10-24 §4: the sheet is stateless, so the page prefetches the
+    // entitled provider ids it filters account groups by. A failed read is
+    // null = entitlement unknown → no filtering (PRD §3) and it never
+    // blocks the sheet from opening.
+    Set<String>? entitledIds;
+    try {
+      entitledIds = await widget.gateway.entitledProviderIds();
+    } catch (_) {
+      entitledIds = null;
     }
     if (!mounted) return;
     showModalBottomSheet(
@@ -2325,10 +2516,13 @@ class _ChatPageState extends State<ChatPage> {
         sessionId: _sessionId,
         providerCatalog: catalog,
         draftConfig: _draftConfig,
+        entitledIds: entitledIds,
+        currentProviderId: _sheetCurrentProviderId,
         onDraftChange: (key, value) {
           setState(() => _draftConfig[key] = value);
         },
         onSwitchIssued: (record) => _lastSwitch = record,
+        onSwitchModel: switchModel,
       ),
     );
   }
@@ -3202,7 +3396,12 @@ class _ChatPageState extends State<ChatPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    tr(context, 'chat.quota.exhaustedTitle'),
+                    tr(
+                      context,
+                      _quotaExpired
+                          ? 'chat.quota.expiredTitle'
+                          : 'chat.quota.exhaustedTitle',
+                    ),
                     style: ZType.sub.copyWith(
                       fontWeight: FontWeight.w600,
                       color: ZInk.dangerTone(context),
@@ -3210,7 +3409,12 @@ class _ChatPageState extends State<ChatPage> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    tr(context, 'chat.quota.exhaustedBody'),
+                    tr(
+                      context,
+                      _quotaExpired
+                          ? 'chat.quota.expiredBody'
+                          : 'chat.quota.exhaustedBody',
+                    ),
                     style: ZType.caption.copyWith(color: ZInk.muted(context)),
                   ),
                   Row(
@@ -6186,6 +6390,129 @@ class _QuestionItem extends StatelessWidget {
 
 /// ---------------------------------------------------------------- sheets
 
+/// 'builtin:zai-coding-plan/GLM-5.2' → (provider, model)
+(String, String) _splitModelValue(String value) {
+  final idx = value.lastIndexOf('/');
+  if (idx <= 0) return (value, value);
+  return (value.substring(0, idx), value.substring(idx + 1));
+}
+
+/// Hides model choices whose `account:*` provider group the account is not
+/// entitled to (design 10-24 §3). [entitledIds] null = the provider-settings
+/// view could not be read (old desktop / bridge failure) → no filtering,
+/// everything renders as before. An empty set is a successful read with zero
+/// entitlements and filters every unentitled account group.
+///
+/// [currentProviderId] is exempt: the group holding the model in use (live
+/// config or draft pick) never hides — a selection vanishing from the list
+/// is more confusing than a visible unusable group. Personal providers
+/// (non-`account:` ids) and options without a provider id are never hidden.
+List<ConfigOptionValue> filterByEntitlement(
+  List<ConfigOptionValue> choices, {
+  required Set<String>? entitledIds,
+  required String? currentProviderId,
+}) {
+  final entitled = entitledIds;
+  if (entitled == null) return choices;
+  return [
+    for (final choice in choices)
+      if (!_hidesModelChoice(choice, entitled, currentProviderId)) choice,
+  ];
+}
+
+bool _hidesModelChoice(
+  ConfigOptionValue choice,
+  Set<String> entitledIds,
+  String? currentProviderId,
+) {
+  final id = choice.modelProviderId;
+  return id != null &&
+      id.startsWith('account:') &&
+      !entitledIds.contains(id) &&
+      id != currentProviderId;
+}
+
+/// Why [StartPlanAutoSwitch.evaluate] considers the current Start plan done.
+enum StartPlanSwitchReason { exhausted, expired, disentitled }
+
+/// The auto-switch decision: which prep model option to switch to and which
+/// terminal signal fired (design 10-24 §2).
+typedef StartPlanSwitchPlan = ({
+  ConfigOptionValue targetOption,
+  StartPlanSwitchReason reason,
+});
+
+/// Start-plan terminal detection and target selection (design 10-24 §2) —
+/// a pure function over the already-loaded page state, unit-tested against
+/// the live-probed snapshot shapes (research §3/§7).
+class StartPlanAutoSwitch {
+  static final RegExp _startPlanProvider =
+      RegExp(r'^account:(zai|bigmodel)-start-plan$');
+  static final RegExp _codingPlanProvider =
+      RegExp(r'^account:(zai|bigmodel)-(individual|team)-coding-plan$');
+
+  /// Returns the switch plan when the live session's provider is a Start
+  /// plan AND one of the three terminal signals fired AND an entitled
+  /// coding-plan option exists; null otherwise (nothing to do, or not this
+  /// feature's business).
+  ///
+  /// [entitledIds] follows the gateway convention: null = the provider
+  /// settings view could not be read, so entitlement is unknown and the
+  /// whole judgement is skipped; an empty set still judges (the target
+  /// lookup then simply finds nothing).
+  static StartPlanSwitchPlan? evaluate({
+    required EntitlementView view,
+    required Set<String>? entitledIds,
+    required String? currentProviderId,
+    required String? currentModelId,
+    required List<ConfigOptionValue> modelOptions,
+  }) {
+    final provider = currentProviderId ?? '';
+    if (!_startPlanProvider.hasMatch(provider)) return null;
+    if (entitledIds == null) return null;
+    final reason = view.exhausted
+        ? StartPlanSwitchReason.exhausted
+        : view.data?['startPlanExpired'] == true
+        ? StartPlanSwitchReason.expired
+        : !entitledIds.contains(provider)
+        ? StartPlanSwitchReason.disentitled
+        : null;
+    if (reason == null) return null;
+    // Official FPe order: an entitled coding plan (individual/team) outranks
+    // the Start plan; the set preserves the provider-settings view order.
+    String? targetProvider;
+    for (final id in entitledIds) {
+      if (_codingPlanProvider.hasMatch(id)) {
+        targetProvider = id;
+        break;
+      }
+    }
+    if (targetProvider == null) return null;
+    final candidates = [
+      for (final option in modelOptions)
+        if (_optionProviderId(option) == targetProvider) option,
+    ];
+    if (candidates.isEmpty) return null;
+    final modelId = _splitModelValue(currentModelId ?? '').$2;
+    final target = modelId.isEmpty
+        ? candidates.first
+        : candidates.firstWhere(
+            (option) => _splitModelValue(option.value).$2 == modelId,
+            orElse: () => candidates.first,
+          );
+    return (targetOption: target, reason: reason);
+  }
+
+  /// The option's provider: the wire `modelProviderId` when present, else
+  /// the provider segment of its `provider/model` value (older desktops).
+  static String? _optionProviderId(ConfigOptionValue option) {
+    final explicit = option.modelProviderId;
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    final fromValue = _splitModelValue(option.value).$1;
+    return fromValue.isEmpty ? null : fromValue;
+  }
+}
+
 class _ModelModeSheet extends StatelessWidget {
   final ChatGateway gateway;
   final ConversationState? state;
@@ -6199,10 +6526,23 @@ class _ModelModeSheet extends StatelessWidget {
   final Map<String, String>? draftConfig;
   final void Function(String key, String value)? onDraftChange;
 
+  /// Entitled `account:*` provider ids prefetched by the page (design
+  /// 10-24 §3) — null keeps every group (view unreachable / no answer).
+  final Set<String>? entitledIds;
+
+  /// Provider of the currently selected model (live config or draft pick);
+  /// its group is exempt from the entitlement filter.
+  final String? currentProviderId;
+
   /// Design 10-01: every issued switchModelConfig is reported to the page
   /// (which stores it as [_ChatPageState._lastSwitch]) so a bridge-lost
   /// switch can be auto-retried once on revert detection.
   final void Function(_LastSwitch record)? onSwitchIssued;
+
+  /// Live-session model tap (design 10-24 §4): the whole switch chain lives
+  /// in [_ChatPageState.switchModel] so the Start-plan auto switch reuses it
+  /// verbatim; the sheet only forwards the choice.
+  final void Function(ConfigOptionValue value)? onSwitchModel;
 
   const _ModelModeSheet({
     required this.gateway,
@@ -6212,7 +6552,10 @@ class _ModelModeSheet extends StatelessWidget {
     required this.providerCatalog,
     this.draftConfig,
     this.onDraftChange,
+    this.entitledIds,
+    this.currentProviderId,
     this.onSwitchIssued,
+    this.onSwitchModel,
   });
 
   bool get _isDraft => sessionId == null || sessionId!.isEmpty;
@@ -6226,13 +6569,6 @@ class _ModelModeSheet extends StatelessWidget {
     return options.where((o) => !known.contains(o.id)).toList();
   }
 
-  /// 'builtin:zai-coding-plan/GLM-5.2' → (provider, model)
-  (String, String) _splitModelValue(String value) {
-    final idx = value.lastIndexOf('/');
-    if (idx <= 0) return (value, value);
-    return (value.substring(0, idx), value.substring(idx + 1));
-  }
-
   @override
   Widget build(BuildContext context) {
     final sid = sessionId ?? '';
@@ -6241,20 +6577,31 @@ class _ModelModeSheet extends StatelessWidget {
     // PRD 09-19: when prepareWorkspace ships no usable model options, the
     // model section renders the model-provider catalog instead; provider
     // ids never contain '/', so `_splitModelValue` still splits cleanly.
-    final modelChoices =
-        (modelOption != null && modelOption.options.isNotEmpty)
-        ? modelOption.options
-        : <ConfigOptionValue>[
-            for (final p in providerCatalog)
-              for (final m in (p['models'] as List? ?? const []))
-                ConfigOptionValue(
-                  value:
-                      '${p['id'] ?? p['name'] ?? ''}/'
-                      '${m is Map ? '${m['id'] ?? m['modelId'] ?? ''}' : '$m'}',
-                  name: m is Map ? '${m['id'] ?? m['modelId'] ?? ''}' : '$m',
-                  modelProviderName: '${p['name'] ?? p['id'] ?? ''}',
-                ),
-          ];
+    // Design 10-24 §3: the entitlement filter runs once over the assembled
+    // list (wire options and the fallback catalog alike) before rendering.
+    final modelChoices = filterByEntitlement(
+      (modelOption != null && modelOption.options.isNotEmpty)
+          ? modelOption.options
+          : <ConfigOptionValue>[
+              for (final p in providerCatalog)
+                for (final m in (p['models'] as List? ?? const []))
+                  ConfigOptionValue(
+                    value:
+                        '${p['id'] ?? p['name'] ?? ''}/'
+                        '${m is Map ? '${m['id'] ?? m['modelId'] ?? ''}' : '$m'}',
+                    name: m is Map ? '${m['id'] ?? m['modelId'] ?? ''}' : '$m',
+                    // Same provider segment the value carries; missing ids
+                    // stay null (never filtered — nothing to match on).
+                    modelProviderId: p['id'] is String &&
+                            (p['id'] as String).isNotEmpty
+                        ? p['id'] as String
+                        : null,
+                    modelProviderName: '${p['name'] ?? p['id'] ?? ''}',
+                  ),
+            ],
+      entitledIds: entitledIds,
+      currentProviderId: currentProviderId,
+    );
     final modeOption = prep?.option('mode');
     final thoughtOption = prep?.option('thought_level');
     final followup = '${config['followupMode'] ?? 'queue'}';
@@ -6307,10 +6654,14 @@ class _ModelModeSheet extends StatelessWidget {
               const SizedBox(height: 8),
               // The menu groups models by provider (BigModel /
               // tx / kimi_zz …): header whenever the provider changes.
+              // The GROUP KEY prefers the provider id (design 10-24 §4) so
+              // two providers sharing a display name never merge; the header
+              // text stays the provider name.
               for (final (i, v) in modelChoices.indexed) ...[
                 if (i == 0 ||
-                    v.modelProviderName !=
-                        modelChoices[i - 1].modelProviderName)
+                    (v.modelProviderId ?? v.modelProviderName) !=
+                        (modelChoices[i - 1].modelProviderId ??
+                            modelChoices[i - 1].modelProviderName))
                   Padding(
                     padding: EdgeInsets.only(top: i == 0 ? 0 : 10, bottom: 2),
                     child: Text(
@@ -6349,63 +6700,11 @@ class _ModelModeSheet extends StatelessWidget {
                     if (_isDraft) {
                       onDraftChange?.call('model', v.value);
                     } else {
-                      final (provider, model) = _splitModelValue(v.value);
-                      // thought must be valid for the target model:
-                      // keep current if supported, else fall back to the
-                      // thought option's currentValue.
-                      final currentThought = state?.currentThought ?? '';
-                      final thoughtOpt = prep?.option('thought_level');
-                      final thought =
-                          currentThought.isNotEmpty &&
-                              (thoughtOpt?.options.any(
-                                    (o) => o.value == currentThought,
-                                  ) ??
-                                  false)
-                          ? currentThought
-                          : '${thoughtOpt?.currentValue ?? (currentThought.isNotEmpty ? currentThought : 'enabled')}';
-                      // Config exactly as the switch leaves it — the
-                      // optimistic patch lands it, the lost-ack path arms
-                      // the revert trace with the same value.
-                      Map<String, dynamic> switchedConfig() => {
-                        ...?state!.config,
-                        'provider': provider,
-                        'model': model,
-                        'thought': thought,
-                      };
-                      void patch() => state?.optimisticPatch({
-                        'config': switchedConfig(),
-                      });
-                      onSwitchIssued?.call(
-                        _LastSwitch(sid, provider, model, thought, patch),
-                      );
-                      _apply(
-                        context,
-                        () => gateway.conversationCommands.switchModelConfig(
-                          sid,
-                          provider: provider,
-                          model: model,
-                          thought: thought,
-                        ),
-                        // Accepted (design 10-02 Step 3): clear any trace
-                        // armed earlier — old-config snapshots from here
-                        // on are the desktop's pending semantics, never a
-                        // lost command.
-                        onAccepted: () {
-                          state?.clearConfigRevertTrace();
-                          patch();
-                        },
-                        // PRD 09-19: a lost ack (bridge reconnect window)
-                        // is not a rejection — land the patch anyway and
-                        // ARM the revert trace: an authoritative snapshot
-                        // still carrying the old config is now evidence
-                        // of a swallowed command (design 10-02 Step 3).
-                        onTimeoutOptimistic: () {
-                          patch();
-                          state?.armConfigRevertTrace({
-                            'config': switchedConfig(),
-                          });
-                        },
-                      );
+                      // Behavior frozen (design 10-24 §4): the page method is
+                      // the very chain that used to live here — thought
+                      // validity, optimistic patch, revert trace, retry
+                      // record and the sheet-close choreography.
+                      onSwitchModel?.call(v);
                     }
                   },
                 ),
@@ -6670,74 +6969,88 @@ class _ModelModeSheet extends StatelessWidget {
       ),
     );
   }
+}
 
-  /// Runs a config command and lands [onAccepted] on an accepted answer.
-  ///
-  /// [onTimeoutOptimistic] marks a switchModelConfig call (PRD 09-19): the
-  /// server answers `accepted` but pushes no confirming frame, and the
-  /// bridge's ~10s reconnect window can swallow the response after the
-  /// server already applied the switch. A transport-level failure is
-  /// therefore not a rejection: the callback lands the optimistic patch,
-  /// the sheet closes with a "pending" toast, and the next sheet open (or
-  /// a later state frame) shows the real value. Explicit status
-  /// rejections keep the rejection SnackBar and never patch.
-  ///
-  /// Design 10-02 Step 3: the same switch calls also confirm an ACCEPTED
-  /// switch with the pending-semantics toast — the desktop applies the
-  /// switch lazily (it lands on the user's next message), so the sheet
-  /// close alone reads as "nothing happened".
-  Future<void> _apply(
-    BuildContext context,
-    Future<dynamic> Function() run, {
-    void Function()? onAccepted,
-    void Function()? onTimeoutOptimistic,
-  }) async {
-    try {
-      final res = await run();
-      if (context.mounted) {
-        if (res is Map &&
-            res['status'] != null &&
-            res['status'] != 'accepted') {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                trP(context, 'chat.sheet.rejected', [
-                  '${res['reasonCode'] ?? res['status']}',
-                ]),
-              ),
-            ),
-          );
-        } else {
-          onAccepted?.call();
-          Navigator.pop(context);
-          if (onTimeoutOptimistic != null) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text(tr(context, 'chat.sheet.switchPending'))),
-            );
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('[chat] sheet op: $e');
-      if (onTimeoutOptimistic != null && context.mounted) {
-        onTimeoutOptimistic();
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(tr(context, 'chat.sheet.switchPending'))),
-        );
-      } else if (context.mounted) {
+/// Runs a config command and lands [onAccepted] on an accepted answer.
+///
+/// [onTimeoutOptimistic] marks a switchModelConfig call (PRD 09-19): the
+/// server answers `accepted` but pushes no confirming frame, and the
+/// bridge's ~10s reconnect window can swallow the response after the
+/// server already applied the switch. A transport-level failure is
+/// therefore not a rejection: the callback lands the optimistic patch,
+/// the sheet closes with a "pending" toast, and the next sheet open (or
+/// a later state frame) shows the real value. Explicit status
+/// rejections keep the rejection SnackBar and never patch.
+///
+/// Design 10-02 Step 3: the same switch calls also confirm an ACCEPTED
+/// switch with the pending-semantics toast — the desktop applies the
+/// switch lazily (it lands on the user's next message), so the sheet
+/// close alone reads as "nothing happened".
+///
+/// [closeSheet] is the sheet choreography (pop + pending toast): true for
+/// every config-sheet control; false for the Start-plan auto switch, which
+/// runs on the page's context outside any sheet and reports with its own
+/// toast (design 10-24 §4). The rejection SnackBar and the lost-ack patch
+/// are identical either way. Returns whether the command was accepted or
+/// optimistically applied (lost ack = pending), false on explicit
+/// rejection or an unrelated failure.
+Future<bool> _apply(
+  BuildContext context,
+  Future<dynamic> Function() run, {
+  void Function()? onAccepted,
+  void Function()? onTimeoutOptimistic,
+  bool closeSheet = true,
+}) async {
+  try {
+    final res = await run();
+    if (context.mounted) {
+      if (res is Map &&
+          res['status'] != null &&
+          res['status'] != 'accepted') {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              trP(context, 'chat.op.failed', [
-                commandErrorCopy('$e', localeOf(context)) ?? '$e',
+              trP(context, 'chat.sheet.rejected', [
+                '${res['reasonCode'] ?? res['status']}',
               ]),
             ),
           ),
         );
+        return false;
       }
+      onAccepted?.call();
+      if (closeSheet) Navigator.pop(context);
+      if (onTimeoutOptimistic != null && closeSheet) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr(context, 'chat.sheet.switchPending'))),
+        );
+      }
+      return true;
+    }
+  } catch (e) {
+    debugPrint('[chat] sheet op: $e');
+    if (onTimeoutOptimistic != null && context.mounted) {
+      onTimeoutOptimistic();
+      if (closeSheet) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr(context, 'chat.sheet.switchPending'))),
+        );
+      }
+      return true;
+    } else if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            trP(context, 'chat.op.failed', [
+              commandErrorCopy('$e', localeOf(context)) ?? '$e',
+            ]),
+          ),
+        ),
+      );
     }
   }
+  return false;
 }
 
 /// Context usage detail panel, restyled onto the desktop/remote entitlement

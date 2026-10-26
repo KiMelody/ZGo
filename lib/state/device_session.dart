@@ -20,6 +20,7 @@ import '../protocol/method_probe.dart';
 import '../protocol/model_selection.dart' show parseModelSelectionCatalog;
 import '../protocol/off_peak.dart';
 import '../protocol/project_resolver.dart';
+import '../protocol/provider_settings.dart';
 import '../protocol/relay_client.dart';
 import '../protocol/relay_v2.dart' show RelayV2StartException;
 import '../protocol/remote_client.dart';
@@ -71,6 +72,14 @@ String workspaceTitle(Map<String, dynamic> w) {
 /// their own shape). Entries are appended, never reordered: the first
 /// listed workspace stays the auto-open target.
 ///
+/// [home], when known, also synthesizes the `default` workspace
+/// (`<home>/.zcode/workspace/default`, 10-26 D2): the old desktop grouped
+/// un-grouped conversations there and ZGo's draft merge anchors on that
+/// group, but the current desktop's single-window registry no longer lists
+/// it. The entry is appended AFTER the project roots and deduped by
+/// normalized path against both sources — a wire entry or a user-registered
+/// root row of the same directory keeps its own spelling/label.
+///
 /// Returns [workspaces] itself when nothing was appended, so the pre-merge
 /// behavior (and the object identity of the list) is preserved exactly.
 ///
@@ -81,8 +90,9 @@ String workspaceTitle(Map<String, dynamic> w) {
 /// and that is accepted.
 List<Map<String, dynamic>> mergeProjectWorkspaces(
   List<Map<String, dynamic>> workspaces,
-  Iterable<ProjectRoot> roots,
-) {
+  Iterable<ProjectRoot> roots, {
+  String? home,
+}) {
   final seen = <String>{};
   for (final ws in workspaces) {
     final path = ws['workspacePath'];
@@ -102,6 +112,17 @@ List<Map<String, dynamic>> mergeProjectWorkspaces(
       'workspacePath': path,
       'workspacePurpose': 'project',
     });
+  }
+  if (home != null && home.isNotEmpty) {
+    final path = ProjectResolver.defaultWorkspacePath(home);
+    if (seen.add(ProjectResolver.normalizeProjectRoot(path))) {
+      merged ??= List<Map<String, dynamic>>.of(workspaces);
+      merged.add({
+        'kind': 'local',
+        'label': 'default',
+        'workspacePath': path,
+      });
+    }
   }
   return merged ?? workspaces;
 }
@@ -296,6 +317,14 @@ abstract interface class ChatGateway
   /// uncached, so the next sheet open retries).
   Future<List<Map<String, dynamic>>> modelProviderCatalog();
 
+  /// Entitled `account:*` provider ids of the provider-settings view (the
+  /// chat config sheet hides unentitled account model groups, design
+  /// 10-24 §3). Null means the view could not be read (old desktop /
+  /// bridge failure): entitlement is unknown, so nothing is filtered. An
+  /// empty set is a successful read with zero entitlement and hides every
+  /// unentitled account group. Never throws.
+  Future<Set<String>?> entitledProviderIds();
+
   /// @-mention data sources (web chat.mention.* picker).
   /// Workspace file SEARCH for the add-context panel / `@` file picker —
   /// task 2's probed `searchWorkspaceFiles` path (falls back to the packed
@@ -394,6 +423,15 @@ abstract interface class ChatGateway
   /// refresh/use — the scope is injected by [entitlementSnapshot].
   QuotaResetController get quotaResetController;
 }
+
+/// One quota route the usage page renders (design 10-25): the resolved plan
+/// access the snapshot was requested for, and that route's poller view.
+/// [plan] is null on the legacy wire (<3.12.3), where a single unrouted
+/// snapshot answers and no `accountAccess` exists.
+typedef EntitlementSnapshotRoute = ({
+  Map<String, dynamic>? plan,
+  EntitlementView view,
+});
 
 /// One native protocol connection to one device. Owns the full stack
 /// (relay → bridge → conversation → sessions-index) and exposes just what
@@ -1844,20 +1882,39 @@ class DeviceSession extends ChangeNotifier
   /// whatever the resolver has loaded so far. A bootstrap frame landing
   /// after the mapping resolved (reconnects, the 30 s overview cadence)
   /// gets the completion without waiting for another read.
+  ///
+  /// Also the connection-initialisation trigger of the project read
+  /// (10-26 D3): the wire list is the home source, and this is the first
+  /// point where it is known. Every frame may fire it — the resolver's
+  /// one-shot answer plus the in-flight dedup make repeat calls free.
   void _setBootstrapWorkspaces(List<Map<String, dynamic>> list) {
     _bootstrapWorkspaces = list;
-    _mergeResolvedProjectWorkspaces();
+    final changed = _mergeResolvedProjectWorkspaces();
+    if (params.atLeast(3, 16, 2) &&
+        changed &&
+        (_testGate != null || _bridge != null)) {
+      // A merge landing through a bootstrap/push frame grows the list, but
+      // not every caller re-pulls afterwards (the relay push path has no
+      // pull at all, and a caller's own pull can join a round built from
+      // the OLD scopes). Route every growth through the same
+      // wait-out-then-redial path the late resolver answer uses (10-26
+      // Bug B) so `listTaskList` scopes follow the merged list.
+      unawaited(_refreshTaskScopesAfterMerge());
+    }
+    unawaited(_refreshProjectWorkspaces());
   }
 
   /// Recomputes [_workspaces] as RAW list ∪ resolver project roots
-  /// (3.16.2 only — older desktops have no project layer, so the merged
-  /// view is the raw list itself and behavior stays byte-identical).
-  /// Answers whether the merged list changed.
+  /// (+ the synthesized `default` entry, 10-26 D2; 3.16.2 only — older
+  /// desktops have no project layer, so the merged view is the raw list
+  /// itself and behavior stays byte-identical). Answers whether the merged
+  /// list changed.
   bool _mergeResolvedProjectWorkspaces() {
     final merged = params.atLeast(3, 16, 2)
         ? mergeProjectWorkspaces(
             _bootstrapWorkspaces,
             _projectResolver.projectRoots,
+            home: _projectResolver.knownHome,
           )
         : _bootstrapWorkspaces;
     if (_sameWorkspaces(_workspaces, merged)) return false;
@@ -1895,13 +1952,39 @@ class DeviceSession extends ChangeNotifier
     await _refreshTaskScopesAfterMerge();
   }
 
+  /// In-flight dedup of [_refreshProjectWorkspaces] (10-26 D3): the trigger
+  /// now fires on every bootstrap/push frame, so overlapping calls must join
+  /// one read instead of stacking. Cleared on completion (the resolver's
+  /// `_resolved` one-shot is what makes repeat rounds cheap; this field only
+  /// guards the concurrent window).
+  Future<void>? _projectWorkspaceRefresh;
+
   /// Resolves (or joins) the project mapping and applies the completion.
-  /// Triggered by the workspace-open prewarm and by the first createSession
-  /// that lands before it — the two points where the mapping read has a
-  /// live file channel.
-  Future<void> _refreshProjectWorkspaces() async {
+  /// Triggered by the connection-initialisation bootstrap landing, the
+  /// workspace-open prewarm and the first createSession that lands before
+  /// it. Never blocks a handshake: every caller fires it unawaited.
+  Future<void> _refreshProjectWorkspaces() {
+    final pending = _projectWorkspaceRefresh;
+    if (pending != null) return pending;
+    final future = _resolveProjectWorkspaces();
+    _projectWorkspaceRefresh = future;
+    // Same early-completion guard as the task leg: a version-gated no-op
+    // completes synchronously, and a finished Future parked in the field
+    // would swallow every later retry.
+    return future.whenComplete(() {
+      if (identical(_projectWorkspaceRefresh, future)) {
+        _projectWorkspaceRefresh = null;
+      }
+    });
+  }
+
+  Future<void> _resolveProjectWorkspaces() async {
     if (!params.atLeast(3, 16, 2) || _disposed) return;
     final client = _client;
+    // The read rides the workspace file channel; without a live link (or an
+    // injected test gate) there is nothing to read yet — the next frame
+    // retries, and the workspace-open prewarm stays the live trigger.
+    if (client == null) return;
     try {
       await _projectResolver.mapping();
     } catch (_) {
@@ -2851,22 +2934,86 @@ class DeviceSession extends ChangeNotifier
     _sessionMissingIds.remove(sessionId);
   }
 
-  /// Session-wide entitlement poller — the usage page and the chat quota
-  /// pill / warning banner share one cache per connection. Created lazily
-  /// on first use and disposed with the session.
-  EntitlementPoller? _entitlementPoller;
+  /// Session-wide entitlement pollers keyed by `preferredProviderId` — one
+  /// cache per quota route, shared by the usage page's parallel groups, the
+  /// chat quota pill / warning banner and the quota-reset controller. Keying
+  /// by provider id is what lets the dual-plan usage page (subscription +
+  /// Start, design 10-25) refresh each route on its own staleness clock
+  /// while the main route still reuses the same instance. Created lazily and
+  /// disposed with the session.
+  final Map<String, EntitlementPoller> _entitlementPollers = {};
 
-  /// Fallback plan access — the maintainer's plan. Other plans rely on the
-  /// derivation in [_resolvePlanAccess] or degrade to the pre-3.12.3
-  /// display until the desktop's provider registry backfills.
-  static const _planAccessConstant = {
-    'providerId': 'account:zai-individual-coding-plan',
-    'accountAccess': {
-      'type': 'zhipu-account',
-      'family': 'zai',
-      'planKind': 'individual-coding-plan',
-    },
-  };
+  /// Pre-3.12.3 wire: one global snapshot, no plan routing.
+  EntitlementPoller? _legacyEntitlementPoller;
+
+  /// Last resolved main route ([entitlementSnapshot]): while its poller is
+  /// fresh a non-forced call answers without resolving the plan again —
+  /// the pre-10-25 request profile (cache hit issues no RPC).
+  ({Map<String, dynamic> plan, EntitlementPoller poller})? _mainRoute;
+
+  EntitlementPoller _pollerFor(Map<String, dynamic> plan) {
+    final key = '${plan['providerId']}';
+    return _entitlementPollers.putIfAbsent(
+      key,
+      () => EntitlementPoller(fetch: () => _fetchEntitlement(plan)),
+    );
+  }
+
+  EntitlementPoller _legacyPoller() =>
+      _legacyEntitlementPoller ??=
+          EntitlementPoller(fetch: () => _fetchEntitlement(const {}));
+
+  /// Entitled account providers of the `provider-settings` view, mapped onto
+  /// the `{providerId, accountAccess}` shape [parsePlanAccess] produces —
+  /// the shared entry the quota wire and the model catalog both read
+  /// (design 10-24 §2). Only account providers whose
+  /// `effectiveConfig.access.entitled` is true and whose id parses onto a
+  /// known plan family are returned, in view order.
+  ///
+  /// Never cached: entitlement refreshes (5-minute poller staleness) and
+  /// config-sheet opens are user-throttled, and a live re-read is what lets
+  /// a plan change heal without reconnecting (the removed session-wide
+  /// cache is what pinned starter-only accounts to the coding-plan route).
+  /// A missing channel (old desktop) or a failed getView answers an empty
+  /// list — callers fall back to their own derivation. Callers that must
+  /// tell "failed" from "zero entitled" use the throwing core through
+  /// [entitledProviderIds].
+  Future<List<Map<String, dynamic>>> entitledPlanAccesses() async {
+    try {
+      return await _readEntitledPlanAccesses();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Throwing core of [entitledPlanAccesses]: the model-catalog filter needs
+  /// getView failure (no filtering) and a successful view with zero
+  /// entitlements (filter every unentitled account group) to stay apart
+  /// (design 10-24 §3).
+  Future<List<Map<String, dynamic>>> _readEntitledPlanAccesses() async {
+    final port = ProviderSettingsPort(callChannel);
+    final view = ProviderSettingsView.parse(await port.getView());
+    return [
+      for (final provider in view.accountProviders)
+        if (provider.entitled)
+          if (parsePlanAccess(provider.providerId) case final plan?) plan,
+    ];
+  }
+
+  /// Provider-id projection for the chat config sheet's group filter: null
+  /// when the provider-settings view cannot be read (old desktop / bridge
+  /// failure → entitlement unknown, show everything), otherwise the
+  /// entitled account ids (possibly empty → hide every unentitled account
+  /// group).
+  @override
+  Future<Set<String>?> entitledProviderIds() async {
+    try {
+      final plans = await _readEntitledPlanAccesses();
+      return {for (final plan in plans) '${plan['providerId']}'};
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Maps a coding-plan provider id (`account:<family>-<planKind>`) onto the
   /// `{providerId, accountAccess}` pair the 3.12.3 quota wire requires;
@@ -2885,52 +3032,164 @@ class DeviceSession extends ChangeNotifier
     };
   }
 
-  /// The coding-plan provider the 3.12.3+ quota wire targets, resolved once
-  /// per session: derived from the current model selection when its provider
-  /// is a coding-plan id, else the constant fallback. Cached including
-  /// misses so the 5-minute entitlement refresh never stacks an extra RPC.
-  Map<String, dynamic>? _planAccess;
+  /// Coding-plan kinds (the subscription family) — the first of these in
+  /// view order is the usage page's subscription group representative.
+  static const _codingPlanKinds = {
+    'individual-coding-plan',
+    'team-coding-plan',
+  };
 
-  Future<Map<String, dynamic>> _resolvePlanAccess() async {
-    final cached = _planAccess;
-    if (cached != null) return cached;
-    Map<String, dynamic> plan = _planAccessConstant;
-    try {
-      final relay = _relayTasks;
-      if (relay.isNotEmpty) {
-        final first = relay.first;
-        final sel = await callChannel('zcode-task', 'getTaskModelSelection', [
-          {
-            'taskId': '${first['taskId']}',
-            'workspacePath': '${first['workspacePath']}',
-            if (first['workspaceIdentity'] != null)
-              'workspaceIdentity': first['workspaceIdentity'],
-          }
-        ]);
-        final providerId = sel is Map ? sel['providerId'] : null;
-        if (providerId is String) {
-          plan = parsePlanAccess(providerId) ?? plan;
-        }
-      }
-    } catch (_) {
-      // Best-effort derivation; the constant fallback covers it.
-    }
-    return _planAccess = plan;
+  /// planKinds that are quota-snapshot targets. Off-peak (idle plan) and
+  /// highspeed are deliberately absent: the official client excludes them
+  /// (hw), and asking the desktop for an idle-plan snapshot only answers
+  /// `no_plan` — the exact false negative this resolution removes.
+  static const _snapshotPlanKinds = {..._codingPlanKinds, 'start-plan'};
+
+  static const _startPlanKinds = {'start-plan'};
+
+  /// `accountAccess.planKind` of a parsed plan access; null when absent.
+  static String? _planKindOf(Map<String, dynamic> plan) {
+    final access = plan['accountAccess'];
+    final kind = access is Map ? access['planKind'] : null;
+    return kind is String ? kind : null;
   }
 
-  /// usage-stats channel fetch for [_entitlementPoller]. Pre-3.12.3 the
-  /// bare call is the legacy wire; 3.12.3+ gates the quota APIs on the
-  /// full parameter set (accountAccess — live-probed 2026-09-17).
-  /// A failing full call throws into the
-  /// poller's error phase — no bare retry: on 3.12.3 the bare form answers
-  /// not_configured, so a retry would add zero information.
-  Future<dynamic> _fetchEntitlement() async {
+  /// First plan of one of [kinds] in view order; null when none matches.
+  static Map<String, dynamic>? _firstPlanOfKind(
+    List<Map<String, dynamic>> plans,
+    Set<String> kinds,
+  ) {
+    for (final plan in plans) {
+      final kind = _planKindOf(plan);
+      if (kind != null && kinds.contains(kind)) return plan;
+    }
+    return null;
+  }
+
+  /// The plan provider the 3.12.3+ quota wire targets, resolved fresh on
+  /// every use (design 10-24 §3). Priority follows the official xPe/FPe
+  /// order: the current task's derived provider when entitled → an entitled
+  /// coding plan (individual/team, view order) → an entitled Start plan →
+  /// the legacy derivation. Off-peak/highspeed entries are parseable but
+  /// are not snapshot targets, so they never match the kind filters.
+  ///
+  /// Only when no entitled plan and no derivation exists does the coding-plan
+  /// probe literal stand in: the desktop must still be asked once so it can
+  /// answer `no_plan` (the phase machine depends on that authoritative
+  /// answer, design §3).
+  ///
+  /// [entitled] lets a caller that already read the entitled set
+  /// ([entitlementSnapshots]) pass it in instead of paying a second getView.
+  Future<Map<String, dynamic>> _resolvePlanAccess({
+    List<Map<String, dynamic>>? entitled,
+  }) async {
+    final entitledPlans = entitled ?? await entitledPlanAccesses();
+    final derived = await _derivePlanAccess();
+    // 1. Follow the session's actual provider when it is entitled AND a
+    // snapshot target: a session running an off-peak task derives
+    // `account:zai-*-off-peak`, which the desktop cannot snapshot — it must
+    // never outrank a purchased coding/Start plan.
+    final derivedKind = derived == null ? null : _planKindOf(derived);
+    if (derived != null &&
+        derivedKind != null &&
+        _snapshotPlanKinds.contains(derivedKind)) {
+      for (final plan in entitledPlans) {
+        if (plan['providerId'] == derived['providerId']) return derived;
+      }
+    }
+
+    // 2. Official FPe: a purchased coding plan outranks a Start plan.
+    final coding = _firstPlanOfKind(entitledPlans, _codingPlanKinds);
+    if (coding != null) return coding;
+    // 3. Starter-only accounts ride the Start plan.
+    final start = _firstPlanOfKind(entitledPlans, _startPlanKinds);
+    if (start != null) return start;
+    // 4. Degrade to the legacy derivation, or the coding-plan probe literal.
+    return derived ??
+        {
+          'providerId': 'account:zai-individual-coding-plan',
+          'accountAccess': {
+            'type': 'zhipu-account',
+            'family': 'zai',
+            'planKind': 'individual-coding-plan',
+          },
+        };
+  }
+
+  /// Best-effort plan access of the most recently updated relay task's
+  /// model selection — null when there is no task, no task answers an
+  /// account provider, or every probe fails. The newest task wins
+  /// (`updatedAt`, the relay row's real field; ties keep list order); a
+  /// failed / non-account selection on it falls back to the first task, so
+  /// a lagging newest row never loses the derivation entirely.
+  Future<Map<String, dynamic>?> _derivePlanAccess() async {
+    final relay = relayTasks;
+    if (relay.isEmpty) return null;
+    final first = relay.first;
+    final latest = _newestRelayTask(relay);
+    final fromLatest = await _planAccessOfTask(latest);
+    if (fromLatest != null) return fromLatest;
+    if (identical(latest, first)) return null;
+    return _planAccessOfTask(first);
+  }
+
+  /// Relay task with the greatest `updatedAt`; ties keep list order (strict
+  /// `>` scan, no unstable sort). A missing/mistyped field counts as 0 —
+  /// the derivation is best-effort and must never throw on a drifted row.
+  static Map<String, dynamic> _newestRelayTask(
+    List<Map<String, dynamic>> tasks,
+  ) {
+    int updatedAtOf(Map<String, dynamic> task) {
+      final raw = task['updatedAt'];
+      return raw is num ? raw.toInt() : 0;
+    }
+
+    var best = tasks.first;
+    var bestAt = updatedAtOf(best);
+    for (final task in tasks.skip(1)) {
+      final at = updatedAtOf(task);
+      if (at > bestAt) {
+        best = task;
+        bestAt = at;
+      }
+    }
+    return best;
+  }
+
+  /// One `getTaskModelSelection` probe, mapped onto a parsed plan access;
+  /// null (never throws) on RPC failure or a non-account provider.
+  Future<Map<String, dynamic>?> _planAccessOfTask(
+    Map<String, dynamic> task,
+  ) async {
+    try {
+      final sel = await callChannel('zcode-task', 'getTaskModelSelection', [
+        {
+          'taskId': '${task['taskId']}',
+          'workspacePath': '${task['workspacePath']}',
+          if (task['workspaceIdentity'] != null)
+            'workspaceIdentity': task['workspaceIdentity'],
+        }
+      ]);
+      final providerId = sel is Map ? sel['providerId'] : null;
+      return providerId is String ? parsePlanAccess(providerId) : null;
+    } catch (_) {
+      // Best-effort derivation; the entitled set / literal fallback covers it.
+      return null;
+    }
+  }
+
+  /// usage-stats channel fetch for one route's poller. Pre-3.12.3 the bare
+  /// call is the legacy wire (the plan is ignored); 3.12.3+ gates the quota
+  /// APIs on the full parameter set (accountAccess — live-probed
+  /// 2026-09-17). A failing full call throws into the poller's error phase —
+  /// no bare retry: on 3.12.3 the bare form answers not_configured, so a
+  /// retry would add zero information.
+  Future<dynamic> _fetchEntitlement(Map<String, dynamic> plan) async {
     if (!params.atLeast(3, 12, 3)) {
       return callChannel('usage-stats', 'getEntitlementSnapshot', [
         {'includeSubscription': true}
       ]);
     }
-    final plan = await _resolvePlanAccess();
     return callChannel('usage-stats', 'getEntitlementSnapshot', [
       {
         'includeSubscription': true,
@@ -2945,21 +3204,84 @@ class DeviceSession extends ChangeNotifier
 
   @override
   Future<EntitlementView> entitlementSnapshot({bool force = false}) async {
-    final view = await (_entitlementPoller ??=
-        EntitlementPoller(fetch: _fetchEntitlement))
-        .refresh(force: force);
+    final EntitlementPoller poller;
+    Map<String, dynamic>? plan;
+    if (params.atLeast(3, 12, 3)) {
+      final cached = _mainRoute;
+      if (!force && cached != null && cached.poller.isFresh) {
+        poller = cached.poller;
+        plan = cached.plan;
+      } else {
+        plan = await _resolvePlanAccess();
+        poller = _pollerFor(plan);
+        _mainRoute = (plan: plan, poller: poller);
+      }
+    } else {
+      poller = _legacyPoller();
+    }
+    final view = await poller.refresh(force: force);
     // The reset scope rides the snapshot (design Q2a): the session injects
-    // the provider id, so consumers never touch the raw map. Same value is
-    // a no-op.
-    quotaResetController.updateScope(view.resetScopeProviderId);
+    // the provider id — and, on the routed wire, the plan pair the fetch
+    // was made for, so the reset RPCs keep `accountAccess` same-source
+    // with the scope (design 10-25). Same value is a no-op.
+    quotaResetController.updateScope(view.resetScopeProviderId, plan: plan);
     return view;
   }
 
-  /// Session-wide reset-opportunity controller — lazily created like
-  /// [_entitlementPoller], disposed with the session. The scope
-  /// (`preferredProviderId`) is injected by [entitlementSnapshot] from
-  /// the entitlement snapshot; the forwarded RPCs below read it back as
-  /// the single source.
+  /// The quota routes the usage page renders side by side (design 10-25):
+  /// the entitled subscription representative (first individual/team coding
+  /// plan in provider-settings view order) and the entitled Start
+  /// representative (first start-plan), each fetched through its own
+  /// provider-keyed [EntitlementPoller]. Kinds outside [_snapshotPlanKinds]
+  /// (off-peak, highspeed) never become routes — the official xPe limit is
+  /// one coding + one Start route.
+  ///
+  /// With an unreadable provider-settings view or no entitled snapshot
+  /// target, the single main route ([_resolvePlanAccess]) stands in — the
+  /// page then renders exactly the pre-10-25 one-group form. The legacy
+  /// wire (<3.12.3) answers one unrouted snapshot, so its route carries a
+  /// null plan. Never throws beyond the per-poller error phase; the reset
+  /// scope rides the first (primary) route's view like [entitlementSnapshot].
+  Future<List<EntitlementSnapshotRoute>> entitlementSnapshots({
+    bool force = false,
+  }) async {
+    if (!params.atLeast(3, 12, 3)) {
+      final view = await _legacyPoller().refresh(force: force);
+      quotaResetController.updateScope(view.resetScopeProviderId);
+      return [(plan: null, view: view)];
+    }
+    final entitled = await entitledPlanAccesses();
+    final coding = _firstPlanOfKind(entitled, _codingPlanKinds);
+    final start = _firstPlanOfKind(entitled, _startPlanKinds);
+    final plans = <Map<String, dynamic>>[
+      if (coding != null) coding,
+      if (start != null) start,
+    ];
+    if (plans.isEmpty) {
+      plans.add(await _resolvePlanAccess(entitled: entitled));
+    }
+    final views = await Future.wait([
+      for (final plan in plans) _pollerFor(plan).refresh(force: force),
+    ]);
+    // The reset card is single and rides the primary (subscription) route:
+    // its plan pair is injected alongside the view's provider id so the
+    // reset RPCs stay same-source even when the main route derived a
+    // different (e.g. Start) provider.
+    quotaResetController.updateScope(
+      views.first.resetScopeProviderId,
+      plan: plans.first,
+    );
+    return [
+      for (var i = 0; i < plans.length; i++)
+        (plan: plans[i], view: views[i]),
+    ];
+  }
+
+  /// Session-wide reset-opportunity controller — lazily created like the
+  /// entitlement pollers, disposed with the session. The scope
+  /// (`preferredProviderId`) is injected by [entitlementSnapshot] /
+  /// [entitlementSnapshots] from the snapshot; the forwarded RPCs below
+  /// read it back as the single source.
   QuotaResetController? _quotaReset;
 
   @override
@@ -2974,16 +3296,31 @@ class DeviceSession extends ChangeNotifier
       ]);
     }
     // 3.12.3 requires accountAccess (coding_plan_reset_account_access_
-    // required otherwise); before the first snapshot lands the scope is
-    // still null, so the resolved plan provider stands in.
-    final plan = await _resolvePlanAccess();
+    // required otherwise). It must come from the SAME plan as
+    // `preferredProviderId` — pairing a Start access with a coding scope
+    // (the derived-main / dual-plan case) is a rejected shape (10-25).
+    final plan = await _resetScopePlan();
     return callChannel('usage-stats', 'getCodingPlanResetStatus', [
       {
-        'preferredProviderId':
-            quotaResetController.scopeProviderId ?? plan['providerId'],
+        'preferredProviderId': plan['providerId'],
         'accountAccess': plan['accountAccess'],
       }
     ]);
+  }
+
+  /// The plan pair the reset RPCs must carry: the scope injected with its
+  /// snapshot (same-source `accountAccess`), or — for callers that only
+  /// injected a bare provider id — that id's parsed access; the main-route
+  /// resolution is only the last resort (before the first snapshot lands).
+  Future<Map<String, dynamic>> _resetScopePlan() async {
+    final scoped = quotaResetController.scopePlan;
+    if (scoped != null) return scoped;
+    final providerId = quotaResetController.scopeProviderId;
+    if (providerId != null) {
+      final parsed = parsePlanAccess(providerId);
+      if (parsed != null) return parsed;
+    }
+    return _resolvePlanAccess();
   }
 
   @override
@@ -3002,11 +3339,13 @@ class DeviceSession extends ChangeNotifier
       ]);
     }
     // Same injection as the status call (destructive op — unverifiable by
-    // probe; the status call's accepted shape validates the form).
-    final plan = await _resolvePlanAccess();
+    // probe; the status call's accepted shape validates the form). The
+    // scope's plan pair wins over the bare argument so the two fields stay
+    // same-source (10-25).
+    final plan = await _resetScopePlan();
     await callChannel('usage-stats', 'useCodingPlanReset', [
       {
-        'preferredProviderId': preferredProviderId ?? plan['providerId'],
+        'preferredProviderId': plan['providerId'],
         'idempotencyKey': idempotencyKey,
         'resetType': resetType,
         'accountAccess': plan['accountAccess'],
@@ -3047,6 +3386,10 @@ class DeviceSession extends ChangeNotifier
     _tasksFromBootstrap = false;
     _tasksRefresh = null;
     _pinnedMerge = null;
+    // A project read in flight belongs to the closed link; a fresh
+    // connection must start its own instead of joining the old answer
+    // (whose late-merge guard would drop it anyway).
+    _projectWorkspaceRefresh = null;
     // Snapshot cache dies with the rest of the directory state — a rebuild
     // is a cold start (design §清点). Retry loops don't pass through here,
     // so a flapping link keeps its cached rows.
@@ -3077,7 +3420,10 @@ class DeviceSession extends ChangeNotifier
     if (_disposed) return;
     _disposed = true;
     await suspend();
-    _entitlementPoller?.dispose();
+    for (final poller in _entitlementPollers.values) {
+      poller.dispose();
+    }
+    _legacyEntitlementPoller?.dispose();
     _quotaReset?.dispose();
     super.dispose();
   }

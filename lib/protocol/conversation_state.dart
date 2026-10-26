@@ -87,12 +87,21 @@ class ConfigOptionValue {
   final String value;
   final String name;
   final String? description;
+
+  /// Provider id of the group the option belongs to (wire-optional,
+  /// design 10-24 §2) — the entitlement filter's key. Desktop projections
+  /// before the field existed (and malformed values) degrade to null.
+  final String? modelProviderId;
   final String? modelProviderName;
 
   ConfigOptionValue._(Map raw)
     : value = '${raw['value'] ?? ''}',
       name = '${raw['name'] ?? raw['value'] ?? ''}',
       description = raw['description'] as String?,
+      // Optional on the wire; drift degrades to null (design 10-24 §2).
+      modelProviderId = raw['modelProviderId'] is String
+          ? raw['modelProviderId'] as String
+          : null,
       modelProviderName = raw['modelProviderName'] as String?;
 
   /// Public constructor: synthesizes sheet-side entries from other
@@ -102,6 +111,7 @@ class ConfigOptionValue {
     required this.value,
     required this.name,
     this.description,
+    this.modelProviderId,
     this.modelProviderName,
   });
 }

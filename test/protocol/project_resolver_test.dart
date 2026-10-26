@@ -359,6 +359,46 @@ void main() {
     });
   });
 
+  group('knownHome (default-workspace synthesis seam, 10-26 D1)', () {
+    test('the wire-derived home wins over the cached one', () {
+      final resolver = ProjectResolver(
+        workspaces: () => _workspaces,
+        readRange: (path, offset, length) async => Uint8List(0),
+        loadCachedHome: () => r'D:\Stale',
+      );
+      expect(resolver.knownHome, 'C:/Users/Melody',
+          reason: 'the current wire beats a persisted home');
+    });
+
+    test('the cached home answers when the wire lists none', () {
+      final resolver = ProjectResolver(
+        workspaces: () => const [
+          {'workspacePath': r'F:\ZLinker'},
+        ],
+        readRange: (path, offset, length) async => Uint8List(0),
+        loadCachedHome: () => 'C:/Users/Melody',
+      );
+      expect(resolver.knownHome, 'C:/Users/Melody');
+    });
+
+    test('null when neither source names a home', () {
+      final resolver = ProjectResolver(
+        workspaces: () => const [
+          {'workspacePath': r'F:\ZLinker'},
+        ],
+        readRange: (path, offset, length) async => Uint8List(0),
+      );
+      expect(resolver.knownHome, isNull);
+    });
+
+    test('reading knownHome never triggers an index read', () {
+      final index = _FakeIndex(_fixture(projects: const [], roots: const []));
+      final resolver = _resolverFor(index);
+      expect(resolver.knownHome, 'C:/Users/Melody');
+      expect(index.calls, 0);
+    });
+  });
+
   group('cached desktop home (resolver-home-fallback)', () {
     test('wire lists no .zcode/workspace path: the cached home reads the '
         'index (16-card regression)', () async {

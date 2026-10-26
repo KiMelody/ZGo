@@ -38,9 +38,24 @@ bool isConversationWorkspacePath(String path) {
 /// `workspacePurpose` marker (schema enum — future desktops may populate it)
 /// OR the draft path convention (the live 3.16.2 shape). Single gate shared
 /// by the merge layer, the card construction and the 「对话」 badge.
+///
+/// `<home>/.zcode/workspace/default` is the exception (10-26 D6): the live
+/// 3.16.2 desktop tags the default group `workspacePurpose:'conversation'`
+/// (it is the old un-grouped-conversations container), but ZGo renders it
+/// as an ordinary group card and as the draft rows' display anchor, so the
+/// path check precedes the purpose marker. Slash-normalized and
+/// case-folded like the home derivation, because wire paths arrive in
+/// either spelling; `draft-*` paths cannot collide with this ending.
 bool isConversationWorkspace(Map<String, dynamic> ws) {
-  if (ws['workspacePurpose'] == 'conversation') return true;
   final path = ws['workspacePath'];
+  if (path is String &&
+      path.isNotEmpty &&
+      path.replaceAll(r'\', '/').toLowerCase().endsWith(
+            '/.zcode/workspace/default',
+          )) {
+    return false;
+  }
+  if (ws['workspacePurpose'] == 'conversation') return true;
   return path is String && path.isNotEmpty && isConversationWorkspacePath(path);
 }
 

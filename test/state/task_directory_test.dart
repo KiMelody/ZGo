@@ -1253,4 +1253,68 @@ void main() {
     });
   });
 
+  group('isConversationWorkspace: default 组卡不滤（10-26 D6）', () {
+    test('wire default 条目（purpose=conversation）渲染为普通组卡', () {
+      expect(
+        isConversationWorkspace({
+          'kind': 'local',
+          'label': 'default',
+          'workspacePath': r'C:\Users\Melody\.zcode\workspace\default',
+          'workspacePurpose': 'conversation',
+        }),
+        isFalse,
+        reason: 'live 3.16.2 bootstrap 原文形态：default 是旧对话的归并容器，'
+            '不能被 purpose 过滤掉',
+      );
+    });
+
+    test('draft 条目（无 purpose）仍按路径过滤', () {
+      expect(
+        isConversationWorkspace({
+          'kind': 'local',
+          'label': 'draft-701cf0e6',
+          'workspacePath': r'C:\Users\Melody\.zcode\workspace\draft-701cf0e6',
+        }),
+        isTrue,
+      );
+    });
+
+    test('purpose=conversation 且路径非 default/draft 仍过滤', () {
+      expect(
+        isConversationWorkspace({
+          'workspacePath': '/home/melody/.zcode/workspace/special',
+          'workspacePurpose': 'conversation',
+        }),
+        isTrue,
+        reason: '未来枚举不误放行',
+      );
+    });
+
+    test('大小写/斜杠混合变体同样识别 default', () {
+      expect(
+        isConversationWorkspace({
+          'workspacePath': r'C:/USERS/Melody\.zcode/workspace\DEFAULT',
+          'workspacePurpose': 'conversation',
+        }),
+        isFalse,
+      );
+    });
+
+    test('POSIX home 形态同样识别 default', () {
+      expect(
+        isConversationWorkspace({
+          'workspacePath': '/home/x/.zcode/workspace/default',
+          'workspacePurpose': 'conversation',
+        }),
+        isFalse,
+      );
+      expect(
+        isConversationWorkspace({
+          'workspacePath': '/home/x/.zcode/workspace/default',
+        }),
+        isFalse,
+        reason: '无 purpose 的 default 本来就不是 conversation',
+      );
+    });
+  });
 }
