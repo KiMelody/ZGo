@@ -33,6 +33,17 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // Per-ABI APKs (CI + local acceptance): --target-platform alone only
+        // prunes libapp.so/libflutter.so — plugin .so files (e.g. ML Kit
+        // barhopper) would still ship for every ABI. Passed as
+        // --android-project-arg=target-abi=... together with
+        // disable-abi-filtering=true (without it the Flutter Gradle plugin
+        // clears defaultConfig abiFilters back to the full platform list).
+        // Unset = universal APK with all ABIs.
+        val targetAbi = project.findProperty("target-abi") as String?
+        if (!targetAbi.isNullOrEmpty()) {
+            ndk { abiFilters.add(targetAbi) }
+        }
     }
 
     signingConfigs {
@@ -53,6 +64,12 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 }
