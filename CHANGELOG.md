@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.1] - 2026-10-26
+
+### Added
+
+- **Plan auto-switch**: when the Start plan runs out or expires, chat
+  switches automatically to an available subscription (three trigger
+  signals, same-`modelId` preference, per-session dedup), and a plan
+  expiry banner closes the gap where expiry was completely silent.
+
+### Changed
+
+- **Usage page**: subscription and Start snapshots render side by side
+  (providerId-keyed pollers, latest-`updatedAt` task derivation, reset
+  scope aligned with accountAccess). Remaining-semantics unified across
+  bars and big numbers — limit percentages and bar fills inverted so a
+  short red bar means "nearly exhausted"; token counts abbreviated
+  k/M/B; larger limit-row figures; mirror-card dual-% template;
+  localized ISO timestamps; plan-card titles fall back to the provider
+  name; 6 dp progress-bar token; 17 dp placeholder keeps row height on
+  plans without a time column.
+- **Android build**: release CI ships arm64 / arm32 / universal APKs
+  instead of one fat artifact — arm64 payload 92.85 → 36.6 MB; R8
+  minify + resource shrinking enabled (dex halved; the lasting value
+  is obfuscation and the mapping file).
+
+### Fixed
+
+- **Entitlement routing**: plan snapshots resolve by the entitled flag —
+  starter-account detection fixed, Start bucket projection normalized.
+- **Model catalog**: provider groups without entitlement are hidden
+  from the config panel; Z.AI/BigModel same-name families disambiguated
+  with a prefix on the providers page.
+- **Start snapshot percentage scale**: the wire carries a 0..1 decimal
+  remaining ratio (asar S3 verdict) — normalized as (1−p)×100 instead
+  of the previous misread.
+- **Task list**: the default workspace card stays resident — wire
+  entries carrying `workspacePurpose: 'conversation'` were wrongly
+  dropped by the conversation-workspace predicate; the
+  `/.zcode/workspace/default` suffix path is now exempt (draft- folding
+  and the purpose enum unchanged). Workspace completion moves onto the
+  bootstrap frame, mergeProjectWorkspaces gains a home-synthesis
+  fallback, and list growth re-dials from the merged full set.
+
 ## [1.15.0] - 2026-10-23
 
 ### Added
