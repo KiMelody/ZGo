@@ -49,8 +49,31 @@ jobs:
           printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=zgo-release.jks\n' \
             "$KEYSTORE_PASSWORD" "$KEY_PASSWORD" "$KEY_ALIAS" > android/key.properties
 
-      - name: Build APK (github channel)
-        run: flutter build apk --release --dart-define=APP_CHANNEL=github
+      # Three APKs via three builds (universal / arm64 / arm). NOT
+      # --split-per-abi: on Flutter 3.47.4 that path skips the dev-dependency
+      # filter when regenerating GeneratedPluginRegistrant, so the registrant
+      # references integration_test while the Gradle plugin strips its
+      # release classpath -> compileReleaseJavaWithJavac fails. The
+      # target-abi property (read by build.gradle.kts) keeps plugin .so files
+      # single-ABI too. All three builds write app-release.apk, so rename
+      # straight after each.
+      - name: Build APKs (github channel)
+        run: |
+          flutter build apk --release --dart-define=APP_CHANNEL=github
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             ZGo-${{ github.ref_name }}-universal.apk
+          flutter build apk --release \
+            --dart-define=APP_CHANNEL=github --target-platform android-arm64 \
+            --android-project-arg=disable-abi-filtering=true \
+            --android-project-arg=target-abi=arm64-v8a
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             ZGo-${{ github.ref_name }}-arm64.apk
+          flutter build apk --release \
+            --dart-define=APP_CHANNEL=github --target-platform android-arm \
+            --android-project-arg=disable-abi-filtering=true \
+            --android-project-arg=target-abi=armeabi-v7a
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             ZGo-${{ github.ref_name }}-arm32.apk
 
       - name: Build AAB (play channel)
         run: flutter build appbundle --release --dart-define=APP_CHANNEL=play
@@ -76,15 +99,13 @@ jobs:
           name: android-aab
           path: build/app/outputs/bundle/release/app-release.aab
 
-      - name: Rename artifact
-        run: |
-          mv build/app/outputs/flutter-apk/app-release.apk \
-             ZGo-${{ github.ref_name }}.apk
-
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: ZGo-${{ github.ref_name }}.apk
+          path: |
+            ZGo-${{ github.ref_name }}-universal.apk
+            ZGo-${{ github.ref_name }}-arm64.apk
+            ZGo-${{ github.ref_name }}-arm32.apk
 
   ios:
     name: Build iOS (signed)
