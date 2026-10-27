@@ -1194,6 +1194,75 @@ void main() {
     expect(session.activeWorkspace?['workspaceIdentity'], 'alpha');
   });
 
+  testWidgets(
+      'a failed cross-workspace open blocks the ＋ chat push and says why',
+      (tester) async {
+    // The bridge could not be pointed at beta (both addressing legs failed):
+    // pushing a draft chat would subscribe under alpha's scope and dead-end
+    // every command. The page must stay put and show the localized copy.
+    final (_, _, session) = await setupTwoWorkspaces(tester);
+    session.openWorkspaceSucceeds = false;
+
+    await tester.tap(find.descendant(
+      of: cardOf('beta'),
+      matching: find.byTooltip('新建任务'),
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(ChatPage), findsNothing);
+    expect(session.openWorkspacePurposes, [WorkspaceOpenPurpose.chatNew]);
+    expect(find.textContaining('该工作区未在桌面端打开'), findsOneWidget);
+  });
+
+  testWidgets(
+      'a failed cross-workspace task open blocks the chat push and says why',
+      (tester) async {
+    final (_, _, session) = await setupTwoWorkspaces(tester);
+    session.openWorkspaceSucceeds = false;
+
+    await tester.tap(find.text('beta'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.descendant(
+      of: cardOf('beta'),
+      matching: find.text('中继任务乙'),
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(ChatPage), findsNothing);
+    expect(session.openWorkspacePurposes, [WorkspaceOpenPurpose.openTask]);
+    expect(find.textContaining('该工作区未在桌面端打开'), findsOneWidget);
+  });
+
+  testWidgets('the workspace-unreachable sentinel renders localized copy',
+      (tester) async {
+    // R3: the session error after a dead-end window gate is a stable
+    // sentinel, never the desktop's raw refusal text.
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      workspaces: [
+        {'workspacePath': '/repo/app'},
+      ],
+    )..error = workspaceUnreachableError;
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('该工作区未在桌面端打开'), findsOneWidget);
+    expect(find.textContaining(workspaceUnreachableError), findsNothing);
+  });
+
   testWidgets('live-ready active workspace still renders relay-only rows',
       (tester) async {
     // TaskDirectory merge anchor (CONTEXT.md「Task Directory」): relay 打底、

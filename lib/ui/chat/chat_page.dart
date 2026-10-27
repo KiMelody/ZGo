@@ -55,6 +55,12 @@ class ChatPage extends StatefulWidget {
   /// second header row).
   final String? workspaceLabel;
 
+  /// The workspace this DRAFT page was opened in (ignored for existing
+  /// sessions). The first send asks the gateway to re-point the bridge here
+  /// when a reconnect moved it elsewhere; null keeps the legacy behavior
+  /// (create in whatever workspace is active).
+  final String? draftWorkspacePath;
+
   /// Pinned state of the opened task (from the list entry) so the 更多 menu
   /// can show 置顶任务 / 取消置顶任务 like the web and toggle it.
   final bool initialPinned;
@@ -95,6 +101,7 @@ class ChatPage extends StatefulWidget {
     this.embedded = false,
     this.initialComposerText,
     this.workspaceLabel,
+    this.draftWorkspacePath,
     this.initialPinned = false,
     this.onOpenUsage,
     this.offPeakHost,
@@ -1555,13 +1562,29 @@ class _ChatPageState extends State<ChatPage> {
       _sending = true;
       _uploadProgress = null;
       _showSlash = false;
-      _progress = null;
+      // Draft first-send surfaces "creating" from the very start: the draft
+      // guard, the v4 handshake and the health gate can each stall for tens
+      // of seconds BEFORE the createSession rpc runs (2026-10-27 P1).
+      _progress = _sessionId == null ? tr(context, 'chat.creating') : null;
     });
     try {
       var sessionId = _sessionId;
       if (sessionId == null) {
-        // 1) create the session (can take a while when the runtime warms)
-        setState(() => _progress = tr(context, 'chat.creating'));
+        // A connection rebuild auto-opens the preferred workspace under an
+        // open draft page; creating here would land the task in that
+        // workspace instead of the one the user is looking at. Re-point the
+        // bridge first; a dead end blocks the send (draft text and pending
+        // attachments stay) instead of producing a wrong-workspace task.
+        if (!await widget.gateway.ensureDraftWorkspace(
+          widget.draftWorkspacePath,
+        )) {
+          if (!mounted) return;
+          _toast(tr(context, 'tasks.workspaceUnreachable'));
+          return;
+        }
+        if (!mounted) return;
+        // 1) create the session (can take a while when the runtime warms;
+        //    the "creating" progress has been up since _send began)
         // Plain text first message is sent WITH createSession (firstInput,
         // as the composer does). This avoids a send-before-subscribe
         // race where the first command can be dropped on a fresh session.

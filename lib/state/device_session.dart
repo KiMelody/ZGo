@@ -188,6 +188,43 @@ class StallTimings {
 
 enum DeviceStatus { disconnected, connecting, connected, error }
 
+/// Why a workspace bridge is being pointed at a workspace — decides which
+/// addressing leg the window-gate fallback may use. [chatNew] targets a new
+/// draft chat in the workspace (project addressing); [openTask] targets an
+/// existing task (host addressing via `taskHostId`). Null on internal opens
+/// (auto-open, watchdog reloads), which keep the pre-addressing behavior.
+enum WorkspaceOpenPurpose { chatNew, openTask }
+
+/// Whether a bridge-open failure is the desktop's "workspace is not in the
+/// bound window" refusal. The upstream frame carries no error code, so the
+/// message is the only discriminator (the desktop answers
+/// 「目标工作区不在当前桌面窗口中…」 for bridge-open and
+/// 「…不在当前窗口中…」 for reconnect — both mean the same window gate).
+/// Not user-visible: this only decides whether the 3.16.3+ addressing leg
+/// may retry.
+bool isWorkspaceWindowGateError(Object error) {
+  final text = '$error';
+  return text.contains('不在当前桌面窗口中') || text.contains('不在当前窗口中');
+}
+
+/// `DeviceSession.error` sentinel for "the bridge stayed on the previous
+/// workspace after both addressing legs". The desktop's refusal text is
+/// diagnostic, not user copy — the UI maps this stable value to
+/// `tasks.workspaceUnreachable` instead of rendering the raw message.
+const String workspaceUnreachableError = 'workspace-unreachable';
+
+/// Internal marker: the first leg hit the window gate and the addressing
+/// retry failed too. Keeps the raw desktop refusal available to logs while
+/// the session surfaces the stable [workspaceUnreachableError] to the UI.
+class _WorkspaceUnreachable implements Exception {
+  const _WorkspaceUnreachable(this.cause);
+
+  final Object cause;
+
+  @override
+  String toString() => '$cause';
+}
+
 /// What the automations UI needs from a device link: live status plus the
 /// automation port. [DeviceSession] implements this; tests fake it.
 abstract interface class AutomationHost {
@@ -290,6 +327,17 @@ abstract interface class ChatGateway
   /// for the chat page's copy action.
   String? get chatWorkspaceId;
   String? get workspacePath;
+
+  /// Draft-page send guard: before the first `createSession`, verifies the
+  /// bridge still points at [workspacePath] — the workspace the draft page
+  /// was opened in. A connection rebuild auto-opens the preferred workspace
+  /// under an open draft; without this check the create would silently land
+  /// there (the original window-gate bug in disguise, live 2026-10-27).
+  /// A drifted bridge re-opens through the same 3.16.3+ addressing fallback
+  /// chain as the list page. Returns false when the target cannot be
+  /// reached — the caller must not send (draft text stays untouched); a
+  /// null/empty or already-active target answers true with zero RPC.
+  Future<bool> ensureDraftWorkspace(String? workspacePath);
 
   /// Composer-draft persistence for this device's chat pages (text +
   /// attachment metadata in SharedPreferences, attachment bytes under the
@@ -589,6 +637,14 @@ class DeviceSession extends ChangeNotifier
   bool _openingWorkspace = false;
   bool _kicked = false;
   String? _error;
+
+  /// Desktop's live app version from the bootstrap-response top level
+  /// (`desktopAppVersion`, live-probed 3.16.3). Null until a frame carries
+  /// it. Addressing gates prefer this over [params]: the paired link's
+  /// `app_version` is a generation-time snapshot and can lag the running
+  /// desktop (a 3.16.3 desktop behind a 3.16.2 link — live acceptance
+  /// 2026-10-26; the stale gate was why the fallback leg never fired).
+  String? _desktopAppVersion;
 
   DeviceStatus _status = DeviceStatus.disconnected;
 
@@ -1251,6 +1307,12 @@ class DeviceSession extends ChangeNotifier
   List<Map<String, dynamic>> get workspaces => _workspaces;
   Map<String, dynamic>? get activeWorkspace => _activeWorkspace;
 
+  /// Live desktop version reported by the latest bootstrap-response frame,
+  /// null until one carries `desktopAppVersion`. Callers that gate wire
+  /// shapes on the desktop version should prefer this over [params]
+  /// (whose `app_version` is a link-generation snapshot).
+  String? get desktopAppVersion => _desktopAppVersion;
+
   /// Live sessions-index state of the active workspace, if subscribed.
   @override
   SessionsIndexState? get sessions => _sessionsSub?.state;
@@ -1563,11 +1625,24 @@ class DeviceSession extends ChangeNotifier
   /// which read exactly like the dead "retry" button of the loading bug.
   /// [taskId] rides the `workspace-bridge-open` payload (tapping
   /// a task of a non-active workspace opens the bridge straight onto it).
-  Future<void> openWorkspace(Map<String, dynamic> workspace, {String? taskId}) {
+  /// [purpose] opts the open into the 3.16.3+ window-gate fallback chain
+  /// (project / task-host addressing); null keeps the single-leg behavior
+  /// for internal opens.
+  ///
+  /// Returns whether the workspace ended up open. Callers that push a chat
+  /// page after the open use false to block it (the bridge still points at
+  /// the previous workspace, so a chat there would subscribe under the
+  /// wrong scope).
+  Future<bool> openWorkspace(
+    Map<String, dynamic> workspace, {
+    String? taskId,
+    WorkspaceOpenPurpose? purpose,
+  }) {
     final previous = _openChain;
-    final completer = Completer<void>();
+    final completer = Completer<bool>();
     _openChain = completer;
     () async {
+      var opened = false;
       try {
         if (previous != null) {
           try {
@@ -1575,34 +1650,55 @@ class DeviceSession extends ChangeNotifier
           } catch (_) {}
         }
         if (_disposed) return;
-        await _openWorkspaceNow(workspace, taskId: taskId);
+        opened = await _openWorkspaceNow(
+          workspace,
+          taskId: taskId,
+          purpose: purpose,
+        );
       } finally {
         if (identical(_openChain, completer)) _openChain = null;
-        completer.complete();
+        completer.complete(opened);
       }
     }();
     return completer.future;
   }
 
-  Completer<void>? _openChain;
+  Completer<bool>? _openChain;
 
-  Future<void> _openWorkspaceNow(
+  Future<bool> _openWorkspaceNow(
     Map<String, dynamic> workspace, {
     String? taskId,
+    WorkspaceOpenPurpose? purpose,
   }) async {
     final key = workspaceKeyOf(workspace);
     final client = _client;
     if (key == null || client == null || _disposed || _openingWorkspace) {
-      return;
+      return false;
     }
     _openingWorkspace = true;
     final sw = Stopwatch()..start();
     _listWatchdog?.cancel();
     try {
-      final bridge = await client.openBridge(key, taskId: taskId);
+      final bridge = await _openBridgeAddressed(
+        client,
+        key: key,
+        workspace: workspace,
+        taskId: taskId,
+        purpose: purpose,
+      );
       if (_disposed || _client != client) {
         bridge.dispose();
-        return;
+        return false;
+      }
+      // The bridge's OWN workspace key, not the requested one: project-draft
+      // addressing (formB) makes the desktop prepare a NEW draft workspace,
+      // so the reply can differ. Everything downstream (active card, scope,
+      // sessions-index subscription, createSession) must follow the reply.
+      final active = _workspaceOfBridge(bridge, workspace, key);
+      final activeKey = workspaceKeyOf(active) ?? key;
+      if (activeKey != key) {
+        _log('[session] bridge opened $activeKey '
+            'for requested key=$key');
       }
       final oldSub = _sessionsSub;
       final oldBridge = _bridge;
@@ -1616,7 +1712,7 @@ class DeviceSession extends ChangeNotifier
       _conversation = null;
       _chatSubs.clear();
       _bridge = bridge;
-      _activeWorkspace = workspace;
+      _activeWorkspace = active;
       // Fresh bridge = fresh channel client: re-hang the managed listeners.
       _reattachChannelListeners();
       unawaited(oldSub?.dispose());
@@ -1626,9 +1722,9 @@ class DeviceSession extends ChangeNotifier
       oldBridge?.dispose();
 
       final scope = <String, dynamic>{
-        'workspacePath': workspace['workspacePath'],
-        if (workspace['workspaceIdentity'] != null)
-          'workspaceIdentity': workspace['workspaceIdentity'],
+        'workspacePath': active['workspacePath'],
+        if (active['workspaceIdentity'] != null)
+          'workspaceIdentity': active['workspaceIdentity'],
       };
       final conversation = bridge.conversation(
         scope,
@@ -1643,10 +1739,10 @@ class DeviceSession extends ChangeNotifier
       final sub = await conversation.subscribeSessionsIndex();
       if (_disposed || _bridge != bridge) {
         await sub.dispose();
-        return;
+        return false;
       }
       _sessionsSub = sub;
-      sub.state.subscribedWorkspaceKey = key;
+      sub.state.subscribedWorkspaceKey = activeKey;
       // 3.16.2 project prewarm + workspace-list completion (acceptance
       // round 1 P1-2; research/07 方案 A): read the desktop's project
       // index off the createSession critical path — a handful of pages, so
@@ -1671,7 +1767,7 @@ class DeviceSession extends ChangeNotifier
         // Same early-exit chain as above: the open may have been
         // superseded while the probe was in flight — whoever replaced the
         // bridge already disposed this sub, so plain return.
-        if (_disposed || _bridge != bridge) return;
+        if (_disposed || _bridge != bridge) return false;
         if (deleted != null) sub.state.deletedTaskIds = Set.of(deleted);
       } catch (_) {
         sub.state.deletedTaskIds = const {};
@@ -1689,15 +1785,20 @@ class DeviceSession extends ChangeNotifier
       snapshotSessionsIntoCache(sub.state);
       recordVanishedSessions();
       _error = null;
-      onWorkspaceOpened?.call(key);
+      onWorkspaceOpened?.call(activeKey);
       notifyListeners();
+      return true;
     } catch (e) {
       _log('[session] workspace open failed: $e');
       // The relay link itself is fine; only the native list is degraded —
       // surface the reason so the UI can offer retry / web fallback
-      // instead of an eternal spinner.
-      _error = '$e';
+      // instead of an eternal spinner. A window-gate dead end is a stable
+      // sentinel: the UI localizes it instead of showing desktop text.
+      _error = e is _WorkspaceUnreachable || isWorkspaceWindowGateError(e)
+          ? workspaceUnreachableError
+          : '$e';
       notifyListeners();
+      return false;
     } finally {
       _openingWorkspace = false;
       sw.stop();
@@ -1705,6 +1806,190 @@ class DeviceSession extends ChangeNotifier
       // snapshot yet) is exactly the cold-start loading bug: guard it.
       _armListWatchdog();
     }
+  }
+
+  /// The desktop local host id every 3.16.3 addressing leg carries. Project
+  /// rows the resolver can name and tasks in the relay overview all belong
+  /// to this machine (`projects.host_id == 'local'`; remote hosts live in
+  /// another machine's index).
+  static const String _localHostId = 'local';
+
+  /// Whether the desktop understands the 3.16.3 addressing fields. The
+  /// bootstrap frame's live [desktopAppVersion] wins when present — the
+  /// paired link's `app_version` is a generation-time snapshot that can lag
+  /// the running desktop (live acceptance: a 3.16.3 desktop behind a 3.16.2
+  /// link, where the stale gate kept the fallback leg from ever firing) —
+  /// and falls back to that snapshot when the frame carries nothing.
+  bool get _supportsBridgeAddressing {
+    final desktop = _desktopAppVersion;
+    return desktop == null
+        ? params.atLeast(3, 16, 3)
+        : versionAtLeast(desktop, 3, 16, 3);
+  }
+
+  /// First addressing leg is the pre-3.16.3 frame. When the desktop's
+  /// bounded-window registry misses [key], the 3.16.3+ schemas accept a
+  /// second leg (live-probed against 3.16.3):
+  /// - [WorkspaceOpenPurpose.openTask]: `taskId + taskHostId` (READY — the
+  ///   desktop opens the task's own workspace into the bound window);
+  /// - [WorkspaceOpenPurpose.chatNew]: borrow a non-archived task of the
+  ///   workspace as `taskId + taskHostId` (same READY form — the workspace
+  ///   lands in the window and the following createSession stays on the
+  ///   existing success path), or, for a desktop-managed default/draft
+  ///   workspace with no task row, `project:{projectId:null, hostId}`
+  ///   (READY — the desktop prepares a NEW draft workspace; the reply's
+  ///   workspaceKey differs and [_openWorkspaceNow] follows it).
+  ///   A project workspace with no task has no viable leg: the live probe
+  ///   rejected `project:{projectId}` with `project.not-found` (the
+  ///   external projectId is not admitted by the renderer's project
+  ///   navigation domain), so the dead end stands.
+  ///
+  /// The version gate is mandatory BEFORE the first send of the extra
+  /// fields (an older strict validator may drop the whole frame);
+  /// purpose-less internal opens keep the single-leg behavior.
+  ///
+  /// A second-leg failure is wrapped in [_WorkspaceUnreachable], so the
+  /// caller's catch localizes the dead end while the log keeps the desktop's
+  /// raw refusal.
+  Future<BridgeSession> _openBridgeAddressed(
+    RemoteClient client, {
+    required String key,
+    required Map<String, dynamic> workspace,
+    String? taskId,
+    WorkspaceOpenPurpose? purpose,
+  }) async {
+    try {
+      return await client.openBridge(key, taskId: taskId);
+    } catch (e) {
+      if (purpose == null ||
+          !isWorkspaceWindowGateError(e) ||
+          !_supportsBridgeAddressing) {
+        rethrow;
+      }
+      if (purpose == WorkspaceOpenPurpose.openTask) {
+        if (taskId == null || taskId.isEmpty) rethrow;
+        _log('[session] workspace outside the desktop window; retrying with '
+            'task host addressing: key=$key task=$taskId');
+        try {
+          return await client.openBridge(
+            key,
+            taskId: taskId,
+            taskHostId: _localHostId,
+          );
+        } catch (e) {
+          throw _WorkspaceUnreachable(e);
+        }
+      }
+      final borrowed = _relayTaskIdFor(key);
+      if (borrowed != null) {
+        _log('[session] workspace outside the desktop window; retrying by '
+            'borrowing task host addressing: key=$key task=$borrowed');
+        try {
+          return await client.openBridge(
+            key,
+            taskId: borrowed,
+            taskHostId: _localHostId,
+          );
+        } catch (e) {
+          throw _WorkspaceUnreachable(e);
+        }
+      }
+      if (!_isDesktopManagedWorkspacePath(workspace['workspacePath'])) rethrow;
+      _log('[session] workspace outside the desktop window; retrying with '
+          'draft project addressing: key=$key');
+      try {
+        return await client.openBridge(
+          key,
+          // `project` is mutually exclusive with `taskId` server-side. The
+          // null projectId is the desktop's draft shape (formB): it
+          // prepares a fresh draft workspace instead of reusing one.
+          project: {'projectId': null, 'hostId': _localHostId},
+        );
+      } catch (e) {
+        throw _WorkspaceUnreachable(e);
+      }
+    }
+  }
+
+  /// A non-archived relay task living in [key]'s workspace, most recently
+  /// updated first — the taskId the chatNew fallback borrows to make the
+  /// desktop open that workspace into the bound window. Keys normalize
+  /// through [_workspaceKeyAliases] (an identity-keyed workspace lists its
+  /// rows by path until the overview leg re-normalizes them — check W1,
+  /// 10-26), and mirror copies cannot win: an id whose persisted home anchor
+  /// points elsewhere is skipped outright (the anchor is the anti-pollution
+  /// truth — a pollution copy IS the freshest row by construction), and an
+  /// un-anchored multi-copy id is ambiguous by definition (check W2 —
+  /// borrowing either would prepare the wrong workspace, the exact bug
+  /// this task fixes). No group aliases: borrowing a task from another
+  /// workspace would prepare the wrong directory.
+  String? _relayTaskIdFor(String key) {
+    final aliases = _workspaceKeyAliases;
+    String norm(String k) => aliases[k] ?? k;
+    final wanted = norm(key);
+    final copiesById = <String, int>{};
+    for (final task in _relayTasks) {
+      final id = task['taskId'];
+      if (id is String && id.isNotEmpty) {
+        copiesById[id] = (copiesById[id] ?? 0) + 1;
+      }
+    }
+    String? bestId;
+    var bestUpdatedAt = -1;
+    for (final task in _relayTasks) {
+      if (task['archived'] == true) continue;
+      final rowKey = TaskDirectory.relayKeyOf(task);
+      if (rowKey == null || norm(rowKey) != wanted) continue;
+      final id = task['taskId'];
+      if (id is! String || id.isEmpty) continue;
+      if (_homeStore.locallyDeletedTaskIds.contains(id)) continue;
+      final anchored = _homeStore.homeKeys[id];
+      if (anchored != null) {
+        if (norm(anchored) != wanted) continue;
+      } else if ((copiesById[id] ?? 0) > 1) {
+        continue;
+      }
+      final updatedAt = (task['updatedAt'] as num?)?.toInt() ?? 0;
+      if (updatedAt > bestUpdatedAt) {
+        bestUpdatedAt = updatedAt;
+        bestId = id;
+      }
+    }
+    return bestId;
+  }
+
+  /// Whether [path] names a workspace the desktop itself manages under
+  /// `.zcode/workspace` (`default` or a `draft-*` directory). Those have no
+  /// project row and accept the null-project draft leg; project roots do
+  /// not. Slash-normalized so both Windows and POSIX spellings match.
+  bool _isDesktopManagedWorkspacePath(Object? path) =>
+      path is String &&
+      path.replaceAll(r'\', '/').contains('/.zcode/workspace/');
+
+  /// The workspace the READY bridge actually points at: `bridge.workspaceKey`,
+  /// falling back to the requested map when the reply names the same
+  /// workspace (the usual path — keeps identity/label) or is absent. When
+  /// the reply names a different workspace (the draft-project leg prepares
+  /// a fresh draft), the listed entry for it is used, else a minimal path
+  /// map, so the subsequent subscription and createSession carry the real
+  /// scope instead of the requested one.
+  Map<String, dynamic> _workspaceOfBridge(
+    BridgeSession bridge,
+    Map<String, dynamic> requested,
+    String requestedKey,
+  ) {
+    final replyKey = bridge.workspaceKey;
+    if (replyKey == null || replyKey.isEmpty || replyKey == requestedKey) {
+      return requested;
+    }
+    for (final ws in _workspaces) {
+      if (workspaceKeyOf(ws) == replyKey ||
+          ws['workspacePath'] == replyKey ||
+          ws['workspaceIdentity'] == replyKey) {
+        return ws;
+      }
+    }
+    return {'workspacePath': replyKey};
   }
 
   void _onSessionsChanged() {
@@ -1849,6 +2134,15 @@ class DeviceSession extends ChangeNotifier
   /// field there keeps the previous list, a bootstrap frame always carries
   /// both.
   void _applyRelayOverview(Map<String, dynamic> bootstrap) {
+    // Live desktop version (top level of the bootstrap-response frame, not
+    // inside `result`): the only real-time version source — the link's
+    // `app_version` is a generation-time snapshot. Replace it every frame so
+    // a reconnect to another desktop cannot keep a stale gate open.
+    final desktopVersion = bootstrap['desktopAppVersion'];
+    _desktopAppVersion =
+        desktopVersion is String && desktopVersion.trim().isNotEmpty
+            ? desktopVersion.trim()
+            : null;
     final list = bootstrap['workspaces'];
     _setBootstrapWorkspaces([
       if (list is List)
@@ -2383,6 +2677,51 @@ class DeviceSession extends ChangeNotifier
 
   @override
   String? get workspacePath => _activeWorkspace?['workspacePath'] as String?;
+
+  @override
+  Future<bool> ensureDraftWorkspace(String? workspacePath) async {
+    final target = workspacePath;
+    if (target == null || target.isEmpty) return true;
+    final aliases = _workspaceKeyAliases;
+    String norm(String key) => aliases[key] ?? key;
+    final wanted = norm(target);
+    final active = _activeWorkspace;
+    if (active != null) {
+      final activePath = active['workspacePath'];
+      if (activePath is String && norm(activePath) == wanted) return true;
+      final activeKey = workspaceKeyOf(active);
+      if (activeKey != null && norm(activeKey) == wanted) return true;
+    }
+    Map<String, dynamic>? row;
+    for (final ws in _workspaces) {
+      final path = ws['workspacePath'];
+      final key = workspaceKeyOf(ws);
+      if (path == target || key == target) {
+        row = ws;
+        break;
+      }
+    }
+    if (row == null) {
+      // Conversation-group siblings (default + draft-*) normalize together;
+      // the exact-row pass above must win so the session lands in the
+      // target directory, not whichever sibling lists first.
+      for (final ws in _workspaces) {
+        final path = ws['workspacePath'];
+        final key = workspaceKeyOf(ws);
+        if ((path is String && norm(path) == wanted) ||
+            (key != null && norm(key) == wanted)) {
+          row = ws;
+          break;
+        }
+      }
+    }
+    _log('[session] draft target drifted from the bridge workspace; '
+        're-opening $target');
+    return openWorkspace(
+      row ?? {'workspacePath': target},
+      purpose: WorkspaceOpenPurpose.chatNew,
+    );
+  }
 
   @override
   String? get remoteUrl => params.source.toString();

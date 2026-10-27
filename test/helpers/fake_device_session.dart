@@ -146,6 +146,10 @@ class FakeDeviceSession extends DeviceSession {
   @override
   String? failureReason;
 
+  /// Seeded degraded-link error (null = healthy).
+  @override
+  String? error;
+
   @override
   Map<String, dynamic> get offPeakScope {
     final ws = _active ?? const <String, dynamic>{};
@@ -186,17 +190,28 @@ class FakeDeviceSession extends DeviceSession {
   ConversationTransport get conversationCommands => _conversationCommands;
 
   /// Recorded [openWorkspace] calls `(workspace, taskId)` for assertions on
-  /// the open path's workspace scope.
+  /// the open path's workspace scope; [openWorkspacePurposes] keeps the
+  /// purpose of each call in the same order.
   final List<(Map<String, dynamic>, String?)> openWorkspaceCalls = [];
+  final List<WorkspaceOpenPurpose?> openWorkspacePurposes = [];
+
+  /// Answers the open with a controllable success flag: `false` reproduces
+  /// the window-gate failure path (bridge still points at the old
+  /// workspace) without switching the fake's active workspace.
+  bool openWorkspaceSucceeds = true;
 
   @override
-  Future<void> openWorkspace(
+  Future<bool> openWorkspace(
     Map<String, dynamic> workspace, {
     String? taskId,
+    WorkspaceOpenPurpose? purpose,
   }) async {
     openWorkspaceCalls.add((workspace, taskId));
+    openWorkspacePurposes.add(purpose);
+    if (!openWorkspaceSucceeds) return false;
     _active = workspace;
     notifyListeners();
+    return true;
   }
 
   @override

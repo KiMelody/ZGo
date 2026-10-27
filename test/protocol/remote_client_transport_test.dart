@@ -88,6 +88,8 @@ void main() {
     fake.deliver({
       'zcode_type': 'bootstrap-response',
       'requestId': requestId,
+      // Live desktop version: frame top level, outside `result` (3.16.3).
+      'desktopAppVersion': '3.16.3',
       'result': {
         'workspaces': [
           {'workspacePath': '/repo'},
@@ -96,6 +98,8 @@ void main() {
     });
     final result = await future;
     expect(result['workspaces'], hasLength(1));
+    expect(result['desktopAppVersion'], '3.16.3',
+        reason: 'the live version must survive the result unwrap');
 
     // sendMobileDiagnostic is relay-layer telemetry, forwarded verbatim.
     client.sendMobileDiagnostic('state-transition', {'state': 'paired'});

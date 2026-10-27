@@ -109,6 +109,7 @@ const _zh = {
   'tasks.resume': '恢复',
   'tasks.opFailed': '操作失败: \$0',
   'tasks.scopeUnknown': '无法确定会话归属，未打开该任务',
+  'tasks.workspaceUnreachable': '该工作区未在桌面端打开，且无法自动准备，请先在桌面端打开该工作区',
   'tasks.untitled': '未命名任务',
   'tasks.workspaces': '工作区',
   'tasks.pickWorkspace': '选择工作区',
@@ -1379,6 +1380,9 @@ const _en = {
   'tasks.opFailed': 'Operation failed: \$0',
   'tasks.scopeUnknown':
       "Couldn't determine the session's workspace; task not opened.",
+  'tasks.workspaceUnreachable':
+      'This workspace is not open on the desktop and could not be prepared '
+          'automatically. Open it on the desktop first.',
   'tasks.untitled': 'Untitled task',
   'tasks.workspaces': 'Workspace',
   'tasks.pickWorkspace': 'Choose a workspace',

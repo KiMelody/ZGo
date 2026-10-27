@@ -74,6 +74,14 @@ class ConversationTransport {
   /// Injectable so tests can shrink it (protocol tests are fake_async-free).
   final Duration subscribeAckTimeout;
 
+  /// Per-call timeout for the handshake RPCs (hello + initialize). A live
+  /// bridge answers in well under a second; a reply that died with a
+  /// degraded bridge must not park every send behind the default 30s —
+  /// the timeout clears the cached handshake future so the next send
+  /// re-handshakes on the fresh channel (2026-10-27 draft-send stall).
+  /// Injectable so tests can shrink it.
+  final Duration handshakeCallTimeout;
+
   /// Desktop project id for a workspace path (3.16.2 project attribution,
   /// design 10-21 Part 2) — consulted ONLY by [createSession], whose outer
   /// channel parameters accept `projectId` as a sibling of `workspacePath`
@@ -94,6 +102,7 @@ class ConversationTransport {
     this.appVersion = '3.6.5',
     this.workspaceHookReviewUi = false,
     this.subscribeAckTimeout = const Duration(seconds: 10),
+    this.handshakeCallTimeout = const Duration(seconds: 10),
     this.projectIdFor,
     this.onLog,
     this.onLinkLevelFailure,
@@ -150,6 +159,11 @@ class ConversationTransport {
             channel,
             'helloConversationV4',
             [],
+            // A light RPC on a live bridge answers in well under a second;
+            // the default 30s would silently stall every command behind a
+            // handshake whose reply died with a degraded bridge
+            // (2026-10-27 draft-send stall).
+            timeout: handshakeCallTimeout,
           );
           log('[v4] hello: $hello');
           if (hello is Map) {
@@ -174,7 +188,7 @@ class ConversationTransport {
           try {
             await channels.call(channel, 'initializeConversationV4', [
               clientHello,
-            ]);
+            ], timeout: handshakeCallTimeout);
           } on ChannelRpcError catch (e) {
             // The desktop rejected the clientHello. When the
             // workflowRunDeltas capability was aboard, attribute the
@@ -193,7 +207,7 @@ class ConversationTransport {
             }
             await channels.call(channel, 'initializeConversationV4', [
               clientHello,
-            ]);
+            ], timeout: handshakeCallTimeout);
           }
           _handshaken = true;
         }().catchError((e) {

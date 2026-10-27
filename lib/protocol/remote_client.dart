@@ -316,13 +316,25 @@ class RemoteClient {
   }
 
   /// bootstrap-request -> bootstrap-response (workspaces overview).
+  ///
+  /// The desktop's live app version rides the FRAME top level as
+  /// `desktopAppVersion` (live-probed 3.16.3), outside `result`. It is
+  /// preserved on the returned map for version gates: the paired link's
+  /// `app_version` is a generation-time snapshot and can lag the running
+  /// desktop (a 3.16.3 desktop behind a 3.16.2 link, live acceptance
+  /// 2026-10-26).
   Future<Map<String, dynamic>> bootstrap() async {
     final id = _reqId('bootstrap');
     final res = await request({
       'zcode_type': 'bootstrap-request',
       'requestId': id,
     }, (p) => p['zcode_type'] == 'bootstrap-response' && p['requestId'] == id);
-    return (res['result'] as Map?)?.cast<String, dynamic>() ?? res;
+    final result = (res['result'] as Map?)?.cast<String, dynamic>() ?? res;
+    final version = res['desktopAppVersion'];
+    if (version is String && version.trim().isNotEmpty) {
+      return {...result, 'desktopAppVersion': version.trim()};
+    }
+    return result;
   }
 
   /// workspace-list-request -> workspace-list-response.
@@ -360,9 +372,19 @@ class RemoteClient {
 
   /// workspace-bridge-open -> workspace-bridge-ready, then builds the
   /// rpc-frame transport + IPC channel client for the workspace.
+  ///
+  /// [project] and [taskHostId] are the 3.16.3+ desktop addressing fields:
+  /// when [workspaceKey] misses the bound window's registry, the desktop
+  /// uses them to `prepareProjectWorkspace` first (project draft addressing
+  /// for a new chat, task host addressing for an existing task). Both are
+  /// omitted unless passed explicitly, so pre-3.16.3 frames stay
+  /// byte-identical to the pre-addressing shape. `project` is mutually
+  /// exclusive with `taskId` server-side.
   Future<BridgeSession> openBridge(
     String workspaceKey, {
     String? taskId,
+    Map<String, dynamic>? project,
+    String? taskHostId,
     Duration timeout = const Duration(seconds: 30),
   }) async {
     final bridgeSessionId = _reqId('bridge');
@@ -376,6 +398,8 @@ class RemoteClient {
         'bridgeGeneration': generation,
         'workspaceKey': workspaceKey,
         if (taskId != null) 'taskId': taskId,
+        if (taskHostId != null) 'taskHostId': taskHostId,
+        if (project != null) 'project': project,
       },
       (p) =>
           (p['zcode_type'] == 'workspace-bridge-ready' ||
@@ -392,6 +416,17 @@ class RemoteClient {
 
     final session = BridgeSession._(
       bridge: bridge,
+      // Only the 3.16.3+ window-gate fallback leg passes taskHostId; that
+      // pair is what made the desktop prepare the workspace into its bound
+      // window, so recovery must replay it. A first-leg open (workspaceKey,
+      // or workspaceKey+taskId) needs no re-addressing: its workspace is
+      // already inside the window. A project (draft formB) leg is
+      // deliberately not recorded either: replaying it would prepare a
+      // FRESH draft workspace on every recovery, and the reply's drifted
+      // workspaceKey is not followed by _reopenBridge.
+      recoveryTaskId: taskHostId == null || taskId == null ? null : taskId,
+      recoveryTaskHostId:
+          taskHostId == null || taskId == null ? null : taskHostId,
       onDispose: (s) {
         _activeBridges.remove(s);
         _frameRouters.remove(s.bridge['bridgeSessionId']);
@@ -456,6 +491,13 @@ class RemoteClient {
   /// Reopens a degraded/dead bridge: new `workspace-bridge-open` (fresh
   /// bridgeSessionId, bumped generation, carries recoveryId), then swaps
   /// the stack into the existing [BridgeSession].
+  ///
+  /// When the bridge was established through the task-host addressing leg,
+  /// the reopen replays that pair: the desktop's bounded-window registry
+  /// still misses the prepared workspace, so a bare workspaceKey would be
+  /// refused by the window gate on every retry (live 3.16.3, 2026-10-27).
+  /// Plain-workspaceKey bridges add no field — their frame stays
+  /// byte-identical to the pre-addressing shape (R5).
   Future<void> _reopenBridge(BridgeSession session, String workspaceKey) async {
     final oldBridge = session.bridge;
     final bridgeSessionId = _reqId('bridge');
@@ -471,6 +513,9 @@ class RemoteClient {
         if (oldBridge['recoveryId'] != null)
           'recoveryId': oldBridge['recoveryId'],
         'workspaceKey': workspaceKey,
+        if (session.recoveryTaskId != null) 'taskId': session.recoveryTaskId,
+        if (session.recoveryTaskHostId != null)
+          'taskHostId': session.recoveryTaskHostId,
       },
       (p) =>
           (p['zcode_type'] == 'workspace-bridge-ready' ||
@@ -610,10 +655,21 @@ class BridgeSession {
         .whenComplete(() => degraded.removeListener(check));
   }
 
+  /// The `taskId`/`taskHostId` pair the desktop accepted when this bridge
+  /// was opened through the 3.16.3+ window-gate task-host fallback leg.
+  /// Null for first-leg bridges (workspaceKey alone or workspaceKey+taskId:
+  /// the workspace was already in the bound window). [_reopenBridge] replays
+  /// the pair so the desktop re-prepares the task's workspace after a
+  /// transport fault; null keeps the reopen frame byte-identical.
+  final String? recoveryTaskId;
+  final String? recoveryTaskHostId;
+
   BridgeSession._({
     required Map<String, dynamic> bridge,
     required void Function(BridgeSession) onDispose,
     required this.workspaceHookReviewUi,
+    this.recoveryTaskId,
+    this.recoveryTaskHostId,
   }) : _bridge = bridge,
        _transport = _placeholderTransport(bridge),
        _channels = ChannelClient(sendBody: (_) {}),
