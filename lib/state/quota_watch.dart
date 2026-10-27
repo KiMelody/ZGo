@@ -557,6 +557,10 @@ class QuotaWatchController extends ChangeNotifier {
   /// app (2026-09-20 真机诊断): doze throttles the CPU enough that RPCs
   /// stall for tens of seconds, so both states settle on 5 min and are
   /// restored independently (a resume / one success) without interacting.
+  /// The backgrounded branch applies only while keep-alive is off
+  /// (2026-10-26 R1): a running foreground service keeps the process out of
+  /// the doze-throttled scenario, so the user's cadence holds in the
+  /// background.
   static const backoffInterval = Duration(minutes: 5);
 
   /// Failed ticks in a row before the backoff cadence kicks in.
@@ -587,6 +591,7 @@ class QuotaWatchController extends ChangeNotifier {
   QuotaWatchEdgeState _edges = const QuotaWatchEdgeState();
   bool _disposed = false;
   bool _backgrounded = false;
+  bool _keepAliveActive = false;
   int _consecutiveFailures = 0;
 
   QuotaWatchSnapshot _snapshot =
@@ -597,11 +602,15 @@ class QuotaWatchController extends ChangeNotifier {
   QuotaWatchSnapshot get snapshot => _snapshot;
 
   /// The cadence the periodic timer currently runs at: the configured
-  /// interval, unless the app is backgrounded or the poll is in failure
-  /// backoff — both slow to the fixed [backoffInterval]. Also the honest
-  /// value for the N6 retry copy.
+  /// interval, unless the app is backgrounded with keep-alive off or the
+  /// poll is in failure backoff — those slow to the fixed [backoffInterval].
+  /// Keep-alive removes the background slow-down (2026-10-26 R1: the
+  /// foreground service keeps the process out of the doze-throttled
+  /// scenario, so the user's cadence holds); failure backoff stays
+  /// independent of it. Also the honest value for the N6 retry copy.
   Duration get effectiveInterval =>
-      (_backgrounded || _consecutiveFailures >= backoffAfterFailures)
+      ((_backgrounded && !_keepAliveActive) ||
+              _consecutiveFailures >= backoffAfterFailures)
           ? backoffInterval
           : _interval;
 
@@ -613,9 +622,11 @@ class QuotaWatchController extends ChangeNotifier {
   /// Pushes the settings节 values in (called on every UiSettings change);
   /// enabling starts polling with an immediate tick, disabling stops it
   /// and withdraws the notice. A threshold / reminder / lead change
-  /// re-judges the last view without an RPC.
+  /// re-judges the last view without an RPC. A keep-alive change re-syncs
+  /// the cadence ([effectiveInterval]) without an RPC either.
   void configure({
     required bool enabled,
+    required bool keepAliveActive,
     required int thresholdPercent,
     required Duration interval,
     required bool expiryReminderEnabled,
@@ -627,6 +638,7 @@ class QuotaWatchController extends ChangeNotifier {
     final intervalChanged = _interval != interval;
     final unchanged = !intervalChanged &&
         wasEnabled == enabled &&
+        _keepAliveActive == keepAliveActive &&
         _thresholdPercent == thresholdPercent &&
         _expiryReminderEnabled == expiryReminderEnabled &&
         _fiveHourExpiryLeadMinutes == fiveHourExpiryLeadMinutes &&
@@ -638,6 +650,7 @@ class QuotaWatchController extends ChangeNotifier {
     _fiveHourExpiryLeadMinutes = fiveHourExpiryLeadMinutes;
     _weeklyExpiryLeadHours = weeklyExpiryLeadHours;
     _enabled = enabled;
+    _keepAliveActive = keepAliveActive;
     // A fresh enable starts from a clean slate: failures accumulated
     // before the switch-off must not open in backoff.
     if (!wasEnabled && enabled) _consecutiveFailures = 0;
@@ -674,28 +687,39 @@ class QuotaWatchController extends ChangeNotifier {
   /// 2026-09-20 真机诊断 showed doze-stalled ticks leaving old data standing
   /// until the next periodic tick, and a resume must refresh at once. Not
   /// gated by the backoff: it drives [pollNow] directly, off the timer.
-  /// Skipped while the last successful poll is younger than
-  /// [foregroundRefetchWindow].
   void foregrounded() {
     if (_disposed) return;
     _backgrounded = false;
     _consecutiveFailures = 0;
     _syncTimer();
+    _refetchIfStale();
+  }
+
+  /// App paused (home screen, app switch, screen off): with keep-alive off,
+  /// drop to the fixed slow cadence — doze throttles the CPU enough that the
+  /// tight cadence only burns battery while every RPC stalls anyway. With
+  /// keep-alive on the user cadence holds (2026-10-26 R1). Either way the
+  /// pause re-polls once (R2), so the notice is fresh from the pause moment
+  /// on instead of waiting out the whole cadence.
+  void backgrounded() {
+    if (_disposed) return;
+    _backgrounded = true;
+    _syncTimer();
+    _refetchIfStale();
+  }
+
+  /// The lifecycle seam's re-fetch gate (foreground and background): poll
+  /// now unless the last SUCCESSFUL poll is younger than
+  /// [foregroundRefetchWindow] (2026-09-21 风控对标) — rapid app switching
+  /// must not hammer the billing endpoint. A failed poll records nothing,
+  /// so a lifecycle flip right after a failure still retries.
+  void _refetchIfStale() {
     final last = _lastSuccessfulPollAt;
     if (last != null &&
         clock.now().difference(last) < foregroundRefetchWindow) {
       return;
     }
     unawaited(pollNow(force: true));
-  }
-
-  /// App paused (home screen, app switch, screen off): drop to the fixed
-  /// slow cadence — doze throttles the CPU enough that the tight cadence
-  /// only burns battery while every RPC stalls anyway.
-  void backgrounded() {
-    if (_disposed) return;
-    _backgrounded = true;
-    _syncTimer();
   }
 
   /// One poll + judge cycle (public so tests and manual refreshes drive

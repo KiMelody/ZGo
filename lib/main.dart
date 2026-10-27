@@ -335,6 +335,7 @@ class _ZGoAppState extends State<ZGoApp>
   void _applyQuotaWatchSettings() {
     _quotaWatch.configure(
       enabled: _ui.quotaWatchEnabled,
+      keepAliveActive: _ui.keepAliveEnabled,
       thresholdPercent: _ui.quotaWatchThreshold,
       interval: Duration(minutes: _ui.quotaWatchIntervalMinutes),
       expiryReminderEnabled: _ui.quotaWatchExpiryReminderEnabled,
@@ -462,9 +463,11 @@ class _ZGoAppState extends State<ZGoApp>
 
   /// Quota watch cadence (2026-09-20 真机诊断): doze stalls the RPCs, so
   /// going to the background (paused — home screen, app switch, screen
-  /// off) drops to the slow 5-minute cadence, and a resume refreshes at
-  /// once instead of waiting out the next periodic tick. `inactive` /
-  /// `hidden` (dialogs, system sheets) leave the cadence alone.
+  /// off) drops to the slow 5-minute cadence unless keep-alive holds the
+  /// user cadence (2026-10-26 R1), and the pause re-polls once (R2). A
+  /// resume refreshes at once instead of waiting out the next periodic
+  /// tick. `inactive` / `hidden` (dialogs, system sheets) leave the
+  /// cadence alone.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
