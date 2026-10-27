@@ -62,6 +62,8 @@ class _StubClient extends RemoteClient {
   Future<BridgeSession> openBridge(
     String workspaceKey, {
     String? taskId,
+    Map<String, dynamic>? project,
+    String? taskHostId,
     Duration timeout = const Duration(seconds: 30),
   }) async =>
       throw StateError('openBridge is not expected in this test');

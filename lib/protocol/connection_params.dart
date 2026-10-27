@@ -1,5 +1,34 @@
 import 'package:flutter/foundation.dart';
 
+/// Parses a dotted desktop version into up to three numeric segments; null
+/// when absent or any segment is non-numeric (e.g. a `-beta` suffix) —
+/// callers must treat null as "unknown", never as "new".
+///
+/// Shared by the link's `app_version` gate ([RemoteConnectionParams.atLeast])
+/// and the live `desktopAppVersion` gate (bootstrap-response), so both
+/// spellings compare identically.
+List<int>? parseVersionTriple(String? version) {
+  final parts = version?.split('.');
+  if (parts == null) return null;
+  final triple = <int>[];
+  for (var i = 0; i < 3; i++) {
+    final n = i < parts.length ? int.tryParse(parts[i]) : 0;
+    if (n == null) return null;
+    triple.add(n);
+  }
+  return triple;
+}
+
+/// Whether [version] is at least [major].[minor].[patch]. Unknown, absent
+/// or malformed versions answer false so legacy shapes stay the default.
+bool versionAtLeast(String? version, int major, int minor, int patch) {
+  final t = parseVersionTriple(version);
+  if (t == null) return false;
+  if (t[0] != major) return t[0] > major;
+  if (t[1] != minor) return t[1] > minor;
+  return t[2] >= patch;
+}
+
 /// Parses a ZCode web-remote connection URL.
 ///
 /// Two link generations exist (desktop 3.16.2, 2026-10-19):
@@ -110,17 +139,7 @@ class RemoteConnectionParams {
   /// Parsed [appVersion] as up to three numeric segments; null when absent
   /// or any segment is non-numeric (e.g. a `-beta` suffix) — callers must
   /// treat null as "unknown", never as "new".
-  List<int>? get _versionTriple {
-    final parts = appVersion?.split('.');
-    if (parts == null) return null;
-    final triple = <int>[];
-    for (var i = 0; i < 3; i++) {
-      final n = i < parts.length ? int.tryParse(parts[i]) : 0;
-      if (n == null) return null;
-      triple.add(n);
-    }
-    return triple;
-  }
+  List<int>? get _versionTriple => parseVersionTriple(appVersion);
 
   /// Whether [appVersion] parsed into a comparable numeric triple — false
   /// when the parameter is absent or malformed. Version-gated callers use
@@ -132,11 +151,6 @@ class RemoteConnectionParams {
   /// — the first-level gate for 3.12.3 wire shapes (quota `accountAccess`,
   /// automation `scheduleRule`, off-peak positional args). Unknown, absent
   /// or malformed versions answer false so legacy shapes stay the default.
-  bool atLeast(int major, int minor, int patch) {
-    final t = _versionTriple;
-    if (t == null) return false;
-    if (t[0] != major) return t[0] > major;
-    if (t[1] != minor) return t[1] > minor;
-    return t[2] >= patch;
-  }
+  bool atLeast(int major, int minor, int patch) =>
+      versionAtLeast(appVersion, major, minor, patch);
 }

@@ -40,6 +40,8 @@ class StubRemoteClient extends RemoteClient {
   Future<BridgeSession> openBridge(
     String workspaceKey, {
     String? taskId,
+    Map<String, dynamic>? project,
+    String? taskHostId,
     Duration timeout = const Duration(seconds: 30),
   }) => Future.error(StateError('workspace-bridge-error: stub has no bridges'));
 

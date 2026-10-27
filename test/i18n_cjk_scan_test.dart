@@ -90,6 +90,19 @@ const List<Exemption> exemptions = [
         'window-missed refusal for failure memory, never rendered by the app',
   ),
   Exemption(
+    file: 'lib/state/device_session.dart',
+    literal: '不在当前桌面窗口中',
+    reason: 'isWorkspaceWindowGateError(): classifies the raw desktop '
+        'workspace-bridge-open window-gate refusal to pick the 3.16.3+ '
+        'addressing leg, never rendered by the app',
+  ),
+  Exemption(
+    file: 'lib/state/device_session.dart',
+    literal: '不在当前窗口中',
+    reason: 'isWorkspaceWindowGateError(): the reconnect spelling of the '
+        'same desktop window-gate refusal, never rendered by the app',
+  ),
+  Exemption(
     file: 'lib/ui/remote_page.dart',
     literal: '(function () {',
     reason: 'injected deep-link JS: matches the desktop web DOM text '

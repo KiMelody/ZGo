@@ -182,6 +182,11 @@ class _TaskListPageState extends State<TaskListPage>
   String? _paneInitialComposerText;
   bool _panePinned = false;
 
+  /// The workspace a draft pane was opened in (captured when the pane is
+  /// opened, not read live): the chat page uses it to re-point the bridge
+  /// before the first send when a reconnect moved the connection elsewhere.
+  String? _paneDraftWorkspacePath;
+
   /// True while a [DeviceSession.reloadTasks] RPC is in flight — the list
   /// is about to be replaced, so the list surfaces go pointer-dead for the
   /// round-trip (no stale-row taps mid-reshuffle; page-level, not per row).
@@ -765,6 +770,7 @@ class _TaskListPageState extends State<TaskListPage>
       embedded: true,
       initialComposerText: _paneInitialComposerText,
       initialPinned: _panePinned,
+      draftWorkspacePath: id == null ? _paneDraftWorkspacePath : null,
       workspaceLabel: session.activeWorkspace != null
           ? workspaceTitle(session.activeWorkspace!)
           : null,
@@ -1791,7 +1797,14 @@ class _TaskListPageState extends State<TaskListPage>
     final newLabel = tr(context, 'tasks.new');
     Future<void> start() async {
       if (workspace != null && !_isWorkspaceActive(session, workspace)) {
-        await session.openWorkspace(workspace);
+        final opened = await session.openWorkspace(
+          workspace,
+          purpose: WorkspaceOpenPurpose.chatNew,
+        );
+        if (!opened) {
+          if (mounted) _showWorkspaceUnreachable();
+          return;
+        }
       }
       if (!mounted) return;
       await _openChat(title: newLabel);
@@ -2058,13 +2071,30 @@ class _TaskListPageState extends State<TaskListPage>
       return;
     }
     if (!_isWorkspaceActive(session, workspace)) {
-      await session.openWorkspace(workspace, taskId: entry.sessionId);
+      final opened = await session.openWorkspace(
+        workspace,
+        taskId: entry.sessionId,
+        purpose: WorkspaceOpenPurpose.openTask,
+      );
+      if (!opened) {
+        if (mounted) _showWorkspaceUnreachable();
+        return;
+      }
     }
     if (!mounted) return;
     await _openChat(
       sessionId: entry.sessionId,
       title: title,
       pinned: entry.raw['pinned'] == true,
+    );
+  }
+
+  /// The bridge still points at the previous workspace (both addressing
+  /// legs failed): keep the user on the list instead of pushing a chat that
+  /// would subscribe under the wrong scope, and say why in the locale.
+  void _showWorkspaceUnreachable() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(tr(context, 'tasks.workspaceUnreachable'))),
     );
   }
 
@@ -2640,6 +2670,8 @@ class _TaskListPageState extends State<TaskListPage>
         _paneTitle = title;
         _paneInitialComposerText = initialComposerText;
         _panePinned = pinned;
+        _paneDraftWorkspacePath =
+            sessionId == null ? session.workspacePath : null;
       });
       return;
     }
@@ -2652,6 +2684,7 @@ class _TaskListPageState extends State<TaskListPage>
           theme: widget.theme,
           initialComposerText: initialComposerText,
           initialPinned: pinned,
+          draftWorkspacePath: sessionId == null ? session.workspacePath : null,
           workspaceLabel: session.activeWorkspace != null
               ? workspaceTitle(session.activeWorkspace!)
               : null,
@@ -2812,7 +2845,7 @@ class _TaskListPageState extends State<TaskListPage>
             ),
             const SizedBox(height: 8),
             Text(
-              error ?? tr(context, 'tasks.fallback.body'),
+              _errorCopy(context, error),
               textAlign: TextAlign.center,
               maxLines: 5,
               overflow: TextOverflow.ellipsis,
@@ -2854,6 +2887,15 @@ class _TaskListPageState extends State<TaskListPage>
   }
 }
 
+/// Maps stable session error sentinels to localized copy; any other error
+/// string is an upstream message shown verbatim (pre-existing behavior).
+String _errorCopy(BuildContext context, String? error) {
+  if (error == workspaceUnreachableError) {
+    return tr(context, 'tasks.workspaceUnreachable');
+  }
+  return error ?? tr(context, 'tasks.fallback.body');
+}
+
 /// Connection status card at the top of the list (mobile layout).
 /// Always visible: the healthy link shows the green online state plus the
 /// explanation copy; degraded states add retry + web fallback actions.
@@ -2880,7 +2922,7 @@ class _ConnectionBanner extends StatelessWidget {
       final localized = tr(context, 'remote.failure.$reason');
       if (localized != 'remote.failure.$reason') return localized;
     }
-    return s.error ?? tr(context, 'tasks.fallback.body');
+    return _errorCopy(context, s.error);
   }
 
   bool get _online =>

@@ -65,6 +65,8 @@ class StubRemoteClient extends RemoteClient {
   Future<BridgeSession> openBridge(
     String workspaceKey, {
     String? taskId,
+    Map<String, dynamic>? project,
+    String? taskHostId,
     Duration timeout = const Duration(seconds: 30),
   }) async {
     final bridge = bridgeOverride;
@@ -125,6 +127,11 @@ class _SendPathBridge implements BridgeSession {
 
   final Object? Function(String channel, String method, List<Object?> args)
       _respond;
+
+  /// The send-path tests never assert on the reply key; null keeps the
+  /// session on the requested workspace map.
+  @override
+  String? get workspaceKey => null;
 
   /// When true the health gate throws immediately — the bridge-level tier
   /// ([BridgeSession.waitHealthy] expiry) without the 45s wall.

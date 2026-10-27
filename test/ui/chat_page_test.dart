@@ -6,6 +6,7 @@ import 'package:flutter/services.dart'
     show MethodChannel, SystemChannels, Uint8List;
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:zgo/i18n/lexicon.dart';
 import 'package:zgo/protocol/channel_client.dart';
 import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/protocol/remote_client.dart';
@@ -1181,6 +1182,113 @@ void main() {
     expect(call.$2[2], {'thought': 'off'});
   });
 
+    testWidgets('draft first send verifies the captured workspace before '
+        'createSession', (tester) async {
+      final gateway = FakeChatGateway();
+      await tester.pumpWidget(
+        wrap(
+          ChatPage(
+            gateway: gateway,
+            title: '新任务',
+            draftWorkspacePath: '/repo/app',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), '开始分析');
+      await tester.pump();
+      await tester.tap(find.byIcon(Icons.arrow_upward));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(gateway.ensuredDraftWorkspaces, ['/repo/app']);
+      expect(
+        gateway.calls.where((c) => c.$1 == 'createSession'),
+        hasLength(1),
+        reason: 'a reachable target proceeds to the normal create path',
+      );
+    });
+
+  testWidgets('a stalled draft guard keeps the creating progress visible '
+      '(2026-10-27 P1)', (tester) async {
+    final gateway = FakeChatGateway()
+      ..ensureDraftWorkspaceGate = Completer<void>();
+    await tester.pumpWidget(
+      wrap(
+        ChatPage(
+          gateway: gateway,
+          title: '新任务',
+          draftWorkspacePath: '/repo/app',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '开始分析');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pump();
+
+    // The guard is parked (bridge-jitter window): the page must say it is
+    // creating instead of sitting silent, and no session may be created.
+    expect(
+      find.text(trLocale('zh-CN', 'chat.creating')),
+      findsOneWidget,
+      reason: 'the progress state covers the guard/handshake wait, not '
+          'just the createSession rpc',
+    );
+    expect(gateway.calls.where((c) => c.$1 == 'createSession'), isEmpty);
+
+    gateway.ensureDraftWorkspaceGate!.complete();
+    // Fixed pumps, not pumpAndSettle: the creating progress may keep an
+    // animation alive while the fake createSession has long completed.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(
+      gateway.calls.where((c) => c.$1 == 'createSession'),
+      hasLength(1),
+      reason: 'once the guard resolves the send proceeds normally',
+    );
+  });
+
+  testWidgets('a dead-end draft target blocks the send and keeps the draft',
+      (tester) async {
+    final gateway = FakeChatGateway()..ensureDraftWorkspaceResult = false;
+    await tester.pumpWidget(
+      wrap(
+        ChatPage(
+          gateway: gateway,
+          title: '新任务',
+          draftWorkspacePath: '/repo/chat',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '开始分析');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(gateway.ensuredDraftWorkspaces, ['/repo/chat']);
+    expect(
+      gateway.calls.where((c) => c.$1 == 'createSession'),
+      isEmpty,
+      reason: 'creating now would land the task in the wrong workspace',
+    );
+    expect(
+      tester.widget<TextField>(find.byType(TextField).first).controller!.text,
+      '开始分析',
+      reason: 'the draft text survives the blocked send',
+    );
+    expect(
+      find.text(trLocale('zh-CN', 'tasks.workspaceUnreachable')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('existing session: send goes through sendTextOrQueue', (
     tester,
   ) async {
@@ -1198,6 +1306,11 @@ void main() {
     await tester.tap(find.byIcon(Icons.arrow_upward));
     await tester.pumpAndSettle();
 
+    expect(
+      gateway.ensuredDraftWorkspaces,
+      isEmpty,
+      reason: 'an existing session never re-runs the draft guard',
+    );
     final call = gateway.calls
         .where((c) => c.$1 == 'sendTextOrQueue')
         .toList()

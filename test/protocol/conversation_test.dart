@@ -1432,6 +1432,54 @@ void main() {
       expect((hellos.last['capabilities'] as Map)['workflowRunDeltas'], isTrue);
     });
 
+    test('a stalled hello times out and the next send retries the handshake '
+        '(2026-10-27 draft-send stall)', () async {
+      // First hello's reply dies with a degraded bridge — the channel never
+      // answers. The injected short call timeout must surface a
+      // TimeoutException and clear the cached handshake future, so the NEXT
+      // command re-handshakes on the (now live) channel instead of parking
+      // every send behind the dead future.
+      var helloCalls = 0;
+      late final ChannelClient client;
+      client = ChannelClient(sendBody: (body) {
+        final reader = ValueReader(body);
+        final header = decodeValue(reader) as List;
+        final id = header[1] as int;
+        final method = '${header[3]}';
+        if (method == 'helloConversationV4') {
+          helloCalls++;
+          if (helloCalls == 1) return; // dead bridge: no answer at all
+        }
+        final payload =
+            method == 'helloConversationV4' ? {'connectionId': 'c1'} : const {};
+        final w = ValueWriter();
+        encodeValue(w, [ChannelClient.resPromiseSuccess, id]);
+        encodeValue(w, payload);
+        client.handleMessage(w.toBytes());
+      });
+      final init = ValueWriter();
+      encodeValue(init, [ChannelClient.resInitialize, 0]);
+      client.handleMessage(init.toBytes());
+      final session = _FakeBridgeSession(client);
+      final transport = ConversationTransport(
+        session: session,
+        scope: {'workspacePath': '/repo'},
+        handshakeCallTimeout: const Duration(milliseconds: 50),
+      );
+
+      await expectLater(
+        transport.sendCommand(null, 'createSession', const {}),
+        throwsA(isA<TimeoutException>()),
+      );
+      expect(helloCalls, 1);
+
+      final res = await transport.sendCommand(null, 'createSession', const {});
+      expect(res, const {});
+      expect(helloCalls, 2,
+          reason: 'the cleared handshake future lets the next send '
+              're-handshake on the live channel');
+    });
+
     test('dial rejects twice: the retry failure propagates', () async {
       var attempts = 0;
       final transport = ConversationTransport(

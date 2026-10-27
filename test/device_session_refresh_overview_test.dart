@@ -67,6 +67,8 @@ class OverviewStubClient extends RemoteClient {
   Future<BridgeSession> openBridge(
     String workspaceKey, {
     String? taskId,
+    Map<String, dynamic>? project,
+    String? taskHostId,
     Duration timeout = const Duration(seconds: 30),
   }) async {
     openBridgeCalls += 1;
