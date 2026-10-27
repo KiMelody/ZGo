@@ -264,6 +264,51 @@ class _TaskListPageState extends State<TaskListPage>
       ..sort((a, b) => b.lastActivityAt.compareTo(a.lastActivityAt));
   }
 
+  /// Workspace cards ordered by most recent activity, using the SAME key
+  /// the card chip prints: `max(lastActivityAt)` over the workspace's
+  /// non-archived directory rows (default [TaskDirectory.entriesFor]
+  /// scope, no `includeArchived`). Wire entries and synthesized completion
+  /// entries share this key — a completion entry no longer defaults to the
+  /// tail (PRD R1/R2).
+  ///
+  /// Conversation workspaces own no card (see [_isConversationWorkspace]),
+  /// so the gate lives here instead of repeating at each call site. A null
+  /// key — no workspace key, or an empty non-archived directory (no tasks
+  /// at all, or archived only) — sorts last. Ties, including null-null,
+  /// break on the title and then on the key so the order is total: Dart's
+  /// sort is not stable, never rely on the incoming list order.
+  List<Map<String, dynamic>> _orderedWorkspaces(DeviceSession session) {
+    int? activityOf(Map<String, dynamic> ws) {
+      final dirKey = workspaceKeyOf(ws);
+      if (dirKey == null) return null;
+      int? newest;
+      for (final (entry, _) in session.taskDirectory.entriesFor(dirKey)) {
+        if (newest == null || entry.lastActivityAt > newest) {
+          newest = entry.lastActivityAt;
+        }
+      }
+      return newest;
+    }
+
+    final ordered = <(Map<String, dynamic>, int?)>[
+      for (final ws in session.workspaces)
+        if (!_isConversationWorkspace(ws)) (ws, activityOf(ws)),
+    ];
+    ordered.sort((a, b) {
+      final (wsA, activityA) = a;
+      final (wsB, activityB) = b;
+      if (activityA != activityB) {
+        if (activityA == null) return 1;
+        if (activityB == null) return -1;
+        return activityB.compareTo(activityA);
+      }
+      final byTitle = workspaceTitle(wsA).compareTo(workspaceTitle(wsB));
+      if (byTitle != 0) return byTitle;
+      return (workspaceKeyOf(wsA) ?? '').compareTo(workspaceKeyOf(wsB) ?? '');
+    });
+    return [for (final (ws, _) in ordered) ws];
+  }
+
   // ------------------------------------------------- merged task data source
   //
   // One merged directory (see [TaskDirectory]): the relay overview carries
@@ -513,9 +558,8 @@ class _TaskListPageState extends State<TaskListPage>
                             top: 0, bottom: 16, horizontal: 6),
                         children: [
                           ..._desktopPinned(context, session),
-                          for (final ws in session.workspaces)
-                            if (!_isConversationWorkspace(ws))
-                              _desktopWorkspaceFolder(context, session, ws),
+                          for (final ws in _orderedWorkspaces(session))
+                            _desktopWorkspaceFolder(context, session, ws),
                         ],
                       ),
                     ),
@@ -979,12 +1023,11 @@ class _TaskListPageState extends State<TaskListPage>
             else if (_groupBy == 'timeline')
               ..._timelineGroups(context, session)
             else
-              for (final ws in session.workspaces)
-                if (!_isConversationWorkspace(ws))
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: ZSpacing.cardGap),
-                    child: _workspaceCard(context, session, ws),
-                  ),
+              for (final ws in _orderedWorkspaces(session))
+                Padding(
+                  padding: const EdgeInsets.only(bottom: ZSpacing.cardGap),
+                  child: _workspaceCard(context, session, ws),
+                ),
           ],
         ];
         // The replace window: while a reload RPC is in flight the list is
@@ -1528,10 +1571,14 @@ class _TaskListPageState extends State<TaskListPage>
   List<Widget> _archiveView(BuildContext context, DeviceSession session) {
     final widgets = <Widget>[];
     var total = 0;
-    for (final ws in session.workspaces) {
-      // Conversation rows are keyed to the default group; their archived
-      // rows already surface under that group below (no draft header).
-      if (_isConversationWorkspace(ws)) continue;
+    // Same activity order as the cards. The key is the non-archived one, so
+    // a workspace whose live directory is empty (archived rows only) keeps
+    // the null key and sorts last — deliberate, so the archive view never
+    // contradicts the home card order.
+    // Conversation rows are keyed to the default group; their archived
+    // rows already surface under that group below (no draft header) —
+    // [_orderedWorkspaces] filters those workspaces out.
+    for (final ws in _orderedWorkspaces(session)) {
       final dirKey = workspaceKeyOf(ws);
       final entries = _sortedEntries(dirKey == null
           ? const <SessionEntry>[]

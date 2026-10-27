@@ -1380,6 +1380,232 @@ void main() {
     expect(order, ['新中继', '中位任务', '旧中继']);
   });
 
+  testWidgets(
+      'workspace cards order by newest task activity — wire and completed '
+      '(synthesized) entries share the key (R1/R2)', (tester) async {
+    // The card chip's key is max(lastActivityAt) over the card's
+    // non-archived rows; the CARD ORDER must read the same data (completion
+    // entries no longer default to the tail). The wire order below is the
+    // broken old order — stale first, fresh synthesized last — so passing
+    // requires the explicit sort.
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 1600);
+    addTearDown(tester.view.reset);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    const hour = 3600000;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        // Live-only row of app: 1h old (carries its own key — the seeded
+        // index is "subscribed" to the first workspace, not this one).
+        {
+          'sessionId': 's1',
+          'title': '应用任务',
+          'phase': 'completedSuccess',
+          'lastActivityAt': now - hour,
+          'workspacePath': '/repo/app',
+          'workspaceIdentity': 'app-id',
+        },
+      ],
+      workspaces: [
+        {'workspacePath': '/repo/stale', 'workspaceIdentity': 'stale'},
+        // Keyless workspace: no path, no identity → no directory at all.
+        {'label': 'orphan'},
+        {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+        // 3.16.2 completion entry (synthesized from the project resolver):
+        // must sort by its own activity, not stay appended at the tail.
+        {
+          'kind': 'local',
+          'label': 'chat',
+          'workspacePath': r'F:\chat',
+          'workspacePurpose': 'project',
+        },
+      ],
+      relayTasks: [
+        {
+          'taskId': 'r-stale',
+          'title': '旧中继任务',
+          'workspacePath': '/repo/stale',
+          'workspaceIdentity': 'stale',
+          'displayStatus': 'idle',
+          'updatedAt': now - 21 * hour,
+        },
+        {
+          'taskId': 'r-chat',
+          'title': '合成工作区任务',
+          'workspacePath': r'F:\chat',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final order = tester
+        .widgetList<Text>(find.byWidgetPredicate((w) =>
+            w is Text &&
+            const ['chat', 'app', 'stale', 'orphan'].contains(w.data)))
+        .map((t) => t.data)
+        .toList();
+    expect(order, ['chat', 'app', 'stale', 'orphan']);
+  });
+
+  testWidgets(
+      'empty workspaces sink below active ones, ordered by title (R1)',
+      (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 1200);
+    addTearDown(tester.view.reset);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 's1',
+          'title': '活跃任务',
+          'phase': 'completedSuccess',
+          'lastActivityAt': now,
+        },
+      ],
+      workspaces: [
+        // Active first with the live row; the two empty ones arrive
+        // zulu-then-bravo, so their order must come from the title
+        // tiebreak, not the incoming list.
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        {'workspacePath': '/repo/zulu', 'workspaceIdentity': 'zulu'},
+        {'workspacePath': '/repo/bravo', 'workspaceIdentity': 'bravo'},
+      ],
+      relayTasks: [
+        {
+          // Archived-only activity must NOT lift bravo: the card key is the
+          // non-archived max, so bravo keeps the null key — below alpha,
+          // and before zulu by title.
+          'taskId': 'r-bravo',
+          'title': '归档任务',
+          'workspacePath': '/repo/bravo',
+          'workspaceIdentity': 'bravo',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+          'archived': true,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final order = tester
+        .widgetList<Text>(find.byWidgetPredicate((w) =>
+            w is Text && const ['alpha', 'bravo', 'zulu'].contains(w.data)))
+        .map((t) => t.data)
+        .toList();
+    expect(order, ['alpha', 'bravo', 'zulu']);
+  });
+
+  testWidgets('archive view groups follow the same activity order (R4)',
+      (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 1200);
+    addTearDown(tester.view.reset);
+    final (store, device) = await setupDevice();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    const hour = 3600000;
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 's1',
+          'title': 'alpha 活任务',
+          'phase': 'completedSuccess',
+          'lastActivityAt': now - hour,
+          'workspacePath': '/repo/alpha',
+          'workspaceIdentity': 'alpha',
+        },
+      ],
+      workspaces: [
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        {'workspacePath': '/repo/beta', 'workspaceIdentity': 'beta'},
+        {'workspacePath': '/repo/gamma', 'workspaceIdentity': 'gamma'},
+      ],
+      relayTasks: [
+        {
+          'taskId': 'a-arch',
+          'title': 'alpha 归档',
+          'workspacePath': '/repo/alpha',
+          'workspaceIdentity': 'alpha',
+          'displayStatus': 'idle',
+          'updatedAt': now - 30 * hour,
+          'archived': true,
+        },
+        // beta has archived rows only → null key → last, despite the
+        // freshest archived activity.
+        {
+          'taskId': 'b-arch',
+          'title': 'beta 归档',
+          'workspacePath': '/repo/beta',
+          'workspaceIdentity': 'beta',
+          'displayStatus': 'idle',
+          'updatedAt': now,
+          'archived': true,
+        },
+        {
+          'taskId': 'g-live',
+          'title': 'gamma 活任务',
+          'workspacePath': '/repo/gamma',
+          'workspaceIdentity': 'gamma',
+          'displayStatus': 'idle',
+          'updatedAt': now - 100 * hour,
+        },
+        {
+          'taskId': 'g-arch',
+          'title': 'gamma 归档',
+          'workspacePath': '/repo/gamma',
+          'workspaceIdentity': 'gamma',
+          'displayStatus': 'idle',
+          'updatedAt': now - 200 * hour,
+          'archived': true,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('查看归档'));
+    await tester.pumpAndSettle();
+
+    final order = tester
+        .widgetList<Text>(find.byWidgetPredicate((w) =>
+            w is Text && const ['alpha', 'beta', 'gamma'].contains(w.data)))
+        .map((t) => t.data)
+        .toList();
+    expect(order, ['alpha', 'gamma', 'beta']);
+  });
+
   testWidgets('收起全部 collapses everything, then active re-expands alone',
       (tester) async {
     await setupTwoWorkspaces(tester);
