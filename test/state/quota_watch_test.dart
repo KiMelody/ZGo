@@ -572,6 +572,7 @@ void main() {
       addTearDown(controller.dispose);
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 5),
         expiryReminderEnabled: true,
@@ -595,6 +596,7 @@ void main() {
       addTearDown(controller.dispose);
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 5),
         expiryReminderEnabled: true,
@@ -619,6 +621,7 @@ void main() {
       addTearDown(controller.dispose);
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 1),
         expiryReminderEnabled: true,
@@ -637,6 +640,7 @@ void main() {
       advanceClock(const Duration(minutes: 15));
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 15),
         expiryReminderEnabled: true,
@@ -662,6 +666,7 @@ void main() {
       addTearDown(controller.dispose);
       controller.configure(
         enabled: false,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 5),
         expiryReminderEnabled: true,
@@ -684,6 +689,7 @@ void main() {
       addTearDown(controller.dispose);
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 1),
         expiryReminderEnabled: true,
@@ -716,8 +722,8 @@ void main() {
     });
 
     quotaTest(
-        'lifecycle seam: backgrounded drops to the slow cadence, '
-        'foregrounded re-polls at once and restores it', () async {
+        'lifecycle seam: without keep-alive, backgrounded drops to the slow '
+        'cadence, foregrounded re-polls at once and restores it', () async {
       final source = sourceOf();
       final controller = QuotaWatchController(
         sessionsOf: () => [source],
@@ -726,6 +732,7 @@ void main() {
       addTearDown(controller.dispose);
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 1),
         expiryReminderEnabled: true,
@@ -749,6 +756,150 @@ void main() {
     });
 
     quotaTest(
+        'keep-alive (R1): backgrounded keeps the user cadence; failure '
+        'backoff stays independent of it', () async {
+      final source = sourceOf();
+      final controller = QuotaWatchController(
+        sessionsOf: () => [source],
+        onEvent: (_) {},
+      );
+      addTearDown(controller.dispose);
+      controller.configure(
+        enabled: true,
+        keepAliveActive: true,
+        thresholdPercent: 20,
+        interval: const Duration(minutes: 1),
+        expiryReminderEnabled: true,
+        fiveHourExpiryLeadMinutes: 60,
+        weeklyExpiryLeadHours: 6,
+      );
+      await until(() => controller.snapshot.phase == QuotaWatchPhase.normal);
+
+      // A foreground service keeps the process out of doze throttling, so
+      // the 1-minute user cadence holds in the background (R1).
+      controller.backgrounded();
+      expect(controller.effectiveInterval, const Duration(minutes: 1));
+
+      // Failure backoff is orthogonal: two failed ticks still slow to the
+      // fixed backoff cadence even with keep-alive on (PRD R4).
+      source.setView(EntitlementView(
+        phase: EntitlementPhase.error,
+        data: _dualPlan().data,
+        fetchedAt: _currentNow,
+        error: 'boom',
+      ));
+      await controller.pollNow();
+      await controller.pollNow();
+      expect(controller.effectiveInterval,
+          QuotaWatchController.backoffInterval);
+
+      // One success restores the user cadence, keep-alive still on.
+      source.setView(_dualPlan());
+      await controller.pollNow();
+      expect(controller.effectiveInterval, const Duration(minutes: 1));
+
+      // Switching keep-alive off while backgrounded re-syncs to the slow
+      // cadence through effectiveInterval (configure rebuilt the timer).
+      controller.configure(
+        enabled: true,
+        keepAliveActive: false,
+        thresholdPercent: 20,
+        interval: const Duration(minutes: 1),
+        expiryReminderEnabled: true,
+        fiveHourExpiryLeadMinutes: 60,
+        weeklyExpiryLeadHours: 6,
+      );
+      expect(controller.effectiveInterval,
+          QuotaWatchController.backoffInterval);
+    });
+
+    quotaTest(
+        'backgrounded (R2): re-polls at once when the last success is past '
+        'the 60s refetch gate', () async {
+      final source = sourceOf();
+      final controller = QuotaWatchController(
+        sessionsOf: () => [source],
+        onEvent: (_) {},
+      );
+      addTearDown(controller.dispose);
+      controller.configure(
+        enabled: true,
+        keepAliveActive: false,
+        thresholdPercent: 20,
+        interval: const Duration(minutes: 5),
+        expiryReminderEnabled: true,
+        fiveHourExpiryLeadMinutes: 60,
+        weeklyExpiryLeadHours: 6,
+      );
+      await until(() => controller.snapshot.phase == QuotaWatchPhase.normal);
+
+      // Past the gate, the pause refreshes immediately instead of waiting
+      // out the (slow) background cadence.
+      advanceClock(QuotaWatchController.foregroundRefetchWindow +
+          const Duration(seconds: 1));
+      final fetches = source.snapshotForces.length;
+      controller.backgrounded();
+      await until(() => source.snapshotForces.length > fetches);
+      expect(source.snapshotForces.last, isTrue);
+    });
+
+    quotaTest(
+        'backgrounded (R2): no re-poll inside the 60s refetch gate (rapid '
+        'app switching must not hammer the endpoint)', () async {
+      final source = sourceOf();
+      final controller = QuotaWatchController(
+        sessionsOf: () => [source],
+        onEvent: (_) {},
+      );
+      addTearDown(controller.dispose);
+      controller.configure(
+        enabled: true,
+        keepAliveActive: false,
+        thresholdPercent: 20,
+        interval: const Duration(minutes: 5),
+        expiryReminderEnabled: true,
+        fiveHourExpiryLeadMinutes: 60,
+        weeklyExpiryLeadHours: 6,
+      );
+      await until(() => controller.snapshot.phase == QuotaWatchPhase.normal);
+
+      final fetches = source.snapshotForces.length;
+      controller.backgrounded();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(source.snapshotForces.length, fetches);
+    });
+
+    quotaTest(
+        'backgrounded (R2): re-polls when no successful poll has landed yet',
+        () async {
+      final source = sourceOf(
+        view: EntitlementView(phase: EntitlementPhase.error, fetchedAt: null),
+      );
+      final controller = QuotaWatchController(
+        sessionsOf: () => [source],
+        onEvent: (_) {},
+      );
+      addTearDown(controller.dispose);
+      controller.configure(
+        enabled: true,
+        keepAliveActive: false,
+        thresholdPercent: 20,
+        interval: const Duration(minutes: 5),
+        expiryReminderEnabled: true,
+        fiveHourExpiryLeadMinutes: 60,
+        weeklyExpiryLeadHours: 6,
+      );
+      await until(
+          () => controller.snapshot.phase == QuotaWatchPhase.unavailable);
+
+      // A failed initial poll stamps nothing, so the pause retries.
+      final fetches = source.snapshotForces.length;
+      controller.backgrounded();
+      await until(() => source.snapshotForces.length > fetches);
+      expect(source.snapshotForces.last, isTrue);
+    });
+
+    quotaTest(
         'foreground gate: a resume inside 60s of the last SUCCESSFUL poll '
         'skips the re-fetch (official access path parity), a resume after '
         'a failed poll still retries', () async {
@@ -760,6 +911,7 @@ void main() {
       addTearDown(controller.dispose);
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 15),
         expiryReminderEnabled: true,
@@ -808,6 +960,7 @@ void main() {
       addTearDown(controller.dispose);
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 1),
         expiryReminderEnabled: true,
@@ -848,6 +1001,7 @@ void main() {
       addTearDown(controller.dispose);
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 5),
         expiryReminderEnabled: true,
@@ -862,6 +1016,7 @@ void main() {
       // persistent notice re-renders as normal with NO further fetch.
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 5),
         expiryReminderEnabled: true,
@@ -883,6 +1038,7 @@ void main() {
       addTearDown(controller.dispose);
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 5),
         expiryReminderEnabled: true,
@@ -926,6 +1082,7 @@ void main() {
       addTearDown(controller.dispose);
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 5),
         expiryReminderEnabled: true,
@@ -965,6 +1122,7 @@ void main() {
       addTearDown(controller.dispose);
       controller.configure(
         enabled: true,
+        keepAliveActive: false,
         thresholdPercent: 20,
         interval: const Duration(minutes: 5),
         expiryReminderEnabled: true,
