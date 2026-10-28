@@ -1025,10 +1025,32 @@ class ConversationTransport {
   /// Subscribes the sessions-index of this workspace
   /// (`subscribeSessionsIndexV4` + `onDynamicSessionsIndexFrame`).
   /// Provides the live session list with title/phase/lastAssistantPreview.
-  Future<SessionsIndexSubscription> subscribeSessionsIndex() async {
+  ///
+  /// [scope] addresses a DIFFERENT workspace over the same bridge (design
+  /// 10-28 sidecar subscriptions; live-probed: the subscribe self-addresses
+  /// by scope, ack + snapshot + topic carry that workspace). Omitted = the
+  /// transport's own scope, byte-identical to the pre-10-28 shape.
+  /// [onSubscribeFailure] forwards automatic-resubscribe failures to the
+  /// caller's classifier (cold-runtime cooldown); initial failures rethrow.
+  Future<SessionsIndexSubscription> subscribeSessionsIndex({
+    Map<String, dynamic>? scope,
+    void Function(Object error)? onSubscribeFailure,
+  }) async {
     await handshake();
-    final subscription = SessionsIndexSubscription(this);
-    await subscription.start();
+    final subscription = SessionsIndexSubscription(
+      this,
+      scope: scope,
+      onSubscribeFailure: onSubscribeFailure,
+    );
+    try {
+      await subscription.start();
+    } catch (e) {
+      // Same leak guard as [subscribe]: the constructor already armed the
+      // fragment-cleanup timer and the bridge-recovery hook, and the
+      // cold-runtime sidecar path now hits this failure repeatedly.
+      await subscription.dispose();
+      rethrow;
+    }
     return subscription;
   }
 

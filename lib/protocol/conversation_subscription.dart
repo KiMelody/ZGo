@@ -80,6 +80,35 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
   final _fragments = <String, _LogicalFrameAssembly>{};
   Timer? _fragmentCleanup;
 
+  /// Recently applied logical-frame ids (insertion-ordered, bounded by
+  /// [_seenLogicalFrameIdsLimit]). Only consulted when
+  /// [_dedupeLogicalFrames] is on.
+  final _seenLogicalFrameIds = <String>{};
+
+  /// Replay window of [_seenLogicalFrameIds]. A sibling index subscription
+  /// attaching to the same channel replays the frames already delivered in
+  /// the last few seconds (probe R4, 2026-10-28); a couple of dozen ids
+  /// covers that window with headroom.
+  static const int _seenLogicalFrameIdsLimit = 64;
+
+  /// Whether a complete logical frame whose `logicalFrameId` was already
+  /// applied is dropped at the wire ingress (replay guard). On for the
+  /// sessions-index subscription only: several index subscriptions share
+  /// one channel event stream (design 10-28), and a replayed `deltas` frame
+  /// would trip the `fromSeq != seq` gap guard and resync-storm. Off keeps
+  /// the pre-10-28 conversation subscription byte-identical.
+  bool get _dedupeLogicalFrames => false;
+
+  /// Returns false when [id] was already applied (the caller must drop the
+  /// frame); records it otherwise, evicting the oldest id past the bound.
+  bool _markLogicalFrameSeen(String id) {
+    if (!_seenLogicalFrameIds.add(id)) return false;
+    if (_seenLogicalFrameIds.length > _seenLogicalFrameIdsLimit) {
+      _seenLogicalFrameIds.remove(_seenLogicalFrameIds.first);
+    }
+    return true;
+  }
+
   _SubscriptionBase(this._transport, this.state, this._logTag) {
     _transport.session.recovered.addListener(_onBridgeRecovered);
     _fragmentCleanup = Timer.periodic(
@@ -129,6 +158,12 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
   /// Called during dispose — extra cleanup.
   Future<void> _onDispose() async {}
 
+  /// Called when an automatic resubscribe attempt fails ([start] rethrows to
+  /// its caller instead of retrying). Default no-op; the sessions-index
+  /// sidecar manager uses it to classify a benign cold-runtime refusal and
+  /// cool the workspace down instead of hammering the retry queue.
+  void _onSubscribeFailure(Object error) {}
+
   int get _resyncSeq => 0;
   String? get _resyncEpoch => null;
 
@@ -156,7 +191,7 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
       ConversationTransport.channel,
       _frameEventName,
       _handleWireFrame,
-      arg: _transport.scope,
+      arg: _requestScope(),
     );
     _ackWatchdog?.cancel();
     _ackWatchdog = Timer(_transport.subscribeAckTimeout, () {
@@ -269,6 +304,10 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
         return;
       }
       _transport.log('[$_logTag] resubscribe failed: $e');
+      _onSubscribeFailure(e);
+      // The failure hook may have disposed this subscription (a benign
+      // cold-runtime sidecar refusal does) — never arm a retry then.
+      if (_disposed) return;
       _resubscribeTimer?.cancel();
       // Exponential backoff (10-11 R2): 3s → 6s → 12s capped — the fixed
       // 3s hammer amplified the KICK storm's subscribe pressure (1308
@@ -292,6 +331,19 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
       case 'complete':
         final inner = frame['frame'];
         if (inner is Map) {
+          // Replay guard (design 10-28): a sibling index subscription
+          // attaching to the same channel re-delivers frames already
+          // applied here (probe R4: one snapshot, same logicalFrameId,
+          // received twice). Fragments keep their own id-keyed assembly —
+          // every fragment of one logical frame shares the id — so their
+          // guard runs on the assembled frame in [_acceptFragment].
+          final logicalId = frame['logicalFrameId'];
+          if (_dedupeLogicalFrames &&
+              logicalId is String &&
+              !_markLogicalFrameSeen(logicalId)) {
+            _transport.log('[$_logTag] dropped replayed frame $logicalId');
+            return;
+          }
           _acceptOrStage(inner.cast<String, dynamic>());
         }
         break;
@@ -327,6 +379,14 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
       try {
         final decoded = jsonDecode(utf8.decode(assembly.assemble()));
         if (decoded is Map) {
+          // The replay guard runs on the ASSEMBLED frame (check P2-3): the
+          // per-fragment ingress must not dedupe (all fragments of one
+          // logical frame share its id), but a replayed assembly is the
+          // same replay a complete frame sees.
+          if (_dedupeLogicalFrames && !_markLogicalFrameSeen(id)) {
+            _transport.log('[$_logTag] dropped replayed frame $id');
+            return;
+          }
           _acceptOrStage(decoded.cast<String, dynamic>());
         }
       } catch (e) {
@@ -543,10 +603,38 @@ class _LogicalFrameAssembly {
 }
 
 class SessionsIndexSubscription extends _SubscriptionBase<SessionsIndexState> {
+  /// Sidecar scope override (design 10-28): when set, this subscription
+  /// targets [scope] — `{workspacePath, workspaceIdentity?}` — on the
+  /// transport's channel, i.e. a DIFFERENT workspace over the SAME bridge
+  /// (live-probed: the subscribe self-addresses by scope and answers with
+  /// its own subscriptionId + `sessions-index/<key>` topic). Null keeps the
+  /// pre-10-28 single-subscription shape byte-identical.
+  final Map<String, dynamic>? scope;
+
+  /// Automatic-resubscribe failure hook (design 10-28). The state layer
+  /// classifies a benign cold-runtime refusal from it and cools the
+  /// workspace down; every other failure keeps the built-in retry.
+  final void Function(Object error)? onSubscribeFailure;
+
   /// Internal: created by [ConversationTransport.subscribeSessionsIndex];
   /// not public API.
-  SessionsIndexSubscription(ConversationTransport transport)
-    : super(transport, SessionsIndexState(), 'v4-si');
+  SessionsIndexSubscription(
+    ConversationTransport transport, {
+    this.scope,
+    this.onSubscribeFailure,
+  }) : super(transport, SessionsIndexState(), 'v4-si');
+
+  @override
+  Map<String, dynamic> _requestScope() => scope ?? super._requestScope();
+
+  @override
+  void _onSubscribeFailure(Object error) => onSubscribeFailure?.call(error);
+
+  /// Index subscriptions share one channel event stream with their
+  /// siblings — replayed logical frames must not re-enter the state
+  /// machine (see [_dedupeLogicalFrames]).
+  @override
+  bool get _dedupeLogicalFrames => true;
 
   /// Monotonic subscription generation: bumped on every successful
   /// (re)subscribe — `start()` covers both the initial open and a bridge
@@ -593,7 +681,7 @@ class SessionsIndexSubscription extends _SubscriptionBase<SessionsIndexState> {
   };
   @override
   String get topic =>
-      'sessions-index/${_transport.scope['workspaceIdentity'] ?? _transport.scope['workspacePath']}';
+      'sessions-index/${_requestScope()['workspaceIdentity'] ?? _requestScope()['workspacePath']}';
   @override
   int get _resyncSeq => state.seq;
   @override
@@ -610,6 +698,13 @@ class SessionsIndexSubscription extends _SubscriptionBase<SessionsIndexState> {
     // after this hook), so the new generation's first frame — staged or
     // pushed — can only establish a fresh tombstone baseline.
     _generation++;
+    // A new subscription generation may restart the desktop's
+    // logicalFrameId sequence (unverified — the probe never recorded the
+    // id shape); a kept replay window could silently drop the new
+    // generation's first frame and freeze the index (check P2-4). The
+    // sibling-fanout replay this guard exists for is re-recorded as the
+    // new generation's frames arrive.
+    _seenLogicalFrameIds.clear();
   }
 
   @override

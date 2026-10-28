@@ -8,6 +8,7 @@ import '../protocol/automation.dart';
 import '../protocol/channel_client.dart'
     show
         Channels,
+        isAgentRuntimeNotRunningError,
         isBridgeGateTimeoutError,
         isChannelLevelError,
         isChannelMissingError,
@@ -545,6 +546,13 @@ class DeviceSession extends ChangeNotifier
   @visibleForTesting
   final StallTimings timings;
 
+  /// How long a workspace that answered its sidecar subscribe with the
+  /// benign cold-runtime refusal stays out of the sidecar set (design
+  /// 10-28: ~10 minutes). A collection change (the key leaving the top-N)
+  /// clears the cooldown, so a re-entering workspace retries at once.
+  @visibleForTesting
+  final Duration sidecarCooldown;
+
   DeviceSession({
     required this.deviceId,
     required this.params,
@@ -557,6 +565,7 @@ class DeviceSession extends ChangeNotifier
     this.loadCachedHome,
     this.saveCachedHome,
     this.timings = const StallTimings(),
+    this.sidecarCooldown = const Duration(minutes: 10),
   }) : _homeStore = TaskHomeStore(deviceId: deviceId) {
     // Persisted task-home anchors + local delete tombstones (design
     // 10-15): fire-and-forget like every store load — until it lands the
@@ -690,6 +699,30 @@ class DeviceSession extends ChangeNotifier
   /// with the rest of the directory state on suspend; whole-map replaced
   /// by each fresh first frame of the same key.
   final Map<String, List<SessionEntry>> _liveSnapshots = {};
+
+  // --- Sidecar sessions-index subscriptions (design 10-28) ---
+
+  /// Upper bound on sidecar (non-active workspace) index subscriptions:
+  /// the recently active non-active workspaces, newest `updatedAt` first.
+  /// Bounded so a bridge swing's resubscribe wave stays cheap.
+  static const int sidecarWorkspaceLimit = 5;
+
+  /// Sidecar subscriptions by workspace key (the write side of
+  /// [_sidecarIndexes]).
+  final Map<String, SessionsIndexSubscription> _sidecarSubs = {};
+
+  /// Sidecar index states by workspace key — the live layers the task
+  /// directory merges (below the ACTIVE index, above the relay rows).
+  final Map<String, SessionsIndexState> _sidecarIndexes = {};
+
+  /// Keys with a subscribe in flight (dedup across overlapping recomputes).
+  final Set<String> _sidecarStarting = {};
+
+  /// Per-key cooldown deadline after the benign cold-runtime refusal
+  /// ("ZCode Agent runtime is not running"): retrying sooner only repeats a
+  /// known answer. Never part of the LinkSupervisor ledger — the subscribe
+  /// path bypasses [callChannel] structurally.
+  final Map<String, DateTime> _sidecarCooldownUntil = {};
 
   /// Cross-terminal deletion tombstones (task 10-06 chat tombstone):
   /// session ids that VANISHED from the live sessions-index while this
@@ -899,6 +932,9 @@ class DeviceSession extends ChangeNotifier
         }
         _relayTasks = _normalizeRelayTasks(deduped.values);
         reconcileTaskHomes();
+        // Fresh overview = fresh sidecar evidence (30s cadence): re-diff
+        // the recently active non-active workspaces (design 10-28).
+        _recomputeSidecarSubscriptions();
         notifyListeners();
         await _mergePinnedTaskFlags();
       } catch (e) {
@@ -993,6 +1029,7 @@ class DeviceSession extends ChangeNotifier
         keyAliases: _workspaceKeyAliases,
         groupKeyAliases: _workspaceGroupAliases,
         cachedSessions: _liveSnapshots,
+        sidecarIndexes: _sidecarIndexes,
       );
 
   /// The display group of every 3.16.2 conversation workspace: the default
@@ -1163,6 +1200,282 @@ class DeviceSession extends ChangeNotifier
     }
     return false;
   }
+
+  // ------------------------------------ sidecar sessions-index (10-28)
+
+  /// Recomputes the sidecar subscription set (design 10-28). Candidates =
+  /// the non-active workspaces with the newest relay-overview `updatedAt`,
+  /// capped at [sidecarWorkspaceLimit]; the set is diffed against the live
+  /// subscriptions (new → subscribe, fallen out / became active →
+  /// unsubscribe). Runs after every relay overview landing
+  /// ([_applyRelayOverview], [_onWorkspaceListUpdated],
+  /// [_refreshRelayTasksFromChannel]) and after a workspace open. One pass
+  /// over the relay rows; no RPC when the set is unchanged.
+  void _recomputeSidecarSubscriptions() {
+    if (_disposed) return;
+    final desired = _sidecarCandidates();
+    final desiredKeys = {for (final c in desired) c.key};
+    for (final key in {..._sidecarSubs.keys, ..._sidecarIndexes.keys}) {
+      if (desiredKeys.contains(key)) continue;
+      // A workspace with a row still in a running phase keeps its layer
+      // even after falling out of the top-5 (check P2-6): dropping it would
+      // flip the row back to the relay's last-turn outcome and could fire a
+      // false completion notification. The extra slot lives only until the
+      // run ends; becoming the ACTIVE workspace still drops here (the
+      // active index covers the same rows).
+      if (!_isActiveWorkspaceKey(key) && _sidecarHasRunningRow(key)) {
+        continue;
+      }
+      _dropSidecar(key, reason: 'left the sidecar set');
+    }
+    // "Cooldown ~10 min OR until the set changes": a workspace that fell
+    // out and re-enters starts over instead of waiting out the old window.
+    _sidecarCooldownUntil.removeWhere((key, _) => !desiredKeys.contains(key));
+    if (!sidecarSubscriptionsAvailable) return;
+    for (final candidate in desired) {
+      if (_sidecarIndexes.containsKey(candidate.key) ||
+          _sidecarSubs.containsKey(candidate.key) ||
+          _sidecarStarting.contains(candidate.key)) {
+        continue;
+      }
+      final until = _sidecarCooldownUntil[candidate.key];
+      if (until != null && clock.now().isBefore(until)) continue;
+      unawaited(_startSidecar(candidate));
+    }
+  }
+
+  /// Whether [key] is the workspace the conversation link is currently open
+  /// on (alias-normalized like the candidate ranking).
+  bool _isActiveWorkspaceKey(String key) {
+    final active = activeWorkspace;
+    if (active == null) return false;
+    final rawKey = workspaceKeyOf(active);
+    if (rawKey == null) return false;
+    return (_workspaceKeyAliases[rawKey] ?? rawKey) == key;
+  }
+
+  /// Whether a sidecar layer still reports a running-class row (the phase
+  /// pill vocabulary: running / prewarming).
+  bool _sidecarHasRunningRow(String key) {
+    final state = _sidecarIndexes[key];
+    if (state == null) return false;
+    for (final entry in state.list) {
+      if (entry.phase == 'running' || entry.phase == 'prewarming') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Whether sidecar subscriptions can start right now (an open bridge +
+  /// active-workspace transport must exist). Overridable so state tests can
+  /// drive the manager without a bridge (fake_device_session.dart).
+  @protected
+  bool get sidecarSubscriptionsAvailable => _conversation != null;
+
+  /// The top-[sidecarWorkspaceLimit] non-active workspaces by newest relay
+  /// row, with the subscribe scope assembled from the row. The scope needs
+  /// `workspacePath` (every scoped wire call does); `workspaceIdentity` is
+  /// optional and only passed when the row carries it (3.16.2 relay rows
+  /// usually do not).
+  ///
+  /// Conversation (draft-*) workspaces are skipped: they are ephemeral
+  /// one-chat directories whose rows already display in the default group,
+  /// so subscribing them would burn the whole budget on drafts.
+  List<({String key, Map<String, dynamic> scope})> _sidecarCandidates() {
+    final aliases = _workspaceKeyAliases;
+    String norm(String key) => aliases[key] ?? key;
+    // The virtual getter (fake sessions seed it through the override).
+    final active = activeWorkspace;
+    final rawActiveKey = active == null ? null : workspaceKeyOf(active);
+    final activeKey = rawActiveKey == null ? null : norm(rawActiveKey);
+    final latest = <String, ({int updatedAt, String path, String? identity})>{};
+    for (final task in relayTasks) {
+      final rawKey = TaskDirectory.relayKeyOf(task);
+      final path = task['workspacePath'];
+      if (rawKey == null || path is! String || path.isEmpty) continue;
+      if (isConversationWorkspacePath(path)) continue;
+      final key = norm(rawKey);
+      if (activeKey != null && key == activeKey) continue;
+      final updatedAt = (task['updatedAt'] as num?)?.toInt() ?? 0;
+      final previous = latest[key];
+      if (previous == null || updatedAt > previous.updatedAt) {
+        final identity = task['workspaceIdentity'];
+        latest[key] = (
+          updatedAt: updatedAt,
+          path: path,
+          identity: identity is String && identity.trim().isNotEmpty
+              ? identity.trim()
+              : null,
+        );
+      }
+    }
+    final ranked = latest.entries.toList()
+      ..sort((a, b) => b.value.updatedAt.compareTo(a.value.updatedAt));
+    return [
+      for (final entry in ranked.take(sidecarWorkspaceLimit))
+        (
+          key: entry.key,
+          scope: {
+            'workspacePath': entry.value.path,
+            if (entry.value.identity != null)
+              'workspaceIdentity': entry.value.identity,
+          },
+        ),
+    ];
+  }
+
+  /// Starts ONE sidecar subscription and wires it into the directory.
+  Future<void> _startSidecar(
+    ({String key, Map<String, dynamic> scope}) candidate,
+  ) async {
+    final key = candidate.key;
+    _sidecarStarting.add(key);
+    try {
+      final state = await subscribeSidecarIndex(key, candidate.scope);
+      if (_disposed) {
+        unawaited(disposeSidecarIndex(key));
+        return;
+      }
+      // The candidate set may have moved while the subscribe flew (check
+      // P2-2): a workspace that fell out of the top-5 during the await must
+      // not leave an over-budget layer installed until the next relay
+      // cadence. (A key that left and re-entered counts as desired — the
+      // subscription is still the one the set now wants.)
+      if (!_sidecarCandidates().any((c) => c.key == key)) {
+        _log('[session] sidecar index $key: left the set while subscribing');
+        unawaited(disposeSidecarIndex(key));
+        return;
+      }
+      // Recorded at subscribe time like the active open: rows fall back to
+      // it for attribution, and the directory keys the layer by this key.
+      state.subscribedWorkspaceKey = key;
+      state.addListener(_onSidecarIndexChanged);
+      _sidecarIndexes[key] = state;
+      _log('[session] sidecar index subscribed: $key');
+      notifyListeners();
+      // Deleted-task tombstones for this workspace's live rows (§3.3).
+      // Quiet channel path: a probe miss must not feed the link ledger.
+      unawaited(_probeSidecarTombstones(key, state, candidate.scope));
+    } catch (e) {
+      if (isAgentRuntimeNotRunningError(e)) {
+        _sidecarCooldownUntil[key] = clock.now().add(sidecarCooldown);
+        _log('[session] sidecar index $key: cold runtime, cooling down '
+            '${sidecarCooldown.inMinutes}min');
+      } else {
+        // Timeouts / bridge trouble: the relay overview cadence retries
+        // naturally; no separate retry loop lives here.
+        _log('[session] sidecar index $key subscribe failed: $e');
+      }
+    } finally {
+      _sidecarStarting.remove(key);
+    }
+  }
+
+  /// Automatic-resubscribe failures of one sidecar subscription (design
+  /// 10-28). A benign cold-runtime refusal cools the workspace down and
+  /// drops the subscription — the built-in 3/6/12s retry would otherwise
+  /// keep asking a runtime that is simply off. Every other failure keeps
+  /// the built-in retry.
+  void _onSidecarSubscribeFailure(String key, Object error) {
+    if (_disposed || !isAgentRuntimeNotRunningError(error)) return;
+    _sidecarCooldownUntil[key] = clock.now().add(sidecarCooldown);
+    _log('[session] sidecar index $key: cold runtime on resubscribe, '
+        'cooling down ${sidecarCooldown.inMinutes}min');
+    _dropSidecar(key, reason: 'cold runtime');
+  }
+
+  /// Pulls one workspace's registry-deleted task ids for the sidecar
+  /// layer's tombstone filter (task-registry-semantics §3.3). Any failure
+  /// degrades to an empty set (the pre-probe behavior), never blocks.
+  Future<void> _probeSidecarTombstones(
+    String key,
+    SessionsIndexState state,
+    Map<String, dynamic> scope,
+  ) async {
+    final deleted = await probeListDeletedTaskIds(
+      (method, args) => _callChannelQuiet(Channels.zcodeTask, method, args),
+      scope: scope,
+    );
+    if (_disposed || deleted == null) return;
+    // The layer may have been dropped/replaced while the probe flew.
+    if (!identical(_sidecarIndexes[key], state)) return;
+    state.deletedTaskIds = Set.of(deleted);
+    notifyListeners();
+  }
+
+  /// Removes one sidecar subscription (listener, state map, wire
+  /// unsubscribe) and repaints.
+  void _dropSidecar(String key, {required String reason}) {
+    final state = _sidecarIndexes.remove(key);
+    if (state == null && !_sidecarSubs.containsKey(key)) return;
+    state?.removeListener(_onSidecarIndexChanged);
+    _log('[session] sidecar index dropped: $key ($reason)');
+    unawaited(disposeSidecarIndex(key));
+    notifyListeners();
+  }
+
+  /// Tears every sidecar subscription down (workspace switch, suspend):
+  /// their per-scope EventListens and subscribes live on the bridge that is
+  /// about to die, so they must never outlive it.
+  void _dropAllSidecarSubscriptions() {
+    final keys = {..._sidecarSubs.keys, ..._sidecarIndexes.keys};
+    for (final key in keys) {
+      _sidecarIndexes.remove(key)?.removeListener(_onSidecarIndexChanged);
+      unawaited(disposeSidecarIndex(key));
+    }
+    if (keys.isNotEmpty) {
+      _log('[session] sidecars cleared (${keys.length})');
+    }
+    _sidecarCooldownUntil.clear();
+  }
+
+  /// Any sidecar frame: the merged directory changed, repaint the list.
+  void _onSidecarIndexChanged() {
+    if (_disposed) return;
+    notifyListeners();
+  }
+
+  /// Starts ONE sidecar sessions-index subscription for [scope] on the
+  /// active bridge (design 10-28: the same bridge, a different workspace
+  /// scope — live-probed). Overridable so state tests drive the manager
+  /// without a bridge (test/helpers/fake_device_session.dart).
+  @protected
+  Future<SessionsIndexState> subscribeSidecarIndex(
+    String key,
+    Map<String, dynamic> scope,
+  ) async {
+    final conversation = _conversation;
+    if (conversation == null) throw StateError('not connected');
+    final sub = await conversation.subscribeSessionsIndex(
+      scope: scope,
+      onSubscribeFailure: (error) => _onSidecarSubscribeFailure(key, error),
+    );
+    if (_disposed || _conversation != conversation) {
+      // The link / active workspace changed under us: nobody will ever
+      // read this subscription — dispose it instead of leaking its timers
+      // and its bridge-recovery hook.
+      unawaited(sub.dispose());
+      throw StateError('sidecar subscription superseded');
+    }
+    _sidecarSubs[key] = sub;
+    return sub.state;
+  }
+
+  /// Disposes one sidecar subscription. Overridable for the same test seam.
+  @protected
+  Future<void> disposeSidecarIndex(String key) async {
+    final sub = _sidecarSubs.remove(key);
+    if (sub == null) return;
+    sub.state.removeListener(_onSidecarIndexChanged);
+    await sub.dispose();
+  }
+
+  /// Test seam: runs the sidecar set recomputation exactly like a relay
+  /// overview landing does (the fake session has no channel leg).
+  @visibleForTesting
+  void debugRecomputeSidecarSubscriptions() =>
+      _recomputeSidecarSubscriptions();
 
   /// Anchor reconciliation + lifecycle (design 10-15 §1.1), run after
   /// every relay overview application ([_applyRelayOverview] /
@@ -1498,6 +1811,7 @@ class DeviceSession extends ChangeNotifier
       // `pinned` bits — the cross-workspace pinned merge belongs to the
       // 3.16.2 channel leg only.
       reconcileTaskHomes();
+      _recomputeSidecarSubscriptions();
     }
     notifyListeners();
   }
@@ -1711,6 +2025,10 @@ class DeviceSession extends ChangeNotifier
       _indexDiffBase = null;
       _conversation = null;
       _chatSubs.clear();
+      // Sidecar subscriptions live on the same bridge as the active one
+      // (per-scope EventListens + subscribes): drop them BEFORE the old
+      // bridge dies, or their recovery hooks and timers outlive it.
+      _dropAllSidecarSubscriptions();
       _bridge = bridge;
       _activeWorkspace = active;
       // Fresh bridge = fresh channel client: re-hang the managed listeners.
@@ -1787,6 +2105,10 @@ class DeviceSession extends ChangeNotifier
       _error = null;
       onWorkspaceOpened?.call(activeKey);
       notifyListeners();
+      // The active workspace changed: re-diff the sidecar set on the fresh
+      // bridge (the old active workspace is now a candidate; the newly
+      // active one must leave the set).
+      _recomputeSidecarSubscriptions();
       return true;
     } catch (e) {
       _log('[session] workspace open failed: $e');
@@ -2170,6 +2492,8 @@ class DeviceSession extends ChangeNotifier
     // Fresh overview = fresh anchor evidence: tombstone expiry, single-copy
     // reconcile, absence prune (design 10-15 §1.1).
     reconcileTaskHomes();
+    // Same landing also re-diffs the sidecar set (design 10-28).
+    _recomputeSidecarSubscriptions();
   }
 
   /// Stores a raw wire workspace list and recomputes the merged view from
@@ -3736,6 +4060,9 @@ class DeviceSession extends ChangeNotifier
       _log('[session] live snapshots cleared (${_liveSnapshots.length} keys)');
     }
     _liveSnapshots.clear();
+    // Sidecar subscriptions die with the bridge below — dispose them first
+    // so their timers / recovery hooks never outlive it (design 10-28).
+    _dropAllSidecarSubscriptions();
     _failureReason = null;
     _kicked = false;
     _error = null;

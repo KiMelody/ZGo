@@ -1,3 +1,4 @@
+import 'package:zgo/protocol/channel_client.dart';
 import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/state/task_directory.dart';
@@ -18,6 +19,7 @@ class FakeDeviceSession extends DeviceSession {
   FakeDeviceSession({
     required super.deviceId,
     required super.params,
+    super.sidecarCooldown,
     List<Map<String, dynamic>> entries = const [],
     List<Map<String, dynamic>> workspaces = const [],
     this.relayTasks = const [],
@@ -101,6 +103,58 @@ class FakeDeviceSession extends DeviceSession {
   void applyRelayOverview(List<Map<String, dynamic>> tasks) {
     relayTasks = tasks;
     reconcileTaskHomes();
+    // Production's overview landing points also re-diff the sidecar set
+    // (DeviceSession._recomputeSidecarSubscriptions).
+    debugRecomputeSidecarSubscriptions();
+  }
+
+  // --- sidecar sessions-index subscriptions (design 10-28) ---
+
+  /// Every sidecar subscribe attempt, in order: (workspace key, scope).
+  final List<(String, Map<String, dynamic>)> sidecarSubscribeCalls = [];
+
+  /// Keys whose sidecar subscription the manager disposed, in order.
+  final List<String> sidecarDisposed = [];
+
+  /// States handed out by [subscribeSidecarIndex], by workspace key —
+  /// tests drive frames through them (the manager attaches its listener).
+  final Map<String, SessionsIndexState> sidecarStates = {};
+
+  /// When true, [subscribeSidecarIndex] throws the desktop's benign
+  /// cold-runtime refusal (the manager must cool the workspace down).
+  bool sidecarColdRuntime = false;
+
+  /// Optional gate [subscribeSidecarIndex] awaits before handing the state
+  /// back — lets a test move the relay overview while a subscribe is still
+  /// in flight (the P2-2 candidate recheck).
+  Future<void>? sidecarSubscribeGate;
+
+  /// The fake has no bridge/transport; the manager only needs the seam.
+  @override
+  bool get sidecarSubscriptionsAvailable => true;
+
+  @override
+  Future<SessionsIndexState> subscribeSidecarIndex(
+    String key,
+    Map<String, dynamic> scope,
+  ) async {
+    sidecarSubscribeCalls.add((key, scope));
+    final gate = sidecarSubscribeGate;
+    if (gate != null) await gate;
+    if (sidecarColdRuntime) {
+      throw ChannelRpcError(
+        'ZCode Agent runtime is not running for workspace '
+        '${scope['workspacePath']}',
+        null,
+      );
+    }
+    return sidecarStates[key] ??= SessionsIndexState();
+  }
+
+  @override
+  Future<void> disposeSidecarIndex(String key) async {
+    sidecarDisposed.add(key);
+    sidecarStates.remove(key);
   }
 
   Map<String, dynamic>? _active;

@@ -211,6 +211,27 @@ bool isSessionNotFoundText(String text) =>
 bool isSessionNotFoundError(Object error) =>
     error is ChannelRpcError && isSessionNotFoundText(error.message);
 
+/// The desktop's cold-runtime refusal of a sessions-index subscribe
+/// (`subscribeSessionsIndexV4` with `runtimePolicy:'existing-only'` on a
+/// workspace whose agent runtime is not running, live-known since 10-26;
+/// design 10-28 sidecar subscriptions). This is a benign answer — the
+/// workspace simply has nothing live to stream — NOT a link fault: the
+/// sidecar manager cools the workspace down instead of retrying, and the
+/// failure must never reach the LinkSupervisor ledger (its subscribe path
+/// bypasses DeviceSession.callChannel structurally; locked by
+/// test/protocol/sessions_index_sidecar_test.dart).
+///
+/// Text-matched (lower-cased) because the refusal's carrier shape varies
+/// with the desktop's error plumbing; the phrase is the stable core.
+const String agentRuntimeNotRunningMarker = 'runtime is not running';
+
+/// See [agentRuntimeNotRunningMarker].
+bool isAgentRuntimeNotRunningText(String text) =>
+    text.toLowerCase().contains(agentRuntimeNotRunningMarker);
+
+bool isAgentRuntimeNotRunningError(Object error) =>
+    isAgentRuntimeNotRunningText('$error');
+
 /// The desktop's session-busy refusal (design C1 10-05 D1): session-scoped
 /// commands (fork, …) are rejected with 「会话正在进行中，稍后再试」 while
 /// the session is mid-turn (research-emulator.md「busy 之谜」, four

@@ -80,6 +80,16 @@ class TaskDirectory {
   /// Live sessions-index of the subscribed workspace (null until subscribed).
   final SessionsIndexState? sessions;
 
+  /// Live sessions-index states of the SIDECAR subscriptions (design
+  /// 10-28) — recently active workspaces that are not the subscribed one,
+  /// keyed by workspace key. They override the relay overview rows exactly
+  /// like [sessions] does (live phase / pendingInteraction are real-time
+  /// truth while the registry `status` is only the previous turn's
+  /// outcome), but rank BELOW the active index: the merge applies every
+  /// sidecar layer first and [sessions] last, so an id claimed by both
+  /// takes the active row. Empty = pre-sidecar behavior.
+  final Map<String, SessionsIndexState> sidecarIndexes;
+
   /// Locally-confirmed deletes (design 10-02 Step 3, persisted since
   /// design 10-15 §1.2 via the session's [TaskHomeStore]): task ids whose
   /// delete RPC returned success on this device. Unlike the probe-derived
@@ -142,6 +152,7 @@ class TaskDirectory {
   const TaskDirectory({
     this.relayTasks = const [],
     this.sessions,
+    this.sidecarIndexes = const {},
     this.locallyDeletedTaskIds = const {},
     this.confirmedHomeKeys = const {},
     this.keyAliases = const {},
@@ -155,7 +166,10 @@ class TaskDirectory {
   /// marker; it only observes which live rows found no surviving relay
   /// anchor.
   ///
-  /// Merged rows: relay base, live override per task id. Each row carries
+  /// Merged rows: relay base, live override per task id — sidecar index
+  /// layers first, then the active index last (design 10-28 priority
+  /// 活跃 live > sidecar live > relay 合成; both live kinds share
+  /// [_applyLiveLayer]). Each row carries
   /// its workspace key and the archived flag read off the RELAY map only —
   /// the relay `archived` field is the sole authority (live-probed
   /// bootstrap frame; live sessions-index frames carry no reliable
@@ -233,69 +247,33 @@ class TaskDirectory {
       final rawKey = confirmedHomeKeys[id] ?? relayKeyOf(task);
       byId[id] = (entry, _canonicalKey(rawKey), task['archived'] == true);
     }
-    if (sessions?.ready == true) {
-      for (final entry in sessions!.list) {
-        // Deleted-task tombstones: the live index still lists tasks the
-        // user deleted on the desktop, and relay has no anchor row for
-        // them — without this filter the live merge resurrects them
-        // (Addendum 2, 2026-09-23 device report: default 12 → 22). The
-        // local set covers deletes this device confirmed while the
-        // desktop index (and its probe) lag behind.
-        final id = entry.sessionId;
-        if (sessions!.deletedTaskIds.contains(id) ||
-            locallyDeletedTaskIds.contains(id)) {
-          continue;
-        }
-        // Source marker (C1-D2): no surviving relay anchor above → the
-        // row exists only in the live sessions-index.
-        if (!byId.containsKey(id)) {
-          sessionOnlyIds.add(id);
-        }
-        // Multi-copy ids (registry pollution, design 10-15
-        // multi-copy-stable-group): the live index of EVERY workspace
-        // carrying a copy claims membership, so liveKeyOf follows
-        // whichever workspace is ACTIVE — switching = migration = the
-        // "vanishing row" (PMA110 round-2 forensics, sess_b6f8f415). Keep
-        // the relay-layer key (anchor ?? cold pick, stable on
-        // untouchable fields); the live body still rides the row, so
-        // status stays real-time.
-        String? key;
-        if (grouped[id] != null && grouped[id]!.length > 1) {
-          // Canonicalize through keyAliases (§3.8 alias contract): the
-          // cold-pick branch spells path-form while folders/live keys
-          // are workspaceKeyOf-form — a raw path key matches no folder
-          // and the row becomes unopenable.
-          final relayKey = byId[id]?.$2;
-          key = relayKey == null ? null : keyAliases[relayKey] ?? relayKey;
-        }
-        final membershipKey =
-            liveKeyOf(entry, sessions!.subscribedWorkspaceKey);
-        key ??= membershipKey;
-        // Canonicalize membership keys too: a conversation workspace's
-        // index is subscribed under its own draft path, yet its rows
-        // display in the default group (design 10-21 A2a).
-        key = _canonicalKey(key);
-        // The live frame owns none of the archived bit (probed 3.12.1: the
-        // field is absent, and a stray one is untrusted) — carry the relay
-        // authority into the replacement row's raw so consumers reading
-        // `entry.raw['archived']` (swipe / action sheet) still see it.
-        final archived = byId[id]?.$3 ?? false;
-        byId[id] = (
-          SessionEntry({
-            ..._stampedEntry(entry, membershipKey).raw,
-            'archived': archived
-          }),
-          key,
-          archived,
-        );
-      }
+    // Sidecar layers first, the ACTIVE index last (design 10-28 priority:
+    // 活跃 live > sidecar live > relay 合成 > cachedSessions). Both kinds
+    // share one replacement rule (_applyLiveLayer). Within the sidecar tier
+    // the application order is deterministic ([_sidecarKeysByFreshness]):
+    // the manager's map is insertion-ordered by subscribe completion, so a
+    // multi-copy id claimed by two sidecars would otherwise flip its body
+    // whenever a drop + re-add reorders the map (check P2-1).
+    for (final sidecarKey in _sidecarKeysByFreshness(sidecarIndexes)) {
+      _applyLiveLayer(
+        sidecarIndexes[sidecarKey]!,
+        sidecarKey,
+        byId,
+        sessionOnlyIds,
+        grouped,
+      );
+    }
+    final active = sessions;
+    if (active != null) {
+      _applyLiveLayer(active, null, byId, sessionOnlyIds, grouped);
     }
     // Cached snapshots (third layer): gap filler only — any id the relay
-    // layer or the active live index already carries wins, so this never
-    // touches the anchored-home / pick semantics above. Same attribution
-    // rule as the live loop (liveKeyOf with the snapshot's own key), so a
-    // row keeps the group it had before the workspace was switched away
-    // from. Archived is relay's sole authority → false, like live rows.
+    // layer or a live index (active or sidecar) already carries wins, so
+    // this never touches the anchored-home / pick semantics above. Same
+    // attribution rule as the live loop (liveKeyOf with the snapshot's
+    // own key), so a row keeps the group it had before the workspace was
+    // switched away from. Archived is relay's sole authority → false,
+    // like live rows.
     for (final MapEntry(key: cacheKey, value: rows) in cachedSessions.entries) {
       for (final entry in rows) {
         final id = entry.sessionId;
@@ -318,6 +296,144 @@ class TaskDirectory {
       }
     }
     return (rows: byId.values.toList(), sessionOnlyIds: sessionOnlyIds);
+  }
+
+  /// Applies ONE live sessions-index layer on top of the relay layer
+  /// [byId] — the active index and every sidecar index share this exact
+  /// replacement semantics (design 10-28), so the two can never drift:
+  ///
+  /// - tombstone filters apply per layer (the layer's own probe set,
+  ///   [SessionsIndexState.deletedTaskIds], plus the device-wide
+  ///   [locallyDeletedTaskIds]);
+  /// - attribution = [liveKeyOf] with the layer's subscription identity
+  ///   ([SessionsIndexState.subscribedWorkspaceKey]), falling back to
+  ///   [layerKey] for a sidecar whose key was recorded by the manager;
+  /// - multi-copy ids keep the relay-layer key
+  ///   (design 10-15 multi-copy-stable-group);
+  /// - the archived bit stays relay-authoritative ([byId]'s third slot)
+  ///   and is stamped back into the row's raw;
+  /// - relay-side fields the sessions-index schema does not carry
+  ///   (`pinned` / `unreadAt` / `lastError`) are inherited from the relay
+  ///   row when the live frame has no value ([_withRelayMeta]).
+  ///
+  /// [onlyExisting] makes the layer a pure body/phase override: ids [byId]
+  /// does not already carry are skipped instead of being added (the pinned
+  /// projection's contract — a live-only row never becomes a pinned card).
+  ///
+  /// Later layers win (the caller applies sidecars first, the active index
+  /// last), which realizes 活跃 live > sidecar live > relay 合成.
+  void _applyLiveLayer(
+    SessionsIndexState index,
+    String? layerKey,
+    Map<String, (SessionEntry, String?, bool)> byId,
+    Set<String> sessionOnlyIds,
+    Map<String, List<Map<String, dynamic>>> grouped, {
+    bool onlyExisting = false,
+  }) {
+    if (!index.ready) return;
+    final fallbackKey = index.subscribedWorkspaceKey ?? layerKey;
+    for (final entry in index.list) {
+      // Deleted-task tombstones: the live index still lists tasks the
+      // user deleted on the desktop, and relay has no anchor row for
+      // them — without this filter the live merge resurrects them
+      // (Addendum 2, 2026-09-23 device report: default 12 → 22). The
+      // local set covers deletes this device confirmed while the
+      // desktop index (and its probe) lag behind.
+      final id = entry.sessionId;
+      if (index.deletedTaskIds.contains(id) ||
+          locallyDeletedTaskIds.contains(id)) {
+        continue;
+      }
+      // Source marker (C1-D2): no surviving relay anchor above → the
+      // row exists only in the live sessions-index.
+      if (!byId.containsKey(id)) {
+        if (onlyExisting) continue;
+        sessionOnlyIds.add(id);
+      }
+      // Multi-copy ids (registry pollution, design 10-15
+      // multi-copy-stable-group): the live index of EVERY workspace
+      // carrying a copy claims membership, so liveKeyOf follows
+      // whichever workspace is ACTIVE — switching = migration = the
+      // "vanishing row" (PMA110 round-2 forensics, sess_b6f8f415). Keep
+      // the relay-layer key (anchor ?? cold pick, stable on
+      // untouchable fields); the live body still rides the row, so
+      // status stays real-time.
+      String? key;
+      if (grouped[id] != null && grouped[id]!.length > 1) {
+        // Canonicalize through keyAliases (§3.8 alias contract): the
+        // cold-pick branch spells path-form while folders/live keys
+        // are workspaceKeyOf-form — a raw path key matches no folder
+        // and the row becomes unopenable.
+        final relayKey = byId[id]?.$2;
+        key = relayKey == null ? null : keyAliases[relayKey] ?? relayKey;
+      }
+      final membershipKey = liveKeyOf(entry, fallbackKey);
+      key ??= membershipKey;
+      // Canonicalize membership keys too: a conversation workspace's
+      // index is subscribed under its own draft path, yet its rows
+      // display in the default group (design 10-21 A2a).
+      key = _canonicalKey(key);
+      // The live frame owns none of the archived bit (probed 3.12.1: the
+      // field is absent, and a stray one is untrusted) — carry the relay
+      // authority into the replacement row's raw so readers see it; the
+      // registry-side meta the live schema lacks is inherited too (check
+      // P1-1, [_withRelayMeta]).
+      final previous = byId[id];
+      final archived = previous?.$3 ?? false;
+      byId[id] = (
+        SessionEntry(_withRelayMeta(
+          {..._stampedEntry(entry, membershipKey).raw, 'archived': archived},
+          previous?.$1.raw,
+        )),
+        key,
+        archived,
+      );
+    }
+  }
+
+  /// Live body [raw] plus the relay-authoritative fields the live
+  /// sessions-index row schema does not carry (`pinned` / `unreadAt` /
+  /// `lastError`). Live values win; the relay row only fills gaps (check
+  /// P1-1). Without the inheritance every live overlay strips the pin /
+  /// unread affordances and the Copy-TraceID meta off rows the list just
+  /// refreshed — the active window had the same latent bug, the sidecar
+  /// tier would have spread it to the top-5 workspaces.
+  Map<String, dynamic> _withRelayMeta(
+    Map<String, dynamic> raw,
+    Map<String, dynamic>? relayRaw,
+  ) {
+    if (relayRaw == null) return raw;
+    return {
+      ...raw,
+      if (raw['pinned'] == null && relayRaw['pinned'] != null)
+        'pinned': relayRaw['pinned'],
+      if (raw['unreadAt'] == null && relayRaw['unreadAt'] != null)
+        'unreadAt': relayRaw['unreadAt'],
+      if (raw['lastError'] == null && relayRaw['lastError'] != null)
+        'lastError': relayRaw['lastError'],
+    };
+  }
+
+  /// Deterministic application order for the sidecar tier (check P2-1):
+  /// stalest index first so the freshest body wins, the key breaking ties
+  /// so a drop + re-add cannot reorder equal-freshness layers.
+  List<String> _sidecarKeysByFreshness(
+    Map<String, SessionsIndexState> indexes,
+  ) {
+    int freshness(SessionsIndexState index) {
+      var latest = 0;
+      for (final entry in index.list) {
+        if (entry.lastActivityAt > latest) latest = entry.lastActivityAt;
+      }
+      return latest;
+    }
+
+    return indexes.keys.toList()
+      ..sort((a, b) {
+        final byFreshness =
+            freshness(indexes[a]!).compareTo(freshness(indexes[b]!));
+        return byFreshness != 0 ? byFreshness : a.compareTo(b);
+      });
   }
 
   List<(SessionEntry, String?, bool)> _rows() => _merge().rows;
@@ -633,7 +749,7 @@ class TaskDirectory {
       if (locallyDeletedTaskIds.contains(id)) continue;
       (grouped[id] ??= []).add(task);
     }
-    final byId = <String, (SessionEntry, String?)>{};
+    final byId = <String, (SessionEntry, String?, bool)>{};
     for (final MapEntry(key: id, value: rows) in grouped.entries) {
       final task = bestRelayRow(
         rows,
@@ -648,21 +764,40 @@ class TaskDirectory {
       // Same anchor-pins-the-group rule as [_merge], canonicalized through
       // [groupKeyAliases] so a conversation copy lands in the default group.
       final rawKey = confirmedHomeKeys[id] ?? relayKeyOf(task);
-      byId[id] = (entry, _canonicalKey(rawKey));
+      // The archived slot is false here by construction: archived relay
+      // rows are filtered out of this projection (see the loop above).
+      byId[id] = (entry, _canonicalKey(rawKey), false);
+    }
+    // Multi-copy attribution needs the FULL relay set: this projection's
+    // own `grouped` above only holds pinned copies, so a multi-copy id
+    // whose relay copies are all unpinned/stale would flip with the
+    // active workspace here while staying stable in [_merge] (design
+    // 10-15 multi-copy-stable-group §pinned, check P1-2).
+    final allCopies = <String, List<Map<String, dynamic>>>{};
+    for (final task in relayTasks) {
+      final id = '${task['taskId'] ?? ''}';
+      if (id.isEmpty) continue;
+      if (locallyDeletedTaskIds.contains(id)) continue;
+      (allCopies[id] ??= []).add(task);
+    }
+    // Sidecar layers (design 10-28, check P1-2): a pinned task continues in
+    // whichever workspace's index carries it — without this the pinned card
+    // keeps the relay's last-turn outcome while the same task's group row
+    // shows the live phase. `onlyExisting` keeps this projection's contract:
+    // a sidecar row never ADDS a pinned card, it only refreshes one the
+    // relay pinned set already carries. Same deterministic tier order as
+    // [_merge].
+    for (final sidecarKey in _sidecarKeysByFreshness(sidecarIndexes)) {
+      _applyLiveLayer(
+        sidecarIndexes[sidecarKey]!,
+        sidecarKey,
+        byId,
+        const <String>{},
+        allCopies,
+        onlyExisting: true,
+      );
     }
     if (sessions?.ready == true) {
-      // Multi-copy attribution needs the FULL relay set: this projection's
-      // own `grouped` above only holds pinned copies, so a multi-copy id
-      // whose relay copies are all unpinned/stale would flip with the
-      // active workspace here while staying stable in [_merge] (design
-      // 10-15 multi-copy-stable-group §pinned, check P1-2).
-      final allCopies = <String, List<Map<String, dynamic>>>{};
-      for (final task in relayTasks) {
-        final id = '${task['taskId'] ?? ''}';
-        if (id.isEmpty) continue;
-        if (locallyDeletedTaskIds.contains(id)) continue;
-        (allCopies[id] ??= []).add(task);
-      }
       for (final entry in sessions!.list) {
         // Same tombstone rules as [_rows] — deleted live rows never pin.
         final id = entry.sessionId;
@@ -670,7 +805,13 @@ class TaskDirectory {
             locallyDeletedTaskIds.contains(id)) {
           continue;
         }
-        if (entry.raw['pinned'] != true) continue;
+        // Rows already in the pinned projection take every live refresh —
+        // real sessions-index rows carry no `pinned` field (same schema
+        // fact as check P1-1), so gating on it would freeze the pinned card
+        // at the relay outcome while the group row runs. Live-only rows
+        // still need an explicit pin to become a card (add-only contract).
+        final previous = byId[id];
+        if (entry.raw['pinned'] != true && previous == null) continue;
         String? key;
         final copies = allCopies[id];
         if (copies != null && copies.length > 1) {
@@ -693,7 +834,14 @@ class TaskDirectory {
           }
         }
         key ??= liveKeyOf(entry, sessions!.subscribedWorkspaceKey);
-        byId[id] = (entry, _canonicalKey(key));
+        // Same relay-meta inheritance as the sidecar tier (check P1-1):
+        // the relay row owns pinned / unreadAt / lastError, the live row
+        // the phase.
+        byId[id] = (
+          SessionEntry(_withRelayMeta(entry.raw, previous?.$1.raw)),
+          _canonicalKey(key),
+          previous?.$3 ?? false,
+        );
       }
     }
     // Cached snapshots: same gap-filler rule as [_merge] — without this a
@@ -708,11 +856,14 @@ class TaskDirectory {
           byId[entry.sessionId] = (
             entry,
             _canonicalKey(liveKeyOf(entry, cacheKey)),
+            false,
           );
         }
       }
     }
-    final list = byId.values.toList()
+    final list = byId.values
+        .map<(SessionEntry, String?)>((row) => (row.$1, row.$2))
+        .toList()
       ..sort((a, b) => b.$1.lastActivityAt.compareTo(a.$1.lastActivityAt));
     return list;
   }

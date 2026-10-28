@@ -1317,4 +1317,310 @@ void main() {
       );
     });
   });
+  group('sidecar live layers (design 10-28)', () {
+    test('four-layer priority: active live > sidecar live > relay > cache',
+        () {
+      final cached = SessionEntry({
+        'sessionId': 't1',
+        'title': 'cached-t1',
+        'phase': 'idle',
+      });
+      TaskDirectory build({bool active = true, bool sidecar = true}) =>
+          TaskDirectory(
+            relayTasks: [_relayTask('t1', 'alpha')],
+            sessions: active
+                ? _liveIndex([
+                    {
+                      'sessionId': 't1',
+                      'title': 'active-t1',
+                      'phase': 'completedSuccess',
+                    },
+                  ], subscribedWorkspaceKey: 'alpha')
+                : null,
+            sidecarIndexes: sidecar
+                ? {
+                    'beta': _liveIndex([
+                      {
+                        'sessionId': 't1',
+                        'title': 'sidecar-t1',
+                        'phase': 'running',
+                      },
+                    ], subscribedWorkspaceKey: 'beta'),
+                  }
+                : const {},
+            cachedSessions: {
+              'gamma': [cached],
+            },
+          );
+
+      expect(build().allEntries().single.$1.title, 'active-t1');
+      expect(build(active: false).allEntries().single.$1.title, 'sidecar-t1');
+      expect(
+        build(active: false, sidecar: false).allEntries().single.$1.title,
+        'relay-t1',
+      );
+      expect(
+        TaskDirectory(cachedSessions: {
+          'gamma': [cached],
+        }).allEntries().single.$1.title,
+        'cached-t1',
+      );
+      // Sidecar beats the cache for the same id (the cache only fills gaps).
+      expect(
+        TaskDirectory(
+          sidecarIndexes: {
+            'beta': _liveIndex([
+              {'sessionId': 't1', 'title': 'sidecar-t1', 'phase': 'running'},
+            ], subscribedWorkspaceKey: 'beta'),
+          },
+          cachedSessions: {
+            'gamma': [cached],
+          },
+        ).allEntries().single.$1.title,
+        'sidecar-t1',
+      );
+    });
+
+    test('a sidecar row carries the live phase and pendingInteraction', () {
+      final dir = TaskDirectory(
+        relayTasks: [_relayTask('t1', 'alpha', displayStatus: 'completed')],
+        sidecarIndexes: {
+          'beta': _liveIndex([
+            {
+              'sessionId': 't1',
+              'title': 'sidecar-t1',
+              'phase': 'running',
+              'pendingInteraction': {'kind': 'permission'},
+            },
+            {
+              'sessionId': 't2',
+              'title': 'sidecar-only',
+              'phase': 'running',
+            },
+          ], subscribedWorkspaceKey: 'beta'),
+        },
+      );
+      final all = dir.allEntries();
+      final t1 = all.firstWhere((e) => e.$1.sessionId == 't1');
+      expect(t1.$1.phase, 'running');
+      expect(t1.$1.pendingInteraction, {'kind': 'permission'});
+      expect(t1.$2, 'beta');
+      // A row only the sidecar index carries is session-only (no registry
+      // anchor), exactly like an active-live-only row.
+      expect(dir.sessionOnlyIds, contains('t2'));
+      expect(dir.sessionOnlyIds, isNot(contains('t1')));
+    });
+
+    test('sidecar tombstones: the index own probe set and the device-wide '
+        'local tombstones both hide the live row (relay body survives)',
+        () {
+      final dir = TaskDirectory(
+        relayTasks: [
+          _relayTask('t1', 'beta'),
+          _relayTask('t2', 'beta'),
+          _relayTask('t3', 'beta'),
+        ],
+        locallyDeletedTaskIds: const {'t3'},
+        sidecarIndexes: {
+          'beta': _liveIndex([
+            {'sessionId': 't1', 'title': 'sidecar-t1', 'phase': 'running'},
+            {'sessionId': 't2', 'title': 'sidecar-t2', 'phase': 'running'},
+            {'sessionId': 't3', 'title': 'sidecar-t3', 'phase': 'running'},
+          ], subscribedWorkspaceKey: 'beta', deletedTaskIds: {'t1', 't2'}),
+        },
+      );
+      final byId = {for (final (e, _) in dir.allEntries()) e.sessionId: e};
+      // t1/t2/t3: the sidecar rows are filtered, the relay rows stay.
+      expect(byId['t1']!.title, 'relay-t1');
+      expect(byId['t2']!.title, 'relay-t2');
+      expect(byId.containsKey('t3'), isFalse,
+          reason: 'locally-deleted ids drop both layers');
+    });
+
+    test('archived stays relay-authoritative under a sidecar override', () {
+      final dir = TaskDirectory(
+        relayTasks: [_relayTask('t1', 'beta', archived: true)],
+        sidecarIndexes: {
+          'beta': _liveIndex([
+            {
+              'sessionId': 't1',
+              'title': 'sidecar-t1',
+              'phase': 'running',
+              // A stray live archived bit is untrusted.
+              'archived': false,
+            },
+          ], subscribedWorkspaceKey: 'beta'),
+        },
+      );
+      expect(dir.allEntries(), isEmpty);
+      final archived =
+          dir.entriesFor('beta', includeArchived: true).single.$1;
+      expect(archived.phase, 'running');
+      expect(archived.raw['archived'], isTrue,
+          reason: 'consumers read the relay bit off entry.raw');
+    });
+
+    test('multi-copy ids keep the relay-layer group under a sidecar claim '
+        '(same rule as the active live layer)', () {
+      final dir = TaskDirectory(
+        relayTasks: [
+          _relayTask('t1', '/repo/mirror'),
+          _relayTask('t1', '/repo/real'),
+        ],
+        sidecarIndexes: {
+          'beta': _liveIndex([
+            {'sessionId': 't1', 'title': 'sidecar-t1', 'phase': 'running'},
+          ], subscribedWorkspaceKey: 'beta'),
+        },
+        keyAliases: const {
+          'm': 'm',
+          '/repo/mirror': 'm',
+          'r': 'r',
+          '/repo/real': 'r',
+        },
+      );
+      final row = dir.allEntries().single;
+      expect(row.$1.title, 'sidecar-t1', reason: 'live body rides the row');
+      expect(row.$2, 'm',
+          reason: 'cold pick (/repo/mirror, lex) canonicalized — the sidecar '
+              'claim must not migrate a multi-copy group');
+    });
+
+    test('active live wins over a sidecar row for the same id', () {
+      final dir = TaskDirectory(
+        sidecarIndexes: {
+          'beta': _liveIndex([
+            {'sessionId': 't1', 'title': 'sidecar-t1', 'phase': 'running'},
+          ], subscribedWorkspaceKey: 'beta'),
+        },
+        sessions: _liveIndex([
+          {'sessionId': 't1', 'title': 'active-t1', 'phase': 'completedSuccess'},
+        ], subscribedWorkspaceKey: 'alpha'),
+      );
+      final row = dir.allEntries().single;
+      expect(row.$1.title, 'active-t1');
+      expect(row.$2, 'alpha');
+    });
+
+    test('relay-side meta survives a live override (check P1-1)', () {
+      final dir = TaskDirectory(
+        relayTasks: [
+          {
+            ..._relayTask('t1', 'beta', pinned: true),
+            'unreadAt': 42,
+            'lastError': {'message': 'boom', 'traceId': 'trace-1'},
+          },
+        ],
+        sidecarIndexes: {
+          'beta': _liveIndex([
+            {'sessionId': 't1', 'title': 'sidecar-t1', 'phase': 'running'},
+          ], subscribedWorkspaceKey: 'beta'),
+        },
+      );
+      final row = dir.allEntries().single.$1;
+      expect(row.phase, 'running');
+      expect(row.raw['pinned'], isTrue,
+          reason: 'the pin affordance must not flip off under a live row');
+      expect(row.raw['unreadAt'], 42);
+      expect(row.lastErrorTraceId, 'trace-1');
+
+      // Live-provided values stay authoritative — only gaps are filled.
+      final overridden = TaskDirectory(
+        relayTasks: [
+          {
+            ..._relayTask('t1', 'beta', pinned: true),
+            'unreadAt': 42,
+          },
+        ],
+        sidecarIndexes: {
+          'beta': _liveIndex([
+            {
+              'sessionId': 't1',
+              'phase': 'running',
+              'pinned': false,
+              'unreadAt': 7,
+            },
+          ], subscribedWorkspaceKey: 'beta'),
+        },
+      ).allEntries().single.$1;
+      expect(overridden.raw['pinned'], isFalse);
+      expect(overridden.raw['unreadAt'], 7);
+    });
+
+    test('the pinned projection picks up a sidecar phase and keeps the pin '
+        '(check P1-2)', () {
+      final dir = TaskDirectory(
+        relayTasks: [
+          _relayTask('t1', 'beta', pinned: true, displayStatus: 'completed'),
+        ],
+        sidecarIndexes: {
+          'beta': _liveIndex([
+            {'sessionId': 't1', 'title': 'sidecar-t1', 'phase': 'running'},
+            // Not relay-pinned: a sidecar row must never ADD a pinned card.
+            {'sessionId': 't2', 'title': 'live-only', 'phase': 'running'},
+          ], subscribedWorkspaceKey: 'beta'),
+        },
+      );
+      final pinned = dir.pinnedEntries();
+      expect(pinned, hasLength(1));
+      expect(pinned.single.$1.sessionId, 't1');
+      expect(pinned.single.$1.phase, 'running',
+          reason: 'the pinned card must show the live phase, not the relay '
+              'last-turn outcome');
+      expect(pinned.single.$1.raw['pinned'], isTrue);
+      expect(pinned.single.$2, 'beta');
+    });
+
+    test('the pinned card takes an ACTIVE live refresh even though real '
+        'index rows carry no pinned field (check P1-A)', () {
+      final dir = TaskDirectory(
+        relayTasks: [
+          _relayTask('t1', 'alpha', pinned: true, displayStatus: 'completed'),
+        ],
+        sessions: _liveIndex([
+          // Wire rows do not carry `pinned`; the relay row anchors the card
+          // and the live row supplies the phase.
+          {'sessionId': 't1', 'title': 'live-t1', 'phase': 'running'},
+        ], subscribedWorkspaceKey: 'alpha'),
+      );
+      final pinned = dir.pinnedEntries().single.$1;
+      expect(pinned.phase, 'running');
+      expect(pinned.raw['pinned'], isTrue);
+    });
+
+    test('two sidecars claiming one id resolve deterministically by '
+        'freshness, not map insertion order (check P2-1)', () {
+      SessionsIndexState layer(String title, int activity) => _liveIndex([
+            {
+              'sessionId': 't1',
+              'title': title,
+              'phase': 'running',
+              'lastActivityAt': activity,
+            },
+          ], subscribedWorkspaceKey: 'beta');
+      TaskDirectory build(Map<String, SessionsIndexState> indexes) =>
+          TaskDirectory(
+            relayTasks: [_relayTask('t1', 'beta')],
+            sidecarIndexes: indexes,
+          );
+      final stale = layer('stale', 10);
+      final fresh = layer('fresh', 20);
+      expect(
+        build({'stale': stale, 'fresh': fresh}).allEntries().single.$1.title,
+        'fresh',
+      );
+      expect(
+        build({'fresh': fresh, 'stale': stale}).allEntries().single.$1.title,
+        'fresh',
+        reason: 'application order follows freshness, not the manager map',
+      );
+      // Equal freshness: the key is the stable tiebreak.
+      final tie = build({
+        'z': layer('z-body', 10),
+        'a': layer('a-body', 10),
+      }).allEntries().single.$1;
+      expect(tie.title, 'z-body');
+    });
+  });
+
 }
