@@ -31,6 +31,22 @@ void main() {
     });
   });
 
+  group('cold-runtime copy (10-28 C)', () {
+    test('both locales carry the actionable runtime copy verbatim', () {
+      expect(
+        zhTable['tasks.agentRuntimeNotRunning'],
+        '该工作区的智能体运行时未启动。请在桌面端打开该工作区（或其中任一任务）'
+        '以启动运行时，然后重试。',
+      );
+      expect(
+        enTable['tasks.agentRuntimeNotRunning'],
+        'The agent runtime for this workspace is not running. Open this '
+        'workspace (or any task in it) on the desktop to start it, then '
+        'retry.',
+      );
+    });
+  });
+
   group('usage primary-left copy (10-25)', () {
     test('the template carries no percent sign — the argument already has one',
         () {

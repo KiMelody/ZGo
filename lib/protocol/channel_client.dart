@@ -221,6 +221,14 @@ bool isSessionNotFoundError(Object error) =>
 /// bypasses DeviceSession.callChannel structurally; locked by
 /// test/protocol/sessions_index_sidecar_test.dart).
 ///
+/// Structured `code` the desktop sets on [agentRuntimeNotRunningMarker]
+/// (`createRuntimeUnavailableError`, desktop 3.16.3). The ChannelServer 202
+/// error whitelist keeps `code` on the wire, so the code is the precise
+/// anchor; the message phrase stays the fallback for desktops/relay shapes
+/// that drop it. `ZCODE_AGENT_PROVIDER_NOT_READY` is a DIFFERENT failure
+/// (provider/model not configured) and must never classify as this one.
+const String agentRuntimeUnavailableCode = 'ZCODE_AGENT_RUNTIME_UNAVAILABLE';
+
 /// Text-matched (lower-cased) because the refusal's carrier shape varies
 /// with the desktop's error plumbing; the phrase is the stable core.
 const String agentRuntimeNotRunningMarker = 'runtime is not running';
@@ -229,8 +237,17 @@ const String agentRuntimeNotRunningMarker = 'runtime is not running';
 bool isAgentRuntimeNotRunningText(String text) =>
     text.toLowerCase().contains(agentRuntimeNotRunningMarker);
 
-bool isAgentRuntimeNotRunningError(Object error) =>
-    isAgentRuntimeNotRunningText('$error');
+/// Code first, message fallback: the wire `code` survives even when the
+/// desktop re-words its English message ([agentRuntimeUnavailableCode]).
+bool isAgentRuntimeNotRunningError(Object error) {
+  if (error is ChannelRpcError) {
+    final data = error.data;
+    if (data is Map && data['code'] == agentRuntimeUnavailableCode) {
+      return true;
+    }
+  }
+  return isAgentRuntimeNotRunningText('$error');
+}
 
 /// The desktop's session-busy refusal (design C1 10-05 D1): session-scoped
 /// commands (fork, …) are rejected with 「会话正在进行中，稍后再试」 while

@@ -115,11 +115,16 @@ class _ScriptedClient extends RemoteClient {
 /// answering the conversation handshake + sessions-index subscribe, so
 /// [_openWorkspaceNow] can finish exactly like it does against a desktop.
 class _FakeBridge implements BridgeSession {
-  _FakeBridge({this.workspaceKey});
+  _FakeBridge({this.workspaceKey, this.subscribeError});
 
   /// The workspace the READY frame points at (null = same as requested).
   @override
   final String? workspaceKey;
+
+  /// When non-null, `subscribeSessionsIndexV4` answers this 202 error map
+  /// instead of the ack — the cold-runtime refusal shape
+  /// (`{message, code}`).
+  final Map<String, dynamic>? subscribeError;
 
   @override
   late final ChannelClient channels = _buildChannels();
@@ -132,9 +137,14 @@ class _FakeBridge implements BridgeSession {
       decodeValue(reader); // the request args; answers are fixed here
       final id = header[1] as int;
       final method = '${header[3]}';
+      var resType = ChannelClient.resPromiseSuccess;
       Object? payload;
       if (method == 'helloConversationV4') {
         payload = <String, dynamic>{'connectionId': 'conn-1'};
+      } else if (method == 'subscribeSessionsIndexV4' &&
+          subscribeError != null) {
+        resType = ChannelClient.resPromiseError;
+        payload = subscribeError;
       } else if (method == 'subscribeSessionsIndexV4') {
         payload = <String, dynamic>{
           'ack': <String, dynamic>{'subscriptionId': 'sub-1'},
@@ -143,7 +153,7 @@ class _FakeBridge implements BridgeSession {
         payload = <String, dynamic>{};
       }
       final writer = ValueWriter();
-      encodeValue(writer, [ChannelClient.resPromiseSuccess, id]);
+      encodeValue(writer, [resType, id]);
       encodeValue(writer, payload);
       client.handleMessage(writer.toBytes());
     });
@@ -198,11 +208,14 @@ class _FakeBridge implements BridgeSession {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-Future<DeviceSession> _connected(_ScriptedClient client) async {
+Future<DeviceSession> _connected(
+  _ScriptedClient client, {
+  StallTimings timings = _fastTimings,
+}) async {
   final session = DeviceSession(
     deviceId: 'd1',
     params: client.params,
-    timings: _fastTimings,
+    timings: timings,
     clientFactory: () => client,
   );
   await session.connect();
@@ -537,6 +550,71 @@ void main() {
       expect(session.activeWorkspace, isNull);
     });
 
+    test('a cold per-workspace runtime surfaces its own sentinel', () async {
+      // Bridge attach succeeds — the runtime is per-workspace and only the
+      // desktop starts it. The sessions-index subscribe then answers the
+      // runtime-unavailable refusal: this is NOT the window gate, so the
+      // session must expose the runtime sentinel (the UI localizes it to
+      // actionable copy instead of "workspace is not open").
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => _FakeBridge(
+              subscribeError: {
+                'message': 'ZCode Agent runtime is not running.',
+                'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+              },
+            );
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      final opened = await session.openWorkspace(
+        _ws('/repo/beta'),
+        purpose: WorkspaceOpenPurpose.openTask,
+      );
+
+      expect(opened, isFalse);
+      expect(session.error, agentRuntimeNotRunningError);
+      expect(session.error, isNot(workspaceUnreachableError),
+          reason: 'the window-gate sentinel would tell the user to open a '
+              'workspace that is already attached');
+    });
+
+    test('a cold runtime parks the list watchdog instead of rebuilding',
+        () async {
+      // Reconnecting cannot start a per-workspace runtime, so the never-ready
+      // watchdog must not reopen/rebuild in a loop: that would flash the
+      // banner between "connecting" and the runtime copy forever. One failed
+      // open, then silence until the user retries.
+      const coldTimings = StallTimings(
+        healthyWaitTimeout: Duration(milliseconds: 40),
+        rpcTimeout: Duration(milliseconds: 200),
+        dialTimeout: Duration(milliseconds: 60),
+        listReadyTimeout: Duration(milliseconds: 80),
+        minRebuildInterval: Duration(milliseconds: 5),
+        retryBackoff: Duration(milliseconds: 60),
+      );
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => _FakeBridge(
+              subscribeError: {
+                'message': 'ZCode Agent runtime is not running.',
+                'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+              },
+            );
+      final session = await _connected(client, timings: coldTimings);
+      addTearDown(session.dispose);
+
+      final opened = await session.openWorkspace(
+        _ws('/repo/beta'),
+        purpose: WorkspaceOpenPurpose.openTask,
+      );
+      expect(opened, isFalse);
+      expect(session.error, agentRuntimeNotRunningError);
+
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(client.opens, hasLength(1),
+          reason: 'the cold-runtime dead end must not feed the watchdog');
+      expect(session.error, agentRuntimeNotRunningError);
+    });
+
     test('openTask retries with task host addressing', () async {
       final client = _ScriptedClient(_params('3.16.3'))
         ..handler = (call) async {
@@ -710,6 +788,32 @@ void main() {
           reason: 'the bridge must stay on the previous workspace');
       expect(session.error, workspaceUnreachableError,
           reason: 'the UI localizes the stable sentinel and blocks the send');
+    });
+
+    test('a cold-runtime draft target answers false and keeps its sentinel',
+        () async {
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..bootstrapWorkspaces = [
+          _ws('/repo/tao'),
+          _ws('/repo/chat'),
+        ]
+        ..handler = (call) async => call.key == '/repo/chat'
+            ? _FakeBridge(
+                subscribeError: {
+                  'message': 'ZCode Agent runtime is not running.',
+                  'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+                },
+              )
+            : _FakeBridge();
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      final ok = await session.ensureDraftWorkspace('/repo/chat');
+
+      expect(ok, isFalse);
+      expect(session.error, agentRuntimeNotRunningError,
+          reason: 'the draft-first-send guard keeps the sentinel so the chat '
+              'page can pick the runtime copy');
     });
   });
 

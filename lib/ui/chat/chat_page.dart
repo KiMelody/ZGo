@@ -1579,7 +1579,13 @@ class _ChatPageState extends State<ChatPage> {
           widget.draftWorkspacePath,
         )) {
           if (!mounted) return;
-          _toast(tr(context, 'tasks.workspaceUnreachable'));
+          // Same sentinel split as the task list: a cold per-workspace
+          // runtime needs the "open it on the desktop" instruction, not the
+          // "workspace is not open" copy.
+          final key = widget.gateway.error == agentRuntimeNotRunningError
+              ? 'tasks.agentRuntimeNotRunning'
+              : 'tasks.workspaceUnreachable';
+          _toast(tr(context, key));
           return;
         }
         if (!mounted) return;

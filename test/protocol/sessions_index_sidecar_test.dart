@@ -49,6 +49,40 @@ void main() {
         isFalse,
       );
     });
+
+    test('the structured runtime-unavailable code matches without the phrase',
+        () {
+      // Desktop 3.16.3 sets ZCODE_AGENT_RUNTIME_UNAVAILABLE on
+      // createRuntimeUnavailableError; the ChannelServer 202 whitelist keeps
+      // `code` on the wire, so the code alone must be enough (a desktop
+      // re-wording its English message must not break the classification).
+      expect(
+        isAgentRuntimeNotRunningError(
+          ChannelRpcError(
+            'boom',
+            {'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE'},
+          ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('provider-not-ready is a different failure, never the cold runtime',
+        () {
+      // Static lock (10-28 research §5.3): the provider gate answers
+      // ZCODE_AGENT_PROVIDER_NOT_READY with Chinese copy. Misclassifying it
+      // would tell the user to open the workspace instead of configuring a
+      // model.
+      expect(
+        isAgentRuntimeNotRunningError(
+          ChannelRpcError(
+            '当前没有可用的模型供应商和模型，请先登录或配置 API Key。',
+            {'code': 'ZCODE_AGENT_PROVIDER_NOT_READY'},
+          ),
+        ),
+        isFalse,
+      );
+    });
   });
 
   group('scope-addressed subscriptions on one channel', () {

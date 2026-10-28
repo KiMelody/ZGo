@@ -110,6 +110,7 @@ const _zh = {
   'tasks.opFailed': '操作失败: \$0',
   'tasks.scopeUnknown': '无法确定会话归属，未打开该任务',
   'tasks.workspaceUnreachable': '该工作区未在桌面端打开，且无法自动准备，请先在桌面端打开该工作区',
+  'tasks.agentRuntimeNotRunning': '该工作区的智能体运行时未启动。请在桌面端打开该工作区（或其中任一任务）以启动运行时，然后重试。',
   'tasks.untitled': '未命名任务',
   'tasks.workspaces': '工作区',
   'tasks.pickWorkspace': '选择工作区',
@@ -1383,6 +1384,10 @@ const _en = {
   'tasks.workspaceUnreachable':
       'This workspace is not open on the desktop and could not be prepared '
           'automatically. Open it on the desktop first.',
+  'tasks.agentRuntimeNotRunning':
+      'The agent runtime for this workspace is not running. Open this '
+          'workspace (or any task in it) on the desktop to start it, then '
+          'retry.',
   'tasks.untitled': 'Untitled task',
   'tasks.workspaces': 'Workspace',
   'tasks.pickWorkspace': 'Choose a workspace',

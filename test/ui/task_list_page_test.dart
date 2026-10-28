@@ -1263,6 +1263,179 @@ void main() {
     expect(find.textContaining(workspaceUnreachableError), findsNothing);
   });
 
+  testWidgets('the cold-runtime sentinel renders its actionable copy',
+      (tester) async {
+    // The bridge is attached but the workspace's agent runtime is not
+    // running: the banner must point at the runtime (open the workspace on
+    // the desktop), never at "workspace is not open".
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      workspaces: [
+        {'workspacePath': '/repo/app'},
+      ],
+    )..error = agentRuntimeNotRunningError;
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('该工作区的智能体运行时未启动'), findsOneWidget);
+    expect(find.textContaining('该工作区未在桌面端打开'), findsNothing);
+    expect(find.textContaining('runtime is not running'), findsNothing,
+        reason: 'the desktop English message must never leak into the UI');
+  });
+
+  testWidgets(
+      'a cold-runtime failed ＋ open says the runtime is not running',
+      (tester) async {
+    final (_, _, session) = await setupTwoWorkspaces(tester);
+    session.openWorkspaceSucceeds = false;
+    session.error = agentRuntimeNotRunningError;
+
+    await tester.tap(find.descendant(
+      of: cardOf('beta'),
+      matching: find.byTooltip('新建任务'),
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(ChatPage), findsNothing);
+    expect(session.openWorkspacePurposes, [WorkspaceOpenPurpose.chatNew]);
+    expect(find.textContaining('该工作区的智能体运行时未启动'), findsWidgets);
+    expect(find.textContaining('该工作区未在桌面端打开'), findsNothing);
+  });
+
+  testWidgets(
+      'a cold-runtime failed task open says the runtime is not running',
+      (tester) async {
+    final (_, _, session) = await setupTwoWorkspaces(tester);
+    session.openWorkspaceSucceeds = false;
+    session.error = agentRuntimeNotRunningError;
+
+    await tester.tap(find.text('beta'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.descendant(
+      of: cardOf('beta'),
+      matching: find.text('中继任务乙'),
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(ChatPage), findsNothing);
+    expect(session.openWorkspacePurposes, [WorkspaceOpenPurpose.openTask]);
+    expect(find.textContaining('该工作区的智能体运行时未启动'), findsWidgets,
+        reason: 'both the snackbar and the degraded-link banner carry the '
+            'actionable runtime copy');
+    expect(find.textContaining('该工作区未在桌面端打开'), findsNothing);
+  });
+
+  testWidgets('a non-sentinel error keeps the runtime copy off the banner',
+      (tester) async {
+    // Exact-sentinel rule: only the cold-runtime marker earns the runtime
+    // copy; every other failure keeps its pre-existing raw text.
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      workspaces: [
+        {'workspacePath': '/repo/app'},
+      ],
+    )..error = 'ZCODE_AGENT_PROVIDER_NOT_READY: provider not ready';
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('该工作区的智能体运行时未启动'), findsNothing);
+    expect(find.textContaining('provider not ready'), findsOneWidget);
+  });
+
+  testWidgets('a cold-runtime sentinel re-opens even the active workspace',
+      (tester) async {
+    // A failed cold open leaves the banner and the active index stale. The
+    // next task tap must re-point the bridge (and clear the error on
+    // success) instead of skipping straight into chat.
+    final (_, _, session) = await setupTwoWorkspaces(tester);
+    session.error = agentRuntimeNotRunningError;
+
+    await tester.tap(find.text('任务甲'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(session.openWorkspaceCalls, hasLength(1));
+    expect(
+      session.openWorkspaceCalls.single.$1['workspaceIdentity'],
+      'alpha',
+      reason: 'the tap must re-open the active workspace, not skip the open',
+    );
+    expect(session.openWorkspacePurposes, [WorkspaceOpenPurpose.openTask]);
+    expect(find.byType(ChatPage), findsOneWidget);
+  });
+
+  testWidgets('a cold-runtime sentinel re-opens even the active ＋',
+      (tester) async {
+    final (_, _, session) = await setupTwoWorkspaces(tester);
+    session.error = agentRuntimeNotRunningError;
+
+    await tester.tap(find.descendant(
+      of: cardOf('alpha'),
+      matching: find.byTooltip('新建任务'),
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(session.openWorkspacePurposes, [WorkspaceOpenPurpose.chatNew]);
+    expect(find.byType(ChatPage), findsOneWidget);
+  });
+
+  testWidgets(
+      'a cold-runtime sentinel re-opens from the desktop sidebar new task',
+      (tester) async {
+    // The wide layout's sidebar entry is not a workspace card ＋; it must
+    // honor the same sentinel rule instead of opening a draft under a
+    // stale bridge.
+    useDesktop(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      workspaces: [
+        {'workspacePath': '/repo/app', 'workspaceIdentity': 'app'},
+      ],
+    )..error = agentRuntimeNotRunningError;
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.text('新建任务').first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(session.openWorkspacePurposes, [WorkspaceOpenPurpose.chatNew]);
+    expect(find.byType(ChatPage), findsOneWidget);
+  });
+
   testWidgets('live-ready active workspace still renders relay-only rows',
       (tester) async {
     // TaskDirectory merge anchor (CONTEXT.md「Task Directory」): relay 打底、

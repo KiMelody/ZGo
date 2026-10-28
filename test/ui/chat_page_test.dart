@@ -1355,6 +1355,47 @@ void main() {
     );
   });
 
+  testWidgets('a cold-runtime draft target says the runtime is not running',
+      (tester) async {
+    // Same blocked-send guard, different dead end: the bridge attached but
+    // the workspace runtime is cold, so the toast must give the desktop
+    // instruction instead of "workspace is not open".
+    final gateway = FakeChatGateway()
+      ..ensureDraftWorkspaceResult = false
+      ..error = agentRuntimeNotRunningError;
+    await tester.pumpWidget(
+      wrap(
+        ChatPage(
+          gateway: gateway,
+          title: '新任务',
+          draftWorkspacePath: '/repo/chat',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '开始分析');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(gateway.ensuredDraftWorkspaces, ['/repo/chat']);
+    expect(
+      gateway.calls.where((c) => c.$1 == 'createSession'),
+      isEmpty,
+      reason: 'a cold runtime blocks the send exactly like a wrong scope',
+    );
+    expect(
+      find.text(trLocale('zh-CN', 'tasks.agentRuntimeNotRunning')),
+      findsOneWidget,
+    );
+    expect(
+      find.text(trLocale('zh-CN', 'tasks.workspaceUnreachable')),
+      findsNothing,
+    );
+  });
+
   testWidgets('existing session: send goes through sendTextOrQueue', (
     tester,
   ) async {

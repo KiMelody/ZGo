@@ -205,6 +205,14 @@ class _TaskListPageState extends State<TaskListPage>
       identical(session.activeWorkspace, ws) ||
       workspaceKeyOf(ws) == workspaceKeyOf(session.activeWorkspace ?? const {});
 
+  /// Whether opening a task/draft must re-point the bridge first. A cold
+  /// runtime sentinel means the previous open failed: even the active
+  /// workspace needs a successful re-open to clear the banner and rebuild
+  /// its live index (the chat subscription alone only warms the runtime).
+  bool _needsWorkspaceOpen(DeviceSession session, Map<String, dynamic> ws) =>
+      !_isWorkspaceActive(session, ws) ||
+      session.error == agentRuntimeNotRunningError;
+
   /// 3.16.2 conversation workspaces (desktop "New task" drafts,
   /// `.zcode/workspace/draft-*`) own no card: the desktop hides them from
   /// its workspace list (`Bbt` default) and their rows display under the
@@ -483,7 +491,7 @@ class _TaskListPageState extends State<TaskListPage>
               icon: Icons.add,
               label: tr(context, 'tasks.sidebar.new'),
               shortcut: 'Ctrl+N',
-              onTap: () => _openChat(title: tr(context, 'tasks.new')),
+              onTap: () => _startNewTask(),
             ),
             _sidebarNavItem(
               context,
@@ -1744,7 +1752,7 @@ class _TaskListPageState extends State<TaskListPage>
                     color: ZInk.ghost(context),
                   ),
                   const SizedBox(width: 4),
-                  _newTaskButton(context, session, workspace: isActive ? null : ws),
+                  _newTaskButton(context, session, workspace: ws),
                 ],
               ),
             ),
@@ -1833,6 +1841,35 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
+  /// Sidebar "new task": same cold-runtime rule as the card ＋ — a sentinel
+  /// means the previous open failed, so re-point the active workspace first
+  /// (a successful open clears the stale banner). No active workspace means
+  /// there is nothing to re-point: a sentinel still explains the failure on
+  /// the list; otherwise the pre-existing draft path runs.
+  Future<void> _startNewTask() async {
+    final session = _session;
+    if (session != null) {
+      final ws = session.activeWorkspace;
+      if (ws == null) {
+        if (session.error == agentRuntimeNotRunningError) {
+          _showWorkspaceOpenFailure(session);
+          return;
+        }
+      } else if (_needsWorkspaceOpen(session, ws)) {
+        final opened = await session.openWorkspace(
+          ws,
+          purpose: WorkspaceOpenPurpose.chatNew,
+        );
+        if (!opened) {
+          if (mounted) _showWorkspaceOpenFailure(session);
+          return;
+        }
+      }
+    }
+    if (!mounted) return;
+    await _openChat(title: tr(context, 'tasks.new'));
+  }
+
   /// ➕ starts a draft chat (createSession fires on first send). In a
   /// non-active workspace card it re-points the bridge first so the draft
   /// lands in that workspace.
@@ -1843,13 +1880,13 @@ class _TaskListPageState extends State<TaskListPage>
   }) {
     final newLabel = tr(context, 'tasks.new');
     Future<void> start() async {
-      if (workspace != null && !_isWorkspaceActive(session, workspace)) {
+      if (workspace != null && _needsWorkspaceOpen(session, workspace)) {
         final opened = await session.openWorkspace(
           workspace,
           purpose: WorkspaceOpenPurpose.chatNew,
         );
         if (!opened) {
-          if (mounted) _showWorkspaceUnreachable();
+          if (mounted) _showWorkspaceOpenFailure(session);
           return;
         }
       }
@@ -2117,14 +2154,14 @@ class _TaskListPageState extends State<TaskListPage>
       );
       return;
     }
-    if (!_isWorkspaceActive(session, workspace)) {
+    if (_needsWorkspaceOpen(session, workspace)) {
       final opened = await session.openWorkspace(
         workspace,
         taskId: entry.sessionId,
         purpose: WorkspaceOpenPurpose.openTask,
       );
       if (!opened) {
-        if (mounted) _showWorkspaceUnreachable();
+        if (mounted) _showWorkspaceOpenFailure(session);
         return;
       }
     }
@@ -2136,12 +2173,17 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// The bridge still points at the previous workspace (both addressing
-  /// legs failed): keep the user on the list instead of pushing a chat that
-  /// would subscribe under the wrong scope, and say why in the locale.
-  void _showWorkspaceUnreachable() {
+  /// The open failed: keep the user on the list instead of pushing a chat
+  /// that would subscribe under the wrong scope, and say why in the locale.
+  /// Only the exact [agentRuntimeNotRunningError] sentinel means "bridge
+  /// attached, runtime cold" — every other case keeps the pre-existing
+  /// unreachable copy (unclassified failures must not be re-labeled).
+  void _showWorkspaceOpenFailure(DeviceSession session) {
+    final key = session.error == agentRuntimeNotRunningError
+        ? 'tasks.agentRuntimeNotRunning'
+        : 'tasks.workspaceUnreachable';
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(tr(context, 'tasks.workspaceUnreachable'))),
+      SnackBar(content: Text(tr(context, key))),
     );
   }
 
@@ -2937,6 +2979,9 @@ class _TaskListPageState extends State<TaskListPage>
 /// Maps stable session error sentinels to localized copy; any other error
 /// string is an upstream message shown verbatim (pre-existing behavior).
 String _errorCopy(BuildContext context, String? error) {
+  if (error == agentRuntimeNotRunningError) {
+    return tr(context, 'tasks.agentRuntimeNotRunning');
+  }
   if (error == workspaceUnreachableError) {
     return tr(context, 'tasks.workspaceUnreachable');
   }

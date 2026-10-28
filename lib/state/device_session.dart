@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../protocol/automation.dart';
 import '../protocol/channel_client.dart'
     show
+        ChannelRpcError,
         Channels,
         isAgentRuntimeNotRunningError,
         isBridgeGateTimeoutError,
@@ -213,6 +214,15 @@ bool isWorkspaceWindowGateError(Object error) {
 /// diagnostic, not user copy — the UI maps this stable value to
 /// `tasks.workspaceUnreachable` instead of rendering the raw message.
 const String workspaceUnreachableError = 'workspace-unreachable';
+
+/// `DeviceSession.error` sentinel for "the workspace bridge is attached but
+/// its agent runtime is not running" (desktop code
+/// `ZCODE_AGENT_RUNTIME_UNAVAILABLE`). Unlike the window gate, the open got
+/// far enough to attach the bridge: the desktop simply has not started this
+/// workspace's per-workspace agent process, which only a desktop-side open
+/// of the workspace (or one of its tasks) does. The UI localizes this to an
+/// actionable copy instead of the desktop's English message.
+const String agentRuntimeNotRunningError = 'agent-runtime-not-running';
 
 /// Internal marker: the first leg hit the window gate and the addressing
 /// retry failed too. Keeps the raw desktop refusal available to logs while
@@ -618,6 +628,11 @@ class DeviceSession extends ChangeNotifier
 
   /// List-watchdog escalation step: 0 idle; 1 = reopen once failed.
   int _listEscalations = 0;
+
+  /// Whether the cold-runtime dead end was already logged by the current
+  /// parking episode — connect and open-finally both arm the watchdog, and
+  /// the duplicate line is pure noise.
+  bool _watchdogParked = false;
 
   // --- Channel-level failure isolation (dead-channel defence) ---
   /// Failure-tier ledger (per-channel tri-strike) + escalation policy —
@@ -1653,7 +1668,13 @@ class DeviceSession extends ChangeNotifier
     _retryTimer?.cancel();
     _listWatchdog?.cancel();
     _kicked = false;
+    final clearedColdSentinel = _error == agentRuntimeNotRunningError;
     _error = null;
+    if (clearedColdSentinel) {
+      _log('[session] cold sentinel cleared by connect start');
+    }
+    // New connection episode: a later cold parking must log again.
+    _watchdogParked = false;
     _failureReason = null;
     _setStatus(DeviceStatus.connecting);
     // V2 links authenticate with the ZCode account JWT. Without the seam
@@ -1863,7 +1884,12 @@ class DeviceSession extends ChangeNotifier
         // error banner, sessions state keeps its last snapshot.
         if (_status == DeviceStatus.connecting ||
             _status == DeviceStatus.error) {
+          final clearedColdSentinel =
+              _error == agentRuntimeNotRunningError;
           _error = null;
+          if (clearedColdSentinel) {
+            _log('[session] cold sentinel cleared by relay paired');
+          }
           _setStatus(DeviceStatus.connected);
         }
       case RelayState.connecting:
@@ -2102,7 +2128,13 @@ class DeviceSession extends ChangeNotifier
       // Same race, same patch for the snapshot cache (design §写点 调用点二).
       snapshotSessionsIntoCache(sub.state);
       recordVanishedSessions();
+      final clearedColdSentinel = _error == agentRuntimeNotRunningError;
       _error = null;
+      if (clearedColdSentinel) {
+        // Diagnose what clears the actionable banner: a successful open of
+        // any workspace (not necessarily the cold one) used to hide it.
+        _log('[session] cold sentinel cleared by open ok: key=$activeKey');
+      }
       onWorkspaceOpened?.call(activeKey);
       notifyListeners();
       // The active workspace changed: re-diff the sidecar set on the fresh
@@ -2111,14 +2143,24 @@ class DeviceSession extends ChangeNotifier
       _recomputeSidecarSubscriptions();
       return true;
     } catch (e) {
-      _log('[session] workspace open failed: $e');
+      final code = e is ChannelRpcError && e.data is Map
+          ? (e.data as Map)['code']
+          : null;
+      _log('[session] workspace open failed: $e'
+          '${code == null ? '' : ' (code=$code)'}'
+          ' (${sw.elapsedMilliseconds}ms)');
       // The relay link itself is fine; only the native list is degraded —
       // surface the reason so the UI can offer retry / web fallback
       // instead of an eternal spinner. A window-gate dead end is a stable
-      // sentinel: the UI localizes it instead of showing desktop text.
+      // sentinel: the UI localizes it instead of showing desktop text. A
+      // cold per-workspace runtime is a DIFFERENT dead end (the bridge IS
+      // attached; the desktop has not started this workspace's agent
+      // process), so it gets its own sentinel and actionable copy.
       _error = e is _WorkspaceUnreachable || isWorkspaceWindowGateError(e)
           ? workspaceUnreachableError
-          : '$e';
+          : isAgentRuntimeNotRunningError(e)
+              ? agentRuntimeNotRunningError
+              : '$e';
       notifyListeners();
       return false;
     } finally {
@@ -2337,6 +2379,19 @@ class DeviceSession extends ChangeNotifier
   void _armListWatchdog() {
     _listWatchdog?.cancel();
     if (_disposed || status != DeviceStatus.connected) return;
+    // A cold per-workspace agent runtime is a benign, user-actionable dead
+    // end: reconnecting cannot start it (only the desktop can), so the
+    // watchdog would rebuild the relay every timeout and the banner would
+    // flash between "connecting" and the runtime copy. Park it until the
+    // user retries after opening the workspace on the desktop.
+    if (_error == agentRuntimeNotRunningError) {
+      if (!_watchdogParked) {
+        _watchdogParked = true;
+        _log('[session] list watchdog parked: agent runtime not running');
+      }
+      return;
+    }
+    _watchdogParked = false;
     final sub = _sessionsSub;
     if (sub != null && sub.state.ready) return;
     if (_activeWorkspace == null &&
@@ -2354,6 +2409,10 @@ class DeviceSession extends ChangeNotifier
 
   void _onListNotReady() {
     if (_disposed || _kicked || status != DeviceStatus.connected) return;
+    // A timer callback can already be queued when the open's synchronous
+    // segment parks the watchdog; the sentinel still means "do not escalate"
+    // (a soft reopen cannot start the runtime and only churns the link).
+    if (_error == agentRuntimeNotRunningError) return;
     final sub = _sessionsSub;
     if (sub != null && sub.state.ready) return;
     _listEscalations += 1;
@@ -4066,6 +4125,7 @@ class DeviceSession extends ChangeNotifier
     _failureReason = null;
     _kicked = false;
     _error = null;
+    _watchdogParked = false;
     _setStatus(DeviceStatus.disconnected);
     await _failureSub?.cancel();
     _failureSub = null;
