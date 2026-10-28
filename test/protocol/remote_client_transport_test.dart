@@ -328,5 +328,55 @@ void main() {
         'both bridges healthy',
       );
     });
+    test('a late markDegraded after dispose is a no-op', () async {
+      final session = await open('draft-late');
+      session.dispose();
+
+      expect(() => session.markDegraded('late'), returnsNormally);
+    });
+
+    test('disposing a bridge mid-reopen swallows the late recovery writes',
+        () async {
+      // A workspace switch can dispose the bridge while a recovery reopen
+      // is in flight. The late reply must not attach a new stack or write
+      // the disposed ValueNotifiers (10-28 PMA110 unhandled FlutterError).
+      final session = await open('draft-c');
+
+      degrade(session);
+      await settle(
+        () => sentCount('workspace-reconnect-request') == 1,
+        'first reconnect-request',
+      );
+      answerReconnect(
+        lastSent('workspace-reconnect-request'),
+        success: false,
+        error: '远程 workspace 不在当前窗口中，无法重连: /draft/c',
+      );
+      await settle(
+        () => sentCount('workspace-bridge-open', key: 'draft-c') == 2,
+        'reopen after the window miss',
+      );
+      deliverBridgeReady(
+          lastSent('workspace-bridge-open', key: 'draft-c'), 'draft-c');
+      await settle(() => session.degraded.value == null, 'first recovery');
+
+      degrade(session);
+      await settle(
+        () => sentCount('workspace-bridge-open', key: 'draft-c') == 3,
+        'direct reopen for the remembered workspace',
+      );
+      final reopen = lastSent('workspace-bridge-open', key: 'draft-c');
+      final bridgeId = session.bridge['bridgeSessionId'];
+      final generation = session.bridge['bridgeGeneration'];
+
+      session.dispose();
+      deliverBridgeReady(reopen, 'draft-c');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      // The late reply must not swap a fresh stack into the disposed
+      // session (the attach guard, not only the markDegraded guard).
+      expect(session.bridge['bridgeSessionId'], bridgeId);
+      expect(session.bridge['bridgeGeneration'], generation);
+    });
   });
 }

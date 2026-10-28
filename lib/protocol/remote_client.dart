@@ -196,6 +196,9 @@ class RemoteClient {
         final res = await reconnectWorkspace(
           workspaceKey,
         ).timeout(const Duration(seconds: 15));
+        // The session may have been disposed while the round-trip was in
+        // flight; every notifier write below would throw after dispose.
+        if (session._disposed) return true;
         if (res['success'] == true) {
           _log('[bridge] reconnected $workspaceKey');
           session.degraded.value = null;
@@ -216,6 +219,7 @@ class RemoteClient {
     // into the SAME BridgeSession so open pages keep working.
     try {
       await _reopenBridge(session, workspaceKey);
+      if (session._disposed) return true;
       session.degraded.value = null;
       session.recovered.value += 1;
       return true;
@@ -450,6 +454,8 @@ class RemoteClient {
     String requestedBridgeSessionId,
     Map<String, dynamic> bridge,
   ) {
+    // A disposed bridge must not resurrect a transport/listener stack.
+    if (session._disposed) return;
     session._transport.dispose();
     // Server-side bridge rebuild: routing (bridgeSessionId) survives but
     // the new instance forgets our subscriptions/handshakes. Ride the same
@@ -462,7 +468,9 @@ class RemoteClient {
       bridgeGeneration: (bridge['bridgeGeneration'] as num?)?.toInt(),
       recoveryId: bridge['recoveryId'] as String?,
       sendPayload: relay.sendPayload,
-      onServerBridgeRebuilt: () => session.recovered.value += 1,
+      onServerBridgeRebuilt: () {
+        if (!session._disposed) session.recovered.value += 1;
+      },
       onLog: onLog,
     );
     // Over the workspace bridge each rpc-frame message IS one ChannelClient
@@ -522,6 +530,7 @@ class RemoteClient {
               p['zcode_type'] == 'workspace-bridge-error') &&
           p['bridgeSessionId'] == bridgeSessionId,
     );
+    if (session._disposed) return;
     if (res['zcode_type'] == 'workspace-bridge-error') {
       throw StateError('workspace-bridge-error: ${res['error'] ?? res}');
     }
@@ -618,6 +627,10 @@ class BridgeSession {
   /// relay reconnect, recovery attempts) so the stamp cannot drift from
   /// the flag.
   void markDegraded(String reason) {
+    // A recovery attempt can outlive its bridge (workspace switch disposes
+    // the session mid-flight); writing a disposed ValueNotifier throws an
+    // unhandled FlutterError (seen live on 10-28 PMA110).
+    if (_disposed) return;
     lastDegradedAt = DateTime.now();
     degraded.value = reason;
   }
