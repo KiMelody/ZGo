@@ -397,6 +397,52 @@ void main() {
     expect(call.$2[2], 'o1');
   });
 
+  testWidgets('permission option labels localize over the wire label', (
+    tester,
+  ) async {
+    final gateway = FakeChatGateway();
+    gateway.snapshotExtra = {
+      'pendingInteractions': [
+        {
+          'interactionId': 'i1',
+          'payload': {
+            'kind': 'permission',
+            'toolName': 'Bash',
+            'summary': 'rm -rf build',
+            'options': [
+              // Live wire shape: schema-required kind + canonical English
+              // label — kind wins.
+              {'optionId': 'o1', 'kind': 'allowOnce', 'label': 'Allow once'},
+              {'optionId': 'o3', 'kind': 'deny', 'label': 'Deny'},
+              // Drift guard: kind gone, canonical label still localizes.
+              {
+                'optionId': 'o2',
+                'label': 'Always allow in this project',
+              },
+              {'optionId': 'o5', 'label': 'Allow once'},
+              // Unknown labels stay verbatim (drift / locale variance).
+              {'optionId': 'o4', 'label': '再试一次'},
+            ],
+          },
+        },
+      ],
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    expect(find.text('允许一次'), findsNWidgets(2));
+    expect(find.text('拒绝'), findsOneWidget);
+    expect(find.text('总是允许'), findsOneWidget);
+    expect(find.text('再试一次'), findsOneWidget);
+    expect(find.text('Allow once'), findsNothing);
+    expect(find.text('Always allow in this project'), findsNothing);
+  });
+
   /// Form-style `userInput` interaction (the `questions` payload) using the
   /// field names: `label`/`question` question text, `multiSelect`
   /// flag and `value`/`label` options.
@@ -452,6 +498,26 @@ void main() {
   Finder customField(int index) => find.byKey(ValueKey('askq-custom-$index'));
 
   final submitKey = find.byTooltip('提交回答');
+
+  testWidgets(
+      'question option labels stay verbatim even when they collide with a '
+      'canonical permission label', (tester) async {
+    await pumpQuestions(tester, [
+      const {
+        'value': 'q',
+        'label': '是否拒绝',
+        'multiSelect': false,
+        'options': [
+          {'value': 'd', 'label': 'Deny'},
+        ],
+      },
+    ]);
+    // Questions render through _QuestionsView, never _optionLabel — a
+    // model-authored choice spelled like the desktop's canonical English
+    // permission label must not be localized.
+    expect(find.text('Deny'), findsOneWidget);
+    expect(find.text('拒绝'), findsNothing);
+  });
 
   testWidgets(
     'IME up: strip floats over the list, composer touches the viewport '

@@ -5802,17 +5802,38 @@ class _InteractionCardState extends State<_InteractionCard> {
     );
   }
 
+  // Permission options ride the desktop lexicon's canonical English labels
+  // ("chat.permission.*" family); when the schema-required `kind` ever goes
+  // missing, these spellings still map to the localized strings. Model-
+  // authored question choices (questions[].options) never pass through here
+  // and render verbatim.
+  static const _canonicalOptionLabels = {
+    'allow once': 'chat.interact.allowOnce',
+    'always allow': 'chat.interact.allowAlways',
+    'always allow in this project': 'chat.interact.allowAlways',
+    'deny': 'chat.interact.deny',
+  };
+
   String _optionLabel(Map option) {
-    final label = option['label'] as String?;
-    if (label != null && label.isNotEmpty) return label;
+    // kind (schema-required enum) is the localization key; the wire `label`
+    // is canonical English and would shadow it (10-28: zh UI showed English
+    // buttons because label took precedence).
     final kind = option['kind'] as String?;
-    return switch (kind) {
-      'allowOnce' => tr(context, 'chat.interact.allowOnce'),
-      'allowAlways' => tr(context, 'chat.interact.allowAlways'),
-      'deny' => tr(context, 'chat.interact.deny'),
-      'custom' => tr(context, 'chat.interact.custom'),
-      _ => '${option['optionId'] ?? tr(context, 'chat.interact.pick')}',
+    final kindKey = switch (kind) {
+      'allowOnce' => 'chat.interact.allowOnce',
+      'allowAlways' => 'chat.interact.allowAlways',
+      'deny' => 'chat.interact.deny',
+      'custom' => 'chat.interact.custom',
+      _ => null,
     };
+    if (kindKey != null) return tr(context, kindKey);
+    final label = option['label'] as String?;
+    if (label != null && label.isNotEmpty) {
+      final canonical = _canonicalOptionLabels[
+          label.trim().toLowerCase()];
+      return canonical == null ? label : tr(context, canonical);
+    }
+    return '${option['optionId'] ?? tr(context, 'chat.interact.pick')}';
   }
 }
 
