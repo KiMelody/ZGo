@@ -7,18 +7,23 @@ import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/ui/chat/subagent_detail_page.dart';
 import 'package:zgo/ui/chat/subagent_feed.dart';
+import 'package:zgo/ui/chat/timeline.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
 import '../../helpers/fake_device_session.dart';
 
-/// Prepend anchor compensation on the detail page (design D2 miniature):
-/// reading readers must not see the viewport jump when an older page lands.
-/// Rows are mixed-height on purpose (short bubbles vs long markdown answers)
-/// — spec §9: uniform row heights cannot catch the extent-estimate skew this
-/// compensation exists for.
-class _AnchorGateway extends FakeDeviceSession {
-  _AnchorGateway({
+/// Widget-level contract of [TranscriptVeil] / [TranscriptViewport] (task
+/// 10-29-transcript-viewport, design §6 + §9): the frozen-frame veil over a
+/// real list — capture, arm, lift, dispose, drag-lift, failed-capture
+/// downgrade, the unified pinned landing, and the key prefixes the
+/// measurement port walks by.
+///
+/// Hosted on the subagent detail page: it is the second consumer, and the
+/// 10-15 "twin" miniature it used to carry is now the same module (this file
+/// replaces `subagent_detail_anchor_test.dart`).
+class _VeilGateway extends FakeDeviceSession {
+  _VeilGateway({
     required this.rows,
     this.totalCount,
     this.rangeResult,
@@ -38,7 +43,7 @@ class _AnchorGateway extends FakeDeviceSession {
   ConversationState? lastState;
 
   @override
-  ConversationTransport get conversationCommands => _AnchorCommands(this);
+  ConversationTransport get conversationCommands => _VeilCommands(this);
 
   @override
   Future<ChatHandle> subscribe(String sessionId) async {
@@ -68,10 +73,10 @@ class _AnchorGateway extends FakeDeviceSession {
   }
 }
 
-class _AnchorCommands implements ConversationTransport {
-  _AnchorCommands(this._gateway);
+class _VeilCommands implements ConversationTransport {
+  _VeilCommands(this._gateway);
 
-  final _AnchorGateway _gateway;
+  final _VeilGateway _gateway;
 
   @override
   Future<dynamic> rowsRange(
@@ -97,7 +102,8 @@ Widget wrap(Widget child) => MaterialApp(
     );
 
 /// Mixed-height turns: a short user bubble + an alternating short/long
-/// markdown answer. Heights land roughly in the 40/300/120 mix.
+/// markdown answer. Heights land roughly in the 40/300/120 mix — uniform
+/// rows cannot catch the extent-estimate skew the compensation exists for.
 List<Map<String, dynamic>> turns(int from, int to) => [
       for (var i = from; i <= to; i++) ...[
         {'rowId': i * 2 - 1, 'kind': 'userInput', 'text': '任务 $i'},
@@ -112,13 +118,9 @@ List<Map<String, dynamic>> turns(int from, int to) => [
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  /// Pumps the page through its open auto-fill (pinned → no veil, the
-  /// follow pass owns that landing) and settles the reader at the very top;
-  /// jumpTo carries no dragDetails, so no prefetch noise fires. Shared by
-  /// the frozen-frame/veil tests (10-15 revision).
-  Future<void> pumpReaderAtTop(
+  Future<SubagentFeed> pumpDetail(
     WidgetTester tester,
-    _AnchorGateway gateway,
+    _VeilGateway gateway,
   ) async {
     addTearDown(() => gateway.dispose());
     final feed = SubagentFeed(gateway: gateway);
@@ -135,12 +137,11 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     await tester.pumpAndSettle();
-    tester.widget<ListView>(find.byType(ListView)).controller!.jumpTo(0);
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
+    return feed;
   }
 
-  /// The veil Opacity wrapping the list (nearest ancestor of the ListView).
+  /// The veil Opacity wrapping the list (nearest ancestor of the ListView) —
+  /// the same assertion shape the chat page test relies on (design §6).
   Finder listVeil() => find
       .ancestor(of: find.byType(ListView), matching: find.byType(Opacity))
       .first;
@@ -150,7 +151,7 @@ void main() {
   /// mid-flight, before the measured landing lifts it.
   Future<void> pumpUntilVeiled(WidgetTester tester) async {
     var pumps = 0;
-    while (tester.widget<Opacity>(listVeil()).opacity == 1.0 && pumps < 10) {
+    while (tester.widget<Opacity>(listVeil()).opacity == 1.0 && pumps < 20) {
       pumps++;
       await tester.pump();
     }
@@ -158,131 +159,29 @@ void main() {
         reason: 'the prepend frame must paint behind the veil');
   }
 
+  /// Pumps the page through its open auto-fill and settles the reader at the
+  /// very top; jumpTo carries no dragDetails, so no prefetch noise fires.
+  Future<void> pumpReaderAtTop(
+    WidgetTester tester,
+    _VeilGateway gateway,
+  ) async {
+    await pumpDetail(tester, gateway);
+    tester.widget<ListView>(find.byType(ListView)).controller!.jumpTo(0);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+
   double anchorDy(WidgetTester tester) => tester
       .renderObject<RenderBox>(find.text('任务 -19'))
       .localToGlobal(Offset.zero)
       .dy;
 
-  testWidgets('prepending a mixed-height page keeps the reading anchor '
-      'visually pinned (dy drift < 1px)', (tester) async {
-    // 8 turns in the window; the open auto-fill prepends 20 older turns and
-    // keeps the gate open (hasMore) so the button path stays reachable.
-    final gateway = _AnchorGateway(
-      rows: turns(1, 8),
-      totalCount: 100,
-      rangeResult: {
-        'hasMore': true,
-        'atLogEpoch': 'e1',
-        'rows': {
-          'window': turns(-19, 0),
-          'firstRowId': -39,
-        },
-      },
-    );
-    addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
-    await tester.pumpWidget(
-      wrap(
-        SubagentDetailPage(
-          gateway: gateway,
-          feed: feed,
-          childSessionId: 'sess_child_1',
-          title: '实现加固',
-        ),
-      ),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pumpAndSettle();
-    expect(gateway.ranges.length, 1); // open auto-fill only
-
-    // Reading position: the very top. jumpTo carries no dragDetails → no
-    // prefetch noise. The row at the viewport top ('任务 -19', leading the
-    // first stable group) is the reading target the compensation must pin.
-    final controller =
-        tester.widget<ListView>(find.byType(ListView)).controller!;
-    controller.jumpTo(0);
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    final before = tester
-        .renderObject<RenderBox>(find.text('任务 -19'))
-        .localToGlobal(Offset.zero)
-        .dy;
-
-    // Load the second page through the button (no gesture active, so the
-    // page lands directly — no drag-hold parking).
-    gateway.rangeResult = {
-      'hasMore': false,
-      'atLogEpoch': 'e1',
-      'rows': {
-        'window': turns(-39, -20),
-        'firstRowId': -79,
-      },
-    };
-    await tester.tap(find.text('加载更早消息'));
-    await tester.pumpAndSettle();
-
-    // The anchor row sits where it did before the prepend: the compensation
-    // landed on a measured RenderBox delta, not an extent estimate.
-    final after = tester
-        .renderObject<RenderBox>(find.text('任务 -19'))
-        .localToGlobal(Offset.zero)
-        .dy;
-    expect((after - before).abs(), lessThan(1.0));
-    // The widened cache did not leak past the landing.
-    expect(
-      tester.widget<ListView>(find.byType(ListView)).scrollCacheExtent,
-      isNull,
-    );
-  });
-
-  testWidgets('a pinned prepend is not compensated — the follow pass lands '
-      'the reader back at the bottom', (tester) async {
-    final gateway = _AnchorGateway(
-      rows: turns(1, 6),
-      totalCount: 100,
-      rangeResult: {
-        'hasMore': false,
-        'atLogEpoch': 'e1',
-        'rows': {
-          'window': turns(-19, 0),
-          'firstRowId': -39,
-        },
-      },
-    );
-    addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
-    await tester.pumpWidget(
-      wrap(
-        SubagentDetailPage(
-          gateway: gateway,
-          feed: feed,
-          childSessionId: 'sess_child_1',
-          title: '实现加固',
-        ),
-      ),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pumpAndSettle();
-
-    // Open auto-fill prepended 20 turns while pinned: no anchor compensation,
-    // the follow pass grew the view back to the newest row.
-    final controller =
-        tester.widget<ListView>(find.byType(ListView)).controller!;
-    expect(
-      controller.position.pixels,
-      moreOrLessEquals(controller.position.maxScrollExtent),
-    );
-    expect(find.text('任务 6'), findsOneWidget);
-  });
-
   testWidgets('a reading prepend veils the list and stands the frozen '
-      'frame on top (round-24 twin)', (tester) async {
+      'frame on top', (tester) async {
     tester.view.devicePixelRatio = 1.0;
     tester.view.physicalSize = const Size(390, 844);
     addTearDown(tester.view.reset);
-    final gateway = _AnchorGateway(
+    final gateway = _VeilGateway(
       rows: turns(1, 8),
       totalCount: 100,
       rangeResult: {
@@ -321,6 +220,12 @@ void main() {
     expect(topmost.top, 0.0);
     expect(topmost.right, 0.0);
     expect(topmost.bottom, 0.0);
+    // The veil is the ListView's nearest Opacity ancestor and only its
+    // opacity flips (design §6).
+    expect(
+      tester.widget<Opacity>(listVeil()).opacity,
+      0.0,
+    );
   });
 
   testWidgets('the measured landing lifts the veil and disposes the frozen '
@@ -328,7 +233,7 @@ void main() {
     tester.view.devicePixelRatio = 1.0;
     tester.view.physicalSize = const Size(390, 844);
     addTearDown(tester.view.reset);
-    final gateway = _AnchorGateway(
+    final gateway = _VeilGateway(
       rows: turns(1, 8),
       totalCount: 100,
       rangeResult: {
@@ -367,11 +272,62 @@ void main() {
     expect((anchorDy(tester) - before).abs(), lessThan(1.0));
   });
 
+  testWidgets('a pinned prepend freezes TOO and lands on the measured '
+      'newest end (the declared semantics upgrade)', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    // The open auto-fill lands while the reader is pinned at the bottom:
+    // the old detail miniature skipped the freeze and played a visible
+    // return-to-bottom; the shared viewport captures + veils and lands the
+    // newest group on the true content end.
+    final gateway = _VeilGateway(
+      rows: turns(1, 6),
+      totalCount: 100,
+      rangeResult: {
+        'hasMore': false,
+        'atLogEpoch': 'e1',
+        'rows': {
+          'window': turns(-19, 0),
+          'firstRowId': -39,
+        },
+      },
+    );
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(gateway: gateway);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          gateway: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await pumpUntilVeiled(tester);
+    expect(find.byType(RawImage), findsOneWidget,
+        reason: 'pinned prepends freeze like reading ones');
+    await tester.pumpAndSettle();
+
+    final controller =
+        tester.widget<ListView>(find.byType(ListView)).controller!;
+    expect(
+      controller.position.pixels,
+      moreOrLessEquals(controller.position.maxScrollExtent, epsilon: 0.5),
+      reason: 'the endKey landing puts the newest group on the content end',
+    );
+    expect(find.text('任务 6'), findsOneWidget);
+    expect(find.byType(RawImage), findsNothing);
+  });
+
   testWidgets('a user drag lifts the frozen frame immediately', (tester) async {
     tester.view.devicePixelRatio = 1.0;
     tester.view.physicalSize = const Size(390, 844);
     addTearDown(tester.view.reset);
-    final gateway = _AnchorGateway(
+    final gateway = _VeilGateway(
       rows: turns(1, 8),
       totalCount: 100,
       rangeResult: {
@@ -415,7 +371,7 @@ void main() {
 
   testWidgets('a failed capture downgrades to the visible landing — the '
       'list never goes blank', (tester) async {
-    final gateway = _AnchorGateway(
+    final gateway = _VeilGateway(
       rows: turns(1, 8),
       totalCount: 100,
       rangeResult: {
@@ -464,5 +420,24 @@ void main() {
       tester.widget<ListView>(find.byType(ListView)).scrollCacheExtent,
       isNull,
     );
+  });
+
+  testWidgets('the measurement keys follow the documented turn-/row- '
+      'prefixes', (tester) async {
+    // The viewport's element port walks by these prefixes and by the
+    // ChatTurnGroup/ChatRow types (design §11). A rename on either side must
+    // fail THIS test instead of silently orphaning every anchor.
+    final gateway = _VeilGateway(rows: turns(1, 2), totalCount: 2);
+    await pumpDetail(tester, gateway);
+
+    final group = tester.widget<ChatTurnGroup>(find.byType(ChatTurnGroup).first);
+    final firstRowId = group.rows.first['rowId'];
+    expect(group.key, ValueKey('turn-$firstRowId'),
+        reason: 'group key = ValueKey(turn-<first rowId>)');
+    expect(find.byKey(ValueKey('row-$firstRowId')), findsOneWidget,
+        reason: 'row key = ValueKey(row-<rowId>)');
+    // The rowId fallback's contract: the group widget exposes the rows the
+    // compensation matches against.
+    expect(group.rows.first['rowId'], firstRowId);
   });
 }

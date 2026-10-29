@@ -403,6 +403,9 @@ void main() {
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
+    // The shared viewport (task 10-29) defers the settle and the prepend to
+    // separate post-frames (chat-page semantics) — drain them.
+    await tester.pumpAndSettle();
 
     // The auto-fill fetched with the oldest held row as cursor…
     expect(gateway.ranges, [('sess_child_1', 1, 60)]);
@@ -444,6 +447,8 @@ void main() {
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
+    // Shared-viewport settle/prepend frames (see the auto-fill test above).
+    await tester.pumpAndSettle();
 
     expect(gateway.ranges, [('sess_child_1', 1, 60)]);
     // The drifted page still lands (rows are immutable log entries)…
@@ -808,7 +813,10 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    // The open auto-fill consumed exactly one page.
+    // The open auto-fill consumed exactly one page — and its prepend chain
+    // must settle first: the viewport's re-entry gate (chat semantics)
+    // parks the prefetch while a compensation chain owns the viewport.
+    await tester.pumpAndSettle();
     expect(gateway.ranges.length, 1);
 
     // A drag toward the top enters max(64, 2×viewport) of the top with the
@@ -865,6 +873,10 @@ void main() {
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
+    // The shared viewport runs the settle decision and the prepend landing on
+    // consecutive post-frames; let the auto-fill chain finish before touching
+    // the transcript so the expanded card's state survives the rebuild.
+    await tester.pumpAndSettle();
     expect(gateway.ranges.length, 1); // auto-fill only
 
     // Expand the diff card, then drag its horizontal viewport (a real

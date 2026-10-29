@@ -5107,6 +5107,62 @@ void main() {
     expect(lastBottom, greaterThanOrEqualTo(viewportTop));
   });
 
+  testWidgets('history: the open auto-load stays pinned through its own '
+      'follow — a stale extent estimate must not turn the first landing into '
+      'the reading anchor (A7 device acceptance)', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    // Tail window with a tall row AFTER the first screenful: the SliverList
+    // extent estimate at the top is short, the open follow's 200ms descent
+    // grows it, and the animation ends at its stale target — the exact
+    // device shape behind A7. Once that mid-flight `stick=false` sample
+    // stuck, the prepend anchored to the reading position and the viewport
+    // parked mid-history with the jump button up.
+    final tail = [
+      ...historyRows(100, 139),
+      {
+        'rowId': 140,
+        'kind': 'userInput',
+        'text': ['历史消息 140', ...List.generate(60, (i) => '长尾行 $i')]
+            .join('\n'),
+      },
+      ...historyRows(141, 144),
+    ];
+    final held = Completer<dynamic>();
+    final transport = _SequencedRowsTransport()..queue.add(held);
+    final gateway = _SequencedRowsGateway(transport);
+    gateway.feedSnapshot(tail, firstRowId: 1, totalCount: 144);
+    await tester.pumpWidget(
+      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pump(); // subscribe lands: the list mounts, the follow posts
+    await tester.pumpAndSettle(); // the glide finishes on its stale target
+    final controller = historyController(tester);
+    expect(transport.calls, hasLength(1),
+        reason: 'the open auto-load is the page in flight');
+    // Fixture precondition (the device shape): the follow's 200ms descent
+    // itself revises the extent estimate upward, so it ends short of the
+    // real max — its mid-flight samples read `pixels < max - 40`.
+    expect(
+      controller.position.maxScrollExtent - controller.offset,
+      greaterThan(40),
+      reason: 'the follow ends at its stale target while the estimate grew',
+    );
+
+    held.complete(olderPage(60, 99, hasMore: true));
+    await tester.pumpAndSettle();
+
+    expect(
+      controller.position.maxScrollExtent - controller.offset,
+      lessThanOrEqualTo(40),
+      reason: 'the open must land on the newest content — the pin the follow '
+          'animation is carrying must survive the prepend chain',
+    );
+    expect(find.text('历史消息 144'), findsOneWidget,
+        reason: 'the newest message is on screen after the open settles');
+  });
+
   testWidgets('history: the prepend veil hides the guess frame and lifts on '
       'landing (never a frozen blank list)', (tester) async {
     tester.view.devicePixelRatio = 1.0;

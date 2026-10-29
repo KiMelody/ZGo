@@ -1,14 +1,12 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 
 import 'package:clock/clock.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart'
     show ValueListenable, listEquals;
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart'
-    show RenderRepaintBoundary, ScrollCacheExtent;
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 
 import '../../i18n/lexicon.dart';
@@ -24,7 +22,6 @@ import '../theme.dart';
 import '../ui_settings.dart';
 import 'confirm_gate.dart';
 import 'git_panel.dart';
-import 'history_pager.dart';
 import 'interaction_answer.dart';
 import 'goal_panel.dart';
 import 'jump_to_bottom_button.dart';
@@ -33,6 +30,7 @@ import 'subagent_feed.dart';
 import 'timeline.dart';
 import 'tool_row_semantics.dart';
 import 'top_bounce_physics.dart';
+import 'transcript_viewport.dart';
 import 'turn_navigator.dart';
 
 /// Native chat view for one task (session), backed by Conversation V4 over
@@ -122,32 +120,6 @@ class _PendingFile {
   _PendingFile(this.fileName, this.mime, this.bytes);
 }
 
-/// A measured reading anchor for the history prepend compensation (R3): the
-/// turn group identified by [key] sat [dy] px from the viewport edge it is
-/// anchored against (top for reading, bottom for the pinned state — unused
-/// there, the pinned landing targets the true content end).
-typedef _HistoryAnchor = ({
-  Key key,
-  Set<num> rowIds,
-  double dy,
-  bool stick,
-  // Stick landing target: the TRUE newest group's key. Measured too (not
-  // just [key]) because the pinned anchor also records a READING anchor —
-  // if the user scrolled away from the bottom while the page was loading,
-  // the landing demotes to the reading anchor instead of yanking them back
-  // to the bottom (open auto-load + immediate swipe-up, 09-22 round 8).
-  Key? endKey,
-  double baseMax,
-  Key? rowKey,
-  double? rowDy,
-  // Offset at measure time: lets the compensation derive the TRUE content
-  // shift of the prepend (see the LAND note in _compensateAnchor), which
-  // the next prepend's cache pre-widen consumes — raw "target - pixels" is
-  // contaminated by everything that moved the viewport since (drags during
-  // the chain's wait); subtracting this offset cancels it all.
-  double measurePixels,
-});
-
 /// The most recent optimistic model/thought switch (design 10-01): kept so
 /// a bridge-lost switch can be auto-retried ONCE when the authoritative
 /// frame overrides it. A new switch replaces the stored one; [retried]
@@ -230,35 +202,30 @@ class _ChatPageState extends State<ChatPage> {
   /// declines to judge.
   Set<String>? _entitledProviderIds;
 
-  /// History paging decisions (entry gate, fetch, identity guard, DRAG HOLD
-  /// parking, prepend commit, chain generation) — a pure Dart command class
-  /// (task 10-01-history-pager-extract). The measurement chain below
-  /// ([_measureAnchor] / [_prependOlderPage] / [_compensateAnchor]) stays in
-  /// this State; [_compensationPending] remains the shared re-entry gate,
-  /// injected into the pager read/write so there is a single truth.
-  late final HistoryPager _pager = HistoryPager(
+  /// The history-load viewport (task 10-29-transcript-viewport): page-load
+  /// decisions (entry gate, identity guard, DRAG HOLD parking, prepend
+  /// commit, chain generation), the four triggers, the anchor measurement +
+  /// frozen-frame veil + landing compensation, the re-entry gate and the
+  /// layout-cache pre-widen all live in the module. This page keeps the
+  /// ListView shell, the streaming follow, the jump-to-bottom button, the
+  /// keyboard shrink-follow and the turn navigator; it only toasts the
+  /// typed outcomes and reads the read-only gates.
+  late final TranscriptViewport _viewport = TranscriptViewport(
     fetch: _fetchOlderRows,
     currentState: () => _state,
-    isScrollIdle: () => !_userDragActive && _scrollSettled,
-    isCompensationPending: () => _compensationPending,
-    setCompensationPending: (value) => _compensationPending = value,
+    currentSessionId: () => _sessionId,
+    isStickToBottom: () => _stickToBottom,
+    listBottomPadding: _listPadding.bottom,
+    onToast: _onHistoryToast,
     // Every old post-frame callback started with `if (!mounted) return` —
-    // the seam carries that guard so the pager's frame callbacks keep the
-    // exact old semantics.
+    // the seam carries that guard so the viewport's frame callbacks keep
+    // the exact old semantics.
     postFrame: (callback) => WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) callback();
     }),
-    onStep: _onHistoryStep,
-    onGateChanged: () {
-      if (mounted) setState(() {});
-    },
   );
 
-  /// Loading gate forwarded from the pager (the「加载更早」button spinner and
-  /// the scroll bookkeeping read it; the pager owns the flips).
-  bool get _loadingOlder => _pager.loadingOlder;
-
-  /// The conversationRowsRangeV4 RPC behind [HistoryPager.settle].
+  /// The conversationRowsRangeV4 RPC behind [TranscriptViewport].
   Future<dynamic> _fetchOlderRows(
     String sessionId, {
     int? beforeRowId,
@@ -270,9 +237,8 @@ class _ChatPageState extends State<ChatPage> {
         limit: limit,
       );
 
-  /// Reactions to the pager's typed outcomes: toasts here, measurement-chain
-  /// scheduling here, everything else already happened inside the pager.
-  void _onHistoryStep(HistoryLoadStep step) {
+  /// Toast reactions to the viewport's typed outcomes — i18n/UX stay here.
+  void _onHistoryToast(HistoryToastStep step) {
     if (!mounted) return;
     switch (step) {
       case HistoryStale():
@@ -281,85 +247,8 @@ class _ChatPageState extends State<ChatPage> {
         _toast(tr(context, 'chat.noOlder'));
       case HistoryFailed(:final error):
         _toast(trP(context, 'chat.loadOlder.failed', ['$error']));
-      case HistoryProceed(:final state, :final older, :final hasMore):
-        unawaited(_prependOlderPage(state, older, hasMore));
-      case HistoryHold():
-        break; // parked in the pager; flushed on ScrollEnd ([_flushPendingOlder])
-      case HistoryDuplicateDropped():
-        break; // the measurement chain saw inserted == 0 and released the gate
     }
   }
-
-  /// Pull threshold (logical px) for the history pull gesture: releasing a
-  /// top overscroll at least this deep loads the older page.
-  static const double _kPullThreshold = 64.0;
-
-  /// Pull-gesture arming: true while the current drag holds the list
-  /// overscrolled past [_kPullThreshold] at the top; the first non-drag
-  /// scroll update afterwards is the release frame (see [_onListScroll]).
-  bool _pullArmed = false;
-
-  /// True from a user drag's ScrollStart until its release frame: the anchor
-  /// compensation ([_compensateAnchor]) must not jumpTo under an active
-  /// finger — the jump replaces the position's drag activity and every later
-  /// move event of that gesture dies silently. The chain defers frame by
-  /// frame and resumes when the finger lifts.
-  bool _userDragActive = false;
-
-  /// False from the first scroll update of any session (drag, ballistic
-  /// coast, release spring, programmatic animation) until its ScrollEnd —
-  /// i.e. true only while the offset is AT REST. Ballistic and rebound
-  /// frames carry no dragDetails and clear [_userDragActive] on their first
-  /// frame, so neither flag alone can answer "is the viewport moving right
-  /// now": a prepend landing mid-coast must not jumpTo (kills the user's
-  /// momentum, "滑着也被拉", 09-22 round 15) — the fetched page is held
-  /// (see the DRAG HOLD note in [HistoryPager.settle]) and flushed after the
-  /// ScrollEnd, and the prepend gate ([_prependOlderPage]) requires it too.
-  bool _scrollSettled = true;
-
-  /// Prepend VEIL (round 21): between the prepend's first frame and the
-  /// measured landing the list paints fully transparent (layout and the
-  /// anchor measurement run normally under it). The landing offset is only
-  /// knowable AFTER the prepend's layout — until then any offset shown is a
-  /// GUESS (last page's height), and device logs put page-height variance at
-  /// ±1300-3000px: the guessed intermediate frame plus the landing's
-  /// corrective glide read as the load-point jump that no animation tuning
-  /// hid (rounds 12-20). A blank frame displaces nothing. Lifted by the
-  /// landing, the give-up fallback, a stale generation — and IMMEDIATELY by
-  /// any user scroll notification: a misplaced list beats a blank one.
-  /// See the VEIL note in [_prependOlderPage].
-  bool _listVeiled = false;
-
-  /// The frozen frame shown over the veiled list (round 24): the plain
-  /// transparent veil read as a full-screen BLACK flash on device (dark
-  /// theme, 1-2 frames — OLED makes it loud). The last painted frame of
-  /// the list is captured right before the prepend applies and drawn over
-  /// the veil instead: the reader sees the SAME pixels standing still for
-  /// a frame or two, then the landed view — nothing ever goes blank and
-  /// nothing ever teleports. Null while no prepend is in flight; a failed
-  /// capture downgrades the chain to the visible-landing path (no veil).
-  ui.Image? _frozenFrame;
-
-  /// [RepaintBoundary] around the list — the capture source for
-  /// [_frozenFrame].
-  final GlobalKey _freezeKey = GlobalKey();
-
-  /// Temporary oversize cacheExtent for the anchor compensation (null =
-  /// platform default). A 60-row prepend pushes the anchor group several
-  /// viewports below, beyond the ~250px layout cache — instead of JUMPING
-  /// there by the extent estimate (which inflates without bound right
-  /// after a prepend and overshot the true content end on device, parking
-  /// the view at max = "yanked to the bottom", 09-21 round 3), the cache
-  /// is widened for a frame so SliverList lays out down to the anchor and
-  /// the landing is measured, never estimated.
-  double? _anchorCacheExtent;
-
-  /// Temporary oversize cacheExtent for the turn-navigator jump (task
-  /// 10-14; null = platform default). Same trick as [_anchorCacheExtent]:
-  /// the target turn may sit outside the ~250px layout cache, so the cache
-  /// widens for a frame, the landing is MEASURED (never estimated —
-  /// chat-conventions §9), and the extent is restored.
-  double? _jumpCacheExtent;
 
   /// Turn navigator directory (design §2.1): ascending rowIds of the real
   /// user queries in the loaded window, recomputed in the state listener
@@ -392,42 +281,19 @@ class _ChatPageState extends State<ChatPage> {
   final GlobalKey<TurnNavigatorState> _turnNavigatorKey =
       GlobalKey<TurnNavigatorState>();
 
-  /// Invalidation epoch for anchor-compensation chains: stored (and bumped
-  /// per prepend commit) in the pager; forwarded here so the compensation
-  /// chain ([_compensateAnchor]) reads it unchanged.
-  int get _anchorGeneration => _pager.anchorGeneration;
+  /// [RepaintBoundary] around the list — the frozen-frame capture source,
+  /// injected into the viewport through [TranscriptViewport.attach] and
+  /// mounted by [TranscriptVeil].
+  final GlobalKey _freezeKey = GlobalKey();
 
-  /// Last page's MEASURED content shift — pure prepend height with every
-  /// viewport movement cancelled out (see the LAND note in
-  /// [_compensateAnchor]): the best available predictor for the next page's
-  /// prepend height — same page size, similar content. Drives the veil's
-  /// cache-extent pre-widen ([_prependOlderPage]): the anchor's depth below
-  /// the offset is predicted from it so the FIRST veiled frame already lays
-  /// out deep enough to measure (round 21; hops still cover a bad guess),
-  /// and the give-up fallback when even the widened cache can't find the
-  /// anchor.
-  double? _lastMeasuredDelta;
-
-  /// True from a prepend until its anchor compensation chain settles
-  /// (lands, gives up, or dies with no viewport). Between the prepend and
-  /// the landing the viewport sits at the UN-compensated offset — still
-  /// inside the prefetch/pull trigger window — and a re-fire there starts
-  /// the next load before this page's compensation ran, so that chain is
-  /// stale-dropped and its content shift goes UN-compensated entirely
-  /// (09-22 log: three loads a second apart, two stale-dropped = content
-  /// free-falls two screens). Gates [_loadOlder] re-entry until the view
-  /// is stable again.
-  bool _compensationPending = false;
-
-  /// True while a programmatic scroll (jumpTo / animateTo — open
-  /// positioning, keyboard shrink-follow, jump-to-bottom, anchor
-  /// compensation) is in flight. Its pixel sweep crosses the history
-  /// prefetch window without the user reading anywhere near it (the open
-  /// animation starts at offset 0), so the prefetch trigger parks until
-  /// ScrollEnd; a user drag clears it immediately (taking over is fine).
-  /// See [_onListScroll] — controller listeners can't do this routing
-  /// because jumpTo fires them before its Start notification.
-  bool _positioning = false;
+  /// Temporary oversize cacheExtent for the turn-navigator jump (task
+  /// 10-14; null = platform default). The target turn may sit outside the
+  /// ~250px layout cache, so the cache widens for a frame, the landing is
+  /// MEASURED (never estimated — chat-conventions §9), and the extent is
+  /// restored. The prepend chain's own widen lives in the viewport
+  /// ([TranscriptViewport.anchorCacheExtent]); the two never hold at once,
+  /// so build reads `viewport.anchorCacheExtent ?? _jumpCacheExtent`.
+  double? _jumpCacheExtent;
   bool _showSlash = false;
 
   /// @-mention picker state (see _maybeOpenMentionPicker).
@@ -549,6 +415,11 @@ class _ChatPageState extends State<ChatPage> {
       unawaited(_restoreDraft());
     }
     _scrollController.addListener(_onScroll);
+    _viewport.attach(
+      controller: _scrollController,
+      listKey: _listKey,
+      freezeKey: _freezeKey,
+    );
     if (_sessionId != null) {
       _subscribe();
       unawaited(_loadOffPeakQueue());
@@ -758,45 +629,32 @@ class _ChatPageState extends State<ChatPage> {
     // rebuilds (it toggles the jump-to-bottom button), steady scrolling stays
     // free.
     if (stick == _stickToBottom) return;
+    // A FALSE sample taken while OUR OWN programmatic motion carries the
+    // viewport (the open/follow glide, jump-to-bottom, keyboard catch-up) is
+    // not the reader leaving the bottom: the 200ms glide sweeps the middle
+    // of the list and targets an extent ESTIMATE that the descent itself can
+    // revise upward, so it can end short of the real maxScrollExtent. Letting
+    // that sample stick leaves the pin off for good, and the open auto-load's
+    // prepend then anchors to the reading position instead of the newest end
+    // (A7 device acceptance, 2026-10-29). The opposite flip — the motion
+    // reaching the end — still lands, so the jump-to-bottom glide keeps
+    // restoring the pin.
+    if (!stick && _viewport.isPositioning) return;
     debugPrint('[anchor] stick=$stick pixels='
         '${_scrollController.position.pixels.toStringAsFixed(1)} max=$max');
     if (mounted) setState(() => _stickToBottom = stick);
   }
 
-  /// History triggers (prefetch + pull gesture). Both ride the notification
-  /// path, not the controller listener: [ScrollPosition.jumpTo] notifies
-  /// controller listeners from forcePixels BEFORE its Start/Update/End
-  /// notifications, so a listener-side trigger cannot tell a programmatic
-  /// jump from a user scroll. Here every pixel change is bracketed by
-  /// [_onListScroll]'s Start/End bookkeeping.
+  /// Scroll-events router: identity routing, the turn navigator's collapse +
+  /// highlight slices, and the history slice forwarded to the viewport
+  /// ([TranscriptViewport.onScrollNotification]).
   ///
-  /// Release detection uses RefreshIndicator's pattern — the first scroll
-  /// update after a drag whose dragDetails is null is the release frame;
-  /// ScrollEndNotification only fires after the spring has settled (pixels
-  /// back at 0, too late) and the freed top edge emits no
-  /// OverscrollNotification at all (task research, physics §3).
-  /// Lifts the prepend veil ([_listVeiled]) — idempotent, safe to call
-  /// from every compensation exit and scroll notification. Also drops the
-  /// frozen frame; its disposal waits one frame so the layer that already
-  /// painted it lets go first.
-  void _liftVeil() {
-    if (!_listVeiled && _frozenFrame == null) return;
-    final frame = _frozenFrame;
-    setState(() {
-      _listVeiled = false;
-      _frozenFrame = null;
-    });
-    if (frame != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => frame.dispose());
-    }
-  }
-
+  /// Identity routing (same pattern as [_onListMetrics]): the subtree has
+  /// sibling scrollables — diff cards and expanded code blocks scroll
+  /// horizontally — and their notifications bubble through here too. A
+  /// horizontal drag would otherwise almost always satisfy the prefetch
+  /// window and fire a 60-row history load the user never asked for.
   bool _onListScroll(ScrollNotification n) {
-    // Identity routing (same pattern as [_onListMetrics]): the subtree has
-    // sibling scrollables — diff cards and expanded code blocks scroll
-    // horizontally — and their notifications bubble through here too. A
-    // horizontal drag would otherwise almost always satisfy the prefetch
-    // window and fire a 60-row history load the user never asked for.
     if (!_scrollController.hasClients) return false;
     final notificationContext = n.context;
     final scrollable = notificationContext == null
@@ -811,68 +669,14 @@ class _ChatPageState extends State<ChatPage> {
     // while collapsed; identity routing above keeps sibling scrollables
     // (diff cards, code blocks) from dismissing it.
     _turnNavigatorKey.currentState?.collapse();
-    if (n is ScrollStartNotification) {
-      // dragDetails != null → a user drag starts; null → programmatic
-      // activity (jumpTo / animateTo, see [_positioning]).
-      if (n.dragDetails != null && _listVeiled) _liftVeil();
-      _pullArmed = false;
-      _userDragActive = n.dragDetails != null;
-      _positioning = n.dragDetails == null;
-    } else if (n is ScrollUpdateNotification) {
-      if (_listVeiled) _liftVeil();
-      // Any update frame (drag, coast, rebound, animation) = in motion; only
-      // ScrollEnd restores "at rest" (see [_scrollSettled]).
-      _scrollSettled = false;
-      final pixels = n.metrics.pixels;
-      // The first non-drag update after a drag is the release frame
-      // (RefreshIndicator's pattern) — the finger is up again, so deferred
-      // anchor compensation may resume.
-      if (n.dragDetails == null) _userDragActive = false;
-      // History prefetch (main path: it
-      // triggers at scrollTop <= max(64, 2×viewport) from the top).
-      // Programmatic frames ([_positioning]) and the pull gesture don't
-      // count: a jump's pixel sweep doesn't mean the user is reading near
-      // the top, and a sub-threshold pull must release into a silent
-      // bounce — its spring lands at 0 from below, so non-drag frames
-      // require pixels > 0. Reentrancy and cursor guards live inside
-      // [_loadOlder].
-      final inWindow =
-          pixels <= math.max(64.0, n.metrics.viewportDimension * 2);
-      final userDriven = n.dragDetails != null
-          ? pixels >= 0 // live drag: negative = mid-pull overscroll
-          : pixels > 0 && !_positioning;
-      if (inWindow && userDriven) {
-        _prefetchOlder();
-      }
-      if (n.dragDetails != null) {
-        // Dragging: re-arm live with the pull depth.
-        _pullArmed = pixels <= -_kPullThreshold;
-      } else if (_pullArmed && pixels <= -_kPullThreshold) {
-        // Release frame: trigger once.
-        _pullArmed = false;
-        if (!_loadingOlder) _loadOlder();
-      }
+    // History physics (idle bookkeeping, prefetch/pull triggers, veil lift,
+    // ScrollEnd flush) — all inside the viewport.
+    _viewport.onScrollNotification(n);
+    if (n is ScrollUpdateNotification || n is ScrollEndNotification) {
       // Navigator highlight rides the same pass, post-frame (design §2.2).
       _scheduleActiveQueryUpdate();
-    } else if (n is ScrollEndNotification) {
-      _positioning = false;
-      _userDragActive = false;
-      _scrollSettled = true;
-      // Navigator highlight settles on the final position.
-      _scheduleActiveQueryUpdate();
-      // The scroll has truly settled (drag released, spring/fling done):
-      // a drag-held history page may now flush (see the DRAG HOLD note in
-      // [HistoryPager.settle]).
-      _flushPendingOlder();
     }
     return false;
-  }
-
-  /// Scroll-proximity history prefetch entry (guarded by the caller).
-  void _prefetchOlder() {
-    final state = _state;
-    if (state == null || !state.canLoadOlder || _loadingOlder) return;
-    _loadOlder();
   }
 
   /// Keyboard shrink-follow (2026-09-20 真机): with resizeToAvoidBottomInset
@@ -966,8 +770,8 @@ class _ChatPageState extends State<ChatPage> {
       unawaited(_persistDraft());
     }
     _inputController.dispose();
+    _viewport.dispose();
     _scrollController.dispose();
-    _frozenFrame?.dispose();
     _activeQueryIndex.dispose();
     _imeOccupied.dispose();
     super.dispose();
@@ -1045,7 +849,7 @@ class _ChatPageState extends State<ChatPage> {
       // The client shows the full history immediately, so
       // auto-load the missing older rows once on open.
       if (handle.state.canLoadOlder) {
-        await _loadOlder();
+        await _viewport.loadOlder();
       }
       // Explicitly position at the newest message: the state listener only
       // fires on LATER updates and misses the initial snapshot.
@@ -1070,7 +874,7 @@ class _ChatPageState extends State<ChatPage> {
       // loser's target survives: the offset parks past the true end
       // (09-22 round 13 test: expected the true bottom, landed 160px
       // past it after the extent estimate shrank).
-      if (!grew || !_stickToBottom || _compensationPending) {
+      if (!grew || !_stickToBottom || _viewport.compensationInFlight) {
         debugPrint('[anchor] follow-skip grew=$grew stick=$_stickToBottom '
             'px=${_scrollController.position.pixels.toStringAsFixed(1)}');
         return;
@@ -1173,7 +977,7 @@ class _ChatPageState extends State<ChatPage> {
   /// drag, a prepend compensation chain, or another programmatic scroll.
   void _jumpToQuery(int rowId) {
     if (!_scrollController.hasClients) return;
-    if (_userDragActive || _compensationPending || _positioning) return;
+    if (!_viewport.canJumpToQuery) return;
     if (_stickToBottom && mounted) setState(() => _stickToBottom = false);
     _landOnQuery(rowId, hop: 0);
   }
@@ -1758,270 +1562,6 @@ class _ChatPageState extends State<ChatPage> {
     );
   }
 
-  // ------------------------------------------------------------ history
-
-  /// Loads one older history page — the single entry ALL four triggers
-  /// (open auto-load / prefetch window / pull release / button) funnel
-  /// into; the mutual-exclusion gate lives in the pager ([HistoryPager.beginLoad]).
-  /// The fetch decisions themselves live in [HistoryPager.settle].
-  Future<void> _loadOlder() async {
-    final request = _pager.beginLoad(_sessionId);
-    if (request == null) return;
-    // Post-frame so the list has actually mounted (the subscribe microtask
-    // chain can beat the first build) — the anchor itself is NOT measured
-    // here anymore: since round 18 the prepend only runs with the viewport
-    // at rest (see the DRAG HOLD note in [HistoryPager.settle]) and measures
-    // fresh right before it applies the page, so the anchored position IS
-    // the reader's settled position — no armed pre-fetch anchor to yank
-    // them back to, and the SliverList's own retained-child stability does
-    // the mid-list anchoring (see the VEIL note in [_prependOlderPage]).
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      unawaited(_pager.settle(request));
-    });
-  }
-
-  /// Applies a fetched history page. The anchor is ALWAYS measured here,
-  /// right before the prepend — since round 17 the prepend only runs with
-  /// the viewport at rest (see the DRAG HOLD note in [HistoryPager.settle]),
-  /// so "now" is already the reader's settled position and a fresh measure
-  /// is the correct anchor (the old pre-fetch armed anchor anchored the
-  /// REQUEST-time position; whatever the reader drifted to during the ~1s
-  /// round trip, the landing then yanked back — "向下跳动", 09-22 round 18).
-  /// With the offset at rest the SliverList itself keeps the viewport
-  /// content stable across the prepend (retained children keep their
-  /// layoutOffsets and the new rows lay out above them — see the VEIL note
-  /// below for the one exception), so the measured landing usually
-  /// corrects nothing.
-  Future<void> _prependOlderPage(
-    ConversationState state,
-    List<Map<String, dynamic>> older,
-    bool? hasMore,
-  ) async {
-    // Hold re-check AT THE PREPEND FRAME (the park lives in the pager): the
-    // arrival microtask's settled verdict can be one frame stale — a slow
-    // reader's rhythm is stop-and-go, and a reply that lands in a pause
-    // then prepends just as the NEXT drag starts would prepend into a
-    // moving viewport (09-22 round 16 device log: give-up at pixels 320,
-    // next landing 3616 -> 6581).
-    if (_pager.parkPrependIfBusy(state, older, hasMore)) return;
-    // FROZEN FRAME (round 24): capture the list's CURRENT paint before the
-    // prepend applies — the plain transparent veil replaced the list with a
-    // blank for 1-2 frames and read as a full-screen black flash on device
-    // (dark theme; "每次加载的时候都会有一个闪屏, 界面短暂全黑"). Drawing
-    // this capture over the veil shows the SAME pixels standing still until
-    // the measured landing — nothing goes blank, nothing teleports. A
-    // failed capture (no boundary / capture error) downgrades the chain to
-    // the visible-landing path instead: a misplaced list beats a blank one.
-    ui.Image? frozen;
-    final boundary = _freezeKey.currentContext?.findRenderObject();
-    if (boundary is RenderRepaintBoundary && !boundary.debugNeedsPaint) {
-      final ratio = MediaQuery.maybeDevicePixelRatioOf(context) ?? 3.0;
-      try {
-        frozen = await boundary.toImage(pixelRatio: ratio);
-      } catch (_) {
-        frozen = null;
-      }
-    }
-    if (!mounted) {
-      frozen?.dispose();
-      return;
-    }
-    // The capture is async (GPU read-back): re-check the hold AFTER the
-    // gap — a drag that started mid-capture must park the page, not
-    // prepend under a moving finger (same remedy as the entry hold).
-    if (_pager.parkPrependIfBusy(state, older, hasMore)) {
-      frozen?.dispose();
-      return;
-    }
-    // Viewport anchor (R3, shared by prefetch / gesture / button): measured
-    // from real RenderBox positions before the prepend. Deliberately NOT the
-    // old maxScrollExtent arithmetic (jumpTo(anchorPixels + Δmax)): past the
-    // laid-out window the SliverList extent is an average-row estimate that
-    // misses by hundreds of px under real row-height variance, and jumpTo
-    // bypasses applyBoundaryConditions — an over-estimate parked the viewport
-    // beyond the true content end: blank viewport, stuck scroll until the
-    // next touch (2026-09-21 device acceptance). The measured group delta is
-    // exact.
-    final anchor = _measureAnchor(state);
-    // Invalidation epoch: a faster reader fires the next load before this
-    // page's compensation chain finished, and the chains would otherwise
-    // interleave — each landing on a viewport the previous one already
-    // moved, stacking misplaced jumps (the 09-22 log shows three chains
-    // landing 796→7288→10134→8656 = yanked to the bottom). Only the newest
-    // page's chain may still land. The bump and the data write-back live
-    // in the pager commit.
-    final outcome = _pager.commitPrepend(state, older, hasMore);
-    final gen = outcome.generation;
-    final inserted = outcome.inserted;
-    if (inserted == 0) {
-      // Duplicate page: a re-fire raced this chain's prepend window (same
-      // beforeRowId cursor, e.g. a prefetch issued between the drag-hold
-      // flush clearing the gate and its post-frame prepend). Nothing
-      // shifted — anchoring a no-op prepend pre-jumps the view a full page
-      // out and the landing drags it all the way back down ("向下被拉动",
-      // 09-22 round 14: pre-jump 3317px out, LAND dragged 7273 -> 3955).
-      debugPrint('[anchor] duplicate page dropped');
-      _compensationPending = false;
-      return;
-    }
-    // VEIL (round 21): the landing offset is only knowable AFTER the
-    // prepend's layout — until then every offset shown is a guess, and
-    // page-height variance (±1300-3000px in the round 16-20 device logs)
-    // makes the guessed intermediate frame wrong by whole screens. A jump
-    // to the guess (the pre-jump, rounds 5-18) plus the measured landing's
-    // corrective glide read as the load-point jump that no animation
-    // tuning ever hid. Instead the list paints TRANSPARENT from the
-    // prepend's first frame until the measured landing a frame later —
-    // layout and the anchor measurement run normally under the veil, so
-    // the landing is exact and the reader sees one blank frame instead of
-    // one wrong one. The veil never survives contact: any user scroll
-    // notification lifts it (see [_onListScroll]), and every terminal
-    // exit of [_compensateAnchor] lifts it too.
-    // Prepending shifts the content above the reading position; both
-    // modes compensate by re-measuring the anchor group's real position
-    // next frame (the web does scrollTop += delta — this is the
-    // measured variant): reading keeps the anchor's distance from the
-    // viewport top, stick re-lands on the true newest end. The state
-    // listener's follow still owns APPENDS; the old stick branch called
-    // _scrollToBottom here, which rode the same extent estimate and
-    // could fall short of (or mis-aim at) the true end on tall pages.
-    if (anchor != null) {
-      // Re-entry gate (see [_compensationPending]): from here until the
-      // chain settles, the viewport sits at the un-compensated offset —
-      // inside the prefetch window — and must not start another load.
-      _compensationPending = true;
-      final chainedAnchor = anchor;
-      // Pre-widen the layout cache WITH the data change: the anchor sits
-      // ~one page below the offset after the prepend, beyond the ~250px
-      // default cache. Widening here (predicted from the last page's
-      // measured height, ×2 headroom for its variance) lets the FIRST
-      // veiled frame already lay out down to the anchor, so the landing
-      // usually measures on hop 0; a bad guess costs one more veiled
-      // frame via the hop chain, never a shown one.
-      double? preWiden;
-      if (!anchor.stick &&
-          _lastMeasuredDelta != null &&
-          _scrollController.hasClients) {
-        final viewportHeight = _scrollController.position.viewportDimension;
-        preWiden = math.min(
-            _lastMeasuredDelta! * 2 + viewportHeight, 120000.0);
-      }
-      setState(() {
-        _listVeiled = frozen != null;
-        _frozenFrame = frozen;
-        _anchorCacheExtent = preWiden;
-      });
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        if (!_scrollController.hasClients) {
-          _compensationPending = false;
-          _liftVeil();
-          return;
-        }
-        _compensateAnchor(chainedAnchor, hop: 0, gen: gen, chainState: state);
-      });
-    } else {
-      // No measurable anchor (unmounted list / empty groups): the fetch
-      // path pre-closed the re-entry gate — release it, the prepend stands
-      // uncompensated.
-      _compensationPending = false;
-    }
-  }
-
-  /// Flushes a drag-held history page once the scroll has truly ended (drag
-  /// released AND the release spring / fling settled —
-  /// [ScrollEndNotification]); the parked page and all flush decisions
-  /// (identity drop, compensation wait, gate sequencing) live in the pager
-  /// ([HistoryPager.flushHeld]) — this shim only contributes `mounted`.
-  void _flushPendingOlder() {
-    if (!mounted) return;
-    _pager.flushHeld();
-  }
-
-  /// Reading anchor for the prepend compensation, measured from real
-  /// RenderBox positions (never from maxScrollExtent as a landing target —
-  /// see [_loadOlder]; the pre-fetch extent is kept only as the coarse-hop
-  /// delta source).
-  ///
-  /// Reading (non-stick): the first group at/over the viewport top, then a
-  /// retreat up to the nearest STABLE group (userInput / timelineMarker
-  /// first) — see the retreat comment in the body for why the first visible
-  /// group itself can orphan its key across a prepend.
-  ///
-  /// Pinned (stick): ALSO captures the true newest group ([_HistoryAnchor]'s
-  /// endKey) as the landing target — but the reading anchor is measured
-  /// regardless: if the user scrolls away from the bottom while the page
-  /// loads, the landing demotes to the reading anchor instead of yanking
-  /// them back to the end (open auto-load + immediate swipe-up, 09-22
-  /// round 8).
-  _HistoryAnchor? _measureAnchor(ConversationState state) {
-    if (!_scrollController.hasClients) return null;
-    final viewport = _listViewportBox();
-    if (viewport == null) return null;
-    final viewportTop = viewport.localToGlobal(Offset.zero).dy;
-    final allGroups = groupChatRows(state.rows);
-    if (allGroups.isEmpty) return null;
-    // Extent BEFORE the prepend (measured pre-fetch, hence converged): the
-    // compensation's coarse first hop re-derives the estimate delta from it.
-    final baseMax = _scrollController.position.maxScrollExtent;
-    Set<num> rowIdsOf(List<Map<String, dynamic>> rows) => rows
-        .map((r) => r['rowId'])
-        .whereType<num>()
-        .toSet();
-    final stick = _stickToBottom;
-    final groups = _builtGroups();
-    if (groups.isEmpty) return null;
-    var anchorIdx = -1;
-    for (var i = 0; i < groups.length; i++) {
-      if (groups[i].$2.localToGlobal(Offset.zero).dy >= viewportTop - 40) {
-        anchorIdx = i;
-        break;
-      }
-    }
-    anchorIdx = anchorIdx < 0 ? groups.length - 1 : anchorIdx;
-    // Retreat to the nearest STABLE group at/above the reading position: a
-    // group keyed by a non-user first row merges away when a rowsRange page
-    // boundary splits a turn (the prepend re-groups, the first rowId
-    // changes, the key orphans and the compensation used to hop to the list
-    // end — the 09-21 "yanked to the bottom" device report). A userInput
-    // or timelineMarker first can only ever gain rows ABOVE its first row,
-    // never lose it, so its key survives any prepend.
-    var stableIdx = anchorIdx;
-    while (stableIdx >= 0) {
-      final firstKind = groups[stableIdx].$1.rows.first['kind'];
-      if (firstKind == 'timelineMarker' || firstKind == 'userInput') break;
-      stableIdx--;
-    }
-    final useIdx = stableIdx >= 0 ? stableIdx : anchorIdx;
-    final (widget, box) = groups[useIdx];
-    debugPrint('[anchor] measure stick=$stick key=${widget.key} '
-        'rowIds=${widget.rows.map((r) => r['rowId']).toList()} '
-        'retreated=${useIdx != anchorIdx}');
-    // Row-level anchor (exact landing when the group's key orphans to a
-    // page-boundary merge): measure the first row's own box now so the
-    // compensation can land on IT instead of the merged group's top (which
-    // sits the merged-in segment deeper every page — the cumulative
-    // downward drift of 09-22 round 4).
-    final rowKey = ValueKey('row-${widget.rows.first['rowId']}');
-    final rowBox = _findRowBox(rowKey);
-    return (
-      key: widget.key!,
-      rowIds: rowIdsOf(widget.rows),
-      dy: box.localToGlobal(Offset.zero).dy - viewportTop,
-      stick: stick,
-      endKey: stick
-          ? ValueKey('turn-${allGroups.last.first['rowId']}')
-          : null,
-      baseMax: baseMax,
-      rowKey: rowKey,
-      rowDy: rowBox == null
-          ? null
-          : rowBox.localToGlobal(Offset.zero).dy - viewportTop,
-      measurePixels: _scrollController.position.pixels,
-    );
-  }
-
   /// The message list's viewport-sized render box (Listener/GestureDetector
   /// wrap the viewport exactly), or null when nothing is laid out.
   RenderBox? _listViewportBox() {
@@ -2030,14 +1570,11 @@ class _ChatPageState extends State<ChatPage> {
     return box;
   }
 
-  /// Every currently-built turn group, in list order: (widget, box). The
-  /// widget exposes both the key (stable iff the first row is a userInput /
-  /// timelineMarker — such a first row can never lose group-lead position to
-  /// a prepend re-group) and the rows themselves (the rowId fallback when a
-  /// page-boundary re-group orphans the key). Only BUILT children exist
-  /// here — SliverList keeps just the viewport plus its cacheExtent alive,
-  /// which is exactly why the compensation sometimes has to hop, see
-  /// [_compensateAnchor].
+  /// Every currently-built turn group, in list order: (widget, box) — the
+  /// turn navigator's directory/highlight pass (the history anchor chain
+  /// measures through the viewport's own element port). Only BUILT children
+  /// exist here — SliverList keeps just the viewport plus its cacheExtent
+  /// alive.
   List<(ChatTurnGroup, RenderBox)> _builtGroups() {
     final groups = <(ChatTurnGroup, RenderBox)>[];
     final listContext = _listKey.currentContext;
@@ -2059,329 +1596,6 @@ class _ChatPageState extends State<ChatPage> {
 
     listContext.visitChildElements(visit);
     return groups;
-  }
-
-  /// The render box of a single message row by its `ValueKey('row-<rowId>')`
-  /// (rows carry keys in [ChatTurnGroup]'s build), or null when that row
-  /// isn't independently built (merged inside a text part / off-window).
-  RenderBox? _findRowBox(Key rowKey) {
-    RenderBox? found;
-    final listContext = _listKey.currentContext;
-    if (listContext == null) return null;
-    void visit(Element element) {
-      if (found != null) return;
-      final widget = element.widget;
-      if (widget is ChatRow || widget is ToolGroupCard) {
-        if (widget.key == rowKey) {
-          final box = element.findRenderObject();
-          if (box is RenderBox && box.attached && box.hasSize) found = box;
-        }
-        return;
-      }
-      element.visitChildElements(visit);
-    }
-
-    listContext.visitChildElements(visit);
-    return found;
-  }
-
-  /// Post-prepend compensation (R3): re-find the anchor group, measure its
-  /// real position and jump by the measured delta — maxScrollExtent plays no
-  /// part in the LANDING, so row-height variance cannot skew it.
-  ///
-  /// While a finger is down ([_userDragActive]) the chain only defers: a
-  /// jumpTo replaces the position's drag activity and silently kills every
-  /// later move event of that gesture. Once the finger lifts, the chain
-  /// resumes.
-  ///
-  /// The prepend usually pushes the anchor out of the laid-out window (60
-  /// rows span several viewports vs the 250px cacheExtent). The first hop is
-  /// COARSE: one jump by the extent-estimate delta (wrong by row-height
-  /// variance, but by hundreds of px — inside the viewport+cache window), so
-  /// the anchor usually surfaces on the very next frame for the measured
-  /// landing. If it still doesn't (orphaned key beyond the retreat, extreme
-  /// variance), the view STAYS at the coarse landing: an estimate-grade
-  /// anchor, never a guess-crawl — the old behavior's multi-screen sweep
-  /// read as "yanked to the bottom" (device report 09-21).
-  void _compensateAnchor(
-    _HistoryAnchor anchor, {
-    required int hop,
-    int? gen,
-    ConversationState? chainState,
-  }) {
-    // Stale chains die here: a newer load's measure already captured (and
-    // the newest page's chain will land on) the CURRENT viewport — an older
-    // chain landing later would stack a jump on top of it (09-22 log:
-    // three interleaved chains 796→7288→10134→8656 = yanked to bottom).
-    if (gen != null && gen != _anchorGeneration) {
-      if (_anchorCacheExtent != null) {
-        setState(() => _anchorCacheExtent = null);
-      }
-      _liftVeil();
-      debugPrint('[anchor] stale gen=$gen dropped');
-      return;
-    }
-    // No stale return below this point: every remaining exit is terminal for
-    // this chain, so each clears the re-entry gate (a stale chain leaves it
-    // to the newer chain that superseded it).
-    if (_userDragActive) {
-      // A drag arrived under the veil (its ScrollStart should have lifted
-      // it already — belt and braces): show the list while the chain waits
-      // the finger out; the landing's correction then runs visible and
-      // eases (see the landing note).
-      _liftVeil();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || !_scrollController.hasClients) return;
-        _compensateAnchor(anchor, hop: hop, gen: gen, chainState: chainState);
-      });
-      return;
-    }
-    // Our own programmatic scroll ([_positioning]: the open-page follow, a
-    // prior landing's ease) is carrying the viewport: its motion must not
-    // read as user drift, or the landing surrenders off a phantom (the
-    // open auto-load once surrendered off its own 575px follow and stranded
-    // the view mid-content while the extent settled past it, 09-22 round
-    // 15). A STICK chain does not wait — its measured endKey landing is
-    // the authoritative bottom (the follow only animates toward a stale
-    // extent estimate; landing kills it). A READING chain waits the motion
-    // out and re-measures the anchor from the settled position — the same
-    // fresh-measure the drag-hold flush uses; the armed baseline is
-    // meaningless after a programmatic carry.
-    if (chainState != null && _positioning && !anchor.stick) {
-      _liftVeil();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || !_scrollController.hasClients) return;
-        if (_positioning) {
-          _compensateAnchor(anchor, hop: hop, gen: gen, chainState: chainState);
-          return;
-        }
-        final fresh = _measureAnchor(chainState);
-        _compensateAnchor(fresh ?? anchor, hop: hop, gen: gen);
-      });
-      return;
-    }
-    final viewport = _listViewportBox();
-    if (viewport == null) {
-      _compensationPending = false;
-      _liftVeil();
-      return;
-    }
-    final position = _scrollController.position;
-    // Mid rubber-band rebound (pixels outside [0, max] right after the finger
-    // lifted): landing from that moving baseline kills the rebound and reads
-    // as a yank (09-22 log: -59.3 -> 2601 in one jump). The rebound converges
-    // within a few frames — re-check then.
-    if (position.pixels < 0 || position.pixels > position.maxScrollExtent) {
-      // A rebound's baseline moves every frame: don't measure the landing
-      // from it, and don't hold the veil across its (unbounded) frames.
-      _liftVeil();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || !_scrollController.hasClients) return;
-        _compensateAnchor(anchor, hop: hop, gen: gen, chainState: chainState);
-      });
-      return;
-    }
-    // Stick demotion: the anchor was captured pinned, but the user scrolled
-    // while the page loaded (open auto-load + immediate swipe-up, 09-22
-    // round 8) — land on the READING anchor captured at the same measure
-    // instead of yanking them back to the end. Judged by the offset's drift
-    // from measure time (any direction: up = reading, down = still chasing
-    // the end), NOT by [_stickToBottom]: the prepend itself grows max and
-    // flips that flag without any user movement. The drift test is skipped
-    // while a PROGRAMMATIC scroll owns the viewport — that motion is ours,
-    // not the reader's (round 15).
-    final landingStick = anchor.stick &&
-        (_positioning || // our own animation, not the reader's drift
-            (position.pixels - anchor.measurePixels).abs() <= 40);
-    final landingKey = landingStick ? anchor.endKey! : anchor.key;
-    final groups = _builtGroups();
-    RenderBox? box;
-    for (final (widget, candidate) in groups) {
-      if (widget.key == landingKey) {
-        box = candidate;
-        break;
-      }
-    }
-    // Landing base: the anchor GROUP normally. When its key orphaned to a
-    // page-boundary merge, land on the anchor ROW's own box (exact — rows
-    // survive any re-group) if it was measurable at anchor time; only then
-    // fall back to whatever group now contains the rows (sits the merged-in
-    // segment deeper — the cumulative drift of 09-22 round 4).
-    final bool rowLanding;
-    if (box != null) {
-      rowLanding = false;
-    } else if (anchor.rowKey != null && anchor.rowDy != null) {
-      final rowBox = _findRowBox(anchor.rowKey!);
-      if (rowBox != null) {
-        box = rowBox;
-        rowLanding = true;
-        debugPrint('[anchor] row landing ${anchor.rowKey}');
-      } else {
-        rowLanding = false;
-      }
-    } else {
-      rowLanding = false;
-    }
-    if (box == null) {
-      for (final (widget, candidate) in groups) {
-        final ids = widget.rows
-            .map((r) => r['rowId'])
-            .whereType<num>();
-        if (ids.any(anchor.rowIds.contains)) {
-          box = candidate;
-          debugPrint('[anchor] rowId fallback -> ${widget.key}');
-          break;
-        }
-      }
-    }
-    if (box == null) {
-      if (groups.isEmpty) {
-        // Parked past the real content end (nothing laid out = blank
-        // viewport): step back into range instead of staying stuck.
-        _scrollController.jumpTo(math.max(0.0, position.maxScrollExtent));
-        _compensationPending = false;
-        _liftVeil();
-        return;
-      }
-      if (hop == 0) {
-        // Anchor not built: widen the cache for one frame so SliverList
-        // lays out down to the anchor's expected depth (estimate ×2 headroom
-        // — inflation is one-sided, under-estimate leaves the anchor short).
-        // Measured landing follows; no pixel is ever jumped by estimate.
-        final need = (position.maxScrollExtent - anchor.baseMax) * 2 +
-            viewport.size.height;
-        setState(() => _anchorCacheExtent = math.min(need, 120000.0));
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          if (!_scrollController.hasClients) {
-            _compensationPending = false;
-            _liftVeil();
-            return;
-          }
-          _compensateAnchor(anchor, hop: hop + 1, gen: gen,
-              chainState: chainState);
-        });
-        return;
-      }
-      // Still not found with the widened cache: the anchor's key orphaned
-      // (page-boundary re-group) AND its row isn't an independently-keyed
-      // widget (merged inside a text part — see [_findRowBox]) AND the
-      // rowIds fallback matched nothing built. Not pathological — the
-      // veiled layout puts the anchor several viewports below the offset
-      // and the walk can still miss it. Land by the last page's MEASURED
-      // height (a conservative 0.85-fold: an under-shot lands ~300px off
-      // where a full-height guess missed by 1287, round 20) instead of
-      // compounding an uncompensated prepend into the NEXT landing.
-      // Skipped while the viewport is in motion (kills the gesture /
-      // coast); the veil lifts either way — the reader must never be left
-      // staring at a blank list.
-      debugPrint('[anchor] give up hop=$hop pixels='
-          '${position.pixels.toStringAsFixed(1)} builtGroups='
-          '${groups.length}');
-      setState(() => _anchorCacheExtent = null);
-      // At the very head the reader is looking at the FRESH page — an
-      // estimated jump there leaps somewhere they never chose (round 21
-      // log: two head give-ups jumped to guess positions, "内容跳的非常
-      // 厉害"). Stay put; the next chain lands measured.
-      if (!anchor.stick &&
-          _lastMeasuredDelta != null &&
-          !_userDragActive &&
-          _scrollSettled &&
-          position.pixels >= 1.0) {
-        _scrollController.jumpTo(
-          (position.pixels + _lastMeasuredDelta! * 0.85)
-              .clamp(0.0, position.maxScrollExtent),
-        );
-      }
-      _compensationPending = false;
-      _liftVeil();
-      return;
-    }
-    final viewportTop = viewport.localToGlobal(Offset.zero).dy;
-    final viewportBottom = viewportTop + viewport.size.height;
-    final top = box.localToGlobal(Offset.zero).dy;
-    final dy = rowLanding ? anchor.rowDy! : anchor.dy;
-    // No drift surrender anymore (round 18 removed it): its job was to
-    // catch the reader flinging away from the PRE-FETCH armed position —
-    // but the anchor is now measured fresh at the prepend (whatever the
-    // reader drifted to during the round trip IS the anchored position),
-    // so there is no stale position left to defend. What the pixels-delta
-    // check DID catch lately was the sliver's own scrollOffsetCorrection:
-    // a pre-jump landing in never-laid-out estimate territory gets its
-    // offset translated by thousands of px when the real layout walks in
-    // (round 18 log: pre-jump to 4266, layout corrected the offset to
-    // 10773, drift 6507 "surrendered" and the uncompensated prepend left
-    // the reader lost mid-history). The landing formula below is
-    // translation-invariant — correction moves `top` and `pixels` in the
-    // same amount and cancels — so landing is correct either way.
-    final double target;
-    if (landingStick) {
-      // Pinned: land the captured newest group exactly on the true content
-      // end (the list's bottom padding above the viewport bottom) — derived
-      // from measured boxes, so it can neither fall short the way
-      // animateTo(max-estimate) does nor overshoot into the unpainted
-      // region the way the old Δmax jumpTo did.
-      final bottom = top + box.size.height;
-      target =
-          position.pixels + (bottom - viewportBottom) + _listPadding.bottom;
-    } else {
-      // Reading: keep the anchor's distance from the viewport top (row box
-      // + row dy when landing on the row, group box + group dy otherwise).
-      target = position.pixels + (top - viewportTop - dy);
-    }
-    debugPrint('[anchor] LAND hop=$hop stick=$landingStick veiled=$_listVeiled'
-        ' key=$landingKey pixels=${position.pixels.toStringAsFixed(1)} -> '
-        '${target.toStringAsFixed(1)}');
-    if (!landingStick) {
-      // TRUE content shift of this prepend: the anchor's screen displacement
-      // plus the total pixel displacement since measure (finger drags,
-      // ballistic scroll — everything that moved the viewport cancels out,
-      // leaving pure content height). Feeds the NEXT prepend's cache-extent
-      // pre-widen and the give-up fallback — never a pixel jump (round 21;
-      // the pre-jump it used to drive is gone).
-      _lastMeasuredDelta = (top - viewportTop - dy) +
-          (position.pixels - anchor.measurePixels);
-    }
-    if (_anchorCacheExtent != null) {
-      setState(() => _anchorCacheExtent = null);
-    }
-    _compensationPending = false;
-    // Clamp to the content range: jumpTo bypasses applyBoundaryConditions,
-    // and an un-clamped stale-baseline target once parked the viewport
-    // past the true end (blank view + fake stick).
-    final clamped = target.clamp(0.0, position.maxScrollExtent);
-    if (_listVeiled) {
-      // Veiled transit: the offset's trip to the landing happened off
-      // screen, so land exactly and lift in the same frame — the reader
-      // resumes on the settled view (round 21). The jumpTo's own scroll
-      // notifications can't re-trigger anything here (its ScrollEnd just
-      // re-marks the offset settled, which it is).
-      _scrollController.jumpTo(clamped);
-      _liftVeil();
-      return;
-    }
-    // VISIBLE landing — the veil was interrupted (a drag, a rebound) or a
-    // re-measured chain landed mid-stream: small reading corrections
-    // ANIMATE instead of teleporting; a same-frame teleport is the visible
-    // "content nudges DOWN a little" of 09-22 round 12 (logged 460px and
-    // 1003px). Easing over ~100-180ms reads as the list settling instead;
-    // the duration scales with the distance so a ~3k correction doesn't
-    // glide at 5× the speed of a 400px one. Past the ceiling it still
-    // snaps — half a screen of gliding is worse than one cut. A touch
-    // cancels the animation naturally (ballistic), and any later chain's
-    // jumpTo kills it outright.
-    final correction = (clamped - position.pixels).abs();
-    if (!landingStick && correction > 40 && correction <= 3200) {
-      final ms = (96.0 + (correction - 800).clamp(0.0, 2400.0) * 84 / 2400)
-          .clamp(96.0, 180.0);
-      _scrollController.animateTo(
-        clamped,
-        duration: Duration(milliseconds: ms.round()),
-        curve: Curves.easeOut,
-      );
-    } else {
-      _scrollController.jumpTo(clamped);
-    }
   }
 
   // ------------------------------------------------------------ sheets
@@ -3053,113 +2267,109 @@ class _ChatPageState extends State<ChatPage> {
           return _contentCol(
             NotificationListener<ScrollNotification>(
               onNotification: _onListScroll,
-              // Prepend veil (see [_listVeiled], round 21) + frozen frame
-              // (round 24): the veil hides only the PAINT — layout and the
-              // anchor measurement run normally underneath, so the measured
-              // landing happens off-screen. The frozen capture of the last
-              // pre-prepend frame is drawn OVER the veil (Stack): the same
-              // pixels stand still until the landing lifts it — no blank
-              // flash, no wrong-guess frame.
-              child: Stack(
-                fit: StackFit.passthrough,
-                children: [
-                  RepaintBoundary(
-                    key: _freezeKey,
-                    child: Opacity(
-                      opacity: _listVeiled ? 0.0 : 1.0,
-                      child: ListView.builder(
-                        key: _listKey,
-                        controller: _scrollController,
-                        scrollCacheExtent: _anchorCacheExtent == null &&
-                                _jumpCacheExtent == null
-                            ? null
-                            : ScrollCacheExtent.pixels(
-                                _anchorCacheExtent ?? _jumpCacheExtent!),
-                        // Top rubber-band only while older history exists;
-                        // flipping to null restores the platform clamp (no
-                        // pull, no trigger).
-                        physics: state.canLoadOlder
-                            ? const TopRubberBandPhysics()
-                            : null,
-                        padding: _listPadding,
-                        itemCount: itemCount,
-                        itemBuilder: (context, index) {
-                          if (state.canLoadOlder && index == 0) {
-                            return Center(
-                              child: TextButton.icon(
-                                onPressed: _loadingOlder ? null : _loadOlder,
-                                icon: _loadingOlder
-                                    ? const SizedBox(
-                                        width: 12,
-                                        height: 12,
-                                        child: CircularProgressIndicator(
-                                            strokeWidth: 1.5),
-                                      )
-                                    : const Icon(Icons.history, size: 14),
-                                label: Text(
-                                  tr(context, 'chat.loadOlder'),
-                                  style: ZType.sub,
-                                ),
+              // ListenableBuilder: the viewport's gate and anchor-cache
+              // flips rebuild the ListView shell (spinner + scrollCacheExtent)
+              // without touching the rows.
+              child: ListenableBuilder(
+                listenable: _viewport,
+                builder: (context, _) {
+                  final cacheExtent =
+                      _viewport.anchorCacheExtent ?? _jumpCacheExtent;
+                  // Prepend veil (round 21) + frozen frame (round 24): the
+                  // veil hides only the PAINT — layout and the anchor
+                  // measurement run normally underneath, so the measured
+                  // landing happens off-screen. The frozen capture of the
+                  // last pre-prepend frame is drawn OVER the veil: the same
+                  // pixels stand still until the landing lifts it — no blank
+                  // flash, no wrong-guess frame.
+                  return TranscriptVeil(
+                    viewport: _viewport,
+                    child: ListView.builder(
+                      key: _listKey,
+                      controller: _scrollController,
+                      scrollCacheExtent: cacheExtent == null
+                          ? null
+                          : ScrollCacheExtent.pixels(cacheExtent),
+                      // Top rubber-band only while older history exists;
+                      // flipping to null restores the platform clamp (no
+                      // pull, no trigger).
+                      physics: state.canLoadOlder
+                          ? const TopRubberBandPhysics()
+                          : null,
+                      padding: _listPadding,
+                      itemCount: itemCount,
+                      itemBuilder: (context, index) {
+                        if (state.canLoadOlder && index == 0) {
+                          return Center(
+                            child: TextButton.icon(
+                              onPressed: _viewport.loadingOlder
+                                  ? null
+                                  : _viewport.loadOlder,
+                              icon: _viewport.loadingOlder
+                                  ? const SizedBox(
+                                      width: 12,
+                                      height: 12,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 1.5),
+                                    )
+                                  : const Icon(Icons.history, size: 14),
+                              label: Text(
+                                tr(context, 'chat.loadOlder'),
+                                style: ZType.sub,
                               ),
-                            );
-                          }
-                          final groupIndex =
-                              index - (state.canLoadOlder ? 1 : 0);
-                          final group = groups[groupIndex];
-                          final previous =
-                              groupIndex > 0 ? groups[groupIndex - 1] : null;
-                          final divider = _timeDividerLabel(previous, group);
-                          final anchored =
-                              anchorPlan.byGroup[groupIndex] ??
-                              const <Map<String, dynamic>>[];
-                          return Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              if (divider != null) _TimeDivider(label: divider),
-                              // Stable identity for the history anchor
-                              // compensation: keyed by the turn's first row
-                              // so [_compensateAnchor] can re-find the same
-                              // group after a prepend remounts the window.
-                              // The load-older button row stays unkeyed.
-                              ChatTurnGroup(
-                                key: ValueKey('turn-${group.first['rowId']}'),
-                                rows: group,
-                                gateway: widget.gateway,
-                                sessionId: _sessionId ?? '',
-                                onAction: _run,
-                                state: state,
-                                feed: _feed,
-                                preview: _preview,
-                                confirmWindow: widget.turnFooterConfirmWindow,
-                                workspaceLabel: widget.workspaceLabel,
-                                theme: widget.theme,
-                                editingRowId: _editingRowId,
-                                onEditSend: _sendUserEdit,
-                                gitController: _git,
-                              ),
-                              // D9: interactions anchored to a row of this
-                              // group render directly after it (in-stream),
-                              // same card component as the bottom strip.
-                              for (final interaction in anchored)
-                                _interactionCardFor(
-                                  state: state,
-                                  gateway: widget.gateway,
-                                  interaction: interaction,
-                                ),
-                            ],
+                            ),
                           );
-                        },
-                      ),
+                        }
+                        final groupIndex =
+                            index - (state.canLoadOlder ? 1 : 0);
+                        final group = groups[groupIndex];
+                        final previous =
+                            groupIndex > 0 ? groups[groupIndex - 1] : null;
+                        final divider = _timeDividerLabel(previous, group);
+                        final anchored =
+                            anchorPlan.byGroup[groupIndex] ??
+                            const <Map<String, dynamic>>[];
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (divider != null) _TimeDivider(label: divider),
+                            // Stable identity for the history anchor
+                            // compensation: keyed by the turn's first row so
+                            // the viewport can re-find the same group after a
+                            // prepend remounts the window (the `turn-…` key
+                            // prefix is a contract — see transcript_viewport).
+                            // The load-older button row stays unkeyed.
+                            ChatTurnGroup(
+                              key: ValueKey('turn-${group.first['rowId']}'),
+                              rows: group,
+                              gateway: widget.gateway,
+                              sessionId: _sessionId ?? '',
+                              onAction: _run,
+                              state: state,
+                              feed: _feed,
+                              preview: _preview,
+                              confirmWindow: widget.turnFooterConfirmWindow,
+                              workspaceLabel: widget.workspaceLabel,
+                              theme: widget.theme,
+                              editingRowId: _editingRowId,
+                              onEditSend: _sendUserEdit,
+                              gitController: _git,
+                            ),
+                            // D9: interactions anchored to a row of this
+                            // group render directly after it (in-stream),
+                            // same card component as the bottom strip.
+                            for (final interaction in anchored)
+                              _interactionCardFor(
+                                state: state,
+                                gateway: widget.gateway,
+                                interaction: interaction,
+                              ),
+                          ],
+                        );
+                      },
                     ),
-                  ),
-                  if (_frozenFrame != null)
-                    Positioned.fill(
-                      child: RawImage(
-                        image: _frozenFrame,
-                        fit: BoxFit.fill,
-                      ),
-                    ),
-                ],
+                  );
+                },
               ),
             ),
           );
@@ -4522,7 +3732,7 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
         beforeRowId: cursor,
         limit: 60,
       );
-      // Subscription identity guard (HistoryPager.settle semantics): a
+      // Subscription identity guard (same rule as the viewport's settle): a
       // resubscribe swapped the state out from under this fetch — its page
       // belongs to a state nobody shows; drop it silently.
       if (res is Map && state != widget.state) {
@@ -4543,8 +3753,8 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
         sortOldestFirst: false,
       );
       // The rows are immutable log entries — an epoch drift does not
-      // invalidate them (round 23, see HistoryPager.settle): toast as a
-      // trace, then apply the page anyway.
+      // invalidate them (round 23; same rule as the viewport's settle):
+      // toast as a trace, then apply the page anyway.
       if (!page.epochMatches) {
         if (mounted) _toast(tr(context, 'chat.loadOlder.stale'));
       }
