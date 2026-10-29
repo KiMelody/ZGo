@@ -1238,10 +1238,10 @@ void main() {
     expect(find.textContaining('该工作区未在桌面端打开'), findsOneWidget);
   });
 
-  testWidgets('the workspace-unreachable sentinel renders localized copy',
+  testWidgets('a workspace-unreachable failure renders localized copy',
       (tester) async {
-    // R3: the session error after a dead-end window gate is a stable
-    // sentinel, never the desktop's raw refusal text.
+    // R3: the session's latest failed open is a typed result, never the
+    // desktop's raw refusal text.
     usePhone(tester);
     final (store, device) = await setupDevice();
     final session = FakeDeviceSession(
@@ -1250,7 +1250,8 @@ void main() {
       workspaces: [
         {'workspacePath': '/repo/app'},
       ],
-    )..error = workspaceUnreachableError;
+    )..lastWorkspaceOpenFailure =
+        const WorkspaceOpenUnreachable('目标工作区不在当前桌面窗口中');
     await tester.pumpWidget(wrap(TaskListPage(
       store: store,
       hub: DeviceSessionHub(nativeListEnabled: () => false),
@@ -1260,10 +1261,10 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.textContaining('该工作区未在桌面端打开'), findsOneWidget);
-    expect(find.textContaining(workspaceUnreachableError), findsNothing);
+    expect(find.textContaining('不在当前桌面窗口中'), findsNothing);
   });
 
-  testWidgets('the cold-runtime sentinel renders its actionable copy',
+  testWidgets('a cold-runtime failure renders its actionable copy',
       (tester) async {
     // The bridge is attached but the workspace's agent runtime is not
     // running: the banner must point at the runtime (open the workspace on
@@ -1276,7 +1277,8 @@ void main() {
       workspaces: [
         {'workspacePath': '/repo/app'},
       ],
-    )..error = agentRuntimeNotRunningError;
+    )..lastWorkspaceOpenFailure = const WorkspaceOpenRuntimeNotRunning(
+        'ZCode Agent runtime is not running.');
     await tester.pumpWidget(wrap(TaskListPage(
       store: store,
       hub: DeviceSessionHub(nativeListEnabled: () => false),
@@ -1296,7 +1298,8 @@ void main() {
       (tester) async {
     final (_, _, session) = await setupTwoWorkspaces(tester);
     session.openWorkspaceSucceeds = false;
-    session.error = agentRuntimeNotRunningError;
+    session.openWorkspaceFailure = const WorkspaceOpenRuntimeNotRunning(
+        'ZCode Agent runtime is not running.');
 
     await tester.tap(find.descendant(
       of: cardOf('beta'),
@@ -1317,7 +1320,8 @@ void main() {
       (tester) async {
     final (_, _, session) = await setupTwoWorkspaces(tester);
     session.openWorkspaceSucceeds = false;
-    session.error = agentRuntimeNotRunningError;
+    session.openWorkspaceFailure = const WorkspaceOpenRuntimeNotRunning(
+        'ZCode Agent runtime is not running.');
 
     await tester.tap(find.text('beta'));
     await tester.pump();
@@ -1338,9 +1342,9 @@ void main() {
     expect(find.textContaining('该工作区未在桌面端打开'), findsNothing);
   });
 
-  testWidgets('a non-sentinel error keeps the runtime copy off the banner',
+  testWidgets('an unclassified error keeps the runtime copy off the banner',
       (tester) async {
-    // Exact-sentinel rule: only the cold-runtime marker earns the runtime
+    // Exact-variant rule: only the cold-runtime result earns the runtime
     // copy; every other failure keeps its pre-existing raw text.
     usePhone(tester);
     final (store, device) = await setupDevice();
@@ -1363,13 +1367,15 @@ void main() {
     expect(find.textContaining('provider not ready'), findsOneWidget);
   });
 
-  testWidgets('a cold-runtime sentinel re-opens even the active workspace',
+  testWidgets('a cold-runtime failure re-opens even the active workspace',
       (tester) async {
     // A failed cold open leaves the banner and the active index stale. The
     // next task tap must re-point the bridge (and clear the error on
     // success) instead of skipping straight into chat.
     final (_, _, session) = await setupTwoWorkspaces(tester);
-    session.error = agentRuntimeNotRunningError;
+    session.lastWorkspaceOpenFailure =
+        const WorkspaceOpenRuntimeNotRunning(
+            'ZCode Agent runtime is not running.');
 
     await tester.tap(find.text('任务甲'));
     await tester.pump();
@@ -1386,10 +1392,12 @@ void main() {
     expect(find.byType(ChatPage), findsOneWidget);
   });
 
-  testWidgets('a cold-runtime sentinel re-opens even the active ＋',
+  testWidgets('a cold-runtime failure re-opens even the active ＋',
       (tester) async {
     final (_, _, session) = await setupTwoWorkspaces(tester);
-    session.error = agentRuntimeNotRunningError;
+    session.lastWorkspaceOpenFailure =
+        const WorkspaceOpenRuntimeNotRunning(
+            'ZCode Agent runtime is not running.');
 
     await tester.tap(find.descendant(
       of: cardOf('alpha'),
@@ -1404,10 +1412,10 @@ void main() {
   });
 
   testWidgets(
-      'a cold-runtime sentinel re-opens from the desktop sidebar new task',
+      'a cold-runtime failure re-opens from the desktop sidebar new task',
       (tester) async {
     // The wide layout's sidebar entry is not a workspace card ＋; it must
-    // honor the same sentinel rule instead of opening a draft under a
+    // honor the same typed-failure rule instead of opening a draft under a
     // stale bridge.
     useDesktop(tester);
     final (store, device) = await setupDevice();
@@ -1417,7 +1425,8 @@ void main() {
       workspaces: [
         {'workspacePath': '/repo/app', 'workspaceIdentity': 'app'},
       ],
-    )..error = agentRuntimeNotRunningError;
+    )..lastWorkspaceOpenFailure = const WorkspaceOpenRuntimeNotRunning(
+        'ZCode Agent runtime is not running.');
     await tester.pumpWidget(wrap(TaskListPage(
       store: store,
       hub: DeviceSessionHub(nativeListEnabled: () => false),
@@ -1434,6 +1443,78 @@ void main() {
 
     expect(session.openWorkspacePurposes, [WorkspaceOpenPurpose.chatNew]);
     expect(find.byType(ChatPage), findsOneWidget);
+  });
+
+  testWidgets('a cleared cold-runtime failure does not force a re-open',
+      (tester) async {
+    // Relay re-pair (and every successful open) clears the remembered
+    // failure; the tap must read the CURRENT field instead of forcing an
+    // extra bridge open on every visit.
+    final (_, _, session) = await setupTwoWorkspaces(tester);
+    session.lastWorkspaceOpenFailure =
+        const WorkspaceOpenRuntimeNotRunning(
+            'ZCode Agent runtime is not running.');
+    await session.openWorkspace(session.activeWorkspace!);
+    session.openWorkspaceCalls.clear();
+
+    await tester.tap(find.text('任务甲'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(session.openWorkspaceCalls, isEmpty,
+        reason: 'the remembered failure is gone: no forced bridge churn');
+    expect(find.byType(ChatPage), findsOneWidget);
+  });
+
+  testWidgets('an open failure never reads as online', (tester) async {
+    // The AppBar subtitle and the connection banner both derive from the
+    // typed failure: a degraded open must never render the online copy.
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      workspaces: [
+        {'workspacePath': '/repo/app'},
+      ],
+    )..lastWorkspaceOpenFailure =
+        const WorkspaceOpenUnreachable('目标工作区不在当前桌面窗口中');
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('已连接到当前桌面窗口'), findsNothing,
+        reason: 'the AppBar subtitle must not claim an online link');
+    expect(find.textContaining('本次连接可以查看当前设备上已打开的项目'), findsNothing,
+        reason: 'the banner must not render the online explanation card');
+    expect(find.textContaining('该工作区未在桌面端打开'), findsOneWidget);
+    expect(find.text('重试'), findsOneWidget);
+  });
+
+  testWidgets('an aborted open blocks the chat without a failure copy',
+      (tester) async {
+    // Superseded/no-client opens are not failures: no toast, no banner for
+    // them — the chat push is simply skipped.
+    final (_, _, session) = await setupTwoWorkspaces(tester);
+    session.openWorkspaceSucceeds = false;
+    session.openWorkspaceFailure = const WorkspaceOpenAborted();
+
+    await tester.tap(find.descendant(
+      of: cardOf('beta'),
+      matching: find.byTooltip('新建任务'),
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(ChatPage), findsNothing);
+    expect(find.textContaining('该工作区未在桌面端打开'), findsNothing);
+    expect(find.textContaining('该工作区的智能体运行时未启动'), findsNothing);
   });
 
   testWidgets('live-ready active workspace still renders relay-only rows',

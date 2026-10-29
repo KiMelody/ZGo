@@ -249,23 +249,43 @@ class FakeDeviceSession extends DeviceSession {
   final List<(Map<String, dynamic>, String?)> openWorkspaceCalls = [];
   final List<WorkspaceOpenPurpose?> openWorkspacePurposes = [];
 
-  /// Answers the open with a controllable success flag: `false` reproduces
-  /// the window-gate failure path (bridge still points at the old
-  /// workspace) without switching the fake's active workspace.
+  /// Answers the open with a controllable result: `openWorkspaceSucceeds =
+  /// false` returns [openWorkspaceFailure] (and remembers it as the latest
+  /// failure) without switching the fake's active workspace.
   bool openWorkspaceSucceeds = true;
 
+  /// The typed failure [openWorkspace] answers with when
+  /// [openWorkspaceSucceeds] is false. Defaults to the window-gate dead end
+  /// (the pre-existing "workspace unreachable" copy).
+  WorkspaceOpenResult openWorkspaceFailure =
+      const WorkspaceOpenUnreachable('window gate dead end');
+
+  /// Latest failed open outcome — settable so UI tests can seed a banner /
+  /// re-open state without driving [openWorkspace] (production keeps the
+  /// same field as the single source for the watchdog and banner copy).
   @override
-  Future<bool> openWorkspace(
+  WorkspaceOpenResult? lastWorkspaceOpenFailure;
+
+  @override
+  Future<WorkspaceOpenResult> openWorkspace(
     Map<String, dynamic> workspace, {
     String? taskId,
     WorkspaceOpenPurpose? purpose,
   }) async {
     openWorkspaceCalls.add((workspace, taskId));
     openWorkspacePurposes.add(purpose);
-    if (!openWorkspaceSucceeds) return false;
+    if (!openWorkspaceSucceeds) {
+      // Mirrors production: an aborted open is not a failure, so it never
+      // becomes the remembered last failure.
+      if (openWorkspaceFailure is! WorkspaceOpenAborted) {
+        lastWorkspaceOpenFailure = openWorkspaceFailure;
+      }
+      return openWorkspaceFailure;
+    }
     _active = workspace;
+    lastWorkspaceOpenFailure = null;
     notifyListeners();
-    return true;
+    return const WorkspaceOpenOpened();
   }
 
   @override

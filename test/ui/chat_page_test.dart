@@ -1320,7 +1320,9 @@ void main() {
 
   testWidgets('a dead-end draft target blocks the send and keeps the draft',
       (tester) async {
-    final gateway = FakeChatGateway()..ensureDraftWorkspaceResult = false;
+    final gateway = FakeChatGateway()
+      ..ensureDraftWorkspaceResult =
+          const WorkspaceOpenUnreachable('window gate dead end');
     await tester.pumpWidget(
       wrap(
         ChatPage(
@@ -1361,8 +1363,8 @@ void main() {
     // the workspace runtime is cold, so the toast must give the desktop
     // instruction instead of "workspace is not open".
     final gateway = FakeChatGateway()
-      ..ensureDraftWorkspaceResult = false
-      ..error = agentRuntimeNotRunningError;
+      ..ensureDraftWorkspaceResult = const WorkspaceOpenRuntimeNotRunning(
+          'ZCode Agent runtime is not running.');
     await tester.pumpWidget(
       wrap(
         ChatPage(

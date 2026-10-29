@@ -1575,17 +1575,24 @@ class _ChatPageState extends State<ChatPage> {
         // workspace instead of the one the user is looking at. Re-point the
         // bridge first; a dead end blocks the send (draft text and pending
         // attachments stay) instead of producing a wrong-workspace task.
-        if (!await widget.gateway.ensureDraftWorkspace(
+        final draftGuard = await widget.gateway.ensureDraftWorkspace(
           widget.draftWorkspacePath,
-        )) {
+        );
+        if (draftGuard is! WorkspaceOpenOpened) {
           if (!mounted) return;
-          // Same sentinel split as the task list: a cold per-workspace
+          // Same failure split as the task list: a cold per-workspace
           // runtime needs the "open it on the desktop" instruction, not the
-          // "workspace is not open" copy.
-          final key = widget.gateway.error == agentRuntimeNotRunningError
-              ? 'tasks.agentRuntimeNotRunning'
-              : 'tasks.workspaceUnreachable';
-          _toast(tr(context, key));
+          // "workspace is not open" copy. An aborted guard is not a failure
+          // (link/bridge replaced mid-open): block the send without a toast.
+          final key = switch (draftGuard) {
+            WorkspaceOpenRuntimeNotRunning() =>
+              'tasks.agentRuntimeNotRunning',
+            WorkspaceOpenUnreachable() ||
+            WorkspaceOpenTransportFailure() =>
+              'tasks.workspaceUnreachable',
+            WorkspaceOpenOpened() || WorkspaceOpenAborted() => null,
+          };
+          if (key != null) _toast(tr(context, key));
           return;
         }
         if (!mounted) return;

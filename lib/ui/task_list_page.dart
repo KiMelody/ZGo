@@ -206,12 +206,12 @@ class _TaskListPageState extends State<TaskListPage>
       workspaceKeyOf(ws) == workspaceKeyOf(session.activeWorkspace ?? const {});
 
   /// Whether opening a task/draft must re-point the bridge first. A cold
-  /// runtime sentinel means the previous open failed: even the active
+  /// runtime failure means the previous open failed: even the active
   /// workspace needs a successful re-open to clear the banner and rebuild
   /// its live index (the chat subscription alone only warms the runtime).
   bool _needsWorkspaceOpen(DeviceSession session, Map<String, dynamic> ws) =>
       !_isWorkspaceActive(session, ws) ||
-      session.error == agentRuntimeNotRunningError;
+      session.lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning;
 
   /// 3.16.2 conversation workspaces (desktop "New task" drafts,
   /// `.zcode/workspace/draft-*`) own no card: the desktop hides them from
@@ -342,7 +342,8 @@ class _TaskListPageState extends State<TaskListPage>
         session != null &&
         session.status == DeviceStatus.connected &&
         !session.kicked &&
-        (session.error?.isEmpty ?? true);
+        (session.error?.isEmpty ?? true) &&
+        session.lastWorkspaceOpenFailure == null;
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 0,
@@ -1841,27 +1842,29 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// Sidebar "new task": same cold-runtime rule as the card ＋ — a sentinel
-  /// means the previous open failed, so re-point the active workspace first
-  /// (a successful open clears the stale banner). No active workspace means
-  /// there is nothing to re-point: a sentinel still explains the failure on
-  /// the list; otherwise the pre-existing draft path runs.
+  /// Sidebar "new task": same cold-runtime rule as the card ＋ — a typed
+  /// cold-runtime failure means the previous open failed, so re-point the
+  /// active workspace first (a successful open clears the stale banner). No
+  /// active workspace means there is nothing to re-point: a cold-runtime
+  /// failure still explains the failure on the list; otherwise the
+  /// pre-existing draft path runs.
   Future<void> _startNewTask() async {
     final session = _session;
     if (session != null) {
       final ws = session.activeWorkspace;
       if (ws == null) {
-        if (session.error == agentRuntimeNotRunningError) {
-          _showWorkspaceOpenFailure(session);
+        final failure = session.lastWorkspaceOpenFailure;
+        if (failure is WorkspaceOpenRuntimeNotRunning) {
+          _showWorkspaceOpenFailure(failure);
           return;
         }
       } else if (_needsWorkspaceOpen(session, ws)) {
-        final opened = await session.openWorkspace(
+        final result = await session.openWorkspace(
           ws,
           purpose: WorkspaceOpenPurpose.chatNew,
         );
-        if (!opened) {
-          if (mounted) _showWorkspaceOpenFailure(session);
+        if (result is! WorkspaceOpenOpened) {
+          if (mounted) _showWorkspaceOpenFailure(result);
           return;
         }
       }
@@ -1881,12 +1884,12 @@ class _TaskListPageState extends State<TaskListPage>
     final newLabel = tr(context, 'tasks.new');
     Future<void> start() async {
       if (workspace != null && _needsWorkspaceOpen(session, workspace)) {
-        final opened = await session.openWorkspace(
+        final result = await session.openWorkspace(
           workspace,
           purpose: WorkspaceOpenPurpose.chatNew,
         );
-        if (!opened) {
-          if (mounted) _showWorkspaceOpenFailure(session);
+        if (result is! WorkspaceOpenOpened) {
+          if (mounted) _showWorkspaceOpenFailure(result);
           return;
         }
       }
@@ -2155,13 +2158,13 @@ class _TaskListPageState extends State<TaskListPage>
       return;
     }
     if (_needsWorkspaceOpen(session, workspace)) {
-      final opened = await session.openWorkspace(
+      final result = await session.openWorkspace(
         workspace,
         taskId: entry.sessionId,
         purpose: WorkspaceOpenPurpose.openTask,
       );
-      if (!opened) {
-        if (mounted) _showWorkspaceOpenFailure(session);
+      if (result is! WorkspaceOpenOpened) {
+        if (mounted) _showWorkspaceOpenFailure(result);
         return;
       }
     }
@@ -2175,13 +2178,19 @@ class _TaskListPageState extends State<TaskListPage>
 
   /// The open failed: keep the user on the list instead of pushing a chat
   /// that would subscribe under the wrong scope, and say why in the locale.
-  /// Only the exact [agentRuntimeNotRunningError] sentinel means "bridge
-  /// attached, runtime cold" — every other case keeps the pre-existing
-  /// unreachable copy (unclassified failures must not be re-labeled).
-  void _showWorkspaceOpenFailure(DeviceSession session) {
-    final key = session.error == agentRuntimeNotRunningError
-        ? 'tasks.agentRuntimeNotRunning'
-        : 'tasks.workspaceUnreachable';
+  /// Only the [WorkspaceOpenRuntimeNotRunning] result means "bridge
+  /// attached, runtime cold" — every other failure keeps the pre-existing
+  /// unreachable copy (unclassified failures must not be re-labeled), and
+  /// an [WorkspaceOpenAborted] open is not a failure: no copy at all.
+  void _showWorkspaceOpenFailure(WorkspaceOpenResult result) {
+    final key = switch (result) {
+      WorkspaceOpenRuntimeNotRunning() => 'tasks.agentRuntimeNotRunning',
+      WorkspaceOpenUnreachable() ||
+      WorkspaceOpenTransportFailure() =>
+        'tasks.workspaceUnreachable',
+      WorkspaceOpenOpened() || WorkspaceOpenAborted() => null,
+    };
+    if (key == null) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(tr(context, key))),
     );
@@ -2898,7 +2907,6 @@ class _TaskListPageState extends State<TaskListPage>
   }
 
   Widget _fallback(BuildContext context, DeviceSession? session) {
-    final error = session?.error;
     final connecting =
         session != null &&
         session.status != DeviceStatus.error &&
@@ -2934,7 +2942,7 @@ class _TaskListPageState extends State<TaskListPage>
             ),
             const SizedBox(height: 8),
             Text(
-              _errorCopy(context, error),
+              _errorCopy(context, session),
               textAlign: TextAlign.center,
               maxLines: 5,
               overflow: TextOverflow.ellipsis,
@@ -2976,16 +2984,28 @@ class _TaskListPageState extends State<TaskListPage>
   }
 }
 
-/// Maps stable session error sentinels to localized copy; any other error
-/// string is an upstream message shown verbatim (pre-existing behavior).
-String _errorCopy(BuildContext context, String? error) {
-  if (error == agentRuntimeNotRunningError) {
-    return tr(context, 'tasks.agentRuntimeNotRunning');
+/// Degraded-link copy. First available source wins: the app-error reason
+/// (`remote.failure.*`) → the typed workspace-open failure → the raw
+/// session error text → the generic fallback body.
+String _errorCopy(BuildContext context, DeviceSession? session) {
+  final reason = session?.failureReason;
+  if (reason != null) {
+    final localized = tr(context, 'remote.failure.$reason');
+    if (localized != 'remote.failure.$reason') return localized;
   }
-  if (error == workspaceUnreachableError) {
-    return tr(context, 'tasks.workspaceUnreachable');
+  final failure = session?.lastWorkspaceOpenFailure;
+  switch (failure) {
+    case WorkspaceOpenRuntimeNotRunning():
+      return tr(context, 'tasks.agentRuntimeNotRunning');
+    case WorkspaceOpenUnreachable():
+      return tr(context, 'tasks.workspaceUnreachable');
+    case WorkspaceOpenTransportFailure(:final error):
+      return '$error';
+    case WorkspaceOpenOpened():
+    case WorkspaceOpenAborted():
+    case null:
+      return session?.error ?? tr(context, 'tasks.fallback.body');
   }
-  return error ?? tr(context, 'tasks.fallback.body');
 }
 
 /// Connection status card at the top of the list (mobile layout).
@@ -3005,23 +3025,18 @@ class _ConnectionBanner extends StatelessWidget {
     required this.onWeb,
   });
 
-  /// Failure-state copy (`webRemoteControl.failure.*`): a
-  /// well-known app-error/close-code reason maps to the same localized text
-  /// the web page shows; unknown reasons fall back to the raw error.
-  static String _failureBody(BuildContext context, DeviceSession s) {
-    final reason = s.failureReason;
-    if (reason != null) {
-      final localized = tr(context, 'remote.failure.$reason');
-      if (localized != 'remote.failure.$reason') return localized;
-    }
-    return _errorCopy(context, s.error);
-  }
+  /// Failure-state copy: the app-error/close-code reason (the same
+  /// localized text the web page shows), else the typed open failure, else
+  /// the raw session error — see [_errorCopy].
+  static String _failureBody(BuildContext context, DeviceSession s) =>
+      _errorCopy(context, s);
 
   bool get _online =>
       session != null &&
       session!.status == DeviceStatus.connected &&
       !session!.kicked &&
-      (session!.error?.isEmpty ?? true);
+      (session!.error?.isEmpty ?? true) &&
+      session!.lastWorkspaceOpenFailure == null;
 
   @override
   Widget build(BuildContext context) {

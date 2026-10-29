@@ -425,8 +425,10 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
       'https://zcode.z.ai/remote/v4?sid=abc&hash=xyz&t=123&mid=m1&name=demo';
 
   /// Programmed [ChatGateway.ensureDraftWorkspace] verdict + every target
-  /// the chat page asked to verify (draft send guard, 2026-10-27).
-  bool ensureDraftWorkspaceResult = true;
+  /// the chat page asked to verify (draft send guard, 2026-10-27). Typed
+  /// since 2026-10-29: the page maps the result variant to copy directly.
+  WorkspaceOpenResult ensureDraftWorkspaceResult =
+      const WorkspaceOpenOpened();
 
   /// When set, [ensureDraftWorkspace] parks on this future — models the
   /// silent-stall window (bridge jitter) the first send must survive with
@@ -435,7 +437,8 @@ class RecordingChatGateway extends ChangeNotifier implements ChatGateway {
   final List<String?> ensuredDraftWorkspaces = [];
 
   @override
-  Future<bool> ensureDraftWorkspace(String? workspacePath) async {
+  Future<WorkspaceOpenResult> ensureDraftWorkspace(
+      String? workspacePath) async {
     ensuredDraftWorkspaces.add(workspacePath);
     final gate = ensureDraftWorkspaceGate;
     if (gate != null) await gate.future;

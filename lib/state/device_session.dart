@@ -209,24 +209,63 @@ bool isWorkspaceWindowGateError(Object error) {
   return text.contains('不在当前桌面窗口中') || text.contains('不在当前窗口中');
 }
 
-/// `DeviceSession.error` sentinel for "the bridge stayed on the previous
-/// workspace after both addressing legs". The desktop's refusal text is
-/// diagnostic, not user copy — the UI maps this stable value to
-/// `tasks.workspaceUnreachable` instead of rendering the raw message.
-const String workspaceUnreachableError = 'workspace-unreachable';
+/// Typed outcome of [DeviceSession.openWorkspace] — one variant per dead
+/// end the UI distinguishes. A successful open clears the session's
+/// remembered failure; any failure is remembered as the latest failed open
+/// ([DeviceSession.lastWorkspaceOpenFailure]) so the list watchdog and the
+/// failure banner derive from the same value (2026-10-29: the former
+/// `_error` sentinel strings are retired).
+sealed class WorkspaceOpenResult {
+  const WorkspaceOpenResult();
+}
 
-/// `DeviceSession.error` sentinel for "the workspace bridge is attached but
-/// its agent runtime is not running" (desktop code
-/// `ZCODE_AGENT_RUNTIME_UNAVAILABLE`). Unlike the window gate, the open got
-/// far enough to attach the bridge: the desktop simply has not started this
-/// workspace's per-workspace agent process, which only a desktop-side open
-/// of the workspace (or one of its tasks) does. The UI localizes this to an
-/// actionable copy instead of the desktop's English message.
-const String agentRuntimeNotRunningError = 'agent-runtime-not-running';
+/// The bridge is attached to the requested (or desktop-prepared draft)
+/// workspace and its sessions-index subscription is live.
+final class WorkspaceOpenOpened extends WorkspaceOpenResult {
+  const WorkspaceOpenOpened();
+}
+
+/// The desktop refused the open: the window gate dead end survived both
+/// addressing legs (or the requested workspace was unaddressable). The UI
+/// maps this to `tasks.workspaceUnreachable`; [cause] keeps the raw desktop
+/// refusal available to logs.
+final class WorkspaceOpenUnreachable extends WorkspaceOpenResult {
+  const WorkspaceOpenUnreachable(this.cause);
+
+  final Object cause;
+}
+
+/// The bridge attached but the workspace's agent runtime is not running
+/// (desktop code `ZCODE_AGENT_RUNTIME_UNAVAILABLE`) — a per-workspace dead
+/// end only a desktop-side open of the workspace can resolve. Unlike
+/// [WorkspaceOpenUnreachable], the open got far enough to attach. The UI
+/// maps this to the actionable `tasks.agentRuntimeNotRunning` copy instead
+/// of the desktop's English message.
+final class WorkspaceOpenRuntimeNotRunning extends WorkspaceOpenResult {
+  const WorkspaceOpenRuntimeNotRunning(this.cause);
+
+  final Object cause;
+}
+
+/// Any other failure (transport / channel RPC). Callers keep the raw error
+/// object as before; it is not a typed dead end.
+final class WorkspaceOpenTransportFailure extends WorkspaceOpenResult {
+  const WorkspaceOpenTransportFailure(this.error);
+
+  final Object error;
+}
+
+/// The open never ran or was superseded (no active client, disposed,
+/// concurrent open, or the link/bridge was replaced while it was in
+/// flight). NOT a failure: it must not be remembered as one, and the UI
+/// shows no failure copy for it — the caller only skips the chat push.
+final class WorkspaceOpenAborted extends WorkspaceOpenResult {
+  const WorkspaceOpenAborted();
+}
 
 /// Internal marker: the first leg hit the window gate and the addressing
 /// retry failed too. Keeps the raw desktop refusal available to logs while
-/// the session surfaces the stable [workspaceUnreachableError] to the UI.
+/// the session surfaces [WorkspaceOpenUnreachable] to the UI.
 class _WorkspaceUnreachable implements Exception {
   const _WorkspaceUnreachable(this.cause);
 
@@ -345,10 +384,11 @@ abstract interface class ChatGateway
   /// under an open draft; without this check the create would silently land
   /// there (the original window-gate bug in disguise, live 2026-10-27).
   /// A drifted bridge re-opens through the same 3.16.3+ addressing fallback
-  /// chain as the list page. Returns false when the target cannot be
-  /// reached — the caller must not send (draft text stays untouched); a
-  /// null/empty or already-active target answers true with zero RPC.
-  Future<bool> ensureDraftWorkspace(String? workspacePath);
+  /// chain as the list page. Returns the typed open outcome: anything but
+  /// [WorkspaceOpenOpened] means the caller must not send (draft text
+  /// stays untouched); a null/empty or already-active target answers
+  /// [WorkspaceOpenOpened] with zero RPC.
+  Future<WorkspaceOpenResult> ensureDraftWorkspace(String? workspacePath);
 
   /// Composer-draft persistence for this device's chat pages (text +
   /// attachment metadata in SharedPreferences, attachment bytes under the
@@ -662,6 +702,12 @@ class DeviceSession extends ChangeNotifier
   bool _kicked = false;
   String? _error;
 
+  /// Latest failed [openWorkspace] outcome; null after any successful open,
+  /// a connect start, a relay re-pair or suspend. The list watchdog and the
+  /// failure banner derive from this single value (the former machine
+  /// sentinel strings in [_error] are retired).
+  WorkspaceOpenResult? _lastWorkspaceOpenFailure;
+
   /// Desktop's live app version from the bootstrap-response top level
   /// (`desktopAppVersion`, live-probed 3.16.3). Null until a frame carries
   /// it. Addressing gates prefer this over [params]: the paired link's
@@ -792,6 +838,12 @@ class DeviceSession extends ChangeNotifier
   bool get kicked => _kicked;
   @override
   String? get error => _error;
+
+  /// Latest failed [openWorkspace] outcome, if any (typed replacement for
+  /// the former `_error` machine sentinels). Sole writer is the open path;
+  /// link/app error writes never touch it.
+  WorkspaceOpenResult? get lastWorkspaceOpenFailure =>
+      _lastWorkspaceOpenFailure;
 
   /// Reason code (`session-not-found`, `session-conflict`,
   /// `unsupported-action`, ...) of the current failure, if any.
@@ -1668,10 +1720,12 @@ class DeviceSession extends ChangeNotifier
     _retryTimer?.cancel();
     _listWatchdog?.cancel();
     _kicked = false;
-    final clearedColdSentinel = _error == agentRuntimeNotRunningError;
+    final clearedColdFailure =
+        _lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning;
+    _lastWorkspaceOpenFailure = null;
     _error = null;
-    if (clearedColdSentinel) {
-      _log('[session] cold sentinel cleared by connect start');
+    if (clearedColdFailure) {
+      _log('[session] cold runtime failure cleared by connect start');
     }
     // New connection episode: a later cold parking must log again.
     _watchdogParked = false;
@@ -1884,11 +1938,12 @@ class DeviceSession extends ChangeNotifier
         // error banner, sessions state keeps its last snapshot.
         if (_status == DeviceStatus.connecting ||
             _status == DeviceStatus.error) {
-          final clearedColdSentinel =
-              _error == agentRuntimeNotRunningError;
+          final clearedColdFailure =
+              _lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning;
+          _lastWorkspaceOpenFailure = null;
           _error = null;
-          if (clearedColdSentinel) {
-            _log('[session] cold sentinel cleared by relay paired');
+          if (clearedColdFailure) {
+            _log('[session] cold runtime failure cleared by relay paired');
           }
           _setStatus(DeviceStatus.connected);
         }
@@ -1969,20 +2024,22 @@ class DeviceSession extends ChangeNotifier
   /// (project / task-host addressing); null keeps the single-leg behavior
   /// for internal opens.
   ///
-  /// Returns whether the workspace ended up open. Callers that push a chat
-  /// page after the open use false to block it (the bridge still points at
-  /// the previous workspace, so a chat there would subscribe under the
-  /// wrong scope).
-  Future<bool> openWorkspace(
+  /// Returns the typed outcome. Callers that push a chat page after the
+  /// open use a non-[WorkspaceOpenOpened] result to block it (the bridge
+  /// still points at the previous workspace, so a chat there would
+  /// subscribe under the wrong scope). Failures are also remembered as
+  /// [lastWorkspaceOpenFailure] for the watchdog and the banner; a success
+  /// clears it.
+  Future<WorkspaceOpenResult> openWorkspace(
     Map<String, dynamic> workspace, {
     String? taskId,
     WorkspaceOpenPurpose? purpose,
   }) {
     final previous = _openChain;
-    final completer = Completer<bool>();
+    final completer = Completer<WorkspaceOpenResult>();
     _openChain = completer;
     () async {
-      var opened = false;
+      WorkspaceOpenResult result = const WorkspaceOpenAborted();
       try {
         if (previous != null) {
           try {
@@ -1990,22 +2047,22 @@ class DeviceSession extends ChangeNotifier
           } catch (_) {}
         }
         if (_disposed) return;
-        opened = await _openWorkspaceNow(
+        result = await _openWorkspaceNow(
           workspace,
           taskId: taskId,
           purpose: purpose,
         );
       } finally {
         if (identical(_openChain, completer)) _openChain = null;
-        completer.complete(opened);
+        completer.complete(result);
       }
     }();
     return completer.future;
   }
 
-  Completer<bool>? _openChain;
+  Completer<WorkspaceOpenResult>? _openChain;
 
-  Future<bool> _openWorkspaceNow(
+  Future<WorkspaceOpenResult> _openWorkspaceNow(
     Map<String, dynamic> workspace, {
     String? taskId,
     WorkspaceOpenPurpose? purpose,
@@ -2013,7 +2070,7 @@ class DeviceSession extends ChangeNotifier
     final key = workspaceKeyOf(workspace);
     final client = _client;
     if (key == null || client == null || _disposed || _openingWorkspace) {
-      return false;
+      return const WorkspaceOpenAborted();
     }
     _openingWorkspace = true;
     final sw = Stopwatch()..start();
@@ -2028,7 +2085,7 @@ class DeviceSession extends ChangeNotifier
       );
       if (_disposed || _client != client) {
         bridge.dispose();
-        return false;
+        return const WorkspaceOpenAborted();
       }
       // The bridge's OWN workspace key, not the requested one: project-draft
       // addressing (formB) makes the desktop prepare a NEW draft workspace,
@@ -2083,7 +2140,7 @@ class DeviceSession extends ChangeNotifier
       final sub = await conversation.subscribeSessionsIndex();
       if (_disposed || _bridge != bridge) {
         await sub.dispose();
-        return false;
+        return const WorkspaceOpenAborted();
       }
       _sessionsSub = sub;
       sub.state.subscribedWorkspaceKey = activeKey;
@@ -2111,7 +2168,9 @@ class DeviceSession extends ChangeNotifier
         // Same early-exit chain as above: the open may have been
         // superseded while the probe was in flight — whoever replaced the
         // bridge already disposed this sub, so plain return.
-        if (_disposed || _bridge != bridge) return false;
+        if (_disposed || _bridge != bridge) {
+          return const WorkspaceOpenAborted();
+        }
         if (deleted != null) sub.state.deletedTaskIds = Set.of(deleted);
       } catch (_) {
         sub.state.deletedTaskIds = const {};
@@ -2128,12 +2187,15 @@ class DeviceSession extends ChangeNotifier
       // Same race, same patch for the snapshot cache (design §写点 调用点二).
       snapshotSessionsIntoCache(sub.state);
       recordVanishedSessions();
-      final clearedColdSentinel = _error == agentRuntimeNotRunningError;
+      final clearedColdFailure =
+          _lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning;
+      _lastWorkspaceOpenFailure = null;
       _error = null;
-      if (clearedColdSentinel) {
+      if (clearedColdFailure) {
         // Diagnose what clears the actionable banner: a successful open of
         // any workspace (not necessarily the cold one) used to hide it.
-        _log('[session] cold sentinel cleared by open ok: key=$activeKey');
+        _log('[session] cold runtime failure cleared by open ok: '
+            'key=$activeKey');
       }
       onWorkspaceOpened?.call(activeKey);
       notifyListeners();
@@ -2141,7 +2203,7 @@ class DeviceSession extends ChangeNotifier
       // bridge (the old active workspace is now a candidate; the newly
       // active one must leave the set).
       _recomputeSidecarSubscriptions();
-      return true;
+      return const WorkspaceOpenOpened();
     } catch (e) {
       final code = e is ChannelRpcError && e.data is Map
           ? (e.data as Map)['code']
@@ -2151,18 +2213,26 @@ class DeviceSession extends ChangeNotifier
           ' (${sw.elapsedMilliseconds}ms)');
       // The relay link itself is fine; only the native list is degraded —
       // surface the reason so the UI can offer retry / web fallback
-      // instead of an eternal spinner. A window-gate dead end is a stable
-      // sentinel: the UI localizes it instead of showing desktop text. A
-      // cold per-workspace runtime is a DIFFERENT dead end (the bridge IS
-      // attached; the desktop has not started this workspace's agent
-      // process), so it gets its own sentinel and actionable copy.
-      _error = e is _WorkspaceUnreachable || isWorkspaceWindowGateError(e)
-          ? workspaceUnreachableError
-          : isAgentRuntimeNotRunningError(e)
-              ? agentRuntimeNotRunningError
-              : '$e';
+      // instead of an eternal spinner. A window-gate dead end and a cold
+      // per-workspace runtime are DIFFERENT typed dead ends (the latter's
+      // bridge IS attached; the desktop has not started this workspace's
+      // agent process); everything else keeps the raw message.
+      final WorkspaceOpenResult result;
+      if (e is _WorkspaceUnreachable || isWorkspaceWindowGateError(e)) {
+        result = WorkspaceOpenUnreachable(
+          e is _WorkspaceUnreachable ? e.cause : e,
+        );
+      } else if (isAgentRuntimeNotRunningError(e)) {
+        result = WorkspaceOpenRuntimeNotRunning(e);
+      } else {
+        // Single source: the raw error object rides the typed result and
+        // the UI renders it verbatim; [_error] stays reserved for
+        // link/app errors (connect failure, app-error, reload bootstrap).
+        result = WorkspaceOpenTransportFailure(e);
+      }
+      _lastWorkspaceOpenFailure = result;
       notifyListeners();
-      return false;
+      return result;
     } finally {
       _openingWorkspace = false;
       sw.stop();
@@ -2384,7 +2454,7 @@ class DeviceSession extends ChangeNotifier
     // watchdog would rebuild the relay every timeout and the banner would
     // flash between "connecting" and the runtime copy. Park it until the
     // user retries after opening the workspace on the desktop.
-    if (_error == agentRuntimeNotRunningError) {
+    if (_lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning) {
       if (!_watchdogParked) {
         _watchdogParked = true;
         _log('[session] list watchdog parked: agent runtime not running');
@@ -2410,9 +2480,10 @@ class DeviceSession extends ChangeNotifier
   void _onListNotReady() {
     if (_disposed || _kicked || status != DeviceStatus.connected) return;
     // A timer callback can already be queued when the open's synchronous
-    // segment parks the watchdog; the sentinel still means "do not escalate"
-    // (a soft reopen cannot start the runtime and only churns the link).
-    if (_error == agentRuntimeNotRunningError) return;
+    // segment parks the watchdog; the typed cold-runtime result still
+    // means "do not escalate" (a soft reopen cannot start the runtime and
+    // only churns the link).
+    if (_lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning) return;
     final sub = _sessionsSub;
     if (sub != null && sub.state.ready) return;
     _listEscalations += 1;
@@ -3062,18 +3133,22 @@ class DeviceSession extends ChangeNotifier
   String? get workspacePath => _activeWorkspace?['workspacePath'] as String?;
 
   @override
-  Future<bool> ensureDraftWorkspace(String? workspacePath) async {
+  Future<WorkspaceOpenResult> ensureDraftWorkspace(String? workspacePath) async {
     final target = workspacePath;
-    if (target == null || target.isEmpty) return true;
+    if (target == null || target.isEmpty) return const WorkspaceOpenOpened();
     final aliases = _workspaceKeyAliases;
     String norm(String key) => aliases[key] ?? key;
     final wanted = norm(target);
     final active = _activeWorkspace;
     if (active != null) {
       final activePath = active['workspacePath'];
-      if (activePath is String && norm(activePath) == wanted) return true;
+      if (activePath is String && norm(activePath) == wanted) {
+        return const WorkspaceOpenOpened();
+      }
       final activeKey = workspaceKeyOf(active);
-      if (activeKey != null && norm(activeKey) == wanted) return true;
+      if (activeKey != null && norm(activeKey) == wanted) {
+        return const WorkspaceOpenOpened();
+      }
     }
     Map<String, dynamic>? row;
     for (final ws in _workspaces) {
@@ -4125,6 +4200,7 @@ class DeviceSession extends ChangeNotifier
     _failureReason = null;
     _kicked = false;
     _error = null;
+    _lastWorkspaceOpenFailure = null;
     _watchdogParked = false;
     _setStatus(DeviceStatus.disconnected);
     await _failureSub?.cancel();

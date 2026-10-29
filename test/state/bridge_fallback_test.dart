@@ -44,6 +44,15 @@ const _newDraftPath = '/home/me/.zcode/workspace/draft-123';
 
 Map<String, dynamic> _ws(String path) => {'workspacePath': path};
 
+/// Bridge stand-in that attaches but answers the sessions-index subscribe
+/// with the desktop's cold-runtime refusal (`ZCODE_AGENT_RUNTIME_UNAVAILABLE`).
+_FakeBridge _coldRuntimeBridge() => _FakeBridge(
+      subscribeError: {
+        'message': 'ZCode Agent runtime is not running.',
+        'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+      },
+    );
+
 typedef _OpenCall = ({
   String key,
   String? taskId,
@@ -55,7 +64,7 @@ typedef _OpenCall = ({
 /// is distinguished by its addressing fields, exactly what the production
 /// fallback passes.
 class _ScriptedClient extends RemoteClient {
-  _ScriptedClient(super.params);
+  _ScriptedClient(super.params, {super.transportFactory});
 
   final opens = <_OpenCall>[];
 
@@ -73,6 +82,11 @@ class _ScriptedClient extends RemoteClient {
   /// the alias normalization the borrower relies on).
   List<Object> bootstrapWorkspaces = const [];
 
+  /// One-shot failure knob for the connect-start clear test: the next
+  /// bootstrap throws so the reconnect lands in `error` right after its
+  /// start cleared the remembered failure.
+  bool failBootstrapOnce = false;
+
   @override
   Future<void> connect() => Future.value();
 
@@ -81,11 +95,17 @@ class _ScriptedClient extends RemoteClient {
       Future.value();
 
   @override
-  Future<Map<String, dynamic>> bootstrap() async => {
-        'workspaces': bootstrapWorkspaces,
-        'tasks': bootstrapTasks,
-        if (desktopAppVersion != null) 'desktopAppVersion': desktopAppVersion!,
-      };
+  Future<Map<String, dynamic>> bootstrap() async {
+    if (failBootstrapOnce) {
+      failBootstrapOnce = false;
+      throw StateError('bootstrap exploded');
+    }
+    return {
+      'workspaces': bootstrapWorkspaces,
+      'tasks': bootstrapTasks,
+      if (desktopAppVersion != null) 'desktopAppVersion': desktopAppVersion!,
+    };
+  }
 
   @override
   Future<BridgeSession> openBridge(
@@ -278,7 +298,7 @@ void main() {
         purpose: WorkspaceOpenPurpose.chatNew,
       );
 
-      expect(opened, isTrue);
+      expect(opened, isA<WorkspaceOpenOpened>());
       expect(client.opens, hasLength(1));
       expect(client.opens.single.key, '/repo/beta');
       expect(client.opens.single.taskId, isNull);
@@ -331,7 +351,7 @@ void main() {
         purpose: WorkspaceOpenPurpose.chatNew,
       );
 
-      expect(opened, isTrue);
+      expect(opened, isA<WorkspaceOpenOpened>());
       expect(client.opens, hasLength(2));
       expect(client.opens[1].key, '/repo/beta');
       expect(client.opens[1].taskId, 'task-new',
@@ -381,7 +401,7 @@ void main() {
         purpose: WorkspaceOpenPurpose.chatNew,
       );
 
-      expect(opened, isTrue);
+      expect(opened, isA<WorkspaceOpenOpened>());
       expect(client.opens, hasLength(2));
       expect(client.opens[1].taskId, 'task-clean',
           reason: 'un-anchored multi-copy ids are ambiguous, not borrowed');
@@ -422,7 +442,7 @@ void main() {
         purpose: WorkspaceOpenPurpose.chatNew,
       );
 
-      expect(opened, isTrue);
+      expect(opened, isA<WorkspaceOpenOpened>());
       expect(client.opens[1].taskId, 'task-anchored');
     });
 
@@ -452,7 +472,7 @@ void main() {
         purpose: WorkspaceOpenPurpose.chatNew,
       );
 
-      expect(opened, isFalse);
+      expect(opened, isA<WorkspaceOpenUnreachable>());
       expect(client.opens, hasLength(1),
           reason: 'no borrowable row and a project path — no second leg');
     });
@@ -490,7 +510,7 @@ void main() {
         purpose: WorkspaceOpenPurpose.chatNew,
       );
 
-      expect(opened, isTrue);
+      expect(opened, isA<WorkspaceOpenOpened>());
       // opens: [auto-open(first workspace), first leg, borrowed leg]
       expect(client.opens.last.taskId, 'task-p',
           reason: 'path-keyed row normalizes onto the identity key');
@@ -513,7 +533,7 @@ void main() {
         purpose: WorkspaceOpenPurpose.chatNew,
       );
 
-      expect(opened, isTrue);
+      expect(opened, isA<WorkspaceOpenOpened>());
       expect(client.opens, hasLength(2));
       expect(client.opens[1].project, {
         'projectId': null,
@@ -542,19 +562,20 @@ void main() {
         purpose: WorkspaceOpenPurpose.chatNew,
       );
 
-      expect(opened, isFalse);
+      expect(opened, isA<WorkspaceOpenUnreachable>());
       expect(client.opens, hasLength(1),
           reason: 'no borrowed task and not desktop-managed: formA is '
               'rejected by 3.16.3 (project.not-found), so no second send');
-      expect(session.error, workspaceUnreachableError);
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenUnreachable>());
       expect(session.activeWorkspace, isNull);
     });
 
-    test('a cold per-workspace runtime surfaces its own sentinel', () async {
+    test('a cold per-workspace runtime surfaces its own result', () async {
       // Bridge attach succeeds — the runtime is per-workspace and only the
       // desktop starts it. The sessions-index subscribe then answers the
       // runtime-unavailable refusal: this is NOT the window gate, so the
-      // session must expose the runtime sentinel (the UI localizes it to
+      // session must surface the runtime variant (the UI localizes it to
       // actionable copy instead of "workspace is not open").
       final client = _ScriptedClient(_params('3.16.3'))
         ..handler = (_) async => _FakeBridge(
@@ -571,10 +592,12 @@ void main() {
         purpose: WorkspaceOpenPurpose.openTask,
       );
 
-      expect(opened, isFalse);
-      expect(session.error, agentRuntimeNotRunningError);
-      expect(session.error, isNot(workspaceUnreachableError),
-          reason: 'the window-gate sentinel would tell the user to open a '
+      expect(opened, isA<WorkspaceOpenRuntimeNotRunning>());
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenRuntimeNotRunning>());
+      expect(session.lastWorkspaceOpenFailure,
+          isNot(isA<WorkspaceOpenUnreachable>()),
+          reason: 'the window-gate result would tell the user to open a '
               'workspace that is already attached');
     });
 
@@ -606,13 +629,15 @@ void main() {
         _ws('/repo/beta'),
         purpose: WorkspaceOpenPurpose.openTask,
       );
-      expect(opened, isFalse);
-      expect(session.error, agentRuntimeNotRunningError);
+      expect(opened, isA<WorkspaceOpenRuntimeNotRunning>());
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenRuntimeNotRunning>());
 
       await Future<void>.delayed(const Duration(milliseconds: 300));
       expect(client.opens, hasLength(1),
           reason: 'the cold-runtime dead end must not feed the watchdog');
-      expect(session.error, agentRuntimeNotRunningError);
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenRuntimeNotRunning>());
     });
 
     test('openTask retries with task host addressing', () async {
@@ -630,7 +655,7 @@ void main() {
         purpose: WorkspaceOpenPurpose.openTask,
       );
 
-      expect(opened, isTrue);
+      expect(opened, isA<WorkspaceOpenOpened>());
       expect(client.opens, hasLength(2));
       expect(client.opens[1].taskId, 'task-9');
       expect(client.opens[1].taskHostId, 'local');
@@ -650,11 +675,12 @@ void main() {
         purpose: WorkspaceOpenPurpose.chatNew,
       );
 
-      expect(opened, isFalse);
+      expect(opened, isA<WorkspaceOpenUnreachable>());
       expect(client.opens, hasLength(1),
           reason: 'no desktopAppVersion and a 3.16.2 link: conservative '
               'single leg');
-      expect(session.error, workspaceUnreachableError);
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenUnreachable>());
     });
 
     test('a live desktop version below 3.16.3 suppresses the second leg',
@@ -670,10 +696,11 @@ void main() {
         purpose: WorkspaceOpenPurpose.chatNew,
       );
 
-      expect(opened, isFalse);
+      expect(opened, isA<WorkspaceOpenUnreachable>());
       expect(client.opens, hasLength(1),
           reason: 'the live desktop version outranks the newer link snapshot');
-      expect(session.error, workspaceUnreachableError);
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenUnreachable>());
     });
 
     test('both legs failing blocks the open and keeps the error', () async {
@@ -690,11 +717,13 @@ void main() {
         purpose: WorkspaceOpenPurpose.chatNew,
       );
 
-      expect(opened, isFalse);
+      expect(opened, isA<WorkspaceOpenUnreachable>());
       expect(client.opens, hasLength(2));
-      expect(session.error, workspaceUnreachableError,
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenUnreachable>(),
           reason: 'a dead-end window gate is localized by the UI, so the '
-              'session surfaces the stable sentinel instead of desktop text');
+              'session surfaces the typed unreachable result instead of '
+              'desktop text');
       expect(session.activeWorkspace, isNull);
     });
 
@@ -706,14 +735,14 @@ void main() {
 
       final opened = await session.openWorkspace(_ws('/repo/beta'));
 
-      expect(opened, isFalse);
+      expect(opened, isA<WorkspaceOpenUnreachable>());
       expect(client.opens, hasLength(1),
           reason: 'internal opens do not opt into addressing');
     });
   });
 
   group('draft send workspace guard', () {
-    test('an already-active target answers true without any RPC', () async {
+    test('an already-active target answers opened without any RPC', () async {
       final client = _ScriptedClient(_params('3.16.3'))
         ..bootstrapWorkspaces = [
           _ws('/repo/tao'),
@@ -727,7 +756,7 @@ void main() {
 
       final ok = await session.ensureDraftWorkspace('/repo/tao');
 
-      expect(ok, isTrue);
+      expect(ok, isA<WorkspaceOpenOpened>());
       expect(client.opens, hasLength(opensAfterConnect),
           reason: 'a matching target must not re-open anything');
     });
@@ -757,7 +786,7 @@ void main() {
 
       final ok = await session.ensureDraftWorkspace(_draftWorkspacePath);
 
-      expect(ok, isTrue);
+      expect(ok, isA<WorkspaceOpenOpened>());
       expect(client.opens.last.key, _draftWorkspacePath);
       expect(client.opens.last.project, {'projectId': null, 'hostId': 'local'});
       expect(session.workspacePath, _newDraftPath,
@@ -767,7 +796,7 @@ void main() {
       expect(session.error, isNull);
     });
 
-    test('an unreachable draft target answers false and keeps the sentinel',
+    test('an unreachable draft target answers with its typed failure',
         () async {
       final client = _ScriptedClient(_params('3.16.3'))
         ..bootstrapWorkspaces = [
@@ -783,14 +812,15 @@ void main() {
 
       final ok = await session.ensureDraftWorkspace('/repo/chat');
 
-      expect(ok, isFalse);
+      expect(ok, isA<WorkspaceOpenUnreachable>());
       expect(session.workspacePath, '/repo/tao',
           reason: 'the bridge must stay on the previous workspace');
-      expect(session.error, workspaceUnreachableError,
-          reason: 'the UI localizes the stable sentinel and blocks the send');
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenUnreachable>(),
+          reason: 'the UI localizes the typed failure and blocks the send');
     });
 
-    test('a cold-runtime draft target answers false and keeps its sentinel',
+    test('a cold-runtime draft target answers with its typed failure',
         () async {
       final client = _ScriptedClient(_params('3.16.3'))
         ..bootstrapWorkspaces = [
@@ -810,10 +840,148 @@ void main() {
 
       final ok = await session.ensureDraftWorkspace('/repo/chat');
 
-      expect(ok, isFalse);
-      expect(session.error, agentRuntimeNotRunningError,
-          reason: 'the draft-first-send guard keeps the sentinel so the chat '
-              'page can pick the runtime copy');
+      expect(ok, isA<WorkspaceOpenRuntimeNotRunning>());
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenRuntimeNotRunning>(),
+          reason: 'the draft-first-send guard keeps the typed failure so the '
+              'chat page can pick the runtime copy');
+    });
+  });
+
+  group('workspace open result lifecycle', () {
+    test('an open without a live client aborts without a recorded failure',
+        () async {
+      final client = _ScriptedClient(_params('3.16.3'));
+      final session = DeviceSession(
+        deviceId: 'd1',
+        params: client.params,
+        timings: _fastTimings,
+        clientFactory: () => client,
+      );
+      addTearDown(session.dispose);
+
+      final result = await session.openWorkspace(_ws('/repo/beta'));
+
+      expect(result, isA<WorkspaceOpenAborted>(),
+          reason: 'no client: the open never ran, which is not a failure');
+      expect(session.lastWorkspaceOpenFailure, isNull);
+    });
+
+    test('an open superseded by a suspend aborts without a recorded failure',
+        () async {
+      final gate = Completer<BridgeSession>();
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) => gate.future;
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      final opening = session.openWorkspace(_ws('/repo/beta'));
+      await session.suspend();
+      gate.complete(_FakeBridge());
+      final result = await opening;
+
+      expect(result, isA<WorkspaceOpenAborted>());
+      expect(session.lastWorkspaceOpenFailure, isNull);
+    });
+
+    test('a successful open clears the remembered cold-runtime failure',
+        () async {
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => _coldRuntimeBridge();
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      await session.openWorkspace(
+        _ws('/repo/beta'),
+        purpose: WorkspaceOpenPurpose.openTask,
+      );
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenRuntimeNotRunning>());
+
+      client.handler = (_) async => _FakeBridge();
+      final result = await session.openWorkspace(_ws('/repo/gamma'));
+
+      expect(result, isA<WorkspaceOpenOpened>());
+      expect(session.lastWorkspaceOpenFailure, isNull,
+          reason: 'any successful open clears the remembered failure');
+      expect(session.error, isNull);
+    });
+
+    test('a connect start clears the remembered cold-runtime failure',
+        () async {
+      final relay = _CapturingRelay();
+      final client = _ScriptedClient(
+        _params('3.16.3'),
+        transportFactory: (_) => relay,
+      )..handler = (_) async => _coldRuntimeBridge();
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      await session.openWorkspace(
+        _ws('/repo/beta'),
+        purpose: WorkspaceOpenPurpose.openTask,
+      );
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenRuntimeNotRunning>());
+
+      // Move off `connected` so connect() actually dials again; the error
+      // transition itself must not clear the remembered open failure.
+      relay.stateNotifier.value = RelayState.error;
+      expect(session.status, DeviceStatus.error);
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenRuntimeNotRunning>());
+
+      client.failBootstrapOnce = true;
+      await session.connect();
+
+      expect(session.status, DeviceStatus.error);
+      expect(session.lastWorkspaceOpenFailure, isNull,
+          reason: 'connect start resets the whole failure episode');
+    });
+
+    test('relay paired clears the remembered cold-runtime failure', () async {
+      // Not clearing here would change _needsWorkspaceOpen: every task tap
+      // after a transient re-pair would force an extra bridge open.
+      final relay = _CapturingRelay();
+      final client = _ScriptedClient(
+        _params('3.16.3'),
+        transportFactory: (_) => relay,
+      )..handler = (_) async => _coldRuntimeBridge();
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      await session.openWorkspace(
+        _ws('/repo/beta'),
+        purpose: WorkspaceOpenPurpose.openTask,
+      );
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenRuntimeNotRunning>());
+
+      relay.stateNotifier.value = RelayState.error;
+      expect(session.status, DeviceStatus.error);
+      relay.stateNotifier.value = RelayState.paired;
+
+      expect(session.status, DeviceStatus.connected);
+      expect(session.lastWorkspaceOpenFailure, isNull,
+          reason: 'a transient re-pair is a fresh failure episode');
+    });
+
+    test('suspend clears the remembered cold-runtime failure', () async {
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => _coldRuntimeBridge();
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      await session.openWorkspace(
+        _ws('/repo/beta'),
+        purpose: WorkspaceOpenPurpose.openTask,
+      );
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenRuntimeNotRunning>());
+
+      await session.suspend();
+
+      expect(session.lastWorkspaceOpenFailure, isNull);
     });
   });
 
