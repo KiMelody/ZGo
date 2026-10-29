@@ -553,8 +553,8 @@ class RemoteClient {
   }
 
   /// mobile-diagnostic (G7): fire-and-forget telemetry for the session
-  /// state machine. Delegates to [RelayClient.sendMobileDiagnostic] — the
-  /// relay owns the connected/unpaired gate, so this is a no-op when the
+  /// state machine. Delegates through the [RelayTransport] to the shared
+  /// relay kernel, which owns the connected/unpaired gate — a no-op when the
   /// link is down. Never queued, never awaited, never surfaces an error.
   void sendMobileDiagnostic(String event, [Map<String, dynamic>? fields]) =>
       relay.sendMobileDiagnostic(event, fields);

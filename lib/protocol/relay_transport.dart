@@ -46,11 +46,15 @@ String? relayCloseReason(int code) {
 
 /// The relay socket surface [RemoteClient] consumes. Deliberately minimal:
 /// the payload layer above it (bootstrap / bridge / rpc-frame) is identical
-/// on V1 and V2, so both transports only own the auth + heartbeat wiring.
+/// on V1 and V2, so both transports are thin adapters over the shared
+/// connection kernel (`relay_kernel.dart`): socket lifecycle, queue, pair
+/// state machine, heartbeat and reconnect policy live there, while each
+/// adapter owns only its wire (auth + codec) and strategy values.
 ///
-/// Failure semantics both implementations share:
-/// - a transient drop after pairing reconnects with the V1 backoff
-///   (`1000 * (1 << attempt)` clamped 1-15s) and passes through
+/// Failure semantics both implementations share (per-generation timings):
+/// - a transient drop after pairing reconnects with exponential backoff
+///   (1s doubling to 15s; V2 additionally drops to a fixed 60s after 8
+///   consecutive failed attempts) and passes through
 ///   [RelayState.reconnecting];
 /// - `kicked` is terminal — no reconnect; the state layer suppresses retry;
 /// - outbound payloads sent while unpaired are queued (bounded) and flushed

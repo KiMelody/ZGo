@@ -1,12 +1,11 @@
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'connection_params.dart';
 import 'device_info.dart';
+import 'relay_kernel.dart';
 import 'relay_transport.dart';
 
 /// Emitted by [RelayV2Transport.start] when the link cannot even be opened:
@@ -28,59 +27,15 @@ class _TokenFailure implements Exception {
   const _TokenFailure(this.reason, [this.message]);
 }
 
-/// Minimal socket view the V2 transport drives. Production wraps a
-/// [WebSocketChannel]; tests provide a fake without the whole
-/// `web_socket_channel` interface surface.
-abstract interface class RelayV2Socket {
-  Future<void> get ready;
-  Stream<dynamic> get stream;
-  int? get closeCode;
-  String? get closeReason;
-  void send(String data);
-  Future<void> close([int? code, String? reason]);
-}
-
-class _ChannelSocket implements RelayV2Socket {
-  final WebSocketChannel _channel;
-  _ChannelSocket(this._channel);
-
-  @override
-  Future<void> get ready => _channel.ready;
-  @override
-  Stream<dynamic> get stream => _channel.stream;
-  @override
-  int? get closeCode => _channel.closeCode;
-  @override
-  String? get closeReason => _channel.closeReason;
-  @override
-  void send(String data) => _channel.sink.add(data);
-  @override
-  Future<void> close([int? code, String? reason]) =>
-      _channel.sink.close(code, reason);
-}
-
-RelayV2Socket _defaultSocketFactory(Uri uri) =>
-    _ChannelSocket(WebSocketChannel.connect(uri));
+/// Test alias: the V2 fake sockets implement the shared kernel socket.
+typedef RelayV2Socket = RelaySocket;
 
 /// Desktop 3.16.2 relay V2: account-JWT terminal auth over
 /// `wss://<host>/api/v1/remote/ws2?token=&mid=`.
 ///
-/// Flow (live-probed 2026-10-21, two rounds):
-/// 1. `POST /api/v1/remote/token {"role":"terminal"}` with
-///    `Authorization: Bearer <zcode account JWT>` → `{token, expires_in:60}`.
-///    The token is fetched on EVERY (re)connect — 60s TTL, never persisted.
-/// 2. WS open → `auth_init {device_sid, meta, client_ts}` (no proof).
-/// 3. `auth_ack {pair_status: waiting|matched, terminal_sid?}`:
-///    `waiting` = the desktop is offline but the relay accepted us — stay
-///    connected and keep polling; `matched` = paired.
-/// 4. Heartbeat `{type:"pair_status_query"}` every ~10s; no inbound frame
-///    for 15s means the link is dead → reconnect (V1 backoff).
-/// 5. `data` frames carry the exact V1 payload layer — the bootstrap /
-///    bridge / rpc-frame stack above is unchanged.
-///
-/// Error frame codes: `AUTH_FAILED` (terminal, auth-required), `KICKED`
-/// (terminal, kicked — no reconnect), `DEVICE_OFFLINE` (non-fatal: keep the
-/// connection waiting), `WRONG_PARAM` / `INTERNAL` (terminal, unexpected).
+/// The socket lifecycle, queue, pair state machine, heartbeat and reconnect
+/// policy live in [RelayConnectionKernel]; this adapter is the V2 wire (token
+/// per (re)connect, auth_init/encoded frames) plus the V2 strategy values.
 class RelayV2Transport implements RelayTransport {
   final RemoteConnectionParams params;
   final Future<String?> Function()? jwtProvider;
@@ -98,49 +53,7 @@ class RelayV2Transport implements RelayTransport {
   final Duration authAckTimeout;
   final Duration reconnectWaitTimeout;
 
-  RelayV2Socket? _socket;
-  StreamSubscription? _socketSub;
-
-  final _state = ValueNotifier<RelayState>(RelayState.idle);
-  @override
-  ValueListenable<RelayState> get stateListenable => _state;
-  @override
-  RelayState get state => _state.value;
-
-  final _payloadController =
-      StreamController<Map<String, dynamic>>.broadcast();
-  @override
-  Stream<Map<String, dynamic>> get payloads => _payloadController.stream;
-
-  final _failureController = StreamController<RelayFailure>.broadcast();
-  @override
-  Stream<RelayFailure> get failures => _failureController.stream;
-
-  bool _wasPaired = false;
-  bool _intentionallyClosed = false;
-  bool _disposed = false;
-  int _reconnectAttempt = 0;
-
-  /// Consecutive token-endpoint responses that carried no token and were not
-  /// server errors. Three in a row is enough to call the credential dead:
-  /// the live server's expired-JWT shape has never been observed (the probe
-  /// only ever produced HTTP 401), so a 200 + non-zero business code must
-  /// not keep the link in the 15s relay-unavailable retry loop forever.
-  int _tokenRejectStreak = 0;
-  static const _tokenRejectLimit = 3;
-  DateTime _lastInboundAt = DateTime.fromMillisecondsSinceEpoch(0);
-  String? _lastFailureReason;
-  String? _lastFailureMessage;
-
-  /// Per-socket diagnostic gate: the relay hard-fails any data frame sent
-  /// before auth (V1 live-verified 2026-10-09; V2 keeps the same gate until
-  /// the first auth_ack).
-  bool _diagAuthOk = false;
-
-  Timer? _heartbeatTimer;
-  Timer? _authAckTimer;
-  Timer? _rewaitTimer;
-  Timer? _reconnectTimer;
+  late final RelayConnectionKernel _kernel;
 
   RelayV2Transport(
     this.params, {
@@ -153,169 +66,232 @@ class RelayV2Transport implements RelayTransport {
     this.heartbeatTimeout = const Duration(seconds: 15),
     this.authAckTimeout = const Duration(seconds: 15),
     this.reconnectWaitTimeout = const Duration(seconds: 20),
-  }) : _http = httpClient ?? http.Client(),
-       webSocketFactory = webSocketFactory ?? _defaultSocketFactory,
-       now = now ?? DateTime.now;
+  })  : _http = httpClient ?? http.Client(),
+        webSocketFactory = webSocketFactory ?? defaultRelaySocketFactory,
+        now = now ?? DateTime.now {
+    _kernel = RelayConnectionKernel(
+      wire: _RelayV2Wire(params,
+          jwtProvider: jwtProvider,
+          onLog: onLog,
+          http: _http,
+          now: this.now,
+          socketFactory: this.webSocketFactory),
+      liveness: const RelayV2Liveness(),
+      timings: RelayTimings(
+        heartbeatInterval: heartbeatInterval,
+        heartbeatAckTimeout: heartbeatTimeout,
+        authAckTimeout: authAckTimeout,
+        reconnectWaitTimeout: reconnectWaitTimeout,
+        longBackoffAfterFails: 8,
+      ),
+      errorActions: const RelayV2ErrorActions(),
+      pairPolicy: const RelayV2PairPolicy(),
+      diagnostics: const RelayDiagnostics(
+          logPrefix: '[relay-v2]', logUnhandledPairStatus: true),
+      onLog: onLog,
+      now: this.now,
+      connectFailurePolicy: RelayConnectFailurePolicy.publishFailure,
+    );
+  }
 
-  /// Bearer credentials must never reach logs or failure text: a failed
-  /// WebSocket upgrade echoes the full URI (`...&token=<token>&mid=...`).
+  @override
+  ValueListenable<RelayState> get stateListenable => _kernel.stateListenable;
+  @override
+  RelayState get state => _kernel.state;
+  @override
+  Stream<Map<String, dynamic>> get payloads => _kernel.payloads;
+  @override
+  Stream<RelayFailure> get failures => _kernel.failures;
+
+  @override
+  Future<void> start() async {
+    final outcome = await _kernel.start();
+    if (outcome is ConnectOpened) return;
+    final reason = switch (outcome) {
+      ConnectAuthRequired() => 'auth-required',
+      ConnectFailed(:final reason) => reason,
+      ConnectOpened() => 'relay-unavailable',
+    };
+    final message = switch (outcome) {
+      ConnectAuthRequired(:final message) => message,
+      ConnectFailed(:final message) => message,
+      ConnectOpened() => null,
+    };
+    throw RelayV2StartException(reason, message);
+  }
+
+  @override
+  void sendPayload(Map<String, dynamic> payload) =>
+      _kernel.sendPayload(payload);
+
+  @override
+  void sendMobileDiagnostic(String event, [Map<String, dynamic>? fields]) =>
+      _kernel.sendMobileDiagnostic(event, fields);
+
+  @override
+  Future<void> dispose() => _kernel.dispose();
+
+  /// Reconnect backoff (test seam): the shared pure function with V2's
+  /// 8-attempt long-backoff tier.
+  @visibleForTesting
+  static Duration reconnectDelay(int attempt) =>
+      relayReconnectDelay(attempt, longBackoffAfterFails: 8);
+}
+
+/// V2 liveness: every decoded frame renews the 15s window; the stamp resets
+/// per connect (epoch seed before the first dial).
+class RelayV2Liveness implements RelayLiveness {
+  const RelayV2Liveness();
+  @override
+  DateTime initial(DateTime now) => DateTime.fromMillisecondsSinceEpoch(0);
+  @override
+  bool get resetsOnConnect => true;
+  @override
+  bool refreshes(InboundFrame frame) => true;
+}
+
+/// V2 pairing: heartbeat on every `waiting`; `_wasPaired` resets on start().
+class RelayV2PairPolicy implements RelayPairPolicy {
+  const RelayV2PairPolicy();
+  @override
+  bool startHeartbeatOnWaiting(bool wasPaired) => true;
+  @override
+  bool get resetWasPairedOnStart => true;
+}
+
+/// V2 error-frame mapping: AUTH_FAILED terminal auth-required, KICKED
+/// terminal kicked, DEVICE_OFFLINE non-fatal waiting, everything else
+/// unexpected-error.
+class RelayV2ErrorActions implements RelayErrorActions {
+  const RelayV2ErrorActions();
+  @override
+  RelayErrorAction actionFor(String? code, String? message) => switch (code) {
+        'AUTH_FAILED' => RelayErrorAction.terminal,
+        'KICKED' => RelayErrorAction.kicked,
+        'DEVICE_OFFLINE' => RelayErrorAction.nonFatalWaiting,
+        _ => RelayErrorAction.defaultTerminal,
+      };
+}
+
+/// V2 wire: JWT → 60s terminal token on every (re)connect, `auth_init` with
+/// seconds `client_ts`, data frames without `client_ts`. Bearer credentials
+/// must never reach logs or failure text.
+class _RelayV2Wire implements RelayWire {
+  final RemoteConnectionParams _params;
+  final Future<String?> Function()? _jwtProvider;
+  final void Function(String line)? _onLog;
+  final http.Client _http;
+  final DateTime Function() _now;
+  final RelaySocket Function(Uri uri) _socketFactory;
+  RelaySocket? _socket;
+  String? _token;
+
+  /// Consecutive token-endpoint responses that carried no token and were not
+  /// server errors. Three in a row is enough to call the credential dead:
+  /// the live server's expired-JWT shape has never been observed (the probe
+  /// only ever produced HTTP 401), so a 200 + non-zero business code must not
+  /// keep the link in the 15s relay-unavailable retry loop forever.
+  int _tokenRejectStreak = 0;
+  static const _tokenRejectLimit = 3;
   static final RegExp _tokenParam = RegExp(r'token=[^&\s]+');
+
+  _RelayV2Wire(this._params,
+      {required Future<String?> Function()? jwtProvider,
+      required void Function(String line)? onLog,
+      required http.Client http,
+      required DateTime Function() now,
+      required RelaySocket Function(Uri uri) socketFactory})
+      : _jwtProvider = jwtProvider,
+        _onLog = onLog,
+        _http = http,
+        _now = now,
+        _socketFactory = socketFactory;
 
   static String _redact(Object e) =>
       '$e'.replaceAll(_tokenParam, 'token=redacted');
 
-  void _log(String line) =>
-      onLog?.call(line.replaceAll(_tokenParam, 'token=redacted'));
+  void _log(String line) => _onLog?.call(line.replaceAll(_tokenParam, 'token=redacted'));
 
-  void _setState(RelayState s) {
-    final previous = _state.value;
-    _state.value = s;
-    _log('[relay-v2] state -> $s');
-    if (s == previous) return;
-    sendMobileDiagnostic('state-transition', {
-      'state': s.name,
-      'previousState': previous.name,
+  @override
+  Future<void> prepare() async {
+    String? jwt;
+    try {
+      jwt = _jwtProvider == null ? null : await _jwtProvider();
+    } catch (e) {
+      // A failing token store read is the same user-facing state as being
+      // signed out.
+      throw RelayWireException('auth-required', _redact(e));
+    }
+    if (jwt == null || jwt.trim().isEmpty) {
+      throw const RelayWireException('auth-required',
+          'Sign in to your ZCode account to use this remote link.');
+    }
+    try {
+      _token = await _fetchToken(jwt.trim());
+    } on _TokenFailure catch (e) {
+      throw RelayWireException(e.reason, e.message);
+    } catch (e) {
+      throw RelayWireException('relay-unavailable', _redact(e));
+    }
+  }
+
+  @override
+  Future<RelaySocket> open() async {
+    final uri = _wsUri(_token!);
+    // The token is a bearer credential — never log the URI verbatim.
+    _log('[relay-v2] connecting ${uri.scheme}://${uri.host}${uri.path} '
+        '(mid=${_params.deviceMid ?? ''}, token=redacted)');
+    try {
+      final socket = _socketFactory(uri);
+      await socket.ready;
+      return socket;
+    } catch (e) {
+      _log('[relay-v2] connect failed: ${_redact(e)}');
+      throw RelayWireException('relay-unavailable', _redact(e));
+    }
+  }
+
+  @override
+  void onConnected(RelaySocket socket) {
+    _socket = socket;
+    _send({
+      'type': 'auth_init',
+      'device_sid': _params.deviceSid,
+      'meta': {
+        'platform': remotePlatformName(),
+        'version': _params.appVersion ?? 'web',
+        'name': remoteAppName,
+      },
+      // Live probe used seconds on this wire.
+      'client_ts': _now().millisecondsSinceEpoch ~/ 1000,
     });
   }
 
   @override
-  Future<void> start() async {
-    _disposed = false;
-    _intentionallyClosed = false;
-    _reconnectAttempt = 0;
-    _wasPaired = false;
-    _setState(RelayState.connecting);
-    final ok = await _connect();
-    if (!ok) {
-      throw RelayV2StartException(
-        _lastFailureReason ?? 'relay-unavailable',
-        _lastFailureMessage,
-      );
-    }
-  }
+  void onInbound(InboundFrame frame) {}
 
-  /// Opens one socket. Returns false when the initial step failed (token or
-  /// dial); [start] turns that into a thrown [RelayV2StartException] while
-  /// the reconnect path backs off instead.
-  Future<bool> _connect() async {
-    await _socketSub?.cancel();
-    _socketSub = null;
-    final previous = _socket;
-    _socket = null;
-    _authAckTimer?.cancel();
-    _stopHeartbeat();
-    try {
-      await previous?.close();
-    } catch (_) {
-      // best effort
-    }
-    _diagAuthOk = false;
-    _lastFailureReason = null;
-    _lastFailureMessage = null;
+  @override
+  String encode(OutboundFrame frame) => switch (frame) {
+        RelayDataFrame(:final payload) =>
+          jsonEncode({'type': 'data', 'payload': payload}),
+        RelayPairStatusQueryFrame() =>
+          jsonEncode({'type': 'pair_status_query'}),
+      };
 
-    final provider = jwtProvider;
-    String? jwt;
-    try {
-      jwt = provider == null ? null : await provider();
-    } catch (e) {
-      // A failing token store read is the same user-facing state as being
-      // signed out.
-      _lastFailureReason = 'auth-required';
-      _lastFailureMessage = _redact(e);
-      _publishStartFailure();
-      return false;
-    }
-    if (jwt == null || jwt.trim().isEmpty) {
-      _lastFailureReason = 'auth-required';
-      _lastFailureMessage =
-          'Sign in to your ZCode account to use this remote link.';
-      _publishStartFailure();
-      return false;
-    }
-    if (_disposed) return false;
-
-    // 60s TTL: a fresh token on every dial, never reused.
-    String token;
-    try {
-      token = await _fetchToken(jwt.trim());
-    } on _TokenFailure catch (e) {
-      _lastFailureReason = e.reason;
-      _lastFailureMessage = e.message;
-      _publishStartFailure();
-      return false;
-    } catch (e) {
-      _lastFailureReason = 'relay-unavailable';
-      _lastFailureMessage = _redact(e);
-      _publishStartFailure();
-      return false;
-    }
-    if (_disposed) return false;
-
-    final uri = _wsUri(token);
-    // The token is a bearer credential — never log the URI verbatim.
-    _log('[relay-v2] connecting ${uri.scheme}://${uri.host}${uri.path} '
-        '(mid=${params.deviceMid ?? ''}, token=redacted)');
-    RelayV2Socket socket;
-    try {
-      socket = webSocketFactory(uri);
-      await socket.ready;
-    } catch (e) {
-      _log('[relay-v2] connect failed: ${_redact(e)}');
-      _lastFailureReason = 'relay-unavailable';
-      _lastFailureMessage = _redact(e);
-      _publishStartFailure();
-      return false;
-    }
-    if (_disposed) {
-      try {
-        await socket.close();
-      } catch (_) {}
-      return false;
-    }
-    _socket = socket;
-    _lastInboundAt = now();
-    _socketSub = socket.stream.listen(
-      _handleRawMessage,
-      onError: (e) => _log('[relay-v2] socket error: $e'),
-      onDone: () => _handleSocketClosed(
-        socket.closeCode ?? 1006,
-        socket.closeReason,
-      ),
-    );
-    _setState(RelayState.authenticating);
-    _send({
-      'type': 'auth_init',
-      'device_sid': params.deviceSid,
-      'meta': {
-        'platform': remotePlatformName(),
-        'version': params.appVersion ?? 'web',
-        'name': remoteAppName,
-      },
-      // Live probe used seconds on this wire.
-      'client_ts': now().millisecondsSinceEpoch ~/ 1000,
-    });
-    _authAckTimer?.cancel();
-    _authAckTimer = Timer(authAckTimeout, () {
-      if (state == RelayState.authenticating && !_disposed) {
-        _log('[relay-v2] auth_ack timeout');
-        _dropSocketAndHandle(1006, 'auth_ack timeout');
-      }
-    });
-    return true;
-  }
+  @override
+  InboundFrame? decode(String raw) =>
+      decodeRelayFrame(raw, strictCasts: false);
 
   Future<String> _fetchToken(String jwt) async {
-    final uri = params.relayTokenUri;
+    final uri = _params.relayTokenUri;
     _log('[relay-v2] POST $uri');
     final res = await _http
-        .post(
-          uri,
-          headers: {
-            'authorization': 'Bearer $jwt',
-            'content-type': 'application/json',
-          },
-          body: jsonEncode({'role': 'terminal'}),
-        )
+        .post(uri,
+            headers: {
+              'authorization': 'Bearer $jwt',
+              'content-type': 'application/json',
+            },
+            body: jsonEncode({'role': 'terminal'}))
         .timeout(const Duration(seconds: 15));
     Map<String, dynamic>? body;
     try {
@@ -327,9 +303,7 @@ class RelayV2Transport implements RelayTransport {
     final data = body?['data'];
     final token = data is Map ? data['token'] : body?['token'];
     final code = body?['code'];
-    if (token is String &&
-        token.isNotEmpty &&
-        (code == null || code == 0)) {
+    if (token is String && token.isNotEmpty && (code == null || code == 0)) {
       _tokenRejectStreak = 0;
       return token;
     }
@@ -342,10 +316,8 @@ class RelayV2Transport implements RelayTransport {
     // without the credential ever reaching the log (see [_redact]).
     _log('[relay-v2] token rejected: HTTP ${res.statusCode} code=$code '
         'msg=${_excerpt(text)}');
-    final rejected = res.statusCode == 401 ||
-        res.statusCode == 403 ||
-        code == 401 ||
-        code == 403;
+    final rejected =
+        res.statusCode == 401 || res.statusCode == 403 || code == 401 || code == 403;
     // Timeouts/transport errors never get an HTTP response and therefore
     // never reach this counter (R4: they stay relay-unavailable).
     if (res.statusCode < 500) _tokenRejectStreak += 1;
@@ -359,17 +331,9 @@ class RelayV2Transport implements RelayTransport {
       text.length <= max ? text : '${text.substring(0, max)}…';
 
   Uri _wsUri(String token) {
-    final base = params.relayWsUri;
+    final base = _params.relayWsUri;
     return base.replace(
-      queryParameters: {...base.queryParameters, 'token': token},
-    );
-  }
-
-  void _publishStartFailure() {
-    if (_disposed || _failureController.isClosed) return;
-    _setState(RelayState.error);
-    final reason = _lastFailureReason ?? 'relay-unavailable';
-    _failureController.add(RelayFailure(reason, _lastFailureMessage));
+        queryParameters: {...base.queryParameters, 'token': token});
   }
 
   void _send(Map<String, dynamic> frame) {
@@ -379,281 +343,9 @@ class RelayV2Transport implements RelayTransport {
     socket.send(jsonEncode(frame));
   }
 
-  /// Outbound payloads are queued while unpaired (reconnecting / waiting for
-  /// the desktop) and flushed once the relay reports `matched` — the V1
-  /// semantics, unchanged.
-  final _outboundQueue = <Map<String, dynamic>>[];
+  @override
+  void dispose() => _http.close();
 
   @override
-  void sendPayload(Map<String, dynamic> payload) {
-    if (state != RelayState.paired || _socket == null) {
-      if (_outboundQueue.length < 100) {
-        _log('[relay-v2] queued (state=$state): ${payload['zcode_type']}');
-        _outboundQueue.add(payload);
-      }
-      return;
-    }
-    _send({'type': 'data', 'payload': payload});
-  }
-
-  void _flushOutboundQueue() {
-    if (_outboundQueue.isEmpty) return;
-    _log('[relay-v2] flushing ${_outboundQueue.length} queued payload(s)');
-    final queued = List<Map<String, dynamic>>.from(_outboundQueue);
-    _outboundQueue.clear();
-    for (final payload in queued) {
-      _send({'type': 'data', 'payload': payload});
-    }
-  }
-
-  @override
-  void sendMobileDiagnostic(String event, [Map<String, dynamic>? fields]) {
-    try {
-      final payload = <String, dynamic>{
-        'zcode_type': 'mobile-diagnostic',
-        'event': event,
-        'timestamp': now().millisecondsSinceEpoch,
-        ...?fields,
-      };
-      if (_disposed || _socket == null || !_diagAuthOk) return;
-      _send({'type': 'data', 'payload': payload});
-    } catch (_) {
-      // Best-effort: encoding/send failures never surface.
-    }
-  }
-
-  void _handleRawMessage(dynamic data) {
-    Map<String, dynamic>? frame;
-    try {
-      final text = data is String ? data : utf8.decode(data as List<int>);
-      _log('[relay-v2] << $text');
-      final decoded = jsonDecode(text);
-      if (decoded is Map<String, dynamic> && decoded.containsKey('type')) {
-        frame = decoded;
-      }
-    } catch (e) {
-      _log('[relay-v2] bad frame: $e');
-      return;
-    }
-    if (frame == null) return;
-    // Any inbound frame renews the 15s liveness window.
-    _lastInboundAt = now();
-    switch (frame['type']) {
-      case 'auth_ack':
-      case 'pair_status_ack':
-        final status =
-            frame['pair_status'] is String ? frame['pair_status'] as String : null;
-        // Only a recognised pair status settles auth: an ack WITHOUT one
-        // would otherwise park the link at `authenticating` with no
-        // fallback. Keep the 15s timer so its timeout still recovers.
-        if (status == 'waiting' || status == 'matched') {
-          _authAckTimer?.cancel();
-        }
-        _applyPairStatus(status);
-        break;
-      case 'data':
-        final payload = frame['payload'];
-        if (payload is Map<String, dynamic>) {
-          _payloadController.add(payload);
-        }
-        break;
-      case 'error':
-        _handleRelayError(
-          frame['code'] is String ? frame['code'] as String : null,
-          frame['message'] is String ? frame['message'] as String : null,
-        );
-        break;
-    }
-  }
-
-  void _applyPairStatus(String? status) {
-    _diagAuthOk = true;
-    if (status == 'waiting') {
-      // Desktop offline: the relay accepted our auth and holds the socket.
-      // Stay connected and let the heartbeat poll until `matched`.
-      _setState(RelayState.waiting);
-      _startHeartbeat();
-      if (_wasPaired) {
-        // A previously paired mobile should be matched immediately; if the
-        // server keeps saying waiting, force a reconnect instead of hanging
-        // forever (V1 `_rewaitTimer` semantics).
-        _rewaitTimer?.cancel();
-        _rewaitTimer = Timer(reconnectWaitTimeout, () {
-          if (_wasPaired && state == RelayState.waiting && !_disposed) {
-            _log('[relay-v2] re-pair stuck in waiting, reconnecting');
-            unawaited(_reconnect());
-          }
-        });
-      }
-      return;
-    }
-    if (status == 'matched') {
-      _rewaitTimer?.cancel();
-      _reconnectAttempt = 0;
-      _setState(RelayState.paired);
-      _wasPaired = true;
-      _startHeartbeat();
-      _flushOutboundQueue();
-      return;
-    }
-    _log('[relay-v2] unhandled pair_status=$status');
-  }
-
-  void _handleRelayError(String? code, String? message) {
-    _log('[relay-v2] error frame: $code $message');
-    switch (code) {
-      case 'AUTH_FAILED':
-        _failTerminal(RelayState.error, 'auth-required', message);
-        break;
-      case 'KICKED':
-        _failTerminal(RelayState.kicked, 'kicked', message);
-        break;
-      case 'DEVICE_OFFLINE':
-        // Not fatal: the desktop went offline while the relay keeps our
-        // terminal slot. Applies in EVERY stage — 3.16.2 can send it before
-        // auth_ack; leaving the auth timer armed would turn that into a
-        // 15s timeout error. Go waiting and let the heartbeat poll until
-        // the relay reports `matched` again.
-        _log('[relay-v2] desktop offline; waiting for it to come back');
-        _authAckTimer?.cancel();
-        _setState(RelayState.waiting);
-        _startHeartbeat();
-        break;
-      default:
-        _failTerminal(
-          RelayState.error,
-          'unexpected-error',
-          message ?? 'relay error $code',
-        );
-    }
-  }
-
-  void _failTerminal(RelayState terminalState, String reason, String? message) {
-    if (_disposed) return;
-    _setState(terminalState);
-    _intentionallyClosed = true;
-    if (!_failureController.isClosed) {
-      _failureController.add(RelayFailure(reason, message));
-    }
-    _dropSocketAndHandle(
-      terminalState == RelayState.kicked ? 4009 : 1006,
-      reason,
-      handleClose: false,
-    );
-  }
-
-  /// Cancels the stream subscription, closes the socket and (unless
-  /// [handleClose] is false) routes the synthetic close through the normal
-  /// reconnect/error policy.
-  void _dropSocketAndHandle(
-    int code,
-    String? reason, {
-    bool handleClose = true,
-  }) {
-    _stopHeartbeat();
-    _authAckTimer?.cancel();
-    _socketSub?.cancel();
-    _socketSub = null;
-    final socket = _socket;
-    _socket = null;
-    try {
-      socket?.close();
-    } catch (_) {}
-    if (handleClose) _handleSocketClosed(code, reason);
-  }
-
-  void _handleSocketClosed(int code, String? reason) {
-    if (_disposed) return;
-    _stopHeartbeat();
-    _authAckTimer?.cancel();
-    final mapped = relayCloseReason(code);
-    _log('[relay-v2] closed code=$code reason=$reason mapped=$mapped');
-    if (_intentionallyClosed) return;
-    if (_wasPaired || mapped == 'desktop-disconnected') {
-      _scheduleReconnect();
-      return;
-    }
-    _setState(RelayState.error);
-    _failureController.add(RelayFailure(
-      mapped ?? 'relay-unavailable',
-      reason ?? 'connection closed ($code)',
-    ));
-  }
-
-  void _startHeartbeat() {
-    _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(heartbeatInterval, (_) {
-      if (state != RelayState.paired && state != RelayState.waiting) return;
-      if (now().difference(_lastInboundAt) > heartbeatTimeout) {
-        _log('[relay-v2] heartbeat ack timeout, reconnecting');
-        unawaited(_reconnect());
-        return;
-      }
-      _send({'type': 'pair_status_query'});
-    });
-  }
-
-  void _stopHeartbeat() => _heartbeatTimer?.cancel();
-
-  /// Reconnect backoff: 1s doubling to the 15s cap, and once a link keeps
-  /// failing (8 attempts in a row) each retry drops to a fixed 60s. The
-  /// link still self-heals when the network returns — it just stops the
-  /// 15s-endless-retry noise/ battery drain observed over an hour.
-  @visibleForTesting
-  static Duration reconnectDelay(int attempt) {
-    if (attempt >= 8) return const Duration(milliseconds: 60000);
-    return Duration(
-      milliseconds: (1000 * (1 << attempt.clamp(0, 4))).clamp(1000, 15000),
-    );
-  }
-
-  void _scheduleReconnect() {
-    if (_disposed || _intentionallyClosed) return;
-    _setState(RelayState.reconnecting);
-    final delay = reconnectDelay(_reconnectAttempt);
-    _reconnectAttempt += 1;
-    _log('[relay-v2] reconnect in ${delay.inMilliseconds}ms '
-        '(attempt $_reconnectAttempt)');
-    _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(delay, () {
-      if (!_disposed) unawaited(_reconnect());
-    });
-  }
-
-  Future<void> _reconnect() async {
-    _reconnectTimer?.cancel();
-    _setState(RelayState.reconnecting);
-    bool ok;
-    try {
-      ok = await _connect();
-    } catch (e) {
-      _log('[relay-v2] reconnect failed: $e');
-      ok = false;
-    }
-    if (ok || _disposed) return;
-    // auth-required needs the user; everything else backs off and retries.
-    if (_lastFailureReason == 'auth-required') return;
-    if (!_intentionallyClosed) _scheduleReconnect();
-  }
-
-  @override
-  Future<void> dispose() async {
-    _disposed = true;
-    _intentionallyClosed = true;
-    _stopHeartbeat();
-    _authAckTimer?.cancel();
-    _rewaitTimer?.cancel();
-    _reconnectTimer?.cancel();
-    await _socketSub?.cancel();
-    _socketSub = null;
-    final socket = _socket;
-    _socket = null;
-    try {
-      await socket?.close();
-    } catch (_) {}
-    _setState(RelayState.closed);
-    _http.close();
-    await _payloadController.close();
-    await _failureController.close();
-  }
+  bool get terminalCloseThroughHandler => false;
 }
