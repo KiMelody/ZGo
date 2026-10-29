@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'channel_client.dart';
 import 'connection_params.dart';
 import 'conversation.dart';
+import 'desktop_capabilities.dart';
 import 'device_info.dart';
 import 'id.dart';
 import 'relay_client.dart';
@@ -49,6 +50,11 @@ Map<String, dynamic> mobileViewStatePayload({
 class RemoteClient {
   final RemoteConnectionParams params;
   final void Function(String line)? onLog;
+
+  /// Named desktop capability matrix. The protocol layer owns no live
+  /// version source (the bootstrap frame lands in the state layer), so this
+  /// instance is snapshot-only; every gate here stays frozen.
+  late final DesktopCapabilities capabilities = DesktopCapabilities(params);
 
   /// ZCode account JWT seam for the V2 relay. The protocol layer never
   /// imports the plan layer — the state layer injects this callback.
@@ -435,7 +441,7 @@ class RemoteClient {
         _activeBridges.remove(s);
         _frameRouters.remove(s.bridge['bridgeSessionId']);
       },
-      workspaceHookReviewUi: params.atLeast(3, 12, 3),
+      workspaceHookReviewUi: capabilities.workspaceHookReviewUi,
     );
     _attachStack(session, bridgeSessionId, bridge);
     _activeBridges.add(session);

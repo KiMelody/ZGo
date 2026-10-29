@@ -891,9 +891,7 @@ class _TaskListPageState extends State<TaskListPage>
   bool get _providersSupported {
     final session = _session;
     if (session == null) return false;
-    if (session.params.atLeast(3, 14, 0)) return true;
-    if (!session.params.hasKnownVersion) return true;
-    return session.modelProviderAvailable != false;
+    return session.capabilities.providersEntryEnabled;
   }
 
   Widget _providersMenuItem() {
@@ -901,7 +899,7 @@ class _TaskListPageState extends State<TaskListPage>
     // The probe answers the disabled-entry verdict for known pre-3.14
     // links (and primes the verdict an unknown version's route decision
     // consumes); a known ≥3.14 link would only log a doomed call.
-    if (session != null && !session.params.atLeast(3, 14, 0)) {
+    if (session != null && session.capabilities.shouldPrimeProviderProbe) {
       unawaited(session.probeModelProvider());
     }
     if (_providersSupported) {

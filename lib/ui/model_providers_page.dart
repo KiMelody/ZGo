@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../protocol/channel_client.dart';
+import '../protocol/desktop_capabilities.dart' show ProviderRoute;
 import '../protocol/id.dart';
 import '../state/device_session.dart';
 import 'provider_settings_page.dart';
@@ -37,26 +38,29 @@ class _ModelProvidersPageState extends State<ModelProvidersPage> {
 
   Future<void> _decide() async {
     final session = widget.session;
+    final caps = session.capabilities;
     if (mounted) setState(() => _useNewChannel = null);
-    if (session.params.atLeast(3, 14, 0)) {
-      if (mounted) setState(() => _useNewChannel = true);
-      return;
-    }
-    // Known pre-3.14 version: the new channel cannot exist — legacy page
-    // (which carries its own unavailable fallback) with zero added calls.
-    if (session.params.hasKnownVersion) {
-      if (mounted) setState(() => _useNewChannel = false);
-      return;
+    switch (caps.providerRoute) {
+      case ProviderRoute.providerSettings:
+        if (mounted) setState(() => _useNewChannel = true);
+        return;
+      // Known pre-3.14 version: the new channel cannot exist — legacy page
+      // (which carries its own unavailable fallback) with zero added calls.
+      case ProviderRoute.legacy:
+        if (mounted) setState(() => _useNewChannel = false);
+        return;
+      case ProviderRoute.unknown:
+        break;
     }
     // Unknown version: the cached legacy-channel verdict is trusted only
     // once it has actually landed. An absent verdict means the probe never
     // ran (or is still in flight) — await it once (in-flight dedup makes
     // the wait free) before deciding, instead of silently assuming legacy.
-    if (session.modelProviderAvailable == null) {
+    if (caps.providerVerdict == null) {
       await session.probeModelProvider();
       if (!mounted) return;
     }
-    if (session.modelProviderAvailable != false) {
+    if (caps.providerVerdict != false) {
       if (mounted) setState(() => _useNewChannel = false);
       return;
     }

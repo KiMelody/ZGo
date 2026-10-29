@@ -16,6 +16,7 @@ import '../protocol/channel_client.dart'
         isSessionNotFoundError;
 import '../protocol/connection_params.dart';
 import '../protocol/conversation.dart';
+import '../protocol/desktop_capabilities.dart';
 import '../protocol/file_service.dart';
 import '../protocol/git_service.dart';
 import '../protocol/method_probe.dart';
@@ -718,6 +719,16 @@ class DeviceSession extends ChangeNotifier
   /// 2026-10-26; the stale gate was why the fallback leg never fired).
   String? _desktopAppVersion;
 
+  /// Named desktop capability matrix (protocol layer). One long-lived
+  /// instance per session; its callbacks re-read [desktopAppVersion] and
+  /// [modelProviderAvailable] on every evaluation, so a bootstrap frame
+  /// landing after construction is honoured.
+  late final DesktopCapabilities capabilities = DesktopCapabilities(
+    params,
+    liveDesktopVersion: () => desktopAppVersion,
+    providerVerdict: () => modelProviderAvailable,
+  );
+
   DeviceStatus _status = DeviceStatus.disconnected;
 
   /// Raw wire workspace list (bootstrap / `workspace-list-updated`). The
@@ -1201,6 +1212,12 @@ class DeviceSession extends ChangeNotifier
     // New connection episode: a later cold parking must log again.
     _watchdogParked = false;
     _failureReason = null;
+    // Live version belongs to the connection that reported it. Until this
+    // episode's bootstrap lands with a `desktopAppVersion`, live-then-
+    // snapshot capabilities must read the link snapshot, never a previous
+    // desktop's value (reconnect to an older desktop would otherwise keep a
+    // stale gate open).
+    _desktopAppVersion = null;
     _setStatus(DeviceStatus.connecting);
     // V2 links authenticate with the ZCode account JWT. Without the seam
     // there is nothing to dial: fail with the explicit auth-required state
@@ -1630,7 +1647,7 @@ class DeviceSession extends ChangeNotifier
       // Fire-and-forget: the resolver never throws; a create landing
       // mid-read shares the in-flight future, and a failed read leaves both
       // consumers in their pre-feature shape.
-      if (params.atLeast(3, 16, 2)) {
+      if (capabilities.projectLayer) {
         unawaited(_refreshProjectWorkspaces());
       }
       // Deleted-task tombstones for the live-index filter (Addendum 2):
@@ -1738,12 +1755,7 @@ class DeviceSession extends ChangeNotifier
   /// the running desktop (live acceptance: a 3.16.3 desktop behind a 3.16.2
   /// link, where the stale gate kept the fallback leg from ever firing) —
   /// and falls back to that snapshot when the frame carries nothing.
-  bool get _supportsBridgeAddressing {
-    final desktop = _desktopAppVersion;
-    return desktop == null
-        ? params.atLeast(3, 16, 3)
-        : versionAtLeast(desktop, 3, 16, 3);
-  }
+  bool get _supportsBridgeAddressing => capabilities.bridgeAddressing;
 
   /// First addressing leg is the pre-3.16.3 frame. When the desktop's
   /// bounded-window registry misses [key], the 3.16.3+ schemas accept a
@@ -2119,7 +2131,7 @@ class DeviceSession extends ChangeNotifier
   void _setBootstrapWorkspaces(List<Map<String, dynamic>> list) {
     _bootstrapWorkspaces = list;
     final changed = _mergeResolvedProjectWorkspaces();
-    if (params.atLeast(3, 16, 2) &&
+    if (capabilities.projectLayer &&
         changed &&
         (_testGate != null || _bridge != null)) {
       // A merge landing through a bootstrap/push frame grows the list, but
@@ -2139,7 +2151,7 @@ class DeviceSession extends ChangeNotifier
   /// itself and behavior stays byte-identical). Answers whether the merged
   /// list changed.
   bool _mergeResolvedProjectWorkspaces() {
-    final merged = params.atLeast(3, 16, 2)
+    final merged = capabilities.projectLayer
         ? mergeProjectWorkspaces(
             _bootstrapWorkspaces,
             _projectResolver.projectRoots,
@@ -2212,7 +2224,7 @@ class DeviceSession extends ChangeNotifier
   }
 
   Future<void> _resolveProjectWorkspaces() async {
-    if (!params.atLeast(3, 16, 2) || _disposed) return;
+    if (!capabilities.projectLayer || _disposed) return;
     final client = _client;
     // The read rides the workspace file channel; without a live link (or an
     // injected test gate) there is nothing to read yet — the next frame
@@ -2461,7 +2473,7 @@ class DeviceSession extends ChangeNotifier
         // parseModelSelectionCatalog) takes over as the sheet's data
         // source. CRUD (save/delete) has no counterpart — the providers
         // page stays capability-gated on [probeModelProvider].
-        if (params.atLeast(3, 14, 0)) {
+        if (capabilities.modelSelectionCatalog) {
           return parseModelSelectionCatalog(
               await callChannel(Channels.modelSelection, 'getView'));
         }
@@ -2503,7 +2515,7 @@ class DeviceSession extends ChangeNotifier
   @override
   late final AutomationPort automation = AutomationPort(
     (method, args) => callChannel('zcode-agent', method, args),
-    newWire: params.atLeast(3, 12, 3),
+    newWire: capabilities.scopeFirstWire,
   );
 
   /// Off-peak tasks of the connected desktop (off-peak-task channel). The
@@ -2513,8 +2525,8 @@ class DeviceSession extends ChangeNotifier
   @override
   late final OffPeakPort offPeak = OffPeakPort(
     (method, args) => callChannel('off-peak-task', method, args),
-    newWire: params.atLeast(3, 12, 3),
-    statusV314: params.atLeast(3, 14, 0),
+    newWire: capabilities.scopeFirstWire,
+    statusV314: capabilities.offPeakStatusProbes,
   );
 
   /// Workspace scope (workspacePath/identity) for off-peak submissions and
@@ -2595,7 +2607,7 @@ class DeviceSession extends ChangeNotifier
   /// before instead of being queued.
   @override
   ReplayableCommandQueue? get replayableQueue {
-    if (!params.atLeast(3, 12, 3)) return null;
+    if (!capabilities.replayableQueue) return null;
     return _conversation?.replayableQueue;
   }
 
@@ -2752,11 +2764,18 @@ class DeviceSession extends ChangeNotifier
   /// the prewarm never ran): the mapping that just landed also completes
   /// the workspace list, fired without blocking the create.
   Future<String?> _projectIdForCreate(String workspacePath) async {
-    if (!params.atLeast(3, 16, 2)) return null;
+    if (!capabilities.projectCreateAddressing) return null;
     final projectId = await _projectResolver.projectIdFor(workspacePath);
     if (!_disposed) unawaited(_applyProjectWorkspaceCompletion());
     return projectId;
   }
+
+  /// Test seam for the create-session project gate: the production path is
+  /// [ConversationTransport.createSession]'s `projectIdFor` callback, which
+  /// cannot be observed without a live transport.
+  @visibleForTesting
+  Future<String?> debugProjectIdForCreate(String workspacePath) =>
+      _projectIdForCreate(workspacePath);
 
   /// Workspace Git operations on the `git` channel (status-panel Git group,
   /// review panel, branch/commit/push writes). Late final like the ports
@@ -2958,8 +2977,16 @@ class DeviceSession extends ChangeNotifier
   }
 
   @override
-  Future<WorkspacePrep> prepareWorkspace() async {
-    if (params.atLeast(3, 12, 3)) {
+  Future<WorkspacePrep> prepareWorkspace() => _prepareWorkspace();
+
+  /// Test seam: the production [prepareWorkspace] body. The test fake
+  /// overrides the public method with a canned answer, so consumer-level
+  /// capability tests drive the real body through here.
+  @visibleForTesting
+  Future<WorkspacePrep> debugPrepareWorkspace() => _prepareWorkspace();
+
+  Future<WorkspacePrep> _prepareWorkspace() async {
+    if (capabilities.prepareWorkspaceTaskOptions) {
       // 3.12.3 removed prepareWorkspace: config selectors come from the
       // task-level options RPC, slash commands (incl. custom ones) from
       // readWorkspacePresentation alongside it — then the legacy call
@@ -3388,7 +3415,7 @@ class DeviceSession extends ChangeNotifier
   /// no bare retry: on 3.12.3 the bare form answers not_configured, so a
   /// retry would add zero information.
   Future<dynamic> _fetchEntitlement(Map<String, dynamic> plan) async {
-    if (!params.atLeast(3, 12, 3)) {
+    if (!capabilities.quotaWire) {
       return callChannel('usage-stats', 'getEntitlementSnapshot', [
         {'includeSubscription': true}
       ]);
@@ -3409,7 +3436,7 @@ class DeviceSession extends ChangeNotifier
   Future<EntitlementView> entitlementSnapshot({bool force = false}) async {
     final EntitlementPoller poller;
     Map<String, dynamic>? plan;
-    if (params.atLeast(3, 12, 3)) {
+    if (capabilities.quotaWire) {
       final cached = _mainRoute;
       if (!force && cached != null && cached.poller.isFresh) {
         poller = cached.poller;
@@ -3448,7 +3475,7 @@ class DeviceSession extends ChangeNotifier
   Future<List<EntitlementSnapshotRoute>> entitlementSnapshots({
     bool force = false,
   }) async {
-    if (!params.atLeast(3, 12, 3)) {
+    if (!capabilities.quotaWire) {
       final view = await _legacyPoller().refresh(force: force);
       quotaResetController.updateScope(view.resetScopeProviderId);
       return [(plan: null, view: view)];
@@ -3493,7 +3520,7 @@ class DeviceSession extends ChangeNotifier
 
   @override
   Future<Object?> quotaResetStatus({bool force = false}) async {
-    if (!params.atLeast(3, 12, 3)) {
+    if (!capabilities.quotaWire) {
       return callChannel('usage-stats', 'getCodingPlanResetStatus', [
         {'preferredProviderId': quotaResetController.scopeProviderId},
       ]);
@@ -3532,7 +3559,7 @@ class DeviceSession extends ChangeNotifier
     String idempotencyKey, {
     String? preferredProviderId,
   }) async {
-    if (!params.atLeast(3, 12, 3)) {
+    if (!capabilities.quotaWire) {
       return callChannel('usage-stats', 'useCodingPlanReset', [
         {
           'preferredProviderId': preferredProviderId,
@@ -3605,6 +3632,9 @@ class DeviceSession extends ChangeNotifier
     _error = null;
     _lastWorkspaceOpenFailure = null;
     _watchdogParked = false;
+    // The live version dies with the link (see [connect]): a later
+    // connection starts in snapshot-only mode until its bootstrap lands.
+    _desktopAppVersion = null;
     _setStatus(DeviceStatus.disconnected);
     await _failureSub?.cancel();
     _failureSub = null;

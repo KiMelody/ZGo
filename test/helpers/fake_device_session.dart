@@ -23,11 +23,13 @@ class FakeDeviceSession extends DeviceSession {
     required super.deviceId,
     required super.params,
     super.sidecarCooldown,
+    super.projectResolverFactory,
     List<Map<String, dynamic>> entries = const [],
     List<Map<String, dynamic>> workspaces = const [],
     this.relayTasks = const [],
     this.chatRows = const [],
     this.snapshotExtra = const {},
+    this.desktopVersionOverride,
     this.channelHandler,
   }) : status = DeviceStatus.connected,
        sessions = SessionsIndexState(),
@@ -191,6 +193,16 @@ class FakeDeviceSession extends DeviceSession {
     if (handler != null) return handler(channel, method, args);
     return null;
   }
+
+  /// Live desktop version (bootstrap-frame `desktopAppVersion`) for this
+  /// never-connecting fake. The capability matrix reads the public
+  /// [desktopAppVersion] getter, so setting this moves every
+  /// live-then-snapshot capability exactly like a real bootstrap would.
+  String? desktopVersionOverride;
+
+  @override
+  String? get desktopAppVersion =>
+      desktopVersionOverride ?? super.desktopAppVersion;
 
   @override
   List<Map<String, dynamic>> get workspaces => _workspaces;
