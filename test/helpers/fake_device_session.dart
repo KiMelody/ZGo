@@ -1,6 +1,9 @@
+import 'package:clock/clock.dart';
+
 import 'package:zgo/protocol/channel_client.dart';
 import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/state/device_session.dart';
+import 'package:zgo/state/sidecar_index_manager.dart';
 import 'package:zgo/state/task_directory.dart';
 
 import 'recording_chat_gateway.dart';
@@ -36,13 +39,18 @@ class FakeDeviceSession extends DeviceSession {
     // Recorded BEFORE the seed frame so the confirmation below sees it.
     sessions.subscribedWorkspaceKey =
         _active == null ? null : workspaceKeyOf(_active!);
-    // Replay the production wiring (openWorkspace attaches the session's
-    // live-frame listener to the subscribed index): every frame this fake
-    // delivers re-confirms the sticky home cache (design 10-02), records
-    // cross-terminal deletion tombstones (task 10-06) AND snapshots into
-    // the per-workspace cache (design 10-15 live-snapshot) — the seeded
-    // snapshot included, same order as _onSessionsChanged.
-    sessions.addListener(_onLiveFrame);
+    // Drive the REAL TaskHomeService wiring (design 10-29 §2.11): the fake
+    // no longer replays the production listener by hand. The seeded
+    // snapshot lands through the service listener exactly like a first
+    // ready frame (record → confirm → snapshot), and every later
+    // `sessions.applyFrame` keeps running the full production wiring.
+    taskHome.setWorkspaces(workspaces);
+    taskHome.setRelayTasks(relayTasks);
+    taskHome.setActiveSessions(
+      sessions,
+      generation: () => generation,
+      frameKind: () => frameKind,
+    );
     deliver({
       'toSeq': 1,
       'payload': {
@@ -52,24 +60,12 @@ class FakeDeviceSession extends DeviceSession {
     });
   }
 
-  void _onLiveFrame() {
-    recordVanishedSessions();
-    confirmLiveHomes();
-    snapshotSessionsIntoCache(sessions);
-  }
-
-  /// Tombstone-diff signals (the device_session.dart override seam): the
-  /// live index's subscription generation and the kind of the frame
-  /// currently being applied. Tests bump [generation] to replay a
-  /// bridge-swing resubscribe; [deliver] publishes the frame kind around
-  /// applyFrame exactly like the production subscription does.
+  /// Tombstone-diff signals read by the real service's listener closures:
+  /// tests bump [generation] to replay a bridge-swing resubscribe;
+  /// [deliver] publishes the frame kind around applyFrame exactly like the
+  /// production subscription does.
   int generation = 0;
   String? frameKind;
-
-  @override
-  int get indexGeneration => generation;
-  @override
-  String? get applyingFrameKind => frameKind;
 
   /// Delivers a live sessions-index frame the way
   /// [SessionsIndexSubscription] does: the frame kind is published
@@ -95,17 +91,16 @@ class FakeDeviceSession extends DeviceSession {
   /// Overview-application seam mirroring the production wiring
   /// ([DeviceSession._applyRelayOverview] and the
   /// `workspace-list-updated` push path): replaces the relay overview AND
-  /// runs the [DeviceSession.reconcileTaskHomes] both production
+  /// runs the TaskHomeService.reconcileTaskHomes both production
   /// application points run (anchor reconcile + tombstone TTL prune +
   /// absence prune). Tests drive overview changes through this instead of
   /// poking [relayTasks] directly, so the application wiring stays
   /// guarded.
   void applyRelayOverview(List<Map<String, dynamic>> tasks) {
     relayTasks = tasks;
-    reconcileTaskHomes();
-    // Production's overview landing points also re-diff the sidecar set
-    // (DeviceSession._recomputeSidecarSubscriptions).
-    debugRecomputeSidecarSubscriptions();
+    // The real landing wiring: relay rows + anchor reconcile + sidecar
+    // re-diff (TaskHomeService.applyRelayOverview).
+    taskHome.applyRelayOverview(tasks);
   }
 
   // --- sidecar sessions-index subscriptions (design 10-28) ---
@@ -116,46 +111,57 @@ class FakeDeviceSession extends DeviceSession {
   /// Keys whose sidecar subscription the manager disposed, in order.
   final List<String> sidecarDisposed = [];
 
-  /// States handed out by [subscribeSidecarIndex], by workspace key —
+  /// States handed out by the injected subscribe closure, by workspace key —
   /// tests drive frames through them (the manager attaches its listener).
   final Map<String, SessionsIndexState> sidecarStates = {};
 
-  /// When true, [subscribeSidecarIndex] throws the desktop's benign
+  /// When true, the injected subscribe closure throws the desktop's benign
   /// cold-runtime refusal (the manager must cool the workspace down).
   bool sidecarColdRuntime = false;
 
-  /// Optional gate [subscribeSidecarIndex] awaits before handing the state
-  /// back — lets a test move the relay overview while a subscribe is still
-  /// in flight (the P2-2 candidate recheck).
+  /// Optional gate the injected subscribe closure awaits before handing the
+  /// state back — lets a test move the relay overview while a subscribe is
+  /// still in flight (the P2-2 candidate recheck).
   Future<void>? sidecarSubscribeGate;
 
-  /// The fake has no bridge/transport; the manager only needs the seam.
+  /// The fake has no bridge/transport: only this one factory is replaced,
+  /// and the REAL manager runs its six strategies over the fake
+  /// capabilities (the three former @protected sidecar overrides are gone).
   @override
-  bool get sidecarSubscriptionsAvailable => true;
-
-  @override
-  Future<SessionsIndexState> subscribeSidecarIndex(
-    String key,
-    Map<String, dynamic> scope,
-  ) async {
-    sidecarSubscribeCalls.add((key, scope));
-    final gate = sidecarSubscribeGate;
-    if (gate != null) await gate;
-    if (sidecarColdRuntime) {
-      throw ChannelRpcError(
-        'ZCode Agent runtime is not running for workspace '
-        '${scope['workspacePath']}',
-        null,
+  SidecarIndexManager createSidecarManager() => SidecarIndexManager(
+        subscribe: (key, scope, onSubscribeFailure) async {
+          sidecarSubscribeCalls.add((key, scope));
+          final gate = sidecarSubscribeGate;
+          if (gate != null) await gate;
+          if (sidecarColdRuntime) {
+            throw ChannelRpcError(
+              'ZCode Agent runtime is not running for workspace '
+              '${scope['workspacePath']}',
+              null,
+            );
+          }
+          return sidecarStates[key] ??= SessionsIndexState();
+        },
+        dispose: (key) async {
+          sidecarDisposed.add(key);
+          sidecarStates.remove(key);
+        },
+        available: () => true,
+        probeDeleted: (scope) async => null,
+        relayRows: () => relayTasks,
+        activeKey: () {
+          final active = activeWorkspace;
+          if (active == null) return null;
+          return workspaceKeyOf(active);
+        },
+        normalizeKey: (raw) => raw,
+        onChanged: notifyMergedChanged,
+        isDisposed: () => debugDisposed,
+        log: (line) {},
+        limit: DeviceSession.sidecarWorkspaceLimit,
+        cooldown: sidecarCooldown,
+        clock: clock.now,
       );
-    }
-    return sidecarStates[key] ??= SessionsIndexState();
-  }
-
-  @override
-  Future<void> disposeSidecarIndex(String key) async {
-    sidecarDisposed.add(key);
-    sidecarStates.remove(key);
-  }
 
   Map<String, dynamic>? _active;
   final List<Map<String, dynamic>> chatRows;

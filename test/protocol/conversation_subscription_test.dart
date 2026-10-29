@@ -231,6 +231,55 @@ void main() {
       await sub.dispose();
     });
   });
+
+  group('subscribe paths bypass the link ledger (ADR-0009)', () {
+    test('a cold-runtime subscribe refusal reports nothing to '
+        'onLinkLevelFailure / onChannelSuccess and rethrows unchanged',
+        () async {
+      final channels = _ManualChannels();
+      final linkFailures = <String>[];
+      var channelSuccesses = 0;
+      final transport = _FastBackoffTransport(
+        session: _FakeBridgeSession(channels.client),
+        scope: {'workspacePath': '/repo'},
+        onLinkLevelFailure: (channel, error) =>
+            linkFailures.add('$channel:$error'),
+        onChannelSuccess: (channel) => channelSuccesses++,
+      );
+      Future<void> pumpUntil(bool Function() test) async {
+        final deadline = DateTime.now().add(const Duration(seconds: 5));
+        while (!test()) {
+          if (DateTime.now().isAfter(deadline)) fail('condition not met');
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+      }
+
+      final done = transport.subscribeSessionsIndex(
+        scope: {'workspacePath': '/cold'},
+      );
+      await pumpUntil(
+        () => channels.count('subscribeSessionsIndexV4') == 1,
+      );
+      channels.fail(
+        'subscribeSessionsIndexV4',
+        'ZCode Agent runtime is not running for workspace /cold',
+      );
+      Object? caught;
+      try {
+        await done;
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught, isA<ChannelRpcError>(),
+          reason: 'the desktop refusal reaches the caller unchanged');
+      expect(isAgentRuntimeNotRunningError(caught!), isTrue);
+      expect(linkFailures, isEmpty,
+          reason: 'the subscribe path bypasses callChannel/LinkSupervisor '
+              'structurally — no link-level report, cold runtime or not');
+      expect(channelSuccesses, 0,
+          reason: 'a subscribe is not a send path and never reports success');
+    });
+  });
 }
 
 /// Test transport with a shrunk backoff schedule (40/80/160ms) — same
@@ -240,6 +289,8 @@ class _FastBackoffTransport extends ConversationTransport {
     required super.session,
     required super.scope,
     super.onLog,
+    super.onLinkLevelFailure,
+    super.onChannelSuccess,
   });
 
   @override

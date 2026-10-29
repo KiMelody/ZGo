@@ -161,7 +161,7 @@ void main() {
         ],
       );
       session.taskHomeStore.anchorHome('t1', 'old-ws');
-      session.reconcileTaskHomes();
+      session.taskHome.reconcileTaskHomes();
       expect(session.taskHomeStore.homeKeys['t1'], 'old-ws',
           reason: 'confirmLiveHomes manages live-visible ids; reconcile '
               'must not overwrite the anchor with the relay key');
@@ -404,7 +404,7 @@ void main() {
 
       // 关窗 + reconcile（对账的单副本 key 是 path 拼写）。
       session.sessions.applyFrame(snapshot(const []), onGap: () {});
-      session.reconcileTaskHomes();
+      session.taskHome.reconcileTaskHomes();
       expect(session.taskHomeStore.homeKeys['t1'], 'alpha',
           reason: 'canonicalized relay key == anchor: no flip');
       expect(session.taskDirectory.entriesFor('alpha'), hasLength(1),

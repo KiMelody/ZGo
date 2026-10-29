@@ -562,6 +562,28 @@ void main() {
       expect(payload['sessionId'], 'rb1');
     });
 
+    test('archived relay rows still enter the notification scope', () async {
+      // ADR-0011 / design 10-29 §0.9: the hub keeps reading the merged
+      // rows' `notificationRows(includeArchived: true)` view — an archived
+      // task that finishes mid-run must still report its completion, and no
+      // second derived layer is invented below it.
+      Map<String, dynamic> archived(String status) => {
+            ...relayTask('ra1', '已归档任务', status),
+            'archived': true,
+          };
+      session.setRelayTasks([archived('running')]);
+      expect(service.shown, isEmpty, reason: 'running is not an event');
+      session.setRelayTasks([archived('completed')]);
+      await pumpEventQueue();
+
+      expect(service.shown, hasLength(1));
+      final (channel, _, title, body, payload) = service.shown.single;
+      expect(channel, NotifyChannel.tasks);
+      expect(title, '任务完成');
+      expect(body, '已归档任务');
+      expect(payload['sessionId'], 'ra1');
+    });
+
     test('the live index overrides a stale overview row', () async {
       session.setRelayTasks([relayTask('s1', '修复登录', 'running')]);
       session.setEntries([('s1', '修复登录', 'running')]);

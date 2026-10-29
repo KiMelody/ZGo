@@ -120,7 +120,7 @@ void main() {
     // Opening B as the active workspace (production's openWorkspace ends
     // with a recompute) retires its sidecar subscription.
     await s.openWorkspace(wsB);
-    s.debugRecomputeSidecarSubscriptions();
+    s.sidecarManager.reconcile();
     await settle();
     expect(s.sidecarDisposed, contains('/repo/b'));
     expect(s.taskDirectory.sidecarIndexes.containsKey('/repo/b'), isFalse);
@@ -148,7 +148,7 @@ void main() {
 
     // Window expiry retries once.
     await Future<void>.delayed(const Duration(milliseconds: 120));
-    s.debugRecomputeSidecarSubscriptions();
+    s.sidecarManager.reconcile();
     await settle();
     expect(s.sidecarSubscribeCalls, hasLength(2));
 

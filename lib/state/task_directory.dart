@@ -70,8 +70,11 @@ bool isConversationWorkspace(Map<String, dynamic> ws) {
 /// notification hub) with diverging archived handling; consumers now read
 /// this projection instead.
 ///
-/// Stateless: every read recomputes from the inputs, nothing is cached —
-/// rows are tens, not thousands, and rebuilds already re-invoke the readers.
+/// Pure core: the class itself holds no cache — every read recomputes from
+/// the inputs. Production materializes one [mergedRows] snapshot per dirty
+/// revision in `TaskHomeService` (design 10-29 §2.4); tests may keep
+/// constructing the pure core directly. The merge rules themselves stay
+/// here and are the single authority for the projection.
 class TaskDirectory {
   /// Relay task overview (`Dg` maps from bootstrap /
   /// `workspace-list-updated`): every workspace's tasks.
@@ -99,9 +102,9 @@ class TaskDirectory {
   /// lag in memory when a reloadTasks response is swallowed by a bridge
   /// reopen. Owned by the session's [TaskHomeStore] — add-only with a
   /// 7-day TTL (check P1-1, 2026-10-15: a re-listing overview never lifts
-  /// a tombstone; expiry is the only removal) — and re-read fresh on every
-  /// [DeviceSession.taskDirectory] construction, so new tombstones are
-  /// seen at once.
+  /// a tombstone; expiry is the only removal) — and re-read by the
+  /// production projection whenever the store revision moves
+  /// (`TaskHomeService.directory`), so new tombstones are seen at once.
   final Set<String> locallyDeletedTaskIds;
 
   /// Persisted home anchors (design 10-15 §1.1, [TaskHomeStore] backed):
@@ -190,6 +193,9 @@ class TaskDirectory {
   /// ([SessionsIndexState.subscribedWorkspaceKey]) — recorded at subscribe
   /// time, the data self-certifies its home and stays immune to the
   /// page-level switch / re-subscribe drift window.
+  ({List<(SessionEntry, String?, bool)> rows, Set<String> sessionOnlyIds})
+      mergedRows() => _merge();
+
   ({List<(SessionEntry, String?, bool)> rows, Set<String> sessionOnlyIds})
       _merge() {
     final byId = <String, (SessionEntry, String?, bool)>{};

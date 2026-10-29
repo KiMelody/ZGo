@@ -14,9 +14,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 ///
 /// State model: the maps are an in-memory cache loaded from disk and kept
 /// in sync on every mutation (mutate memory synchronously, persist
-/// fire-and-forget — the DeviceStore「先内存再落盘」shape, minus the
-/// notify: readers re-read per rebuild anyway). [load] MERGES disk state
-/// in instead of overwriting: a write racing the load (the session
+/// fire-and-forget — the DeviceStore「先内存再落盘」shape, without a
+/// ChangeNotifier: every write bumps [revision], and readers invalidate
+/// their materialized projection when it changes). [load] MERGES disk
+/// state in instead of overwriting: a write racing the load (the session
 /// constructor confirms live homes before the async read settles) is the
 /// newer fact and must survive.
 ///
@@ -59,6 +60,16 @@ class TaskHomeStore {
   /// only removal).
   final Map<String, int> _tombstones = {};
   bool _loaded = false;
+
+  /// Monotonic write counter (design 10-29 §2.6): every actual mutation
+  /// bumps it, so `TaskHomeService`'s materialized directory can notice a
+  /// store write that had no notify of its own (anchor writes in
+  /// `createTaskWithMessage` / `correctTaskHome`, delete tombstones,
+  /// disk-state merge).
+  int _revision = 0;
+
+  /// See [_revision].
+  int get revision => _revision;
 
   /// True once a [load] attempt settled (success or degrade) — the flag
   /// tests poll on for the restored state.
@@ -144,6 +155,9 @@ class TaskHomeStore {
       // Platform without storage (plain unit tests / rare device states):
       // stay in-memory only.
     } finally {
+      // The disk state merged in (or the attempt degraded): a reader holding
+      // a materialized projection must re-read either way.
+      _revision++;
       _loaded = true;
     }
   }
@@ -157,6 +171,7 @@ class TaskHomeStore {
       key: key,
       confirmedAt: (now ?? clock.now()).millisecondsSinceEpoch,
     );
+    _revision++;
     _capAnchors();
     _scheduleAnchorSave();
   }
@@ -171,6 +186,7 @@ class TaskHomeStore {
       key: anchor.key,
       confirmedAt: (now ?? clock.now()).millisecondsSinceEpoch,
     );
+    _revision++;
     _scheduleAnchorSave();
   }
 
@@ -181,6 +197,7 @@ class TaskHomeStore {
   /// Drops the anchor (id entered the persistent tombstone, or pruned).
   void dropAnchor(String taskId) {
     if (_anchors.remove(taskId) == null) return;
+    _revision++;
     _scheduleAnchorSave();
   }
 
@@ -198,6 +215,7 @@ class TaskHomeStore {
     for (final id in expired) {
       _anchors.remove(id);
     }
+    _revision++;
     _scheduleAnchorSave();
   }
 
@@ -225,6 +243,7 @@ class TaskHomeStore {
     final at = (now ?? clock.now()).millisecondsSinceEpoch;
     if (_tombstones[taskId] == at) return;
     _tombstones[taskId] = at;
+    _revision++;
     _scheduleTombstoneSave();
   }
 
@@ -244,6 +263,7 @@ class TaskHomeStore {
     for (final id in expired) {
       _tombstones.remove(id);
     }
+    _revision++;
     _scheduleTombstoneSave();
   }
 
