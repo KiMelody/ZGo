@@ -13,6 +13,7 @@ import '../state/device_store.dart';
 import '../state/task_directory.dart';
 import 'automations_page.dart';
 import 'chat/chat_page.dart';
+import 'chat/copy_mappings.dart';
 import 'desktop_settings_page.dart';
 import 'device_usage_page.dart';
 import 'model_providers_page.dart';

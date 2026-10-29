@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zgo/ui/chat/chat_page.dart';
+import 'package:zgo/ui/chat/chat_page.dart' show anchoredInteractionPlan;
+import 'package:zgo/ui/chat/copy_mappings.dart';
 import 'package:zgo/ui/chat/timeline.dart';
 
 /// Pure-function units of the 10-08 parity chat-actions batch:

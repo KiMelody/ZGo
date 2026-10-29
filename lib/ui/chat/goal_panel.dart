@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import '../../protocol/conversation.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
-import 'chat_page.dart' show subagentActionText;
+import 'copy_mappings.dart';
 import 'subagent_feed.dart';
 
 /// Web 目标面板 (chat.statusPanel.* / goalBanner.*): the active

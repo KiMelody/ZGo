@@ -24,9 +24,10 @@ import '../phase_pill.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
 import '../widgets/sheet_scaffold.dart';
-import 'chat_page.dart' show ChatPage, businessErrorCopy, commandErrorCopy;
+import 'chat_page.dart' show ChatPage;
 import 'chat_preview.dart';
 import 'confirm_gate.dart';
+import 'copy_mappings.dart';
 import 'diff_view.dart';
 import 'git_panel.dart';
 import 'image_viewer_page.dart';
@@ -187,11 +188,6 @@ typedef AssistantTurnParts = ({
   Map<String, dynamic>? header,
   bool streaming,
 });
-
-/// Locale for the pure copy lookups (tool_row_semantics) at sites that
-/// hold a BuildContext but render through the module, not `tr`.
-String localeOf(BuildContext context) =>
-    UiSettingsProvider.of(context)?.locale ?? 'zh-CN';
 
 /// Fork flow shared by the message-action sheet and the feedback row (task
 /// C1, official parity): send `forkAssistant`, then — like the web's onFork

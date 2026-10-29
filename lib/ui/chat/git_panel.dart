@@ -6,8 +6,8 @@ import '../../protocol/channel_client.dart';
 import '../../protocol/git_service.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
-import 'chat_page.dart' show commandErrorCopy;
 import 'chat_preview.dart';
+import 'copy_mappings.dart';
 import 'diff_view.dart';
 
 /// Workspace Git UI for the chat page: the status-panel 「Git 工具」 group
