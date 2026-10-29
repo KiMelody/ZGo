@@ -6,9 +6,9 @@ import 'package:zgo/ui/chat/chat_page.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
-import '../../helpers/recording_chat_gateway.dart';
+import '../../helpers/chat_role_fakes.dart';
 
-class _Gw extends RecordingChatGateway {}
+class _Gw extends FakeChatGateway {}
 
 Widget wrap(Widget child) => MaterialApp(
   theme: buildDarkTheme(),
@@ -37,7 +37,7 @@ void main() {
     gw.chatDraftStore = store;
     await store.saveText('s1', 'hello draft', 0);
 
-    await tester.pumpWidget(wrap(ChatPage(gateway: gw, sessionId: 's1', title: 't')));
+    await tester.pumpWidget(wrap(ChatPage(host: gw, sessionId: 's1', title: 't')));
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('hello draft'), findsOneWidget);
@@ -52,7 +52,7 @@ void main() {
 
     await tester.pumpWidget(
       wrap(ChatPage(
-        gateway: gw,
+        host: gw,
         sessionId: 's1',
         title: 't',
         initialComposerText: '/compact',
@@ -69,7 +69,7 @@ void main() {
     final store = textStore();
     gw.chatDraftStore = store;
 
-    await tester.pumpWidget(wrap(ChatPage(gateway: gw, sessionId: 's1', title: 't')));
+    await tester.pumpWidget(wrap(ChatPage(host: gw, sessionId: 's1', title: 't')));
     await tester.enterText(find.byType(TextField).first, 'typing away');
     await tester.pump(const Duration(milliseconds: 600));
 
@@ -81,7 +81,7 @@ void main() {
     final store = textStore();
     gw.chatDraftStore = store;
 
-    await tester.pumpWidget(wrap(ChatPage(gateway: gw, sessionId: 's1', title: 't')));
+    await tester.pumpWidget(wrap(ChatPage(host: gw, sessionId: 's1', title: 't')));
     await tester.enterText(find.byType(TextField).first, 'bye draft');
     await tester.pump(const Duration(milliseconds: 600));
     expect((await store.restore('s1'))!.text, 'bye draft');
@@ -99,7 +99,7 @@ void main() {
     final store = textStore();
     gw.chatDraftStore = store;
 
-    await tester.pumpWidget(wrap(ChatPage(gateway: gw, title: 't')));
+    await tester.pumpWidget(wrap(ChatPage(host: gw, title: 't')));
     await tester.enterText(find.byType(TextField).first, 'new task text');
     await tester.pump(const Duration(milliseconds: 600));
     expect((await store.restore('draft.ws-1'))!.text, 'new task text');
@@ -121,7 +121,7 @@ void main() {
     final store = textStore();
     gw.chatDraftStore = store;
 
-    await tester.pumpWidget(wrap(ChatPage(gateway: gw, sessionId: 's1', title: 't')));
+    await tester.pumpWidget(wrap(ChatPage(host: gw, sessionId: 's1', title: 't')));
     await tester.enterText(find.byType(TextField).first, 'left mid-thought');
     // No debounce wait: page death itself must persist the text.
     await tester.pumpWidget(const SizedBox.shrink());

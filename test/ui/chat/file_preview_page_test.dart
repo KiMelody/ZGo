@@ -14,7 +14,7 @@ import 'package:zgo/ui/chat/source_highlight.dart';
 import 'package:zgo/ui/chat/timeline.dart';
 import 'package:zgo/ui/theme.dart';
 
-import '../../helpers/recording_chat_gateway.dart';
+import '../../helpers/chat_role_fakes.dart';
 
 Widget wrap(Widget child) => MaterialApp(theme: buildDarkTheme(), home: child);
 
@@ -638,7 +638,7 @@ void main() {
       'the back stack unwinds the chain', (tester) async {
     // Full production chain: ChatPreview.open → render kind → AppMarkdown
     // link → ChatPreview.openLink → the next preview over this one.
-    final gateway = RecordingChatGateway();
+    final gateway = FakeChatGateway();
     const md = '# notes\n\n[next](other.md)\n';
     gateway.fileReadTextResult = TextChunk(
       text: md,

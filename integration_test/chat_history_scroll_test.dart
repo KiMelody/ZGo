@@ -31,7 +31,7 @@ import 'package:zgo/ui/chat/chat_page.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
-import '../test/helpers/recording_chat_gateway.dart';
+import '../test/helpers/chat_role_fakes.dart';
 
 final _shotKey = GlobalKey();
 
@@ -111,7 +111,7 @@ Set<String> visibleMessages(WidgetTester tester) => {
 ScrollController historyController(WidgetTester tester) =>
     tester.widget<ListView>(find.byType(ListView)).controller!;
 
-int rowsRangeCalls(RecordingChatGateway gateway) =>
+int rowsRangeCalls(FakeChatGateway gateway) =>
     gateway.calls.where((c) => c.$1 == 'rowsRange').length;
 
 double prefetchThreshold(ScrollController controller) =>
@@ -221,7 +221,7 @@ void main() {
 
   testWidgets('history: seven high-variance pages load through every '
       'trigger without losing the reading anchor', (tester) async {
-    final gateway = RecordingChatGateway();
+    final gateway = FakeChatGateway();
     // Seeded window: rows 400..445 (variance heights), older pages queued —
     // entry 0 goes to the open auto-load. Snapshot is fed BEFORE mounting
     // (the open auto-load reads canLoadOlder inside the subscribe
@@ -238,7 +238,7 @@ void main() {
     gateway.feedSnapshot(varianceRows(400, 445), firstRowId: 1, totalCount: 446);
 
     await tester.pumpWidget(
-      _wrap(ChatPage(gateway: gateway, sessionId: 's1', title: '历史验收')),
+      _wrap(ChatPage(host: gateway, sessionId: 's1', title: '历史验收')),
     );
     await tester.pumpAndSettle();
 

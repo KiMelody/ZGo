@@ -14,7 +14,7 @@ import 'package:zgo/ui/chat/git_panel.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
-import '../../helpers/recording_chat_gateway.dart';
+import '../../helpers/chat_role_fakes.dart';
 
 /// Records every wire call the port makes and answers from [_handler].
 class _FakeGit {
@@ -616,7 +616,7 @@ void main() {
       final fake = _FakeGit(mixedChangesHandler);
       final c = _controller(fake);
       await c.reload();
-      final gateway = RecordingChatGateway()
+      final gateway = FakeChatGateway()
         ..fileReadTextResult = const TextChunk(
           text: 'void main() {}',
           bytesRead: 14,
@@ -687,7 +687,7 @@ void main() {
         _wrap(
           GitReviewPanel(
             controller: c,
-            preview: ChatPreview(RecordingChatGateway()),
+            preview: ChatPreview(FakeChatGateway()),
           ),
         ),
       );

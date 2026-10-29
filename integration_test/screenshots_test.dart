@@ -712,7 +712,7 @@ Navigator(
               key: UniqueKey(),
               onGenerateRoute: (_) => MaterialPageRoute<void>(
                 builder: (_) => ChatPage(
-                  gateway: session,
+                  host: session,
                   sessionId: 'sess_shot_1',
                   title: _chatTitle,
                 ),
@@ -773,7 +773,7 @@ Navigator(
               key: UniqueKey(),
               onGenerateRoute: (_) => MaterialPageRoute<void>(
                 builder: (_) => ChatPage(
-                  gateway: sessionQueue,
+                  host: sessionQueue,
                   sessionId: 'sess_shot_1',
                   title: _chatTitle,
                 ),

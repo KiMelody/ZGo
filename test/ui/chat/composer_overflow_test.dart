@@ -4,7 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:zgo/state/entitlement_poller.dart';
 import 'package:zgo/ui/chat/chat_page.dart';
 
-import '../chat_page_test.dart' show FakeChatGateway, wrap;
+import '../chat_page_test.dart' show wrap;
+import '../../helpers/chat_role_fakes.dart' show FakeChatGateway;
 
 /// Composer tool-row overflow matrix (10-10-composer-overflow-fix): every
 /// portrait icon-only combination must lay out with zero RenderFlex overflow
@@ -81,7 +82,7 @@ void main() {
       );
     }
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},

@@ -88,7 +88,7 @@ class TaskHomeService {
   /// live-snapshot cache): the merge layer's gap filler.
   final Map<String, List<SessionEntry>> _liveSnapshots = {};
 
-  /// Cross-terminal deletion tombstones (`ChatGateway.isSessionDeleted`).
+  /// Cross-terminal deletion tombstones (`SessionTruthPort.isSessionDeleted`).
   /// Add-only in memory; preserved across [clear] like the pre-extraction
   /// session (chat pages own their reader-recovery).
   final Set<String> _deletedSessionIds = <String>{};

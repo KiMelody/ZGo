@@ -4,7 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zgo/ui/chat/mention_sheet.dart';
 
-import '../helpers/recording_chat_gateway.dart';
+import '../helpers/chat_role_fakes.dart';
 
 void main() {
   group('insert formats (official renderer, verbatim)', () {
@@ -65,7 +65,7 @@ void main() {
 
   testWidgets('files category lists workspace files and returns the pick',
       (tester) async {
-    final gateway = RecordingChatGateway()
+    final gateway = FakeWorkspaceContext(RecordingCalls())
       ..searchWorkspaceFilesResult = [
         {
           'name': 'chat_page.dart',
@@ -113,7 +113,7 @@ void main() {
 
   testWidgets('add-context panel: 添加/文件/会话 sections, no plugins section',
       (tester) async {
-    final gateway = RecordingChatGateway()
+    final gateway = FakeWorkspaceContext(RecordingCalls())
       ..mentionSessionsResult = const [(id: 'sess_1', title: 'Hello')];
     AddContextResult? result;
     await tester.pumpWidget(MaterialApp(
@@ -124,7 +124,7 @@ void main() {
               onPressed: () async {
                 result = await showAddContextSheet(
                   buttonCtx,
-                  gateway: gateway,
+                  workspaceContext: gateway,
                   isDraft: true,
                   workflowCommand: 'workflow',
                 );
@@ -160,7 +160,7 @@ void main() {
   });
 
   testWidgets('add-context panel hides 目标 outside drafts', (tester) async {
-    final gateway = RecordingChatGateway();
+    final gateway = FakeWorkspaceContext(RecordingCalls());
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
         body: Center(
@@ -168,7 +168,7 @@ void main() {
             builder: (buttonCtx) => FilledButton(
               onPressed: () => showAddContextSheet(
                 buttonCtx,
-                gateway: gateway,
+                workspaceContext: gateway,
                 isDraft: false,
               ),
               child: const Text('open'),

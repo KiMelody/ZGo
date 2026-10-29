@@ -6,7 +6,7 @@ import 'package:zgo/ui/chat/timeline.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
-import '../../helpers/recording_chat_gateway.dart';
+import '../../helpers/chat_role_fakes.dart';
 
 /// `_TurnHeader` running-duration ticker (design D1): the running turn
 /// recomputes its elapsed locally on a 1s clock (official web parity), a
@@ -35,7 +35,7 @@ void main() {
   Future<void> pumpTurn(
     WidgetTester tester,
     List<Map<String, dynamic>> rows,
-    RecordingChatGateway gateway,
+    FakeConversation conversation,
     SubagentFeed feed,
   ) async {
     await tester.pumpWidget(
@@ -43,14 +43,13 @@ void main() {
         ChatTurnGroup(
           key: const ValueKey('turn-1'),
           rows: rows,
-          gateway: gateway,
+          conversation: conversation,
           sessionId: 's1',
           onAction: (label, action) async => action(),
-          state: gateway.state,
+          state: conversation.state,
           feed: feed,
-          preview: ChatPreview(gateway),
+          preview: ChatPreview(FakeWorkspaceContext(RecordingCalls())),
           confirmWindow: const Duration(milliseconds: 150),
-          workspaceLabel: null,
         ),
       ),
     );
@@ -59,9 +58,9 @@ void main() {
 
   testWidgets('running + startedAt ticks locally with the injected clock',
       (tester) async {
-    final gateway = RecordingChatGateway();
-    addTearDown(gateway.dispose);
-    final feed = SubagentFeed(gateway: gateway);
+    final conversation = FakeConversation(RecordingCalls());
+    addTearDown(conversation.dispose);
+    final feed = SubagentFeed(conversation: conversation);
     addTearDown(feed.dispose);
     await pumpTurn(tester, [
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -71,7 +70,7 @@ void main() {
         'state': 'running',
         'startedAt': baseMs - 65000,
       },
-    ], gateway, feed);
+    ], conversation, feed);
 
     var nowMs = baseMs;
     final header = headerState(tester);
@@ -88,9 +87,9 @@ void main() {
 
   testWidgets('running takes max(wire activeMs, now − startedAt) — the '
       'monotonic rule against clock skew', (tester) async {
-    final gateway = RecordingChatGateway();
-    addTearDown(gateway.dispose);
-    final feed = SubagentFeed(gateway: gateway);
+    final conversation = FakeConversation(RecordingCalls());
+    addTearDown(conversation.dispose);
+    final feed = SubagentFeed(conversation: conversation);
     addTearDown(feed.dispose);
     await pumpTurn(tester, [
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -102,7 +101,7 @@ void main() {
         'activeMs': 30000,
         'startedAt': baseMs - 90000,
       },
-    ], gateway, feed);
+    ], conversation, feed);
 
     var nowMs = baseMs;
     final header = headerState(tester);
@@ -120,9 +119,9 @@ void main() {
   testWidgets('terminal keeps the wire activeMs and never ticks', (
     tester,
   ) async {
-    final gateway = RecordingChatGateway();
-    addTearDown(gateway.dispose);
-    final feed = SubagentFeed(gateway: gateway);
+    final conversation = FakeConversation(RecordingCalls());
+    addTearDown(conversation.dispose);
+    final feed = SubagentFeed(conversation: conversation);
     addTearDown(feed.dispose);
     await pumpTurn(tester, [
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -132,7 +131,7 @@ void main() {
         'state': 'completedSuccess',
         'activeMs': 65000,
       },
-    ], gateway, feed);
+    ], conversation, feed);
 
     var nowMs = baseMs;
     final header = headerState(tester);
@@ -146,9 +145,9 @@ void main() {
 
   testWidgets('endedAt − startedAt is the terminal fallback chain (official '
       'RX order), missing fields fall back inert', (tester) async {
-    final gateway = RecordingChatGateway();
-    addTearDown(gateway.dispose);
-    final feed = SubagentFeed(gateway: gateway);
+    final conversation = FakeConversation(RecordingCalls());
+    addTearDown(conversation.dispose);
+    final feed = SubagentFeed(conversation: conversation);
     addTearDown(feed.dispose);
     await pumpTurn(tester, [
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -159,7 +158,7 @@ void main() {
         'startedAt': baseMs - 20000,
         'endedAt': baseMs - 5000,
       },
-    ], gateway, feed);
+    ], conversation, feed);
 
     var nowMs = baseMs;
     final header = headerState(tester);
@@ -173,16 +172,16 @@ void main() {
     await pumpTurn(tester, [
       {'rowId': 3, 'kind': 'userInput', 'text': 'hi again'},
       {'rowId': 4, 'kind': 'turnHeader', 'state': 'running'},
-    ], gateway, feed);
+    ], conversation, feed);
     expect(find.textContaining('已工作'), findsNothing);
     expect(headerState(tester).tickerArmed, isFalse);
   });
 
   testWidgets('terminal upsert disarms the running ticker via '
       'didUpdateWidget; unmounting disarms via dispose', (tester) async {
-    final gateway = RecordingChatGateway();
-    addTearDown(gateway.dispose);
-    final feed = SubagentFeed(gateway: gateway);
+    final conversation = FakeConversation(RecordingCalls());
+    addTearDown(conversation.dispose);
+    final feed = SubagentFeed(conversation: conversation);
     addTearDown(feed.dispose);
     await pumpTurn(tester, [
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -192,7 +191,7 @@ void main() {
         'state': 'running',
         'startedAt': baseMs - 10000,
       },
-    ], gateway, feed);
+    ], conversation, feed);
 
     var nowMs = baseMs;
     final header = headerState(tester);
@@ -210,7 +209,7 @@ void main() {
         'state': 'completedSuccess',
         'activeMs': 65000,
       },
-    ], gateway, feed);
+    ], conversation, feed);
     expect(header.tickerArmed, isFalse);
     nowMs += 5000;
     await tester.pump(const Duration(seconds: 5));
@@ -219,9 +218,9 @@ void main() {
 
   testWidgets('the armed ticker is canceled on unmount (ListView recycle '
       'path) — the test framework fails on a pending timer', (tester) async {
-    final gateway = RecordingChatGateway();
-    addTearDown(gateway.dispose);
-    final feed = SubagentFeed(gateway: gateway);
+    final conversation = FakeConversation(RecordingCalls());
+    addTearDown(conversation.dispose);
+    final feed = SubagentFeed(conversation: conversation);
     addTearDown(feed.dispose);
     await pumpTurn(tester, [
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -231,7 +230,7 @@ void main() {
         'state': 'running',
         'startedAt': baseMs - 10000,
       },
-    ], gateway, feed);
+    ], conversation, feed);
     expect(headerState(tester).tickerArmed, isTrue);
 
     await tester.pumpWidget(wrap(const SizedBox.shrink()));

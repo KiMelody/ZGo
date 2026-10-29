@@ -16,7 +16,7 @@ import 'package:zgo/ui/chat/timeline.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
-import '../../helpers/recording_chat_gateway.dart';
+import '../../helpers/chat_role_fakes.dart';
 
 /// 1x1 PNG — valid decode target for Image.memory in tests.
 final Uint8List kPng = base64Decode(
@@ -28,8 +28,6 @@ final Uint8List kPng = base64Decode(
 final Uint8List kPng32 = base64Decode(
     'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR4nO3NQQkAAAgE'
     'sItqJCMZzRQ+hMH+S/WcikAgEAgEAoFAIPgSLPH0wFuCZjkoAAAAAElFTkSuQmCC');
-
-class FakeChatGateway extends RecordingChatGateway {}
 
 /// Programmed attachment bytes for the R3 inline-fullscreen test:
 /// _AttachmentView loads through the conversation transport's
@@ -49,34 +47,56 @@ class _AttachmentGateway extends FakeChatGateway {
   ConversationTransport get conversationCommands => _AttachmentTransport();
 }
 
-/// Holds `fileReadText` so the preview page stays in its loading phase —
+/// Holds `readText` so the preview page stays in its loading phase —
 /// the real InAppWebView cannot be hosted in widget tests, so the html
-/// dispatch asserts the push + the RPC shape only. The override records
-/// its own calls (the shared `calls` list is bypassed).
-class _HoldTextGateway extends FakeChatGateway {
+/// dispatch asserts the push + the RPC shape only. The port override
+/// records its own calls (the shared `calls` list is bypassed).
+class _HoldTextPort extends RecordingFileServicePort {
+  _HoldTextPort(super.recording);
+
   final completer = Completer<TextChunk>();
   final List<List<Object?>> textCalls = [];
 
   @override
-  Future<TextChunk> fileReadText(String workspacePath, String path,
-      {int offset = 0, required int length}) {
+  Future<TextChunk> readText(
+    String workspacePath,
+    String path, {
+    int offset = 0,
+    required int length,
+  }) {
     textCalls.add([workspacePath, path, offset, length]);
     return completer.future;
   }
 }
 
-/// Holds `fileStat` so the pdf page stays in its loading phase — same
-/// reason as [_HoldTextGateway]: the pdf WebView (and its 1 MB assets) must
-/// not be reached in a widget test.
-class _HoldStatGateway extends FakeChatGateway {
+class _HoldTextGateway extends FakeChatGateway {
+  @override
+  late final FileServicePort fileService = _HoldTextPort(recording);
+
+  List<List<Object?>> get textCalls => (fileService as _HoldTextPort).textCalls;
+}
+
+/// Holds `stat` so the pdf page stays in its loading phase — same reason as
+/// [_HoldTextGateway]: the pdf WebView (and its 1 MB assets) must not be
+/// reached in a widget test.
+class _HoldStatPort extends RecordingFileServicePort {
+  _HoldStatPort(super.recording);
+
   final completer = Completer<FileStat>();
   final List<List<Object?>> statCalls = [];
 
   @override
-  Future<FileStat> fileStat(String workspacePath, String path) {
+  Future<FileStat> stat(String workspacePath, String path) {
     statCalls.add([workspacePath, path]);
     return completer.future;
   }
+}
+
+class _HoldStatGateway extends FakeChatGateway {
+  @override
+  late final FileServicePort fileService = _HoldStatPort(recording);
+
+  List<List<Object?>> get statCalls => (fileService as _HoldStatPort).statCalls;
 }
 
 /// Programmed `conversationFileChangesV4` answers for the changes sheet.
@@ -129,11 +149,11 @@ Map<String, dynamic> _writeRow(String path) => {
 
 Future<void> _pumpToolRow(
   WidgetTester tester,
-  RecordingChatGateway gateway, {
+  FakeChatGateway gateway, {
   String path = 'C:/w/a.png',
 }) async {
   await tester.pumpWidget(
-    wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
   );
   gateway.feedSnapshot([
     {'rowId': 1, 'kind': 'userInput', 'text': '写个文件'},
@@ -310,7 +330,7 @@ void main() {
       final gateway = FakeChatGateway()
         ..fileReadMediaResult = MediaPreview(bytes: kPng);
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {
@@ -333,7 +353,7 @@ void main() {
       final gateway = FakeChatGateway()
         ..fileReadMediaResult = MediaPreview(bytes: kPng);
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {
@@ -355,7 +375,7 @@ void main() {
         (tester) async {
       final gateway = _HoldTextGateway();
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {
@@ -386,7 +406,7 @@ void main() {
           isBinary: true,
         );
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {
@@ -420,7 +440,7 @@ void main() {
 
       final gateway = FakeChatGateway();
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {
@@ -445,7 +465,7 @@ void main() {
         (tester) async {
       final gateway = _AttachmentGateway();
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {
@@ -470,7 +490,7 @@ void main() {
         (tester) async {
       final gateway = FakeChatGateway();
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': '画图'},
@@ -511,7 +531,7 @@ void main() {
       })
         ..fileReadMediaResult = MediaPreview(bytes: kPng);
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': '改文件'},
@@ -543,7 +563,7 @@ void main() {
         (tester) async {
       final gateway = _ChangesGateway({'status': 'accepted', 'files': 2});
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': '改文件'},

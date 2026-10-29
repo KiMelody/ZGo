@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zgo/ui/chat/subagent_feed.dart';
 
-import '../chat_page_test.dart' show FakeChatGateway;
+import '../../helpers/chat_role_fakes.dart' show FakeChatGateway;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -10,7 +10,7 @@ void main() {
   test('acquire dedupes per childSessionId; release closes at zero refs',
       () async {
     final gateway = FakeChatGateway();
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     feed.acquire('c1');
     feed.acquire('c1'); // second consumer, same subscription
     feed.acquire('c2');
@@ -35,7 +35,7 @@ void main() {
   test('release of an unknown id is a no-op; childState needs a live handle',
       () async {
     final gateway = FakeChatGateway();
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     feed.release('ghost');
     expect(feed.childState('ghost'), isNull);
     feed.acquire('c1');
@@ -49,7 +49,7 @@ void main() {
       'terminal view; persisted running is believed', () async {
     final gateway = FakeChatGateway();
     final feed = SubagentFeed(
-      gateway: gateway,
+      conversation: gateway,
       regressionHysteresis: const Duration(milliseconds: 80),
     );
     gateway.feedSnapshot([

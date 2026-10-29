@@ -33,10 +33,11 @@ import 'transcript_viewport.dart';
 import 'turn_navigator.dart';
 
 /// Native chat view for one task (session), backed by Conversation V4 over
-/// [ChatGateway]. Draft mode (no [sessionId]): the first message issues
-/// `createSession` with the draft model/mode/thought config.
+/// the page-construction boundary [ChatPageHost] (ADR-0008 rule ii).
+/// Draft mode (no [sessionId]): the first message issues `createSession`
+/// with the draft model/mode/thought config.
 class ChatPage extends StatefulWidget {
-  final ChatGateway gateway;
+  final ChatPageHost host;
   final String? sessionId;
   final String title;
   final ThemeController? theme;
@@ -91,7 +92,7 @@ class ChatPage extends StatefulWidget {
 
   const ChatPage({
     super.key,
-    required this.gateway,
+    required this.host,
     this.sessionId,
     required this.title,
     this.theme,
@@ -109,6 +110,62 @@ class ChatPage extends StatefulWidget {
 
   @override
   State<ChatPage> createState() => _ChatPageState();
+}
+
+/// Direct-ask dialog for the side-chat entry (D2). Stateful so it owns its
+/// [TextEditingController]: the flow pops the dialog before the command
+/// round-trip, and the exit transition keeps rebuilding the field — a
+/// controller disposed at pop time would be used after disposal.
+class _AskSideChatDialog extends StatefulWidget {
+  const _AskSideChatDialog({
+    required this.title,
+    required this.hint,
+    required this.cancelCopy,
+    required this.confirmCopy,
+  });
+
+  final String title;
+  final String hint;
+  final String cancelCopy;
+  final String confirmCopy;
+
+  @override
+  State<_AskSideChatDialog> createState() => _AskSideChatDialogState();
+}
+
+class _AskSideChatDialogState extends State<_AskSideChatDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() => Navigator.pop(context, _controller.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        minLines: 1,
+        maxLines: 5,
+        textInputAction: TextInputAction.send,
+        decoration: InputDecoration(hintText: widget.hint),
+        onSubmitted: (_) => _submit(),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(widget.cancelCopy),
+        ),
+        FilledButton(onPressed: _submit, child: Text(widget.confirmCopy)),
+      ],
+    );
+  }
 }
 
 class _PendingFile {
@@ -145,14 +202,44 @@ class _ChatPageState extends State<ChatPage> {
 
   /// Workspace file-preview plumbing (markdown images, entry dispatch) —
   /// one per page so the image cache spans the whole session view.
-  late final _preview = ChatPreview(widget.gateway);
+  late final _preview = ChatPreview(widget.host);
 
   /// Workspace Git view shared by the status group (D2), the message change
   /// capsule (D3), the review panel (D4) and the write flows (D5) — one read
   /// chain, one notify. Inert when the page has no workspace.
   late final GitWorkspaceController _git = GitWorkspaceController(
-    widget.gateway.git,
-    widget.gateway.workspacePath ?? '',
+    widget.host.git,
+    widget.host.workspacePath ?? '',
+  );
+
+  /// Page-level navigation callbacks handed to the timeline and the
+  /// status-strip widgets (ADR-0008 rule ii): fork / side-chat / subagent
+  /// drill-in. The two flows live on this page so the pushed pages reuse
+  /// the same host, workspace chip and theme; inner rows only hold the
+  /// callbacks.
+  late final ChatPageActions _actions = ChatPageActions(
+    fork: _forkToNewSession,
+    askInSideChat: _startSelectionSideChat,
+    openSubagent: (context, feed,
+            {required childSessionId,
+            title,
+            subagentType,
+            workId,
+            parentSessionId,
+            running = false,
+            confirmWindow}) =>
+        openSubagentDetail(
+      context,
+      widget.host,
+      feed: feed,
+      childSessionId: childSessionId,
+      title: title,
+      subagentType: subagentType,
+      workId: workId,
+      parentSessionId: parentSessionId,
+      running: running,
+      confirmWindow: confirmWindow,
+    ),
   );
 
   /// Marks the message list subtree for the history anchor-compensation
@@ -166,7 +253,7 @@ class _ChatPageState extends State<ChatPage> {
   /// fails its follow-up send after createSession keeps its text under
   /// the new key.
   String get _draftKey =>
-      _sessionId ?? 'draft.${widget.gateway.chatWorkspaceId ?? ''}';
+      _sessionId ?? 'draft.${widget.host.chatWorkspaceId ?? ''}';
 
   /// Debounce for draft writes (500ms): the only reliable persistence
   /// window on mobile is during editing — an OS kill fires no lifecycle
@@ -230,7 +317,7 @@ class _ChatPageState extends State<ChatPage> {
     int? beforeRowId,
     int limit = 60,
   }) =>
-      widget.gateway.conversationCommands.rowsRange(
+      widget.host.conversationCommands.rowsRange(
         sessionId,
         beforeRowId: beforeRowId,
         limit: limit,
@@ -347,7 +434,7 @@ class _ChatPageState extends State<ChatPage> {
   /// Shared child-session subscription pool + subagent terminal hysteresis
   /// (Agent tile expansion / running works-bar entries / goal-panel tiles).
   late final SubagentFeed _feed = SubagentFeed(
-    gateway: widget.gateway,
+    conversation: widget.host,
     regressionHysteresis: widget.subagentHysteresis,
   );
 
@@ -365,7 +452,7 @@ class _ChatPageState extends State<ChatPage> {
   /// copy content out): banner + disabled send, no pop, no data clearing.
   bool get _tombstoned {
     final id = _sessionId;
-    return id != null && widget.gateway.isSessionDeleted(id);
+    return id != null && widget.host.isSessionDeleted(id);
   }
 
   /// Authoritative subscribe refusal (10-11 sessionNotFound terminal):
@@ -378,7 +465,7 @@ class _ChatPageState extends State<ChatPage> {
   /// hold, this one takes the banner (authority over inference).
   bool get _sessionMissing {
     final id = _sessionId;
-    return id != null && widget.gateway.isSessionMissing(id);
+    return id != null && widget.host.isSessionMissing(id);
   }
 
   @override
@@ -441,7 +528,7 @@ class _ChatPageState extends State<ChatPage> {
   /// Reads the stored draft into the composer. Guards against clobbering
   /// anything the user managed to type/pick before the async load landed.
   Future<void> _restoreDraft() async {
-    final snapshot = await widget.gateway.chatDraftStore.restore(_draftKey);
+    final snapshot = await widget.host.chatDraftStore.restore(_draftKey);
     if (!mounted || snapshot == null) return;
     if (snapshot.text.isNotEmpty && _inputController.text.isEmpty) {
       _inputController.text = snapshot.text;
@@ -468,7 +555,7 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _persistDraft() {
-    return widget.gateway.chatDraftStore.saveText(
+    return widget.host.chatDraftStore.saveText(
       _draftKey,
       _inputController.text,
       _pendingFiles.length,
@@ -604,7 +691,7 @@ class _ChatPageState extends State<ChatPage> {
     _mentionOpen = true;
     _mentionTriggerEnd = i;
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      final entry = await showMentionSheet(context, widget.gateway);
+      final entry = await showMentionSheet(context, widget.host);
       _mentionOpen = false;
       if (!mounted || entry == null) return;
       final start =
@@ -718,7 +805,7 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _loadPrep() async {
     try {
-      final prep = await widget.gateway.prepareWorkspace();
+      final prep = await widget.host.prepareWorkspace();
       if (mounted) {
         setState(() => _prep = prep);
         // Model options are the auto switch's target pool (design 10-24 §4);
@@ -728,7 +815,7 @@ class _ChatPageState extends State<ChatPage> {
     } catch (_) {}
     if (mounted) setState(() => _skillsLoading = true);
     try {
-      final skills = await widget.gateway.skills();
+      final skills = await widget.host.skills();
       if (mounted) setState(() => _skills = skills);
     } catch (_) {
       if (mounted) setState(() => _skills = const []);
@@ -736,7 +823,7 @@ class _ChatPageState extends State<ChatPage> {
       if (mounted) setState(() => _skillsLoading = false);
     }
     try {
-      final subagents = await widget.gateway.mentionSubagents();
+      final subagents = await widget.host.mentionSubagents();
       if (mounted) setState(() => _subagents = subagents);
     } catch (_) {
       if (mounted) setState(() => _subagents = const []);
@@ -747,15 +834,15 @@ class _ChatPageState extends State<ChatPage> {
   void dispose() {
     // mobile-view-state back to workspace-only (the phone left this task).
     try {
-      widget.gateway.sendViewState();
+      widget.host.sendViewState();
     } catch (_) {}
     // Absence memory recovery (10-06 tombstone + 10-11 missing): the page
     // held this id's reader in both sets — release them so the add-only
     // sets do not outlive the page.
     final sessionId = _sessionId;
     if (sessionId != null) {
-      widget.gateway.forgetDeletedSession(sessionId);
-      widget.gateway.forgetMissingSession(sessionId);
+      widget.host.forgetDeletedSession(sessionId);
+      widget.host.forgetMissingSession(sessionId);
     }
     _handle?.close();
     _feed.dispose();
@@ -789,7 +876,7 @@ class _ChatPageState extends State<ChatPage> {
     if (sessionId == null) return;
     final locale = localeOf(context);
     try {
-      await widget.gateway.conversationCommands.editUserQuery(
+      await widget.host.conversationCommands.editUserQuery(
         sessionId,
         target,
         newText,
@@ -816,7 +903,7 @@ class _ChatPageState extends State<ChatPage> {
     final sessionId = _sessionId;
     if (sessionId == null) return;
     try {
-      final handle = await widget.gateway
+      final handle = await widget.host
           .subscribe(sessionId)
           .timeout(const Duration(seconds: 60));
       if (!mounted) {
@@ -828,7 +915,7 @@ class _ChatPageState extends State<ChatPage> {
         _error = null;
       });
       // mobile-view-state: the desktop shows 「手机正在操作此任务」 from it.
-      widget.gateway.sendViewState(taskId: sessionId);
+      widget.host.sendViewState(taskId: sessionId);
       handle.state.addListener(_scrollToBottom);
       handle.state.addListener(_onConfigMaybeReverted);
       handle.state.addListener(_refreshQueryDirectory);
@@ -1111,7 +1198,7 @@ class _ChatPageState extends State<ChatPage> {
     debugPrint('[chat] switch retry '
         'model=${last.model} thought=${last.thought}');
     try {
-      await widget.gateway.conversationCommands.switchModelConfig(
+      await widget.host.conversationCommands.switchModelConfig(
         last.sid,
         provider: last.provider,
         model: last.model,
@@ -1169,7 +1256,7 @@ class _ChatPageState extends State<ChatPage> {
     _lastSwitch = _LastSwitch(sid, provider, model, thought, patch);
     return _apply(
       context,
-      () => widget.gateway.conversationCommands.switchModelConfig(
+      () => widget.host.conversationCommands.switchModelConfig(
         sid,
         provider: provider,
         model: model,
@@ -1272,7 +1359,7 @@ class _ChatPageState extends State<ChatPage> {
       });
       // Persist the newly-landed attachments immediately (design 10-20):
       // byte writes are one-shot per pick, no debounce.
-      final store = widget.gateway.chatDraftStore;
+      final store = widget.host.chatDraftStore;
       for (var i = before; i < _pendingFiles.length; i++) {
         final f = _pendingFiles[i];
         unawaited(
@@ -1297,7 +1384,7 @@ class _ChatPageState extends State<ChatPage> {
     final uploaded = <Map<String, dynamic>>[];
     for (var i = 0; i < _pendingFiles.length; i++) {
       final file = _pendingFiles[i];
-      final descriptor = await widget.gateway.conversationCommands.attachmentPut(
+      final descriptor = await widget.host.conversationCommands.attachmentPut(
         sessionId,
         fileName: file.fileName,
         mime: file.mime,
@@ -1326,7 +1413,7 @@ class _ChatPageState extends State<ChatPage> {
       setState(() => _showSlash = false);
       await _run(
         tr(context, 'chat.compact.failed'),
-        () => widget.gateway.conversationCommands.compact(_requireSession()),
+        () => widget.host.conversationCommands.compact(_requireSession()),
       );
       return;
     }
@@ -1335,7 +1422,7 @@ class _ChatPageState extends State<ChatPage> {
       setState(() => _showSlash = false);
       await _run(
         tr(context, 'chat.goal.pauseFailed'),
-        () => widget.gateway.conversationCommands.pauseGoal(_requireSession()),
+        () => widget.host.conversationCommands.pauseGoal(_requireSession()),
       );
       return;
     }
@@ -1344,7 +1431,7 @@ class _ChatPageState extends State<ChatPage> {
       setState(() => _showSlash = false);
       await _run(
         tr(context, 'chat.goal.resumeFailed'),
-        () => widget.gateway.conversationCommands.resumeGoal(_requireSession()),
+        () => widget.host.conversationCommands.resumeGoal(_requireSession()),
       );
       return;
     }
@@ -1378,7 +1465,7 @@ class _ChatPageState extends State<ChatPage> {
         // workspace instead of the one the user is looking at. Re-point the
         // bridge first; a dead end blocks the send (draft text and pending
         // attachments stay) instead of producing a wrong-workspace task.
-        final draftGuard = await widget.gateway.ensureDraftWorkspace(
+        final draftGuard = await widget.host.ensureDraftWorkspace(
           widget.draftWorkspacePath,
         );
         if (draftGuard is! WorkspaceOpenOpened) {
@@ -1409,11 +1496,11 @@ class _ChatPageState extends State<ChatPage> {
             _pendingFiles.isEmpty &&
             !text.startsWith('/goal ') &&
             heldDisposition == null;
-        final workspaceId = widget.gateway.chatWorkspaceId;
+        final workspaceId = widget.host.chatWorkspaceId;
         if (workspaceId == null || workspaceId.isEmpty) {
           throw StateError(tr(context, 'tasks.noWorkspaces.title'));
         }
-        sessionId = await widget.gateway.conversationCommands.createSession(
+        sessionId = await widget.host.conversationCommands.createSession(
           workspaceId,
           firstText: canUseFirstInput ? text : null,
           config: _buildDraftConfig(),
@@ -1423,7 +1510,7 @@ class _ChatPageState extends State<ChatPage> {
         // its content continues under the session key via the debounced
         // writes, and a stale placeholder must not resurface in the next
         // new-task page (design 10-20).
-        unawaited(widget.gateway.chatDraftStore.remove('draft.$workspaceId'));
+        unawaited(widget.host.chatDraftStore.remove('draft.$workspaceId'));
         _sessionId = sessionId;
         // 2) subscribe in the background — must NOT block sending
         setState(() => _progress = null);
@@ -1439,7 +1526,7 @@ class _ChatPageState extends State<ChatPage> {
         await _subscribe();
       }
       if (text.startsWith('/goal ')) {
-        final res = await widget.gateway.conversationCommands.sendGoalCommand(
+        final res = await widget.host.conversationCommands.sendGoalCommand(
           sessionId,
           text.substring('/goal '.length).trim(),
           heldQueueDisposition: heldDisposition,
@@ -1462,7 +1549,7 @@ class _ChatPageState extends State<ChatPage> {
       // Plain send: the transport classifies the outcome (queued on a
       // channel-level failure, ADR-0010) and this switch maps the four
       // variants 1:1 onto the former inline handling.
-      final result = await widget.gateway.conversationCommands
+      final result = await widget.host.conversationCommands
           .sendTextOrQueue(
             sessionId,
             text,
@@ -1625,13 +1712,13 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _loadEntitlement() async {
     try {
-      final view = await widget.gateway.entitlementSnapshot();
+      final view = await widget.host.entitlementSnapshot();
       // The Start-plan auto switch needs the entitled provider set at the
       // same moment (design 10-24 §3). A failed read is null = entitlement
       // unknown, and the auto switch declines to judge.
       Set<String>? entitledIds;
       try {
-        entitledIds = await widget.gateway.entitledProviderIds();
+        entitledIds = await widget.host.entitledProviderIds();
       } catch (_) {
         entitledIds = null;
       }
@@ -1643,7 +1730,7 @@ class _ChatPageState extends State<ChatPage> {
       // The reset scope rides the snapshot (injected by the session's
       // entitlementSnapshot); this plain refresh picks the pools up — a
       // no-op without a provider id (the banner action never shows).
-      unawaited(widget.gateway.quotaResetController.refresh());
+      unawaited(widget.host.quotaResetController.refresh());
       _maybeAutoSwitchStartPlan();
     } catch (_) {
       // Gateways may reject; the banner then stays hidden and the chat is
@@ -1708,7 +1795,7 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _showResetDialog(Set<String> resettable) async {
     final type = await showQuotaResetDialog(
       context,
-      controller: widget.gateway.quotaResetController,
+      controller: widget.host.quotaResetController,
       resettable: resettable,
     );
     if (!mounted || type == null) return;
@@ -1741,7 +1828,7 @@ class _ChatPageState extends State<ChatPage> {
     var catalog = const <Map<String, dynamic>>[];
     final modelOption = _prep?.option('model');
     if (modelOption == null || modelOption.options.isEmpty) {
-      catalog = await widget.gateway.modelProviderCatalog();
+      catalog = await widget.host.modelProviderCatalog();
     }
     // Design 10-24 §4: the sheet is stateless, so the page prefetches the
     // entitled provider ids it filters account groups by. A failed read is
@@ -1749,7 +1836,7 @@ class _ChatPageState extends State<ChatPage> {
     // blocks the sheet from opening.
     Set<String>? entitledIds;
     try {
-      entitledIds = await widget.gateway.entitledProviderIds();
+      entitledIds = await widget.host.entitledProviderIds();
     } catch (_) {
       entitledIds = null;
     }
@@ -1759,7 +1846,7 @@ class _ChatPageState extends State<ChatPage> {
       isScrollControlled: true,
       showDragHandle: true,
       builder: (context) => _ModelModeSheet(
-        gateway: widget.gateway,
+        conversation: widget.host,
         state: _state,
         prep: _prep,
         sessionId: _sessionId,
@@ -1838,7 +1925,7 @@ class _ChatPageState extends State<ChatPage> {
 
   /// Manual `@` mention panel (add-context footer shortcut / tool entry).
   Future<void> _openMentionPanel() async {
-    final entry = await showMentionSheet(context, widget.gateway);
+    final entry = await showMentionSheet(context, widget.host);
     if (!mounted || entry == null) return;
     _insertAtCursor(entry.insert);
   }
@@ -1848,7 +1935,7 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _openAddContextMenu() async {
     final result = await showAddContextSheet(
       context,
-      gateway: widget.gateway,
+      workspaceContext: widget.host,
       isDraft: _sessionId == null,
       workflowCommand: _workflowCommandName(),
     );
@@ -1872,7 +1959,7 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _showUsageSheet() async {
     final state = _state;
     if (state == null) return;
-    final controller = widget.gateway.quotaResetController;
+    final controller = widget.host.quotaResetController;
     unawaited(controller.refresh());
     await _loadEntitlement();
     if (!mounted) return;
@@ -1903,7 +1990,8 @@ class _ChatPageState extends State<ChatPage> {
       showDragHandle: true,
       builder: (sheetContext) => _BackgroundWorksSheet(
         state: state,
-        gateway: widget.gateway,
+        conversation: widget.host,
+        actions: _actions,
         feed: _feed,
         confirmWindow: widget.turnFooterConfirmWindow,
       ),
@@ -1914,7 +2002,7 @@ class _ChatPageState extends State<ChatPage> {
     final sessionId = _sessionId;
     if (sessionId == null) return;
     try {
-      final plans = await widget.gateway.conversationCommands.plans(sessionId);
+      final plans = await widget.host.conversationCommands.plans(sessionId);
       if (!mounted) return;
       showModalBottomSheet(
         context: context,
@@ -1959,7 +2047,7 @@ class _ChatPageState extends State<ChatPage> {
     if (text == null || text.isEmpty || !mounted) return;
     await _run(
       tr(context, 'chat.op.failed.generic'),
-      () => widget.gateway.renameTask(sessionId, text),
+      () => widget.host.renameTask(sessionId, text),
     );
   }
 
@@ -1971,7 +2059,7 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   void _copyWorkspacePath() {
-    final path = widget.gateway.workspacePath;
+    final path = widget.host.workspacePath;
     if (path == null || path.isEmpty) {
       _toast(tr(context, 'chat.more.noPath'));
       return;
@@ -1986,7 +2074,7 @@ class _ChatPageState extends State<ChatPage> {
   /// fields are already on the wire data ZGo holds).
   void _copyTaskPath() {
     final sessionId = _sessionId;
-    final ws = widget.gateway.workspacePath;
+    final ws = widget.host.workspacePath;
     if (sessionId == null || ws == null || ws.isEmpty) {
       _toast(tr(context, 'chat.more.noPath'));
       return;
@@ -2004,7 +2092,7 @@ class _ChatPageState extends State<ChatPage> {
     final sessionId = _sessionId;
     if (sessionId == null) return;
     try {
-      final res = await widget.gateway.taskNativeSessionLogFile(sessionId);
+      final res = await widget.host.taskNativeSessionLogFile(sessionId);
       if (!mounted) return;
       final path = res is Map ? res['path'] as String? : null;
       if (path == null || path.isEmpty) {
@@ -2021,7 +2109,7 @@ class _ChatPageState extends State<ChatPage> {
 
   void _copyTaskLink() {
     final sessionId = _sessionId;
-    final base = widget.gateway.remoteUrl;
+    final base = widget.host.remoteUrl;
     if (sessionId == null || base == null || base.isEmpty) {
       _toast(tr(context, 'chat.more.noLink'));
       return;
@@ -2047,7 +2135,7 @@ class _ChatPageState extends State<ChatPage> {
           final target = !_pinned;
           _run(
             tr(context, 'chat.op.failed.generic'),
-            () => widget.gateway.setTaskPinned(sessionId, target),
+            () => widget.host.setTaskPinned(sessionId, target),
           );
           setState(() => _pinned = target);
         }
@@ -2055,14 +2143,14 @@ class _ChatPageState extends State<ChatPage> {
         if (sessionId != null) {
           _run(
             tr(context, 'chat.op.failed.generic'),
-            () => widget.gateway.setTaskArchived(sessionId, true),
+            () => widget.host.setTaskArchived(sessionId, true),
           );
         }
       case 'unread':
         if (sessionId != null) {
           _run(
             tr(context, 'chat.op.failed.generic'),
-            () => widget.gateway.setTaskUnread(sessionId, true),
+            () => widget.host.setTaskUnread(sessionId, true),
           );
         }
       case 'copyPath':
@@ -2079,7 +2167,7 @@ class _ChatPageState extends State<ChatPage> {
         if (sessionId != null) {
           _run(
             tr(context, 'chat.compact.failed'),
-            () => widget.gateway.conversationCommands.compact(sessionId),
+            () => widget.host.conversationCommands.compact(sessionId),
           );
         }
       case 'usage':
@@ -2096,7 +2184,7 @@ class _ChatPageState extends State<ChatPage> {
   /// Delete confirmation (tasks.action.delete*): the task is removed
   /// from the workspace and records cannot be recovered. Routing mirrors the
   /// task list's C1/D4 delete (task_list_page `_deleteTaskDialog`): the
-  /// registry write goes through [ChatGateway.deleteTask] — deleteSession
+  /// registry write goes through [TaskMetaPort.deleteTask] — deleteSession
   /// never touches tasks-index, a "deleted" row would resurrect through the
   /// relay overview / bootstrap / reseed paths — and a registry-external
   /// draft row (resolve misses, isTaskResolveFailure) falls back ONCE to the
@@ -2138,13 +2226,13 @@ class _ChatPageState extends State<ChatPage> {
       // the pop on the same envelope.
       () async {
         try {
-          final res = await widget.gateway.deleteTask(sessionId);
+          final res = await widget.host.deleteTask(sessionId);
           deleted = _ackOk(res);
           return res;
         } catch (e) {
           if (!isTaskResolveFailure(e)) rethrow;
           final res =
-              await widget.gateway.conversationCommands.deleteSession(sessionId);
+              await widget.host.conversationCommands.deleteSession(sessionId);
           deleted = _ackOk(res);
           return res;
         }
@@ -2259,7 +2347,7 @@ class _ChatPageState extends State<ChatPage> {
             // view, which refreshes on the gateway's notifier, not on
             // [state] — hence the double-listen (Listenable.merge).
             return AnimatedBuilder(
-              animation: Listenable.merge([state, widget.gateway]),
+              animation: Listenable.merge([state, widget.host]),
               builder: (context, _) => _emptyOrStartFailed(context, state),
             );
           }
@@ -2341,15 +2429,14 @@ class _ChatPageState extends State<ChatPage> {
                             ChatTurnGroup(
                               key: ValueKey('turn-${group.first['rowId']}'),
                               rows: group,
-                              gateway: widget.gateway,
+                              conversation: widget.host,
                               sessionId: _sessionId ?? '',
                               onAction: _run,
                               state: state,
                               feed: _feed,
                               preview: _preview,
                               confirmWindow: widget.turnFooterConfirmWindow,
-                              workspaceLabel: widget.workspaceLabel,
-                              theme: widget.theme,
+                              actions: _actions,
                               editingRowId: _editingRowId,
                               onEditSend: _sendUserEdit,
                               gitController: _git,
@@ -2360,7 +2447,7 @@ class _ChatPageState extends State<ChatPage> {
                             for (final interaction in anchored)
                               _interactionCardFor(
                                 state: state,
-                                gateway: widget.gateway,
+                                conversation: widget.host,
                                 interaction: interaction,
                               ),
                           ],
@@ -2390,7 +2477,7 @@ class _ChatPageState extends State<ChatPage> {
     final sessionId = _sessionId;
     final startFailed = sessionId != null &&
         state.rows.isEmpty &&
-        widget.gateway.taskDisplayStatus(sessionId) == 'error';
+        widget.host.taskDisplayStatus(sessionId) == 'error';
     if (!startFailed) {
       return Center(
         child: Text(
@@ -2450,11 +2537,12 @@ class _ChatPageState extends State<ChatPage> {
           _GoalBanner(state: state),
           _GoalProcessPanel(
             state: state,
-            gateway: widget.gateway,
+            conversation: widget.host,
+            actions: _actions,
             feed: _feed,
           ),
-          _QueueBar(state: state, gateway: widget.gateway),
-          _PendingInteractions(state: state, gateway: widget.gateway),
+          _QueueBar(state: state, conversation: widget.host),
+          _PendingInteractions(state: state, conversation: widget.host),
         ],
       ),
     );
@@ -2466,7 +2554,7 @@ class _ChatPageState extends State<ChatPage> {
   /// workspace) — the placeholder then just tracks the slow hint.
   ValueListenable<String?>? _bridgeDegraded() {
     try {
-      return widget.gateway.conversationCommands.degraded;
+      return widget.host.conversationCommands.degraded;
     } catch (_) {
       return null;
     }
@@ -2600,7 +2688,7 @@ class _ChatPageState extends State<ChatPage> {
         // §8.1 discipline); the message list above stays read-only
         // either way.
         AnimatedBuilder(
-          animation: widget.gateway,
+          animation: widget.host,
           builder: (context, _) {
             final missing = _sessionMissing;
             if (!missing && !_tombstoned) return const SizedBox.shrink();
@@ -2876,8 +2964,9 @@ class _ChatPageState extends State<ChatPage> {
               ),
             ),
             AnimatedBuilder(
-              animation: widget.gateway,
-              builder: (context, _) => _GatewayBanner(gateway: widget.gateway),
+              animation: widget.host,
+              builder: (context, _) =>
+                  _GatewayBanner(sessionLink: widget.host),
             ),
             // Status strip (goal/works/queue/interactions), no-keyboard
             // variant: a plain intrinsic-height child so it never splits
@@ -2938,7 +3027,7 @@ class _ChatPageState extends State<ChatPage> {
                 onRemove: (i) {
                   setState(() => _pendingFiles.removeAt(i));
                   unawaited(
-                    widget.gateway.chatDraftStore.removeAttachmentAt(
+                    widget.host.chatDraftStore.removeAttachmentAt(
                       _draftKey,
                       i,
                     ),
@@ -2949,9 +3038,9 @@ class _ChatPageState extends State<ChatPage> {
             // above the composer like the pendingCommands cards.
             // Null queue (pre-3.12.3 desktop / not connected) renders nothing.
             AnimatedBuilder(
-              animation: widget.gateway,
+              animation: widget.host,
               builder: (context, _) {
-                final replayable = widget.gateway.replayableQueue;
+                final replayable = widget.host.replayableQueue;
                 if (replayable == null) return const SizedBox.shrink();
                 return AnimatedBuilder(
                   animation: replayable,
@@ -2961,8 +3050,8 @@ class _ChatPageState extends State<ChatPage> {
             ),
             AnimatedBuilder(
               animation: (state == null)
-                ? widget.gateway
-                : Listenable.merge([state, widget.gateway]),
+                ? widget.host
+                : Listenable.merge([state, widget.host]),
               builder: (context, _) {
                 return _contentCol(
                   _InputBar(
@@ -2973,7 +3062,8 @@ class _ChatPageState extends State<ChatPage> {
                     state: state,
                     prep: _prep,
                     draftConfig: _draftConfig,
-                    gateway: widget.gateway,
+                    conversation: widget.host,
+                    sessionTruth: widget.host,
                     sessionId: _sessionId,
                     feed: state == null ? null : _feed,
                     subagentConfirmWindow: widget.turnFooterConfirmWindow,
@@ -2994,8 +3084,8 @@ class _ChatPageState extends State<ChatPage> {
     return _KeyboardProbe(
       imeOccupied: _imeOccupied,
       child: AnimatedBuilder(
-        animation: widget.gateway,
-        builder: (context, _) => widget.gateway.kicked
+        animation: widget.host,
+        builder: (context, _) => widget.host.kicked
             ? Stack(children: [chat, _kickedOverlay(context)])
             : chat,
       ),
@@ -3035,7 +3125,7 @@ class _ChatPageState extends State<ChatPage> {
                 FilledButton.icon(
                   onPressed: () => _run(
                     tr(context, 'chat.op.failed.generic'),
-                    widget.gateway.reconnect,
+                    widget.host.reconnect,
                   ),
                   icon: const Icon(Icons.refresh, size: 18),
                   label: Text(tr(context, 'chat.kicked.reconnect')),
@@ -3077,6 +3167,143 @@ class _ChatPageState extends State<ChatPage> {
     return '${two(time.hour)}:${two(time.minute)}';
   }
 
+  /// Fork flow shared by the message-action sheet and the feedback row
+  /// (task C1, official parity): send `forkAssistant`, then — like the web's
+  /// onFork — push the ack's new sessionId as a fresh ChatPage (the landing
+  /// IS the feedback; no extra toast), or snack the fallback copy when the
+  /// server acked created without a usable id (the row surfaces via
+  /// sessions-index). Failures keep [_run]'s snack shapes: a non-pass status
+  /// reads 「分叉失败: `reasonCode|status`」, a thrown error goes through
+  /// commandErrorCopy/businessErrorCopy (busy and resolve-failure map to
+  /// plain-language copy).
+  ///
+  /// Lives on the page since ADR-0008 rule ii: the pushed page reuses this
+  /// page's host, workspace chip and theme; the timeline holds only the
+  /// [ChatPageActions] callback.
+  Future<void> _forkToNewSession(
+    BuildContext context,
+    String sessionId,
+    Map<String, dynamic> target,
+  ) async {
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    final locale = localeOf(context);
+    final errorPrefix = tr(context, 'chat.action.fork.failed');
+    final createdCopy = tr(context, 'chat.fork.created');
+    final draftTitle = tr(context, 'tasks.new');
+    dynamic ack;
+    try {
+      ack = await widget.host.conversationCommands
+          .forkAssistant(sessionId, target);
+    } catch (e) {
+      debugPrint('[chat] $errorPrefix: $e');
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            commandErrorCopy('$e', locale) ??
+                businessErrorCopy('$e', locale) ??
+                '$errorPrefix: $e',
+          ),
+        ),
+      );
+      return;
+    }
+    final newId = forkSessionIdOf(ack);
+    if (newId != null) {
+      navigator.push(
+        zRoute(
+          (_) => ChatPage(
+            host: widget.host,
+            sessionId: newId,
+            title: draftTitle,
+            workspaceLabel: widget.workspaceLabel,
+            theme: widget.theme,
+          ),
+        ),
+      );
+      return;
+    }
+    // Same pass-set as the wire (accepted | duplicate carry the result) —
+    // unlike _run's generic check, `duplicate` here means "created" (the
+    // commandId dedupe replaying the original ack).
+    final status = ack is Map ? ack['status'] : null;
+    if (status == 'accepted' || status == 'duplicate') {
+      messenger.showSnackBar(SnackBar(content: Text(createdCopy)));
+    } else if (status != null) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('$errorPrefix: ${ack['reasonCode'] ?? status}')),
+      );
+    }
+  }
+
+  /// Side-chat flow behind the message-action sheet's 「在辅助对话中提问」
+  /// entry (task parity-reference D2, official ask-in-side-chat parity): ask
+  /// the user what to send, then `createSelectionSideSession(firstInput:
+  /// {text})` and push the new sessionId as a fresh ChatPage (the fork-jump
+  /// precedent — the landing is the feedback, no extra toast). Cancelled or
+  /// blank input creates NOTHING: ZGo never sends a first message the user
+  /// did not type.
+  ///
+  /// Lives on the page since ADR-0008 rule ii (same host reuse rule as
+  /// [_forkToNewSession]).
+  Future<void> _startSelectionSideChat(
+    BuildContext context,
+    String sessionId,
+  ) async {
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    final locale = localeOf(context);
+    final dialogTitle = tr(context, 'chat.selections.askInSideChat');
+    final hint = tr(context, 'chat.selections.askHint');
+    final cancelCopy = tr(context, 'devices.add.cancel');
+    final confirmCopy = tr(context, 'chat.selections.askConfirm');
+    final errorPrefix = tr(context, 'chat.selections.askFailed');
+    final pageTitle = tr(context, 'sidePane.selectionChat');
+    final asked = await showDialog<String>(
+      context: context,
+      useRootNavigator: false,
+      builder: (_) => _AskSideChatDialog(
+        title: dialogTitle,
+        hint: hint,
+        cancelCopy: cancelCopy,
+        confirmCopy: confirmCopy,
+      ),
+    );
+    final text = asked?.trim() ?? '';
+    // Empty/cancel: create nothing, send no first message.
+    if (text.isEmpty) return;
+    String newId;
+    try {
+      newId = await widget.host.conversationCommands
+          .createSelectionSideSession(
+        sessionId,
+        firstText: text,
+      );
+    } catch (e) {
+      debugPrint('[chat] $errorPrefix: $e');
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            commandErrorCopy('$e', locale) ??
+                businessErrorCopy('$e', locale) ??
+                '$errorPrefix: $e',
+          ),
+        ),
+      );
+      return;
+    }
+    navigator.push(
+      zRoute(
+        (_) => ChatPage(
+          host: widget.host,
+          sessionId: newId,
+          title: pageTitle,
+          workspaceLabel: widget.workspaceLabel,
+          theme: widget.theme,
+        ),
+      ),
+    );
+  }
 }
 
 /// ------------------------------------------------------- keyboard scope
@@ -3274,13 +3501,13 @@ class _LoadingPlaceholderState extends State<_LoadingPlaceholder> {
 /// The kicked state has its own full-screen overlay further up the tree
 /// (see _kickedOverlay) — this banner stays hidden there.
 class _GatewayBanner extends StatelessWidget {
-  final ChatGateway gateway;
+  final SessionLinkPort sessionLink;
 
-  const _GatewayBanner({required this.gateway});
+  const _GatewayBanner({required this.sessionLink});
 
   @override
   Widget build(BuildContext context) {
-    if (gateway.kicked || gateway.status != DeviceStatus.connecting) {
+    if (sessionLink.kicked || sessionLink.status != DeviceStatus.connecting) {
       return const SizedBox.shrink();
     }
     return Container(
@@ -3417,13 +3644,17 @@ class _GoalBanner extends StatelessWidget {
 /// _GoalBanner covers that case).
 class _GoalProcessPanel extends StatelessWidget {
   final ConversationState state;
-  final ChatGateway gateway;
+  final ConversationPort conversation;
   final SubagentFeed? feed;
+
+  /// Page-level navigation (ADR-0008 rule ii) — the agent drill-in.
+  final ChatPageActions? actions;
 
   const _GoalProcessPanel({
     required this.state,
-    required this.gateway,
+    required this.conversation,
     this.feed,
+    this.actions,
   });
 
   @override
@@ -3433,14 +3664,13 @@ class _GoalProcessPanel extends StatelessWidget {
     return GoalPanel(
       state: state,
       feed: feed,
-      onPauseGoal: (sid) => gateway.conversationCommands.pauseGoal(sid),
-      onResumeGoal: (sid) => gateway.conversationCommands.resumeGoal(sid),
-      onOpenAgent: pooledFeed == null
+      onPauseGoal: (sid) => conversation.conversationCommands.pauseGoal(sid),
+      onResumeGoal: (sid) => conversation.conversationCommands.resumeGoal(sid),
+      onOpenAgent: pooledFeed == null || actions?.openSubagent == null
           ? null
-          : (agent) => openSubagentDetail(
+          : (agent) => actions!.openSubagent!(
                 context,
-                gateway,
-                feed: pooledFeed,
+                pooledFeed,
                 childSessionId: agent['childSessionId'] as String?,
                 title: agent['title'] as String?,
                 subagentType: agent['subagentType'] as String?,
@@ -3489,7 +3719,10 @@ int _runningWorkTotal(({int bash, int workflow, int subagent}) counts) =>
 /// Common Mistake).
 class _BackgroundWorksSheet extends StatefulWidget {
   final ConversationState state;
-  final ChatGateway gateway;
+  final ConversationPort conversation;
+
+  /// Page-level navigation (ADR-0008 rule ii) — the agent drill-in.
+  final ChatPageActions? actions;
   final SubagentFeed feed;
 
   /// Auto-close confirm window: once the whole running count stayed 0 this
@@ -3498,7 +3731,8 @@ class _BackgroundWorksSheet extends StatefulWidget {
 
   const _BackgroundWorksSheet({
     required this.state,
-    required this.gateway,
+    required this.conversation,
+    this.actions,
     required this.feed,
     required this.confirmWindow,
   });
@@ -3612,7 +3846,7 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
         final id = (r['rowId'] as num?)?.toInt();
         if (id != null && (cursor == null || id < cursor)) cursor = id;
       }
-      final res = await widget.gateway.conversationCommands.rowsRange(
+      final res = await widget.conversation.conversationCommands.rowsRange(
         _sessionId,
         beforeRowId: cursor,
         limit: 60,
@@ -3694,7 +3928,7 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
     final workId = '${agent['agentId'] ?? agent['workId'] ?? ''}';
     if (workId.isEmpty || _sessionId.isEmpty) return;
     try {
-      await widget.gateway.conversationCommands.cancelBackgroundWork(_sessionId, workId);
+      await widget.conversation.conversationCommands.cancelBackgroundWork(_sessionId, workId);
     } catch (e) {
       _toast('$e');
     }
@@ -3859,7 +4093,7 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
     final workId = '${work['workId'] ?? work['id'] ?? ''}';
     if (workId.isEmpty || _sessionId.isEmpty) return;
     try {
-      widget.gateway.conversationCommands.cancelBackgroundWork(
+      widget.conversation.conversationCommands.cancelBackgroundWork(
         _sessionId,
         workId,
       );
@@ -3970,12 +4204,11 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
     final sid = '${agent['childSessionId'] ?? ''}';
     final tail = subagentActionText(context, widget.feed.childState(sid));
     return InkWell(
-      onTap: sid.isEmpty
+      onTap: sid.isEmpty || widget.actions?.openSubagent == null
           ? null
-          : () => openSubagentDetail(
+          : () => widget.actions!.openSubagent!(
                 context,
-                widget.gateway,
-                feed: widget.feed,
+                widget.feed,
                 childSessionId: sid,
                 title: '${agent['title'] ?? ''}',
                 subagentType: agent['subagentType'] as String?,
@@ -4066,12 +4299,11 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
     };
     final title = '${row['summaryText'] ?? row['subagentType'] ?? ''}';
     return InkWell(
-      onTap: sid.isEmpty
+      onTap: sid.isEmpty || widget.actions?.openSubagent == null
           ? null
-          : () => openSubagentDetail(
+          : () => widget.actions!.openSubagent!(
                 context,
-                widget.gateway,
-                feed: widget.feed,
+                widget.feed,
                 childSessionId: sid,
                 subagentType: row['subagentType'] as String?,
                 workId: row['workId'] as String?,
@@ -4188,9 +4420,9 @@ class _SheetElapsedState extends State<_SheetElapsed> {
 
 class _QueueBar extends StatelessWidget {
   final ConversationState state;
-  final ChatGateway gateway;
+  final ConversationPort conversation;
 
-  const _QueueBar({required this.state, required this.gateway});
+  const _QueueBar({required this.state, required this.conversation});
 
   @override
   Widget build(BuildContext context) {
@@ -4226,7 +4458,7 @@ class _QueueBar extends StatelessWidget {
                   state.optimisticPatch({
                     'queue': {...?state.queue, 'autoDrain': next},
                   });
-                  gateway.conversationCommands.setAutoDrain(sessionId, next);
+                  conversation.conversationCommands.setAutoDrain(sessionId, next);
                 },
                 child: Text(
                   state.autoDrain
@@ -4289,7 +4521,7 @@ class _QueueBar extends StatelessWidget {
                         onTap: () {
                           final id = '${items[i]['queueItemId']}';
                           state.optimisticRemoveQueueItem(id);
-                          gateway.conversationCommands.sendQueuedNow(sessionId, id);
+                          conversation.conversationCommands.sendQueuedNow(sessionId, id);
                         },
                       ),
                       _QueueAction(
@@ -4331,7 +4563,7 @@ class _QueueBar extends StatelessWidget {
                           );
                           if (confirmed != true) return;
                           state.optimisticRemoveQueueItem(id);
-                          gateway.conversationCommands.deleteQueueItem(sessionId, id);
+                          conversation.conversationCommands.deleteQueueItem(sessionId, id);
                         },
                       ),
                     ],
@@ -4369,7 +4601,7 @@ class _QueueBar extends StatelessWidget {
     } else {
       beforeId = '${items[targetIndex]['queueItemId']}';
     }
-    gateway.conversationCommands.reorderQueueItem(sessionId, id, beforeId);
+    conversation.conversationCommands.reorderQueueItem(sessionId, id, beforeId);
   }
 
   Future<void> _edit(
@@ -4415,7 +4647,7 @@ class _QueueBar extends StatelessWidget {
         'queue': {...q, 'items': items},
       });
     }
-    await gateway.conversationCommands.editQueueItem(sessionId, '${item['queueItemId']}', text);
+    await conversation.conversationCommands.editQueueItem(sessionId, '${item['queueItemId']}', text);
   }
 }
 
@@ -4605,7 +4837,7 @@ class _PendingFilesBar extends StatelessWidget {
 /// question + options display while hiding every answering affordance.
 Widget _interactionCardFor({
   required ConversationState state,
-  required ChatGateway gateway,
+  required ConversationPort conversation,
   required Map<String, dynamic> interaction,
   bool readOnly = false,
 }) {
@@ -4615,7 +4847,7 @@ Widget _interactionCardFor({
     return _HookReviewCard(
       interaction: interaction,
       readOnly: readOnly,
-      onTrust: (reviewItemIds) => gateway.conversationCommands
+      onTrust: (reviewItemIds) => conversation.conversationCommands
           .respondWorkspaceHookReview(
             sessionId,
             payload is Map
@@ -4629,7 +4861,7 @@ Widget _interactionCardFor({
     interaction: interaction,
     readOnly: readOnly,
     onResolve: ({optionId, freeText, action, content}) =>
-        gateway.conversationCommands.resolveInteraction(
+        conversation.conversationCommands.resolveInteraction(
           sessionId,
           interaction['interactionId'] as String? ?? '',
           optionId: optionId,
@@ -4637,7 +4869,7 @@ Widget _interactionCardFor({
           action: action,
           content: content,
         ),
-    onSnooze: () => gateway.conversationCommands.snoozeInteractionAutoResolution(
+    onSnooze: () => conversation.conversationCommands.snoozeInteractionAutoResolution(
           sessionId,
           interaction['interactionId'] as String? ?? '',
         ),
@@ -4646,9 +4878,9 @@ Widget _interactionCardFor({
 
 class _PendingInteractions extends StatelessWidget {
   final ConversationState state;
-  final ChatGateway gateway;
+  final ConversationPort conversation;
 
-  const _PendingInteractions({required this.state, required this.gateway});
+  const _PendingInteractions({required this.state, required this.conversation});
 
   @override
   Widget build(BuildContext context) {
@@ -4672,7 +4904,7 @@ class _PendingInteractions extends StatelessWidget {
         for (final interaction in bottom)
           _interactionCardFor(
             state: state,
-            gateway: gateway,
+            conversation: conversation,
             interaction: interaction,
           ),
       ],
@@ -5666,7 +5898,7 @@ class StartPlanAutoSwitch {
 }
 
 class _ModelModeSheet extends StatelessWidget {
-  final ChatGateway gateway;
+  final ConversationPort conversation;
   final ConversationState? state;
   final WorkspacePrep? prep;
   final String? sessionId;
@@ -5697,7 +5929,7 @@ class _ModelModeSheet extends StatelessWidget {
   final void Function(ConfigOptionValue value)? onSwitchModel;
 
   const _ModelModeSheet({
-    required this.gateway,
+    required this.conversation,
     required this.state,
     required this.prep,
     required this.sessionId,
@@ -5911,7 +6143,7 @@ class _ModelModeSheet extends StatelessWidget {
                           );
                           _apply(
                             context,
-                            () => gateway.conversationCommands.switchModelConfig(
+                            () => conversation.conversationCommands.switchModelConfig(
                               sid,
                               provider: provider,
                               model: model,
@@ -5964,7 +6196,7 @@ class _ModelModeSheet extends StatelessWidget {
                         );
                         _apply(
                           context,
-                          () => gateway.conversationCommands.switchModelConfig(
+                          () => conversation.conversationCommands.switchModelConfig(
                             sid,
                             provider: '${config['provider'] ?? ''}',
                             model: '${config['model'] ?? ''}',
@@ -6015,7 +6247,7 @@ class _ModelModeSheet extends StatelessWidget {
                     } else {
                       _apply(
                         context,
-                        () => gateway.conversationCommands.switchCollaborationMode(sid, v.value),
+                        () => conversation.conversationCommands.switchCollaborationMode(sid, v.value),
                         onAccepted: () => state?.optimisticPatch({
                           'config': {...?state!.config, 'mode': v.value},
                         }),
@@ -6051,7 +6283,7 @@ class _ModelModeSheet extends StatelessWidget {
                     } else {
                       _apply(
                         context,
-                        () => gateway.conversationCommands.switchCollaborationMode(sid, m),
+                        () => conversation.conversationCommands.switchCollaborationMode(sid, m),
                         onAccepted: () => state?.optimisticPatch({
                           'config': {...?state!.config, 'mode': m},
                         }),
@@ -6079,7 +6311,7 @@ class _ModelModeSheet extends StatelessWidget {
                       selected: followup == f,
                       onSelected: (_) => _apply(
                         context,
-                        () => gateway.conversationCommands.setFollowupMode(sid, f),
+                        () => conversation.conversationCommands.setFollowupMode(sid, f),
                         onAccepted: () => state?.optimisticPatch({
                           'config': {...?state!.config, 'followupMode': f},
                         }),
@@ -6893,7 +7125,8 @@ class _InputBar extends StatefulWidget {
   final ConversationState? state;
   final WorkspacePrep? prep;
   final Map<String, String>? draftConfig;
-  final ChatGateway gateway;
+  final ConversationPort conversation;
+  final SessionTruthPort sessionTruth;
   final String? sessionId;
 
   /// Shared child-session pool backing the subagent pill's terminal
@@ -6924,7 +7157,8 @@ class _InputBar extends StatefulWidget {
     required this.state,
     required this.prep,
     required this.draftConfig,
-    required this.gateway,
+    required this.conversation,
+    required this.sessionTruth,
     required this.sessionId,
     required this.feed,
     required this.subagentConfirmWindow,
@@ -6996,7 +7230,7 @@ class _InputBarState extends State<_InputBar> {
   /// read-only).
   bool get _sessionDeleted {
     final sid = sessionId;
-    return sid != null && gateway.isSessionDeleted(sid);
+    return sid != null && sessionTruth.isSessionDeleted(sid);
   }
 
   /// Authoritative subscribe refusal (10-11): the subscribe channel
@@ -7005,7 +7239,7 @@ class _InputBarState extends State<_InputBar> {
   /// _ChatPageState._sessionMissing).
   bool get _sessionMissing {
     final sid = sessionId;
-    return sid != null && gateway.isSessionMissing(sid);
+    return sid != null && sessionTruth.isSessionMissing(sid);
   }
 
   // Field forwarders so the build/helpers below read like the original
@@ -7015,9 +7249,10 @@ class _InputBarState extends State<_InputBar> {
   bool get isDraft => widget.isDraft;
   ConversationState? get state => widget.state;
   SubagentFeed? get feed => widget.feed;
+  ConversationPort get conversation => widget.conversation;
+  SessionTruthPort get sessionTruth => widget.sessionTruth;
   WorkspacePrep? get prep => widget.prep;
   Map<String, String>? get draftConfig => widget.draftConfig;
-  ChatGateway get gateway => widget.gateway;
   String? get sessionId => widget.sessionId;
   VoidCallback get onSend => widget.onSend;
   VoidCallback get onAddMenu => widget.onAddMenu;
@@ -7350,7 +7585,7 @@ class _InputBarState extends State<_InputBar> {
     );
     if (value == null || value == _modeValue) return;
     if (isDraft || sid == null) return; // draft chips go through the sheet
-    gateway.conversationCommands.switchCollaborationMode(sid, value);
+    conversation.conversationCommands.switchCollaborationMode(sid, value);
   }
 
   Future<void> _pickThought(BuildContext context) async {
@@ -7388,7 +7623,7 @@ class _InputBarState extends State<_InputBar> {
     final modelValue =
         '${state?.config?['provider'] ?? ''}/${state?.config?['model'] ?? ''}';
     final idx = modelValue.lastIndexOf('/');
-    gateway.conversationCommands.switchModelConfig(
+    conversation.conversationCommands.switchModelConfig(
       sid,
       provider: idx > 0 ? modelValue.substring(0, idx) : modelValue,
       model: idx > 0 ? modelValue.substring(idx + 1) : modelValue,
@@ -7410,7 +7645,7 @@ class _InputBarState extends State<_InputBar> {
     // hide the stop button immediately; the next authoritative control
     // frame recalibrates (canStop back to true restores it).
     st?.optimisticStop();
-    gateway.conversationCommands.stop(sid);
+    conversation.conversationCommands.stop(sid);
   }
 }
 

@@ -7,11 +7,7 @@ import 'package:zgo/ui/chat/turn_navigator.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
-import '../../helpers/recording_chat_gateway.dart';
-
-/// Chat-page fake, same construction as chat_page_test (real
-/// [ConversationState] fed by hand through the recording gateway).
-class FakeChatGateway extends RecordingChatGateway {}
+import '../../helpers/chat_role_fakes.dart';
 
 Widget wrap(Widget child) => MaterialApp(
   theme: buildDarkTheme(),
@@ -129,7 +125,7 @@ Future<ScrollController> pumpVariancePage(
   await tester.pumpWidget(
     wrap(
       ChatPage(
-        gateway: gateway,
+        host: gateway,
         sessionId: 's1',
         title: 't',
         // Pin the terminal-footer confirm window beyond the test: the
@@ -422,7 +418,7 @@ void main() {
     ) async {
       final gateway = FakeChatGateway();
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {
@@ -463,7 +459,7 @@ void main() {
       (tester) async {
         final gateway = FakeChatGateway();
         await tester.pumpWidget(
-          wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+          wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
         );
         gateway.feedSnapshot([
           {
@@ -655,7 +651,7 @@ void main() {
       addTearDown(tester.view.reset);
       addTearDown(tester.view.resetDevicePixelRatio);
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot(
         varianceSession(queries: 3),

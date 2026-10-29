@@ -1137,7 +1137,7 @@ class ConversationTransport implements ConversationCommands {
   /// send-failure path. Null on pre-3.12.3 desktops: the gate rides
   /// [workspaceHookReviewUi], the same `params.atLeast(3, 12, 3)` version
   /// flag the RemoteClient stamps on the bridge (DeviceSession re-checks
-  /// it live for its ChatGateway getter) — older desktops never queue,
+  /// it live for its ConversationPort getter) — older desktops never queue,
   /// zero behavior change (ADR-0010).
   ReplayableCommandQueue? get replayableQueue => workspaceHookReviewUi
       ? (_replayableQueue ??= ReplayableCommandQueue(

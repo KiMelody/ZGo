@@ -182,7 +182,7 @@ class _OffPeakPageState extends State<OffPeakPage>
     if (deviceSession != null) {
       await Navigator.of(context).push(zRoute(
         (_) => ChatPage(
-          gateway: deviceSession,
+          host: deviceSession,
           sessionId: sessionId,
           title: task.title.isEmpty
               ? tr(context, 'op.viewResult')

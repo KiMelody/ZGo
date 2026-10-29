@@ -206,11 +206,11 @@ void main() {
   testWidgets('renders the child session timeline read-only', (tester) async {
     final gateway = _FakeSubagentGateway(rows: _childRows);
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -262,11 +262,11 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -289,12 +289,12 @@ void main() {
       config: const {'provider': 'openrouter', 'model': 'gpt-5.2'},
     );
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     gateway.holdSubscribe = Completer<void>();
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -314,11 +314,11 @@ void main() {
     // And a config-less snapshot renders no subtitle at all.
     final bare = _FakeSubagentGateway(rows: _childRows);
     addTearDown(() => bare.dispose());
-    final bareFeed = SubagentFeed(gateway: bare);
+    final bareFeed = SubagentFeed(conversation: bare);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: bare,
+          host: bare,
           feed: bareFeed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -351,11 +351,11 @@ void main() {
       ],
     );
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -390,11 +390,11 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -434,11 +434,11 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -476,13 +476,13 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     // Hold the fetch BEFORE opening — the auto-fill is the in-flight fetch.
     gateway.holdRange = Completer<dynamic>();
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -521,11 +521,11 @@ void main() {
   ) async {
     final gateway = _FakeSubagentGateway(rows: _childRows);
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -565,11 +565,11 @@ void main() {
       {'rowId': 2, 'kind': 'turnHeader', 'state': 'running'},
     ]);
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -608,11 +608,11 @@ void main() {
       {'rowId': 2, 'kind': 'turnHeader', 'state': 'running'},
     ]);
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -636,11 +636,11 @@ void main() {
       ],
     );
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -731,11 +731,11 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -799,11 +799,11 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -860,11 +860,11 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -901,13 +901,13 @@ void main() {
       'subscription (shared refcount)', (tester) async {
     final gateway = _FakeSubagentGateway(rows: _childRows);
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     // A consumer (Agent tile / sheet) already holds the child subscription.
     feed.acquire('sess_child_1');
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -927,11 +927,11 @@ void main() {
       (tester) async {
     final gateway = _FakeSubagentGateway(rows: _childRows);
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -954,12 +954,12 @@ void main() {
       (tester) async {
     final gateway = _FakeSubagentGateway(rows: _childRows);
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     gateway.holdSubscribe = Completer<void>();
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -1003,11 +1003,11 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',

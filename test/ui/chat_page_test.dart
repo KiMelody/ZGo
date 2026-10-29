@@ -20,13 +20,15 @@ import 'package:zgo/ui/quota_reset_dialog.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
-import '../helpers/recording_chat_gateway.dart';
+import '../helpers/chat_role_fakes.dart';
 
 /// Chat-page fake: everything rides the shared loose-default recording
-/// gateway — real [ConversationState] frame injection via [RecordingChatGateway.feedSnapshot],
-/// command calls recorded in `calls` and answered `accepted` (the
-/// conversation command surface goes through `conversationCommands`).
-class FakeChatGateway extends RecordingChatGateway {}
+/// bundle — real [ConversationState] frame injection via
+/// [ChatGatewayBundle.feedSnapshot], command calls recorded in `calls` and
+/// answered `accepted` (the conversation command surface goes through
+/// `conversationCommands`). The class itself lives in
+/// `helpers/chat_role_fakes.dart` and is shared with the sibling page
+/// tests.
 
 /// Transport that never answers `resolveInteraction` — holds the questions
 /// card in its busy state for assertions (the real gateway ack is a passing
@@ -263,7 +265,7 @@ Future<void> _pumpWithRunningSubagent(
   FakeChatGateway gateway,
 ) async {
   await tester.pumpWidget(
-    wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
   );
   gateway.feedSnapshot([
     {
@@ -291,7 +293,7 @@ void main() {
   ) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: '修复登录')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: '修复登录')),
     );
     // subscribe resolves on the next microtask; feed before settle
     gateway.feedSnapshot([
@@ -319,7 +321,7 @@ void main() {
   testWidgets('tool call renders summary + expandable diff', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': '改一下'},
@@ -378,7 +380,7 @@ void main() {
       ],
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -429,7 +431,7 @@ void main() {
       ],
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -484,7 +486,7 @@ void main() {
       'pendingInteractions': [questionsInteraction(questions)],
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gw, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gw, sessionId: 's1', title: 't')),
     );
     gw.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -528,7 +530,7 @@ void main() {
         wrap(
           MediaQuery(
             data: const MediaQueryData(viewInsets: EdgeInsets.only(bottom: 344)),
-            child: ChatPage(gateway: gateway, sessionId: 's1', title: 't'),
+            child: ChatPage(host: gateway, sessionId: 's1', title: 't'),
           ),
         ),
       );
@@ -571,7 +573,7 @@ void main() {
       Widget page(double inset) => wrap(
         MediaQuery(
           data: MediaQueryData(viewInsets: EdgeInsets.only(bottom: inset)),
-          child: ChatPage(gateway: gateway, sessionId: 's1', title: 't'),
+          child: ChatPage(host: gateway, sessionId: 's1', title: 't'),
         ),
       );
       await tester.pumpWidget(page(0));
@@ -636,7 +638,7 @@ void main() {
       Widget page() => wrap(
         MediaQuery(
           data: const MediaQueryData(size: Size(390, 844)),
-          child: ChatPage(gateway: gateway, sessionId: 's1', title: 't'),
+          child: ChatPage(host: gateway, sessionId: 's1', title: 't'),
         ),
       );
       await tester.pumpWidget(page());
@@ -734,7 +736,7 @@ void main() {
       'pendingInteractions': {'permissionCount': 0, 'userInputCount': 1},
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -799,7 +801,7 @@ void main() {
       ],
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -825,7 +827,7 @@ void main() {
       ],
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -940,7 +942,7 @@ void main() {
       'pendingInteractions': [hookReviewInteraction()],
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -998,7 +1000,7 @@ void main() {
       ],
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1023,7 +1025,7 @@ void main() {
       },
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1047,7 +1049,7 @@ void main() {
       (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1083,7 +1085,7 @@ void main() {
       },
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1131,7 +1133,7 @@ void main() {
       },
     ];
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1169,7 +1171,7 @@ void main() {
   testWidgets('draft mode: first send issues createSession with firstText '
       'and the prep-currentValue thought', (tester) async {
     final gateway = FakeChatGateway();
-    await tester.pumpWidget(wrap(ChatPage(gateway: gateway, title: '新任务')));
+    await tester.pumpWidget(wrap(ChatPage(host: gateway, title: '新任务')));
     await tester.pumpAndSettle();
     expect(find.text('输入消息开始新任务'), findsOneWidget);
 
@@ -1196,7 +1198,7 @@ void main() {
   testWidgets('draft with no thought source ships the max fallback and the '
       'sheet preselects it', (tester) async {
     final gateway = _PrepGateway(prepWithoutThoughtCurrent());
-    await tester.pumpWidget(wrap(ChatPage(gateway: gateway, title: '新任务')));
+    await tester.pumpWidget(wrap(ChatPage(host: gateway, title: '新任务')));
     await tester.pumpAndSettle();
 
     // Sheet display walks the same chain the payload ships: prep has a
@@ -1225,7 +1227,7 @@ void main() {
 
   testWidgets('draft explicit thought pick ships as selected', (tester) async {
     final gateway = FakeChatGateway();
-    await tester.pumpWidget(wrap(ChatPage(gateway: gateway, title: '新任务')));
+    await tester.pumpWidget(wrap(ChatPage(host: gateway, title: '新任务')));
     await tester.pumpAndSettle();
 
     // Pick a thought in the draft sheet (prep options: 开启/关闭).
@@ -1255,7 +1257,7 @@ void main() {
       await tester.pumpWidget(
         wrap(
           ChatPage(
-            gateway: gateway,
+            host: gateway,
             title: '新任务',
             draftWorkspacePath: '/repo/app',
           ),
@@ -1284,7 +1286,7 @@ void main() {
     await tester.pumpWidget(
       wrap(
         ChatPage(
-          gateway: gateway,
+          host: gateway,
           title: '新任务',
           draftWorkspacePath: '/repo/app',
         ),
@@ -1327,7 +1329,7 @@ void main() {
     await tester.pumpWidget(
       wrap(
         ChatPage(
-          gateway: gateway,
+          host: gateway,
           title: '新任务',
           draftWorkspacePath: '/repo/chat',
         ),
@@ -1369,7 +1371,7 @@ void main() {
     await tester.pumpWidget(
       wrap(
         ChatPage(
-          gateway: gateway,
+          host: gateway,
           title: '新任务',
           draftWorkspacePath: '/repo/chat',
         ),
@@ -1404,7 +1406,7 @@ void main() {
   ) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1453,7 +1455,7 @@ void main() {
       );
     });
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1498,7 +1500,7 @@ void main() {
       'control': {'phase': 'running'},
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1532,7 +1534,7 @@ void main() {
       'control': {'phase': 'running', 'canStop': true},
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1571,7 +1573,7 @@ void main() {
       },
     };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1589,7 +1591,7 @@ void main() {
   testWidgets('kicked gateway shows the takeover overlay', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1609,7 +1611,7 @@ void main() {
       'kicked UX)', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1638,7 +1640,7 @@ void main() {
     final gateway = FakeChatGateway()
       ..failSubscribeWith = (m) => StateError('bridge down');
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     // finite pumps: the page shows an endless connect spinner on failure,
     // pumpAndSettle would time out on it.
@@ -1651,7 +1653,7 @@ void main() {
   testWidgets('reasoning rows collapse into the 思考过程 strip', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1676,7 +1678,7 @@ void main() {
     addTearDown(tester.view.reset);
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     // finite pumps: the page keeps a connecting spinner alive on this
     // surface, pumpAndSettle would time out on it.
@@ -1735,7 +1737,7 @@ void main() {
       final gw = gateway ?? FakeChatGateway();
       await tester.pumpWidget(
         wrap(ChatPage(
-          gateway: gw,
+          host: gw,
           sessionId: 's1',
           title: 't',
           workspaceLabel: 'my-repo',
@@ -1817,7 +1819,7 @@ void main() {
       final gateway = _PrepGateway(prepWithoutThoughtCurrent());
       await tester.pumpWidget(
         wrap(ChatPage(
-          gateway: gateway,
+          host: gateway,
           sessionId: 's1',
           title: 't',
           workspaceLabel: 'my-repo',
@@ -1856,7 +1858,7 @@ void main() {
     final gateway = _PrepGateway(prepWithoutThoughtCurrent());
     await tester.pumpWidget(
       wrap(ChatPage(
-        gateway: gateway,
+        host: gateway,
         sessionId: 's1',
         title: 't',
         workspaceLabel: 'my-repo',
@@ -1885,7 +1887,7 @@ void main() {
   testWidgets('timeline markers render as centered capsules', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -1915,7 +1917,7 @@ void main() {
     addTearDown(tester.view.reset);
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': '你好', 'state': 'done'},
@@ -1934,7 +1936,7 @@ void main() {
     addTearDown(tester.view.reset);
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     final longText = List.filled(30, '一行长文本内容').join('\n');
     gateway.feedSnapshot([
@@ -1972,7 +1974,7 @@ void main() {
     addTearDown(tester.view.reset);
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi', 'state': 'done'},
@@ -2003,7 +2005,7 @@ void main() {
       tester.view.physicalSize = const Size(390, 844);
       addTearDown(tester.view.reset);
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': 'hi', 'state': 'done'},
@@ -2076,7 +2078,7 @@ void main() {
       tester.view.physicalSize = const Size(390, 844);
       addTearDown(tester.view.reset);
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': 'hi', 'state': 'done'},
@@ -2165,7 +2167,7 @@ void main() {
               onPressed: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(
                   builder: (_) =>
-                      ChatPage(gateway: gateway, sessionId: 's1', title: 't'),
+                      ChatPage(host: gateway, sessionId: 's1', title: 't'),
                 ),
               ),
               child: const Text('open chat'),
@@ -2264,7 +2266,7 @@ void main() {
     addTearDown(tester.view.reset);
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi', 'state': 'done'},
@@ -2320,7 +2322,7 @@ void main() {
     addTearDown(tester.view.reset);
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     // 24 turns: enough history to scroll through.
     gateway.feedSnapshot([
@@ -2429,7 +2431,7 @@ void main() {
       final gateway = FakeChatGateway()
         ..snapshotExtra = {'backgroundWorks': works};
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -2466,7 +2468,7 @@ void main() {
     // the expansion's transcript.
     gateway.childStates['sess_child_1'] = ConversationState();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': '去调研'},
@@ -2524,7 +2526,7 @@ void main() {
   testWidgets('running agent tool call shows 启动中 state', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': '去调研'},
@@ -2844,7 +2846,7 @@ void main() {
         },
       ]);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 100, 'kind': 'userInput', 'text': '开工', 'state': 'done'},
@@ -2931,7 +2933,7 @@ void main() {
         },
       ]);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 100, 'kind': 'userInput', 'text': '开工', 'state': 'done'},
@@ -3005,7 +3007,7 @@ void main() {
         },
       };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 100, 'kind': 'userInput', 'text': '开工', 'state': 'done'},
@@ -3060,7 +3062,7 @@ void main() {
     final gateway = _gatewayWithSubagentOnlyWork();
     await tester.pumpWidget(
       wrap(ChatPage(
-        gateway: gateway,
+        host: gateway,
         sessionId: 's1',
         title: 't',
         turnFooterConfirmWindow: const Duration(milliseconds: 150),
@@ -3092,7 +3094,7 @@ void main() {
     final gateway = _gatewayWithSubagentOnlyWork();
     await tester.pumpWidget(
       wrap(ChatPage(
-        gateway: gateway,
+        host: gateway,
         sessionId: 's1',
         title: 't',
         turnFooterConfirmWindow: const Duration(milliseconds: 150),
@@ -3176,7 +3178,7 @@ void main() {
         },
       };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       subagentRow(rowId: 9, status: 'running'),
@@ -3206,7 +3208,7 @@ void main() {
         {'name': 'explore', 'description': '调研代码'},
       ];
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -3232,7 +3234,7 @@ void main() {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
       wrap(ChatPage(
-        gateway: gateway,
+        host: gateway,
         sessionId: 's1',
         title: 't',
         subagentHysteresis: const Duration(milliseconds: 150),
@@ -3261,7 +3263,7 @@ void main() {
       'snapshot firstRowId', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     // Snapshot carries the placeholder firstRowId=1 while the window sits
     // at rows 100+ (live-probed trap).
@@ -3343,7 +3345,7 @@ void main() {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
       wrap(ChatPage(
-        gateway: gateway,
+        host: gateway,
         sessionId: 's1',
         title: 't',
         subagentHysteresis: const Duration(milliseconds: 150),
@@ -3387,7 +3389,7 @@ void main() {
       {'rowId': 2, 'kind': 'assistantText', 'text': '子会话结论：完成'},
     ]);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': '去调研'},
@@ -3442,7 +3444,7 @@ void main() {
         {'rowId': i, 'kind': 'assistantText', 'text': 'row$i'},
     ]);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': '去调研'},
@@ -3485,7 +3487,7 @@ void main() {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
       wrap(ChatPage(
-        gateway: gateway,
+        host: gateway,
         sessionId: 's1',
         title: 't',
         turnFooterConfirmWindow: const Duration(milliseconds: 150),
@@ -3532,7 +3534,7 @@ void main() {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
       wrap(ChatPage(
-        gateway: gateway,
+        host: gateway,
         sessionId: 's1',
         title: 't',
         turnFooterConfirmWindow: const Duration(milliseconds: 150),
@@ -3649,7 +3651,7 @@ void main() {
     void Function()? onOpenUsage,
   }) async {
     await tester.pumpWidget(wrap(ChatPage(
-      gateway: gateway,
+      host: gateway,
       sessionId: 's1',
       title: 't',
       onOpenUsage: onOpenUsage,
@@ -3762,7 +3764,7 @@ void main() {
     );
     await tester.pumpWidget(wrap(ChatPage(
       key: UniqueKey(),
-      gateway: gateway,
+      host: gateway,
       sessionId: 's1',
       title: 't',
     )));
@@ -3939,7 +3941,7 @@ void main() {
     addTearDown(tester.view.reset);
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录', 'state': 'done'},
@@ -4013,7 +4015,7 @@ void main() {
       'with placeholder labels', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     // The snapshot carries no config: currentModel/currentThought are both
     // empty. Visibility keys off prep option availability (prep lands
@@ -4352,7 +4354,7 @@ void main() {
         'account:zai-start-plan',
         'account:zai-individual-coding-plan',
       };
-    await tester.pumpWidget(wrap(ChatPage(gateway: gateway, title: 't')));
+    await tester.pumpWidget(wrap(ChatPage(host: gateway, title: 't')));
     await tester.pumpAndSettle();
 
     expect(transport.switches, isEmpty);
@@ -4365,7 +4367,7 @@ void main() {
     ]);
     final gateway = _SwitchGateway(transport);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -4397,7 +4399,7 @@ void main() {
     ]);
     final gateway = _SwitchGateway(transport);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -4422,7 +4424,7 @@ void main() {
       ..degraded.value = 'rpc-transport-fault';
     final gateway = _StalledGateway(_DegradedTransport(session));
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     await tester.pump();
 
@@ -4449,7 +4451,7 @@ void main() {
   ) async {
     final gateway = _StalledGateway(_DegradedTransport(_DegradedBridgeSession()));
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     await tester.pump();
     expect(find.text('与桌面端的连接正在恢复…'), findsNothing);
@@ -4518,7 +4520,7 @@ void main() {
       totalCount: 111,
     );
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     await tester.pumpAndSettle();
     return gateway;
@@ -4592,7 +4594,7 @@ void main() {
     final gateway = _SequencedRowsGateway(transport);
     gateway.feedSnapshot(historyRows(100, 111), firstRowId: 1, totalCount: 111);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     await tester.pumpAndSettle();
     final controller = historyController(tester);
@@ -4666,7 +4668,7 @@ void main() {
     // prefetch window and only the ballistic coast crosses into it.
     gateway.feedSnapshot(historyRows(100, 199), firstRowId: 1, totalCount: 199);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     await tester.pumpAndSettle();
     final controller = historyController(tester);
@@ -4708,7 +4710,7 @@ void main() {
     // a real mid-window to drag into while the open load is still pending.
     gateway.feedSnapshot(historyRows(100, 129), firstRowId: 1, totalCount: 129);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     // Finite pumps: the held load keeps the top button's spinner animating,
     // pumpAndSettle would time out on it. 400ms: the open follow's 200ms
@@ -4766,7 +4768,7 @@ void main() {
     addTearDown(tester.view.reset);
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot(historyRows(1, 40)); // no firstRowId → nothing older
     await tester.pumpAndSettle();
@@ -4804,7 +4806,7 @@ void main() {
     final gateway = _SequencedRowsGateway(transport);
     gateway.feedSnapshot(historyRows(100, 111), firstRowId: 1, totalCount: 111);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     await tester.pumpAndSettle();
 
@@ -4894,7 +4896,7 @@ void main() {
       totalCount: 113,
     );
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     await tester.pumpAndSettle();
     // Baseline: only the open auto-load fired.
@@ -4949,7 +4951,7 @@ void main() {
     ]);
     gateway.feedSnapshot(historyRows(100, 111), firstRowId: 1, totalCount: 111);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     await tester.pumpAndSettle();
     final controller = historyController(tester);
@@ -5045,7 +5047,7 @@ void main() {
     final gateway = _SequencedRowsGateway(transport);
     gateway.feedSnapshot(historyRows(100, 111), firstRowId: 1, totalCount: 111);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     await tester.pumpAndSettle();
     final controller = historyController(tester);
@@ -5089,7 +5091,7 @@ void main() {
     // riding an extent estimate that a tall row can skew.
     gateway.feedSnapshot(historyRows(100, 111), firstRowId: 1, totalCount: 111);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     await tester.pumpAndSettle();
 
@@ -5135,7 +5137,7 @@ void main() {
     final gateway = _SequencedRowsGateway(transport);
     gateway.feedSnapshot(tail, firstRowId: 1, totalCount: 144);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     await tester.pump(); // subscribe lands: the list mounts, the follow posts
     await tester.pumpAndSettle(); // the glide finishes on its stale target
@@ -5174,7 +5176,7 @@ void main() {
     final gateway = _SequencedRowsGateway(transport);
     gateway.feedSnapshot(historyRows(100, 129), firstRowId: 1, totalCount: 129);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     await tester.pumpAndSettle();
 
@@ -5216,7 +5218,7 @@ void main() {
       'start-failed card', (tester) async {
     final gateway = FakeChatGateway()..taskDisplayStatuses['s1'] = 'error';
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     // A shell session: the subscription lands with zero rows.
     gateway.feedSnapshot([]);
@@ -5232,7 +5234,7 @@ void main() {
       'list — no card', (tester) async {
     final gateway = FakeChatGateway()..taskDisplayStatuses['s1'] = 'error';
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
@@ -5248,7 +5250,7 @@ void main() {
       'late displayStatus error flip raises the card live', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([]);
     await tester.pump();
@@ -5279,7 +5281,7 @@ void main() {
         },
       };
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
@@ -5341,7 +5343,7 @@ void main() {
     final transport = _SwitchTransport(results: results);
     final gateway = _SwitchGateway(transport);
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
@@ -5528,7 +5530,7 @@ void main() {
     await tester.pumpWidget(
       wrap(
         ChatPage(
-          gateway: gateway,
+          host: gateway,
           sessionId: 's1',
           title: 't',
           workspaceLabel: workspaceLabel,
@@ -5565,7 +5567,7 @@ void main() {
     expect(find.byType(ChatPage, skipOffstage: false), findsNWidgets(2));
     final pushed = tester.widget<ChatPage>(find.byType(ChatPage).last);
     expect(pushed.sessionId, 'sess_fork');
-    expect(pushed.gateway, same(gateway));
+    expect(pushed.host, same(gateway));
     expect(pushed.workspaceLabel, 'ZLinker');
     expect(find.text('新建任务'), findsOneWidget);
   });
@@ -5665,7 +5667,7 @@ void main() {
     await tester.pumpWidget(
       wrap(
         ChatPage(
-          gateway: gateway,
+          host: gateway,
           sessionId: 's1',
           title: 't',
           workspaceLabel: workspaceLabel,
@@ -5724,7 +5726,7 @@ void main() {
     expect(gateway.subscribedSessions, contains('sess_side'));
     final pushed = tester.widget<ChatPage>(find.byType(ChatPage).last);
     expect(pushed.sessionId, 'sess_side');
-    expect(pushed.gateway, same(gateway));
+    expect(pushed.host, same(gateway));
     expect(pushed.workspaceLabel, 'ZLinker');
     // The pushed page's title is the official side-chat tab copy.
     expect(find.text('辅助对话'), findsOneWidget);
@@ -5806,7 +5808,7 @@ void main() {
       'reverts after 1200ms; re-tap restarts the window', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'assistantText', 'text': '回答正文'},
@@ -5838,7 +5840,7 @@ void main() {
       'the official web/desktop input)', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'assistantText', 'text': '回答正文'},
@@ -5862,7 +5864,7 @@ void main() {
     Future<_EditGateway> pumpEditable(tester) async {
       final gateway = _EditGateway();
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': '原始消息', 'state': 'done'},
@@ -5917,7 +5919,7 @@ void main() {
         'control': {'phase': 'running'},
       };
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': '原始消息', 'state': 'done'},
@@ -5967,7 +5969,7 @@ void main() {
         'and the read-only sheet lists executions', (tester) async {
       final gateway = FakeChatGateway();
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -6012,7 +6014,7 @@ void main() {
     testWidgets('a hookless turn renders no webhook button', (tester) async {
       final gateway = FakeChatGateway();
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -6041,7 +6043,7 @@ void main() {
         ],
       };
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -6067,7 +6069,7 @@ void main() {
         ],
       };
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -6105,7 +6107,7 @@ void main() {
         ],
       };
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -6165,7 +6167,7 @@ void main() {
 
       final gateway = FakeChatGateway();
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -6206,7 +6208,7 @@ void main() {
               _ => <String, Object?>{},
             };
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
@@ -6232,7 +6234,7 @@ void main() {
         ..gitCallHandler = (method, args) async =>
             <String, Object?>{'kind': 'not-repository', 'isGitAvailable': true};
       await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
       );
       gateway.feedSnapshot([
         {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},

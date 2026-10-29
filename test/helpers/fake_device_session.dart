@@ -6,7 +6,7 @@ import 'package:zgo/state/device_session.dart';
 import 'package:zgo/state/sidecar_index_manager.dart';
 import 'package:zgo/state/task_directory.dart';
 
-import 'recording_chat_gateway.dart';
+import 'chat_role_fakes.dart';
 
 /// DeviceSession subclass answering from local tables (never connects).
 ///

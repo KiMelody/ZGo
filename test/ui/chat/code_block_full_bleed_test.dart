@@ -7,9 +7,7 @@ import 'package:zgo/ui/chat/markdown_view.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
-import '../../helpers/recording_chat_gateway.dart';
-
-class FakeChatGateway extends RecordingChatGateway {}
+import '../../helpers/chat_role_fakes.dart';
 
 Widget wrap(Widget child) => MaterialApp(
       theme: buildDarkTheme(),
@@ -42,7 +40,7 @@ void main() {
     addTearDown(tester.view.reset);
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-      wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
     );
     gateway.feedSnapshot([
       {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},

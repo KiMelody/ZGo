@@ -817,7 +817,7 @@ class _TaskListPageState extends State<TaskListPage>
     }
     return ChatPage(
       key: ValueKey('${id ?? 'draft'}-${_paneInitialComposerText ?? ''}'),
-      gateway: session,
+      host: session,
       sessionId: id,
       title: title,
       theme: widget.theme,
@@ -2775,7 +2775,7 @@ class _TaskListPageState extends State<TaskListPage>
     await Navigator.of(context).push(
       zRoute(
         (_) => ChatPage(
-          gateway: session,
+          host: session,
           sessionId: sessionId,
           title: title,
           theme: widget.theme,

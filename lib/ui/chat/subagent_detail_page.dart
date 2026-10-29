@@ -19,14 +19,17 @@ import 'transcript_viewport.dart';
 /// subagent pane reuses the conversation renderer readOnly) via the chat
 /// page's shared [SubagentFeed] pool (acquire/release refcount) — it never
 /// opens a private subscription, so Agent tile / sheet / this page share
-/// ONE `gateway.subscribe` per child.
+/// ONE `ConversationPort.subscribe` per child.
 ///
 /// Read-only boundary (R4): no composer and nothing is ever sent to the
 /// child session — every send-shaped affordance the shared renderer has is
 /// gated off via its `readOnly` flag; the only write is stopping the
 /// parent session's background work entry while the subagent runs.
 class SubagentDetailPage extends StatefulWidget {
-  final ChatGateway gateway;
+  /// Page-construction boundary (ADR-0008 rule ii): the union of the roles
+  /// this page's render tree needs. Inner rows narrow to
+  /// [ConversationPort] + [ChatPageActions].
+  final ChatPageHost host;
 
   /// Shared child-session subscription pool owned by the chat page; this
   /// page only acquires/releases its reference.
@@ -58,7 +61,7 @@ class SubagentDetailPage extends StatefulWidget {
 
   const SubagentDetailPage({
     super.key,
-    required this.gateway,
+    required this.host,
     required this.feed,
     required this.childSessionId,
     this.title,
@@ -115,11 +118,36 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
     int? beforeRowId,
     int limit = 60,
   }) =>
-      widget.gateway.conversationCommands.rowsRange(
+      widget.host.conversationCommands.rowsRange(
         sessionId,
         beforeRowId: beforeRowId,
         limit: limit,
       );
+
+  /// Drill-in callbacks for the read-only render tree (fork / side-chat
+  /// stay masked by `readOnly`, so only the drill-in chain is provided).
+  late final ChatPageActions _actions = ChatPageActions(
+    openSubagent: (context, feed,
+            {required childSessionId,
+            title,
+            subagentType,
+            workId,
+            parentSessionId,
+            running = false,
+            confirmWindow}) =>
+        openSubagentDetail(
+      context,
+      widget.host,
+      feed: feed,
+      childSessionId: childSessionId,
+      title: title,
+      subagentType: subagentType,
+      workId: workId,
+      parentSessionId: parentSessionId,
+      running: running,
+      confirmWindow: confirmWindow,
+    ),
+  );
 
   /// Toast reactions to the viewport's typed outcomes — i18n/UX stay here.
   void _onHistoryToast(HistoryToastStep step) {
@@ -139,7 +167,7 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
 
   /// Workspace file-preview plumbing for the shared renderer (tappable
   /// file names in tool cards). One instance per page, like the chat page.
-  late final ChatPreview _preview = ChatPreview(widget.gateway);
+  late final ChatPreview _preview = ChatPreview(widget.host);
 
   @override
   void initState() {
@@ -289,7 +317,7 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
     final workId = widget.workId ?? '';
     if (parent.isEmpty || workId.isEmpty) return;
     try {
-      await widget.gateway.conversationCommands.cancelBackgroundWork(parent, workId);
+      await widget.host.conversationCommands.cancelBackgroundWork(parent, workId);
     } catch (e) {
       _toast('$e');
     }
@@ -513,14 +541,16 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
                           return ChatTurnGroup(
                             key: ValueKey('turn-${group.first['rowId']}'),
                             rows: group,
-                            gateway: widget.gateway,
+                            conversation: widget.host,
                             sessionId: widget.childSessionId,
                             onAction: _runAction,
                             state: state,
                             feed: widget.feed,
                             preview: _preview,
                             confirmWindow: widget.effectiveConfirmWindow,
-                            workspaceLabel: null,
+                            // Drill-in chain only: fork / side-chat stay
+                            // masked by readOnly.
+                            actions: _actions,
                             readOnly: true,
                           );
                         },

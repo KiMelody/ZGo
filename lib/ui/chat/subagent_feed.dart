@@ -63,8 +63,8 @@ class _TerminalRecord {
 /// The parent conversation stream never carries a subagent's tool activity
 /// (300-row sample: nestedChildToolRows=0) — the web subscribes
 /// the child session and groups client-side. This pool shares ONE
-/// `ChatGateway.subscribe` per childSessionId across consumers (Agent tile
-/// expansion, running works-bar entries, goal-panel running tiles) with
+/// `[ConversationPort.subscribe]` per childSessionId across consumers (Agent
+/// tile expansion, running works-bar entries, goal-panel running tiles) with
 /// reference counting; refs back to zero closes the subscription.
 ///
 /// Bridge degradations replay stale frames (success → 26s later running →
@@ -75,11 +75,11 @@ class _TerminalRecord {
 /// backgroundWorks) and read through [effectiveStatus].
 class SubagentFeed extends ChangeNotifier {
   SubagentFeed({
-    required this.gateway,
+    required this.conversation,
     this.regressionHysteresis = const Duration(seconds: 15),
   });
 
-  final ChatGateway gateway;
+  final ConversationPort conversation;
 
   /// How long a running report must persist before it un-finishes an
   /// already-terminal subagent.
@@ -112,7 +112,7 @@ class SubagentFeed extends ChangeNotifier {
   ) async {
     entry.subscribing = true;
     try {
-      final handle = await gateway.subscribe(childSessionId);
+      final handle = await conversation.subscribe(childSessionId);
       if (_disposed || entry.refs == 0 || _children[childSessionId] != entry) {
         // Released (or the page died) while subscribing.
         entry.subscribing = false;

@@ -423,7 +423,7 @@ class _ZGoAppState extends State<ZGoApp>
     if (session != null) {
       await Navigator.of(context).push(zRoute(
         (_) => ChatPage(
-          gateway: session,
+          host: session,
           sessionId: sessionId,
           title: title ?? deviceDisplayName(context, device.label),
           theme: _theme,

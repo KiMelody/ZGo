@@ -28,13 +28,13 @@ import 'pdf_preview_page.dart';
 /// dispatch into the preview surfaces, the markdown link split (http(s) →
 /// system browser, scheme-less local path → dispatch) and the read
 /// callbacks the preview page assembles with. Paths resolve against the
-/// session's active workspace ([ChatGateway.workspacePath]); without one
-/// the resolver returns null and [open] answers a snackbar instead of
-/// dispatching (design 10-18 §3.2).
+/// session's active workspace ([WorkspaceContextPort.workspacePath]);
+/// without one the resolver returns null and [open] answers a snackbar
+/// instead of dispatching (design 10-18 §3.2).
 class ChatPreview {
-  ChatPreview(this._gateway);
+  ChatPreview(this._workspaceContext);
 
-  final ChatGateway _gateway;
+  final WorkspaceContextPort _workspaceContext;
 
   /// Insertion-ordered LRU (re-inserted on hit); null results are cached
   /// too — a missing file stays a placeholder without hammering the
@@ -119,7 +119,7 @@ class ChatPreview {
   static const _readStepBytes = 256 * 1024;
 
   String? get _workspace {
-    final ws = _gateway.workspacePath;
+    final ws = _workspaceContext.workspacePath;
     return (ws == null || ws.isEmpty) ? null : ws;
   }
 
@@ -163,7 +163,7 @@ class ChatPreview {
 
   Future<Uint8List?> _fetchImage(String ws, String path) async {
     try {
-      final res = await _gateway.fileReadMedia(ws, path);
+      final res = await _workspaceContext.fileService.readMedia(ws, path);
       return _remember(path, res.bytes);
     } catch (_) {
       return _remember(path, null);
@@ -221,10 +221,10 @@ class ChatPreview {
         zRoute(
           (_) => PdfPreviewPage(
             path: _absolute(ws, path),
-            stat: (p) => _gateway.fileStat(ws, p),
+            stat: (p) => _workspaceContext.fileService.stat(ws, p),
             readMediaDataUrl: (p) => _readMediaDataUrl(ws, p),
             readRange: (p, offset, length) async =>
-                (await _gateway.fileReadRange(ws, p,
+                (await _workspaceContext.fileService.readFileRange(ws, p,
                         offset: offset, length: length))
                     .bytes,
           ),
@@ -301,7 +301,7 @@ class ChatPreview {
     int? totalBytes;
     try {
       while (offset < _maxTextBytes) {
-        final res = await _gateway.fileReadText(
+        final res = await _workspaceContext.fileService.readText(
           ws,
           abs,
           offset: offset,
@@ -348,7 +348,7 @@ class ChatPreview {
   Future<String?> _readMediaDataUrl(String ws, String path) async {
     try {
       final abs = _absolute(ws, path);
-      final res = await _gateway.fileReadMedia(ws, abs);
+      final res = await _workspaceContext.fileService.readMedia(ws, abs);
       final mime = res.mediaType ?? _mimeByExt[_extOf(abs)];
       return 'data:${mime ?? 'application/octet-stream'};base64,'
           '${base64Encode(res.bytes)}';

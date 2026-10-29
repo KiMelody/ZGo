@@ -335,58 +335,39 @@ class ChatHandle {
   const ChatHandle({required this.state, required this.close});
 }
 
-/// The Conversation V4 surface the native chat page drives — the
-/// [AutomationHost]/[OffPeakHost] seam pattern applied to conversations.
-/// [DeviceSession] implements it against the live transport; tests fake it
-/// (recording calls, answering from a real [ConversationState] fed by hand).
+/// Connection/link surface of the chat link (ADR-0008 revision): the live
+/// status flags, the mobile view-state report and manual recovery after a
+/// KICK. [DeviceSession] implements it; chat widgets hold just this role.
 ///
-/// Lifecycle and state reading stay on the gateway; the named conversation
-/// command surface is exposed through [ConversationCommands] (task
-/// 10-29-conversation-commands-grouping) — the transport's infrastructure
-/// members (subscribe/prepare/skills bookkeeping) and the raw sendCommand
-/// envelope are deliberately not on that interface.
-abstract interface class ChatGateway
-    implements Listenable, QuotaResetGateway {
+/// [Listenable]: the kicked overlay and the gateway banner listen on it.
+abstract interface class SessionLinkPort implements Listenable {
   DeviceStatus get status;
   bool get kicked;
   String? get error;
-
-  /// Conversation V4 commands of the active workspace (sendText / stop /
-  /// queue / model switches / row actions / attachments / …). The session
-  /// owns the transport; throws when no workspace is open.
-  ConversationCommands get conversationCommands;
-
-  /// Offline replayable-command queue (3.12.3 `web-remote-replayable`):
-  /// sendText failures at bridge level land here and are replayed via
-  /// `enqueueTaskCommand` once the bridge recovers. Null on older desktops
-  /// (`params.atLeast(3, 12, 3)` gate — the chat page then never queues,
-  /// zero behavior change) and while no workspace is open.
-  ReplayableCommandQueue? get replayableQueue;
-
-  /// Task metadata commands (rename/pin/archive/unread). Method names are
-  /// source-confirmed — see [TaskCommandsPort].
-  Future<dynamic> renameTask(String sessionId, String title);
-  Future<dynamic> setTaskPinned(String sessionId, bool pinned);
-  Future<dynamic> setTaskArchived(String sessionId, bool archived);
-  Future<dynamic> setTaskUnread(String sessionId, bool unread);
-
-  /// Desktop-local native session log file path (`getTaskNativeSessionLogFile`
-  /// on the zcode-task channel, F2): `{provider, path, exists}` — the chat
-  /// 更多菜单「复制日志路径」data source. Throws when the bridge is down or the
-  /// desktop lacks the method; callers degrade (hide the entry / toast).
-  Future<dynamic> taskNativeSessionLogFile(String sessionId);
-
-  /// Deletes a task (`zcode-task.deleteTask`). Callers confirm first.
-  Future<dynamic> deleteTask(String sessionId);
 
   /// mobile-view-state-update: report the task the chat UI is showing
   /// (or just the workspace when [taskId] is null).
   void sendViewState({String? taskId});
 
-  /// `workspaceId` for draft-mode createSession, plus the workspace path
-  /// for the chat page's copy action.
-  String? get chatWorkspaceId;
-  String? get workspacePath;
+  /// Original remote-control URL (for "copy task link").
+  String? get remoteUrl;
+
+  /// Manual recovery after a KICK: full suspend + reconnect.
+  Future<void> reconnect();
+}
+
+/// Conversation V4 surface a chat surface drives: the command group, the
+/// replayable queue, the draft-workspace guard and the live subscription.
+///
+/// [Listenable]: the queue bar and the page-level merge listen on it.
+abstract interface class ConversationPort implements Listenable {
+  /// Conversation V4 commands of the active workspace (sendText / stop /
+  /// queue / model switches / row actions / attachments / …).
+  ConversationCommands get conversationCommands;
+
+  /// Offline replayable-command queue (3.12.3 `web-remote-replayable`);
+  /// null on older desktops and while no workspace is open.
+  ReplayableCommandQueue? get replayableQueue;
 
   /// Draft-page send guard: before the first `createSession`, verifies the
   /// bridge still points at [workspacePath] — the workspace the draft page
@@ -400,28 +381,62 @@ abstract interface class ChatGateway
   /// [WorkspaceOpenOpened] with zero RPC.
   Future<WorkspaceOpenResult> ensureDraftWorkspace(String? workspacePath);
 
+  /// Live conversation subscription; per-sessionId handles are reused.
+  Future<ChatHandle> subscribe(String sessionId);
+}
+
+/// Task-metadata commands and reads the chat page owns (row actions, the
+/// shell-session error card). Method names are source-confirmed — see
+/// [TaskCommandsPort].
+abstract interface class TaskMetaPort {
+  Future<dynamic> renameTask(String sessionId, String title);
+  Future<dynamic> setTaskPinned(String sessionId, bool pinned);
+  Future<dynamic> setTaskArchived(String sessionId, bool archived);
+  Future<dynamic> setTaskUnread(String sessionId, bool unread);
+
+  /// Desktop-local native session log file path
+  /// (`getTaskNativeSessionLogFile` on the zcode-task channel, F2):
+  /// `{provider, path, exists}` — the chat 更多菜单「复制日志路径」data
+  /// source. Throws when the bridge is down or the desktop lacks the
+  /// method; callers degrade (hide the entry / toast).
+  Future<dynamic> taskNativeSessionLogFile(String sessionId);
+
+  /// Deletes a task (`zcode-task.deleteTask`). Callers confirm first.
+  Future<dynamic> deleteTask(String sessionId);
+
+  /// Relay-overview display status (`idle|running|completed|error`) of one
+  /// task; null when the relay view doesn't hold the session.
+  String? taskDisplayStatus(String sessionId);
+}
+
+/// Workspace context a chat surface reads: ids/paths, the draft store,
+/// workspace preparation, the model/entitlement catalogs, the @-mention
+/// data sources and the workspace-file port.
+///
+/// [mentionSkills] is parity-retained (the `$` picker reads [skills]); it
+/// has no direct consumer in `lib/` today.
+abstract interface class WorkspaceContextPort {
+  /// `workspaceId` for draft-mode createSession, plus the workspace path
+  /// for the chat page's copy action.
+  String? get chatWorkspaceId;
+  String? get workspacePath;
+
   /// Composer-draft persistence for this device's chat pages (text +
   /// attachment metadata in SharedPreferences, attachment bytes under the
   /// hub-injected root). Pages restore once on init and debounce writes
   /// into it; failures degrade to no persistence, never blocking chat.
   ChatDraftStore get chatDraftStore;
 
-  /// Original remote-control URL (for "copy task link").
-  String? get remoteUrl;
-
-  /// Manual recovery after a KICK: full suspend + reconnect.
-  Future<void> reconnect();
-
-  Future<ChatHandle> subscribe(String sessionId);
+  /// `prepareWorkspace` of the active bridge (model/thought selectors and
+  /// slash commands).
   Future<WorkspacePrep> prepareWorkspace();
   Future<List<SkillEntry>> skills();
 
   /// Fallback model catalog for the chat config sheet (PRD 09-19): enabled
   /// providers from the `model-provider` channel (`getAll`), or — on ≥3.14
   /// desktops where that channel is gone — the `model-selection.getView`
-  /// registry mapped to the same shape. Used when
-  /// prepareWorkspace ships no model options. Cached for the session
-  /// lifetime like [DeviceSession.probeModelProvider]; never throws —
+  /// registry mapped to the same shape. Used when [prepareWorkspace] ships
+  /// no model options. Cached for the session lifetime; never throws —
   /// transport/channel failures resolve to an empty list (and stay
   /// uncached, so the next sheet open retries).
   Future<List<Map<String, dynamic>>> modelProviderCatalog();
@@ -434,7 +449,6 @@ abstract interface class ChatGateway
   /// unentitled account group. Never throws.
   Future<Set<String>?> entitledProviderIds();
 
-  /// @-mention data sources (web chat.mention.* picker).
   /// Workspace file SEARCH for the add-context panel / `@` file picker —
   /// task 2's probed `searchWorkspaceFiles` path (falls back to the packed
   /// listing on desktops without it). Rows are {name, path, relativePath,
@@ -451,7 +465,8 @@ abstract interface class ChatGateway
   /// caller hides the file section.
   Future<bool> workspaceFilesReachable();
 
-  /// Skills (id/name/description) — same data as the $ picker.
+  /// Skills (id/name/description) — parity retained; the `$` picker reads
+  /// [skills] instead, so there is no consumer in `lib/` today.
   Future<List<Map<String, dynamic>>> mentionSkills();
 
   /// Subagents (name/description); empty on desktops rejecting the call.
@@ -460,44 +475,22 @@ abstract interface class ChatGateway
   /// Open sessions of the active workspace (id/title).
   List<({String id, String title})> mentionSessions();
 
-  /// Workspace file reads for the preview surfaces (markdown local images,
-  /// HTML preview assembly). Backed by the desktop `file` channel's
-  /// fileService — method names are bundle-derived and probed at runtime,
-  /// never hardcoded (see [FileServicePort]; the args scope shape is pending
-  /// live-probe certification and lives only in the port).
-  Future<FileStat> fileStat(String workspacePath, String path);
-  Future<MediaPreview> fileReadMedia(String workspacePath, String path,
-      {int? maxBytes});
-  Future<TextChunk> fileReadText(String workspacePath, String path,
-      {int offset = 0, required int length});
+  /// Workspace-file reads for the preview surfaces (ADR-0008 rule i:
+  /// role interfaces may expose a protocol port directly instead of
+  /// forwarding each method).
+  FileServicePort get fileService;
+}
 
-  /// Byte-range read on the same port (`{path, offset, length}`, byte units)
-  /// — the pdf range transport's data source. The desktop clamps one call to
-  /// 1 MiB and answers an empty payload past EOF (the loop's termination
-  /// signal); callers follow the official 256 KiB step. See
-  /// [FileServicePort.readFileRange].
-  Future<FileRange> fileReadRange(String workspacePath, String path,
-      {required int offset, required int length});
-
-  /// Workspace Git operations (the desktop `git` channel's gitService) for
-  /// the chat status-panel Git group and the review panel. Method names are
-  /// probed at runtime with both naming sets — see [GitPort].
-  GitPort get git;
-
-  /// Relay-overview display status (`idle|running|completed|error`) of one
-  /// task, read from the relay task view keyed by taskId. The shell-
-  /// session error card's only signal (design 09-25 D1): a session that
-  /// fails its first turn pushes `displayStatus:"error"` while its
-  /// snapshot `control.phase` is unreliable. Null when that view doesn't
-  /// hold the session (not yet bootstrapped / other-workspace lag) —
-  /// callers must treat null as "don't render", never as an error.
-  String? taskDisplayStatus(String sessionId);
-
+/// Cross-terminal session truth: deletion tombstones and the authoritative
+/// subscribe-refusal set. The chat page renders a tombstone banner, disables
+/// the composer send and keeps the messages read-only (no pop, no clearing).
+///
+/// [Listenable]: the tombstone/missing banners rebuild on it.
+abstract interface class SessionTruthPort implements Listenable {
   /// Cross-terminal deletion tombstone (task 10-06 chat tombstone): true
   /// once the live sessions-index of the active workspace dropped
   /// [sessionId] after having listed it — another terminal deleted the
-  /// session. The chat page renders a tombstone banner and disables the
-  /// composer send; the messages stay read-only (no pop, no clearing).
+  /// session.
   bool isSessionDeleted(String sessionId);
 
   /// Drops [sessionId] from the cross-terminal tombstone set. The chat
@@ -518,20 +511,48 @@ abstract interface class ChatGateway
   /// Drops [sessionId] from the missing-session set (chat page dispose —
   /// same reader-recovery shape as [forgetDeletedSession]).
   void forgetMissingSession(String sessionId);
+}
 
+/// Workspace Git operations the chat page hands to `GitWorkspaceController`
+/// (ADR-0008 rule i: the protocol port is exposed directly).
+abstract interface class GitAccessPort {
+  GitPort get git;
+}
+
+/// Entitlement/quota surface of the chat page (usage/quota banner).
+///
+/// [QuotaResetGateway] stays separate: it serves [QuotaResetController],
+/// not the UI.
+abstract interface class QuotaAccessPort {
   /// Entitlement/quota snapshot (usage-stats.getEntitlementSnapshot) via
   /// the session-wide [EntitlementPoller]: cached within the staleness
   /// window, [force] bypasses it. Never throws — failures arrive as an
   /// [EntitlementView] with phase [EntitlementPhase.error].
-  @override
   Future<EntitlementView> entitlementSnapshot({bool force = false});
 
   /// Session-wide reset-opportunity controller (usage page card + chat
-  /// banner action). Lazily created with the gateway, disposed with the
+  /// banner action). Lazily created with the session, disposed with the
   /// session; UI only reads [QuotaResetController.pools] and calls
   /// refresh/use — the scope is injected by [entitlementSnapshot].
   QuotaResetController get quotaResetController;
 }
+
+/// Page-construction boundary of the chat UI (ADR-0008 rule ii): the union
+/// of every role a chat page may need, held only by the page classes
+/// ([ChatPage] / [SubagentDetailPage]) and the composition root
+/// ([DeviceSession]). Inner widgets narrow to a single role; page-level
+/// navigation travels through callbacks, never through this union.
+///
+/// The three [Listenable] roles make this naturally [Listenable].
+abstract interface class ChatPageHost
+    implements
+        SessionLinkPort,
+        ConversationPort,
+        TaskMetaPort,
+        WorkspaceContextPort,
+        SessionTruthPort,
+        GitAccessPort,
+        QuotaAccessPort {}
 
 /// One quota route the usage page renders (design 10-25): the resolved plan
 /// access the snapshot was requested for, and that route's poller view.
@@ -559,7 +580,8 @@ class DeviceSession extends ChangeNotifier
         AutomationHost,
         OffPeakHost,
         NotifiableSession,
-        ChatGateway,
+        ChatPageHost,
+        QuotaResetGateway,
         QuotaWatchSource {
   @override
   final String deviceId;
@@ -788,7 +810,7 @@ class DeviceSession extends ChangeNotifier
   /// points: the initial open's subscribe throw, and a live
   /// subscription's terminal-failure broadcast (the resubscribe path —
   /// no more retry timers once here). Consumed by the chat page through
-  /// [ChatGateway.isSessionMissing]; the page drops its own id on dispose
+  /// [SessionTruthPort.isSessionMissing]; the page drops its own id on dispose
   /// ([forgetMissingSession]) — same reader-recovery shape as the
   /// tombstone set.
   final Set<String> _sessionMissingIds = <String>{};
@@ -2403,7 +2425,7 @@ class DeviceSession extends ChangeNotifier
   /// registration idles until the next rebuild. Returns the cancel
   /// function.
   ///
-  /// Never throws: like the [ChatGateway] fallbacks, a listener is an
+  /// Never throws: like the chat-port fallbacks, a listener is an
   /// enhancement — attach and cancel failures stay silent and the page
   /// keeps working off its initial load.
   VoidCallback listenChannel(
@@ -2468,7 +2490,7 @@ class DeviceSession extends ChangeNotifier
     }
   }
 
-  /// In-flight/cached [ChatGateway.modelProviderCatalog] future.
+  /// In-flight/cached [WorkspaceContextPort.modelProviderCatalog] future.
   Future<List<Map<String, dynamic>>>? _modelProviderCatalogFuture;
 
   @override
@@ -2593,7 +2615,7 @@ class DeviceSession extends ChangeNotifier
     return id;
   }
 
-  // ------------------------------------------------------------ ChatGateway
+  // -------------------------------------------------------- ConversationPort
 
   ConversationTransport get _requireConversation {
     final conv = _conversation;
@@ -2601,14 +2623,14 @@ class DeviceSession extends ChangeNotifier
     return conv;
   }
 
-  /// Conversation V4 command surface (ChatGateway): the live transport of
+  /// Conversation V4 command surface (ConversationPort): the live transport of
   /// the active workspace, narrowed to [ConversationCommands]. Commands go
   /// straight to it — no per-command forwarding — while lifecycle
   /// (subscribe/prepare/skills) and state reading stay on the session below.
   @override
   ConversationCommands get conversationCommands => _requireConversation;
 
-  /// Offline replayable-command queue (ChatGateway), version-gated the
+  /// Offline replayable-command queue (ConversationPort), version-gated the
   /// same way as the automation/off-peak wire gates above: pre-3.12.3
   /// desktops have no enqueueTaskCommand, so send failures surface as
   /// before instead of being queued.
@@ -2720,8 +2742,10 @@ class DeviceSession extends ChangeNotifier
 
   /// Workspace file reads on the `file` channel (the desktop's fileService —
   /// the markdown-image / HTML-preview data source). Late final like the
-  /// ports above; dispose needs no action. The gateway surface is the three
-  /// file* forwards below — the port itself stays session-internal.
+  /// ports above; dispose needs no action. Exposed as
+  /// [WorkspaceContextPort.fileService] (ADR-0008 rule i); the legacy
+  /// per-method forwards below are coexistence-only.
+  @override
   late final FileServicePort fileService = FileServicePort(
     (method, args) => callChannel(Channels.file, method, args),
   );
@@ -2855,26 +2879,6 @@ class DeviceSession extends ChangeNotifier
     notifyListeners();
     return res;
   }
-
-  @override
-  Future<FileStat> fileStat(String workspacePath, String path) =>
-      fileService.stat(workspacePath, path);
-
-  @override
-  Future<MediaPreview> fileReadMedia(String workspacePath, String path,
-          {int? maxBytes}) =>
-      fileService.readMedia(workspacePath, path, maxBytes: maxBytes);
-
-  @override
-  Future<TextChunk> fileReadText(String workspacePath, String path,
-          {int offset = 0, required int length}) =>
-      fileService.readText(workspacePath, path, offset: offset, length: length);
-
-  @override
-  Future<FileRange> fileReadRange(String workspacePath, String path,
-          {required int offset, required int length}) =>
-      fileService.readFileRange(workspacePath, path,
-          offset: offset, length: length);
 
   /// Grouped task view of every known workspace (`zcode-task
   /// .listGroupedTaskViewStructure`, desktop 3.12.3 — live-probed

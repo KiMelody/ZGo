@@ -9,7 +9,7 @@ import 'package:zgo/ui/chat/chat_page.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
-import '../../helpers/recording_chat_gateway.dart';
+import '../../helpers/chat_role_fakes.dart';
 
 /// Wire fake: records (method, args), answers from a programmed table
 /// (default `accepted`), can park calls to hold an item in `sending`.
@@ -52,13 +52,13 @@ Widget wrap(Widget child) => MaterialApp(
   home: child,
 );
 
-Future<RecordingChatGateway> _pumpPage(
+Future<FakeChatGateway> _pumpPage(
   WidgetTester tester,
   ReplayableCommandQueue? queue,
 ) async {
-  final gateway = RecordingChatGateway()..replayableQueue = queue;
+  final gateway = FakeChatGateway()..replayableQueue = queue;
   await tester.pumpWidget(
-    wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')),
+    wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
   );
   gateway.feedSnapshot([
     {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},

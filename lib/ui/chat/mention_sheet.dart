@@ -77,21 +77,21 @@ class MentionEntry {
 /// offers exactly these two categories.
 Future<MentionEntry?> showMentionSheet(
   BuildContext context,
-  ChatGateway gateway,
+  WorkspaceContextPort workspaceContext,
 ) {
   return showModalBottomSheet<MentionEntry>(
     context: context,
     useRootNavigator: false,
     isScrollControlled: true,
     showDragHandle: true,
-    builder: (_) => _MentionSheet(gateway: gateway),
+    builder: (_) => _MentionSheet(workspaceContext: workspaceContext),
   );
 }
 
 class _MentionSheet extends StatefulWidget {
-  final ChatGateway gateway;
+  final WorkspaceContextPort workspaceContext;
 
-  const _MentionSheet({required this.gateway});
+  const _MentionSheet({required this.workspaceContext});
 
   @override
   State<_MentionSheet> createState() => _MentionSheetState();
@@ -124,7 +124,7 @@ class _MentionSheetState extends State<_MentionSheet> {
   Future<void> _probeFiles() async {
     bool ok;
     try {
-      ok = await widget.gateway.workspaceFilesReachable();
+      ok = await widget.workspaceContext.workspaceFilesReachable();
     } catch (_) {
       ok = false;
     }
@@ -142,7 +142,7 @@ class _MentionSheetState extends State<_MentionSheet> {
     setState(() => _loading = true);
     List<Map<String, dynamic>> files;
     try {
-      files = await widget.gateway.searchWorkspaceFiles(_query, limit: 50);
+      files = await widget.workspaceContext.searchWorkspaceFiles(_query, limit: 50);
     } catch (_) {
       files = const [];
     }
@@ -187,7 +187,7 @@ class _MentionSheetState extends State<_MentionSheet> {
         ];
       case 'sessions':
         return [
-          for (final sess in widget.gateway.mentionSessions())
+          for (final sess in widget.workspaceContext.mentionSessions())
             if (q.isEmpty || sess.title.toLowerCase().contains(q))
               MentionEntry(
                 insert: mentionSessionToken(sess.id),
@@ -375,7 +375,7 @@ class AddContextResult {
 /// degradation).
 Future<AddContextResult?> showAddContextSheet(
   BuildContext context, {
-  required ChatGateway gateway,
+  required WorkspaceContextPort workspaceContext,
   required bool isDraft,
   String? workflowCommand,
 }) {
@@ -385,7 +385,7 @@ Future<AddContextResult?> showAddContextSheet(
     isScrollControlled: true,
     showDragHandle: true,
     builder: (_) => _AddContextSheet(
-      gateway: gateway,
+      workspaceContext: workspaceContext,
       isDraft: isDraft,
       workflowCommand: workflowCommand,
     ),
@@ -393,12 +393,12 @@ Future<AddContextResult?> showAddContextSheet(
 }
 
 class _AddContextSheet extends StatefulWidget {
-  final ChatGateway gateway;
+  final WorkspaceContextPort workspaceContext;
   final bool isDraft;
   final String? workflowCommand;
 
   const _AddContextSheet({
-    required this.gateway,
+    required this.workspaceContext,
     required this.isDraft,
     required this.workflowCommand,
   });
@@ -431,7 +431,7 @@ class _AddContextSheetState extends State<_AddContextSheet> {
   Future<void> _probeFiles() async {
     bool ok;
     try {
-      ok = await widget.gateway.workspaceFilesReachable();
+      ok = await widget.workspaceContext.workspaceFilesReachable();
     } catch (_) {
       ok = false;
     }
@@ -443,7 +443,7 @@ class _AddContextSheetState extends State<_AddContextSheet> {
     setState(() => _loading = true);
     List<Map<String, dynamic>> files;
     try {
-      files = await widget.gateway.searchWorkspaceFiles(_query, limit: 50);
+      files = await widget.workspaceContext.searchWorkspaceFiles(_query, limit: 50);
     } catch (_) {
       files = const [];
     }
@@ -638,7 +638,7 @@ class _AddContextSheetState extends State<_AddContextSheet> {
       );
     }
     // sessions
-    final sessions = widget.gateway.mentionSessions();
+    final sessions = widget.workspaceContext.mentionSessions();
     final filtered = [
       for (final s in sessions)
         if (q.isEmpty || s.title.toLowerCase().contains(q)) s,

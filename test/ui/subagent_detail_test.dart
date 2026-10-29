@@ -7,12 +7,12 @@ import 'package:zgo/state/device_session.dart' show ChatHandle;
 import 'package:zgo/ui/chat/subagent_detail_page.dart';
 import 'package:zgo/ui/chat/subagent_feed.dart';
 
-import '../helpers/recording_chat_gateway.dart';
+import '../helpers/chat_role_fakes.dart';
 
 /// Gateway whose subscribe() never resolves — the live-observed stall where
 /// the desktop bridge dies mid-handshake and the subscription call hangs.
 /// Everything else rides the shared loose-default recording gateway.
-class _StalledGateway extends RecordingChatGateway {
+class _StalledGateway extends FakeChatGateway {
   @override
   Future<ChatHandle> subscribe(String sessionId) =>
       Completer<ChatHandle>().future;
@@ -22,11 +22,11 @@ void main() {
   testWidgets('subscribe stall surfaces timeout error with retry button',
       (tester) async {
     final gateway = _StalledGateway();
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       MaterialApp(
         home: SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_subagent_stalled',
           title: 'T',

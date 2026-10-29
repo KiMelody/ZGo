@@ -33,7 +33,7 @@ String quotaResetTypeOf(QuotaWindowKind kind) =>
         : quotaResetTypeWeek;
 
 /// Gateway surface the reset controller needs — implemented by
-/// [ChatGateway] (device_session.dart); fakes implement just these three.
+/// [DeviceSession] (device_session.dart); fakes implement just these three.
 abstract interface class QuotaResetGateway {
   /// Raw `getCodingPlanResetStatus` payload; caching lives in
   /// [QuotaResetController].

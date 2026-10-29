@@ -313,7 +313,7 @@ void main() {
   // ---------------------------------------------------------- controller
 
   /// Session with programmable status / use answers routed through the
-  /// real ChatGateway forwarding; every call is recorded in
+  /// real QuotaResetGateway forwarding; every call is recorded in
   /// [FakeDeviceSession.channelCalls].
   ({
     FakeDeviceSession session,

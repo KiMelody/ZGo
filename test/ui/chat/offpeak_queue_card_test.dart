@@ -8,9 +8,7 @@ import 'package:zgo/ui/chat/chat_page.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
-import '../../helpers/recording_chat_gateway.dart';
-
-class FakeChatGateway extends RecordingChatGateway {}
+import '../../helpers/chat_role_fakes.dart';
 
 /// Minimal off-peak host answering [tasks] for the port's `list` probe.
 class FakeOffPeakHost implements OffPeakHost {
@@ -57,7 +55,7 @@ void main() {
     ]);
     var opened = 0;
     await tester.pumpWidget(wrap(ChatPage(
-      gateway: gateway,
+      host: gateway,
       sessionId: 's1',
       title: 't',
       offPeakHost: host,
@@ -86,7 +84,7 @@ void main() {
       },
     ]);
     await tester.pumpWidget(wrap(ChatPage(
-      gateway: gateway,
+      host: gateway,
       sessionId: 's1',
       title: 't',
       offPeakHost: host,
@@ -110,7 +108,7 @@ void main() {
       },
     ]);
     await tester.pumpWidget(wrap(ChatPage(
-      gateway: gateway,
+      host: gateway,
       sessionId: 's1',
       title: 't',
       offPeakHost: host,
@@ -124,7 +122,7 @@ void main() {
   testWidgets('no off-peak host hides the card entirely', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(
-        wrap(ChatPage(gateway: gateway, sessionId: 's1', title: 't')));
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
 

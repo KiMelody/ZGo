@@ -123,11 +123,11 @@ void main() {
     _VeilGateway gateway,
   ) async {
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',
@@ -294,11 +294,11 @@ void main() {
       },
     );
     addTearDown(() => gateway.dispose());
-    final feed = SubagentFeed(gateway: gateway);
+    final feed = SubagentFeed(conversation: gateway);
     await tester.pumpWidget(
       wrap(
         SubagentDetailPage(
-          gateway: gateway,
+          host: gateway,
           feed: feed,
           childSessionId: 'sess_child_1',
           title: '实现加固',

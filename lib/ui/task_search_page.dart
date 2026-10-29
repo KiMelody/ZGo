@@ -75,7 +75,7 @@ class _TaskSearchPageState extends State<TaskSearchPage>
   /// Workspace-file dispatch plumbing of the file tab (R8): the page-level
   /// instance over the same session, routing through the chat rows' own
   /// vector ([ChatPreview]) — no local copy of the blacklist or routing
-  /// table. The session is the [ChatGateway] the page already searches
+  /// table. The session is the [ChatPageHost] the page already searches
   /// with, so the preview's workspace resolution matches the search root.
   late final ChatPreview _preview = ChatPreview(widget.session);
 

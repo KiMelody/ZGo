@@ -24,7 +24,6 @@ import '../phase_pill.dart';
 import '../theme.dart';
 import '../ui_settings.dart';
 import '../widgets/sheet_scaffold.dart';
-import 'chat_page.dart' show ChatPage;
 import 'chat_preview.dart';
 import 'confirm_gate.dart';
 import 'copy_mappings.dart';
@@ -188,211 +187,6 @@ typedef AssistantTurnParts = ({
   Map<String, dynamic>? header,
   bool streaming,
 });
-
-/// Fork flow shared by the message-action sheet and the feedback row (task
-/// C1, official parity): send `forkAssistant`, then — like the web's onFork
-/// — push the ack's new sessionId as a fresh ChatPage (the landing IS the
-/// feedback; no extra toast), or snack the fallback copy when the server
-/// acked created without a usable id (the row surfaces via sessions-index).
-/// Failures keep _run's snack shapes: a non-pass status reads
-/// 「分叉失败: `reasonCode|status`」, a thrown error goes through
-/// commandErrorCopy/businessErrorCopy (busy and resolve-failure map to
-/// plain-language copy).
-///
-/// [context] must be a page-lifetime context (a row's element), not the
-/// action sheet's — the sheet pops before the command round-trip. Navigator
-/// and ScaffoldMessenger are captured up front, so post-await use is safe.
-/// [theme] rides along so the forked page keeps the theme toggle (the
-/// source page's controller — the pushed page renders under the same
-/// controller-driven ThemeMode).
-Future<void> _forkToNewSession(
-  BuildContext context, {
-  required ChatGateway gateway,
-  required String sessionId,
-  required Map<String, dynamic> target,
-  String? workspaceLabel,
-  ThemeController? theme,
-}) async {
-  final navigator = Navigator.of(context);
-  final messenger = ScaffoldMessenger.of(context);
-  final locale = localeOf(context);
-  final errorPrefix = tr(context, 'chat.action.fork.failed');
-  final createdCopy = tr(context, 'chat.fork.created');
-  final draftTitle = tr(context, 'tasks.new');
-  dynamic ack;
-  try {
-    ack = await gateway.conversationCommands.forkAssistant(sessionId, target);
-  } catch (e) {
-    debugPrint('[chat] $errorPrefix: $e');
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(
-          commandErrorCopy('$e', locale) ??
-              businessErrorCopy('$e', locale) ??
-              '$errorPrefix: $e',
-        ),
-      ),
-    );
-    return;
-  }
-  final newId = forkSessionIdOf(ack);
-  if (newId != null) {
-    navigator.push(
-      zRoute(
-        (_) => ChatPage(
-          gateway: gateway,
-          sessionId: newId,
-          title: draftTitle,
-          workspaceLabel: workspaceLabel,
-          theme: theme,
-        ),
-      ),
-    );
-    return;
-  }
-  // Same pass-set as the wire (accepted | duplicate carry the result) —
-  // unlike _run's generic check, `duplicate` here means "created" (the
-  // commandId dedupe replaying the original ack).
-  final status = ack is Map ? ack['status'] : null;
-  if (status == 'accepted' || status == 'duplicate') {
-    messenger.showSnackBar(SnackBar(content: Text(createdCopy)));
-  } else if (status != null) {
-    messenger.showSnackBar(
-      SnackBar(content: Text('$errorPrefix: ${ack['reasonCode'] ?? status}')),
-    );
-  }
-}
-
-/// Side-chat flow behind the message-action sheet's 「在辅助对话中提问」 entry
-/// (task parity-reference D2, official ask-in-side-chat parity): ask the user
-/// what to send, then `createSelectionSideSession(firstInput:{text})` and push
-/// the new sessionId as a fresh ChatPage (the fork-jump precedent, :_forkTo
-/// NewSession — the landing is the feedback, no extra toast). Cancelled or
-/// blank input creates NOTHING: ZGo never sends a first message the user did
-/// not type (its menu entry stands in for the official desktop selection
-/// tooltip, which stashes the selection and waits for the user's question).
-///
-/// [context] must be a page-lifetime context (a row's element), not the action
-/// sheet's — the sheet pops before the ask dialog and the command round-trip.
-/// Navigator and ScaffoldMessenger are captured up front; every user-facing
-/// string is read before the async gaps, so post-await use is safe. Failures
-/// keep _run's snack shapes (commandErrorCopy first — the protocol's side-chat
-/// guard copy rides it — then businessErrorCopy, then the raw prefixed text).
-Future<void> _startSelectionSideChat(
-  BuildContext context, {
-  required ChatGateway gateway,
-  required String sessionId,
-  String? workspaceLabel,
-  ThemeController? theme,
-}) async {
-  final navigator = Navigator.of(context);
-  final messenger = ScaffoldMessenger.of(context);
-  final locale = localeOf(context);
-  final dialogTitle = tr(context, 'chat.selections.askInSideChat');
-  final hint = tr(context, 'chat.selections.askHint');
-  final cancelCopy = tr(context, 'devices.add.cancel');
-  final confirmCopy = tr(context, 'chat.selections.askConfirm');
-  final errorPrefix = tr(context, 'chat.selections.askFailed');
-  final pageTitle = tr(context, 'sidePane.selectionChat');
-  final asked = await showDialog<String>(
-    context: context,
-    useRootNavigator: false,
-    builder: (_) => _AskSideChatDialog(
-      title: dialogTitle,
-      hint: hint,
-      cancelCopy: cancelCopy,
-      confirmCopy: confirmCopy,
-    ),
-  );
-  final text = asked?.trim() ?? '';
-  if (text.isEmpty) return; // empty/cancel: create nothing, send no first message
-  String newId;
-  try {
-    newId = await gateway.conversationCommands.createSelectionSideSession(
-      sessionId,
-      firstText: text,
-    );
-  } catch (e) {
-    debugPrint('[chat] $errorPrefix: $e');
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(
-          commandErrorCopy('$e', locale) ??
-              businessErrorCopy('$e', locale) ??
-              '$errorPrefix: $e',
-        ),
-      ),
-    );
-    return;
-  }
-  navigator.push(
-    zRoute(
-      (_) => ChatPage(
-        gateway: gateway,
-        sessionId: newId,
-        title: pageTitle,
-        workspaceLabel: workspaceLabel,
-        theme: theme,
-      ),
-    ),
-  );
-}
-
-/// Direct-ask dialog for the side-chat entry (D2). Stateful so it owns its
-/// [TextEditingController]: the flow pops the dialog before the command
-/// round-trip, and the exit transition keeps rebuilding the field — a
-/// controller disposed at pop time would be used after disposal.
-class _AskSideChatDialog extends StatefulWidget {
-  const _AskSideChatDialog({
-    required this.title,
-    required this.hint,
-    required this.cancelCopy,
-    required this.confirmCopy,
-  });
-
-  final String title;
-  final String hint;
-  final String cancelCopy;
-  final String confirmCopy;
-
-  @override
-  State<_AskSideChatDialog> createState() => _AskSideChatDialogState();
-}
-
-class _AskSideChatDialogState extends State<_AskSideChatDialog> {
-  final _controller = TextEditingController();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _submit() => Navigator.pop(context, _controller.text);
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: Text(widget.title),
-      content: TextField(
-        controller: _controller,
-        autofocus: true,
-        minLines: 1,
-        maxLines: 5,
-        textInputAction: TextInputAction.send,
-        decoration: InputDecoration(hintText: widget.hint),
-        onSubmitted: (_) => _submit(),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: Text(widget.cancelCopy),
-        ),
-        FilledButton(onPressed: _submit, child: Text(widget.confirmCopy)),
-      ],
-    );
-  }
-}
 
 /// turnHeader states whose footer (terminal pill + feedback row) is gated
 /// behind the confirm window (see _ChatTurnGroupState).
@@ -692,9 +486,48 @@ String chatModelLabel(ConversationState state) {
   return '$provider/$model';
 }
 
+/// Page-level navigation callbacks threaded down the timeline construction
+/// chain (ADR-0008 rule ii): inner rows hold a [ConversationPort] plus this
+/// immutable value object instead of the page's `ChatPageHost` union.
+/// Built by the page that owns the host; every callback is optional, so
+/// tests and read-only surfaces can omit it (the affordance disappears).
+class ChatPageActions {
+  const ChatPageActions({
+    this.fork,
+    this.askInSideChat,
+    this.openSubagent,
+  });
+
+  /// Message-action sheet / feedback 「分叉」: the page runs
+  /// `forkAssistant` and pushes the new session on its own host.
+  final void Function(
+    BuildContext context,
+    String sessionId,
+    Map<String, dynamic> target,
+  )? fork;
+
+  /// 「在辅助对话中提问」: the page asks, creates the side session and
+  /// pushes it.
+  final void Function(BuildContext context, String sessionId)? askInSideChat;
+
+  /// Drill-in to a child-session detail page (Agent tile, subagent row,
+  /// goal panel, works sheet) through the page's host + shared feed.
+  final void Function(
+    BuildContext context,
+    SubagentFeed feed, {
+    required String? childSessionId,
+    String? title,
+    String? subagentType,
+    String? workId,
+    String? parentSessionId,
+    bool running,
+    Duration? confirmWindow,
+  })? openSubagent;
+}
+
 class ChatTurnGroup extends StatefulWidget {
   final List<Map<String, dynamic>> rows;
-  final ChatGateway gateway;
+  final ConversationPort conversation;
   final String sessionId;
   final Future<void> Function(String, Future<dynamic> Function()) onAction;
   final ConversationState state;
@@ -717,13 +550,10 @@ class ChatTurnGroup extends StatefulWidget {
     bool rewind,
   )? onEditSend;
 
-  /// Source page's workspace chip label — carried so the fork flow can open
-  /// the new session's page with the same chip (same workspace, fork parity).
-  final String? workspaceLabel;
-
-  /// Source page's theme controller — the fork flow hands it to the pushed
-  /// page so the forked session keeps the theme toggle.
-  final ThemeController? theme;
+  /// Page-level navigation callbacks (ADR-0008 rule ii) — fork / side-chat
+  /// / subagent drill-in. Null on surfaces without a host (tests, partial
+  /// renders): the corresponding affordances disappear.
+  final ChatPageActions? actions;
 
   /// Page-shared workspace Git controller — feeds the message change
   /// capsule (D3) and the review panel it opens. Optional so tests can omit
@@ -740,17 +570,16 @@ class ChatTurnGroup extends StatefulWidget {
   const ChatTurnGroup({
     super.key,
     required this.rows,
-    required this.gateway,
+    required this.conversation,
     required this.sessionId,
     required this.onAction,
     required this.state,
     required this.feed,
     required this.preview,
     required this.confirmWindow,
-    required this.workspaceLabel,
+    this.actions,
     this.editingRowId,
     this.onEditSend,
-    this.theme,
     this.gitController,
     this.readOnly = false,
   });
@@ -841,10 +670,9 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
   @override
   Widget build(BuildContext context) {
     final rows = widget.rows;
-    final gateway = widget.gateway;
+    final conversation = widget.conversation;
     final sessionId = widget.sessionId;
     final onAction = widget.onAction;
-    final workspaceLabel = widget.workspaceLabel;
     // single timeline marker
     if (rows.length == 1 && rows.first['kind'] == 'timelineMarker') {
       return _TimelineMarkerWidget(row: rows.first);
@@ -884,7 +712,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
         ChatRow(
           key: ValueKey('row-${first['rowId']}'),
           row: first,
-          gateway: gateway,
+          conversation: conversation,
           sessionId: sessionId,
           onAction: onAction,
           state: widget.state,
@@ -892,8 +720,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
           feed: widget.feed,
           editingRowId: widget.editingRowId,
           onEditSend: widget.onEditSend,
-          workspaceLabel: workspaceLabel,
-          theme: widget.theme,
+          actions: widget.actions,
           readOnly: widget.readOnly,
         ),
       );
@@ -931,15 +758,14 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
             },
             showFeedback: i == lastTextIdx,
             hookRows: i == lastTextIdx ? hookRows : const [],
-            gateway: gateway,
+            conversation: conversation,
             sessionId: sessionId,
             onAction: onAction,
             state: widget.state,
             preview: widget.preview,
             feed: widget.feed,
             turnFeedbackLocked: _feedbackLocked,
-            workspaceLabel: workspaceLabel,
-            theme: widget.theme,
+            actions: widget.actions,
             readOnly: widget.readOnly,
           ),
         );
@@ -950,14 +776,13 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
               'row-${(p.group ?? [if (p.row != null) p.row!]).first['rowId']}',
             ),
             rows: p.group ?? [if (p.row != null) p.row!],
-            gateway: gateway,
+            conversation: conversation,
             sessionId: sessionId,
             onAction: onAction,
             state: widget.state,
             preview: widget.preview,
             feed: widget.feed,
-            workspaceLabel: workspaceLabel,
-            theme: widget.theme,
+            actions: widget.actions,
             readOnly: widget.readOnly,
           ),
         );
@@ -967,13 +792,13 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
             key: ValueKey('row-${p.row!['rowId']}'),
             row: p.row!,
             showFeedback: false,
-            gateway: gateway,
+            conversation: conversation,
             sessionId: sessionId,
             onAction: onAction,
             state: widget.state,
             preview: widget.preview,
             feed: widget.feed,
-            theme: widget.theme,
+            actions: widget.actions,
             readOnly: widget.readOnly,
           ),
         );
@@ -1011,7 +836,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
       children.add(
         _FileChangesBar(
           changes: fileChanges.cast<String, dynamic>(),
-          gateway: gateway,
+          conversation: conversation,
           sessionId: sessionId,
           row: header!,
           onAction: onAction,
@@ -1029,7 +854,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
 
 class ChatRow extends StatelessWidget {
   final Map<String, dynamic> row;
-  final ChatGateway gateway;
+  final ConversationPort conversation;
   final String sessionId;
   final Future<void> Function(String, Future<dynamic> Function()) onAction;
   final ConversationState state;
@@ -1058,12 +883,9 @@ class ChatRow extends StatelessWidget {
     bool rewind,
   )? onEditSend;
 
-  /// Source page's workspace chip label — the fork flow opens the new
-  /// session's page with the same chip (fork parity with the web panel).
-  final String? workspaceLabel;
-
-  /// Source page's theme controller — rides the fork flow to the new page.
-  final ThemeController? theme;
+  /// Page-level navigation callbacks (ADR-0008 rule ii) — fork /
+  /// side-chat / subagent drill-in; null hides those affordances.
+  final ChatPageActions? actions;
 
   /// Read-only boundary (design D2): masks [showFeedback] (the whole
   /// feedback row — copy/like/dislike/fork/hooks — stays unrendered) and
@@ -1073,7 +895,7 @@ class ChatRow extends StatelessWidget {
   const ChatRow({
     super.key,
     required this.row,
-    required this.gateway,
+    required this.conversation,
     required this.sessionId,
     required this.onAction,
     required this.state,
@@ -1084,8 +906,7 @@ class ChatRow extends StatelessWidget {
     this.turnFeedbackLocked = false,
     this.editingRowId,
     this.onEditSend,
-    this.workspaceLabel,
-    this.theme,
+    this.actions,
     this.readOnly = false,
   });
 
@@ -1128,39 +949,28 @@ class ChatRow extends StatelessWidget {
                 Navigator.pop(context);
                 onAction(
                   tr(context, 'chat.action.retry.failed'),
-                  () => gateway.conversationCommands.retryTurn(sessionId, _target),
+                  () => conversation.conversationCommands.retryTurn(sessionId, _target),
                 );
               },
             ),
-            ListTile(
-              leading: const Icon(Icons.fork_right, size: 20),
-              title: Text(tr(context, 'chat.action.fork')),
-              onTap: () {
-                Navigator.pop(context);
-                _forkToNewSession(
-                  rowContext,
-                  gateway: gateway,
-                  sessionId: sessionId,
-                  target: _target,
-                  workspaceLabel: workspaceLabel,
-                  theme: theme,
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.forum_outlined, size: 20),
-              title: Text(tr(context, 'chat.selections.askInSideChat')),
-              onTap: () {
-                Navigator.pop(context);
-                _startSelectionSideChat(
-                  rowContext,
-                  gateway: gateway,
-                  sessionId: sessionId,
-                  workspaceLabel: workspaceLabel,
-                  theme: theme,
-                );
-              },
-            ),
+            if (actions?.fork != null)
+              ListTile(
+                leading: const Icon(Icons.fork_right, size: 20),
+                title: Text(tr(context, 'chat.action.fork')),
+                onTap: () {
+                  Navigator.pop(context);
+                  actions!.fork!(rowContext, sessionId, _target);
+                },
+              ),
+            if (actions?.askInSideChat != null)
+              ListTile(
+                leading: const Icon(Icons.forum_outlined, size: 20),
+                title: Text(tr(context, 'chat.selections.askInSideChat')),
+                onTap: () {
+                  Navigator.pop(context);
+                  actions!.askInSideChat!(rowContext, sessionId);
+                },
+              ),
             ListTile(
               leading: const Icon(Icons.history, size: 20),
               title: Text(tr(context, 'chat.action.rewind')),
@@ -1205,13 +1015,13 @@ class ChatRow extends StatelessWidget {
     if (confirmed != true || !context.mounted) return;
     await onAction(
       tr(context, 'chat.action.rewind.failed'),
-      () => gateway.conversationCommands.applyFileRewind(sessionId, _target),
+      () => conversation.conversationCommands.applyFileRewind(sessionId, _target),
     );
   }
 
   Future<void> _showFileChanges(BuildContext context) async {
     try {
-      final changes = await gateway.conversationCommands.fileChanges(sessionId, target: _target);
+      final changes = await conversation.conversationCommands.fileChanges(sessionId, target: _target);
       if (!context.mounted) return;
       // Defensive parse → tappable file rows (design §4.4); anything not
       // file-row-shaped falls back to the raw JSON sheet (never worse than
@@ -1255,7 +1065,7 @@ class ChatRow extends StatelessWidget {
     final widget_ = switch (row['kind']) {
       'userInput' => _UserBubble(
         row: row,
-        gateway: gateway,
+        conversation: conversation,
         sessionId: sessionId,
         // Read-only boundary (D2): null plumbing keeps the legacy static
         // bubble (no edit affordance, no inline edit card).
@@ -1268,7 +1078,7 @@ class ChatRow extends StatelessWidget {
       ),
       'assistantText' => _AssistantBubble(
         row: row,
-        gateway: gateway,
+        conversation: conversation,
         sessionId: sessionId,
         state: state,
         preview: preview,
@@ -1278,8 +1088,7 @@ class ChatRow extends StatelessWidget {
         showFeedback: showFeedback && !readOnly,
         hookRows: hookRows,
         turnFeedbackLocked: turnFeedbackLocked,
-        workspaceLabel: workspaceLabel,
-        theme: theme,
+        actions: actions,
       ),
       'reasoning' => _ReasoningTile(
         text: row['text'] as String? ?? '',
@@ -1288,19 +1097,20 @@ class ChatRow extends StatelessWidget {
       'toolCall' => _ToolCallTile(
         row: row,
         preview: preview,
-        gateway: gateway,
+        conversation: conversation,
         sessionId: sessionId,
         // Agent rows drill into the subagent's child-session detail page.
         subagent: isAgentTool(row) ? _subagentRowFor(state.rows, row) : null,
         feed: feed,
+        actions: actions,
       ),
       // turnHeader rows are lifted out of the stream by ChatTurnGroup
       'turnHeader' => const SizedBox.shrink(),
       'subagent' => _SubagentTile(
         row: row,
-        gateway: gateway,
         sessionId: sessionId,
         feed: feed,
+        actions: actions,
       ),
       'timelineMarker' => _TimelineMarkerWidget(row: row),
       _ => const SizedBox.shrink(),
@@ -1320,7 +1130,7 @@ class ChatRow extends StatelessWidget {
 
 class _UserBubble extends StatefulWidget {
   final Map<String, dynamic> row;
-  final ChatGateway gateway;
+  final ConversationPort conversation;
   final String sessionId;
 
   /// Inline edit-resend (D1): the page-level editing notifier + send
@@ -1334,7 +1144,7 @@ class _UserBubble extends StatefulWidget {
 
   const _UserBubble({
     required this.row,
-    required this.gateway,
+    required this.conversation,
     required this.sessionId,
     this.editingRowId,
     this.onEditSend,
@@ -1413,7 +1223,7 @@ class _UserBubbleState extends State<_UserBubble> {
                     if (a is Map)
                       _AttachmentView(
                         attachment: a.cast<String, dynamic>(),
-                        gateway: widget.gateway,
+                        conversation: widget.conversation,
                         sessionId: widget.sessionId,
                       ),
                 if (text.isNotEmpty)
@@ -1494,7 +1304,7 @@ class _UserBubbleState extends State<_UserBubble> {
 /// while running）/ `发送` action row — both action buttons send immediately,
 /// there is no toggle state. Holds its own controller; the send actions ride
 /// the page callback ([_ChatPageState._sendUserEdit]) — the card never
-/// touches gateway commands. Replaces the bubble INSIDE its turn group, so
+/// touches conversation commands. Replaces the bubble INSIDE its turn group, so
 /// the Scaffold Column structure is untouched (keyboard contract §8-1) and
 /// the stable `turn-<rowId>` key keeps this State alive across rebuilds.
 class _InlineEditCard extends StatefulWidget {
@@ -1655,12 +1465,12 @@ class _MiniAction extends StatelessWidget {
 
 class _AttachmentView extends StatefulWidget {
   final Map<String, dynamic> attachment;
-  final ChatGateway gateway;
+  final ConversationPort conversation;
   final String sessionId;
 
   const _AttachmentView({
     required this.attachment,
-    required this.gateway,
+    required this.conversation,
     required this.sessionId,
   });
 
@@ -1685,7 +1495,7 @@ class _AttachmentViewState extends State<_AttachmentView> {
     final ref = widget.attachment['ref'] as String?;
     if (ref == null) return;
     try {
-      final res = await widget.gateway.conversationCommands.attachmentRead(
+      final res = await widget.conversation.conversationCommands.attachmentRead(
         widget.sessionId,
         ref: ref,
       );
@@ -1764,7 +1574,7 @@ class _AttachmentViewState extends State<_AttachmentView> {
 /// dislike / fork) hangs off the last text segment of a turn.
 class _AssistantBubble extends StatelessWidget {
   final Map<String, dynamic> row;
-  final ChatGateway gateway;
+  final ConversationPort conversation;
   final String sessionId;
   final ConversationState state;
   final bool showFeedback;
@@ -1783,31 +1593,27 @@ class _AssistantBubble extends StatelessWidget {
   /// feedback UI, see ChatTurnGroup).
   final bool turnFeedbackLocked;
 
-  /// Source page's workspace chip label — carried for the fork flow's new
-  /// page (same workspace, fork parity with the web panel).
-  final String? workspaceLabel;
-
-  /// Source page's theme controller — rides the fork flow to the new page.
-  final ThemeController? theme;
+  /// Page-level navigation callbacks (ADR-0008 rule ii); null hides the
+  /// fork entry.
+  final ChatPageActions? actions;
 
   const _AssistantBubble({
     required this.row,
-    required this.gateway,
+    required this.conversation,
     required this.sessionId,
     required this.state,
     required this.preview,
     this.showFeedback = true,
     this.hookRows = const [],
     this.turnFeedbackLocked = false,
-    this.workspaceLabel,
-    this.theme,
+    this.actions,
   });
 
   void _setFeedback(String? value) {
     if (sessionId.isEmpty) return;
     // Optimistic: update the icon instantly; server row.upserted confirms.
     state.optimisticRowUpdate(row['rowId'] as num?, {'feedback': value});
-    gateway.conversationCommands.setAssistantFeedback(sessionId, {
+    conversation.conversationCommands.setAssistantFeedback(sessionId, {
       'rowId': row['rowId'],
       if (row['entityId'] != null) 'entityId': row['entityId'],
     }, value);
@@ -1874,22 +1680,16 @@ class _AssistantBubble extends StatelessWidget {
                     onTap: () =>
                         _setFeedback(feedback == 'dislike' ? null : 'dislike'),
                   ),
-                  _FeedbackButton(
-                    icon: Icons.fork_right,
-                    active: false,
-                    onTap: () => _forkToNewSession(
-                      context,
-                      gateway: gateway,
-                      sessionId: sessionId,
-                      target: {
+                  if (actions?.fork != null)
+                    _FeedbackButton(
+                      icon: Icons.fork_right,
+                      active: false,
+                      onTap: () => actions!.fork!(context, sessionId, {
                         'rowId': row['rowId'],
                         if (row['entityId'] != null)
                           'entityId': row['entityId'],
-                      },
-                      workspaceLabel: workspaceLabel,
-                      theme: theme,
+                      }),
                     ),
-                  ),
                   if (hookRows.isNotEmpty)
                     _FeedbackButton(
                       icon: Icons.webhook,
@@ -2052,11 +1852,15 @@ class _ReasoningTile extends StatelessWidget {
 class _ToolCallTile extends StatefulWidget {
   final Map<String, dynamic> row;
 
-  /// Agent rows only: gateway/sessionId + [subagent] wire the tile's
-  /// drill-in chevron to the child-session detail page.
-  final ChatGateway? gateway;
+  /// Agent rows only: the conversation role + sessionId + [subagent] wire
+  /// the tile's drill-in chevron to the child-session detail page.
+  final ConversationPort? conversation;
   final String? sessionId;
   final Map<String, dynamic>? subagent;
+
+  /// Page-level navigation callbacks (ADR-0008 rule ii) — the drill-in
+  /// chevron rides [ChatPageActions.openSubagent].
+  final ChatPageActions? actions;
 
   /// Agent rows only: the shared child-session pool backing the inline
   /// transcript in the expansion (see [_AgentChildTimeline]).
@@ -2068,10 +1872,11 @@ class _ToolCallTile extends StatefulWidget {
   const _ToolCallTile({
     required this.row,
     required this.preview,
-    this.gateway,
+    this.conversation,
     this.sessionId,
     this.subagent,
     this.feed,
+    this.actions,
   });
 
   @override
@@ -2116,7 +1921,7 @@ class _ToolCallTileState extends State<_ToolCallTile> {
 
     final agentPrompt = isAgentTool(row) ? promptOf(inputText) : null;
     final childSessionId = widget.subagent?['childSessionId'] as String?;
-    final canOpen = widget.gateway != null &&
+    final canOpen = widget.actions?.openSubagent != null &&
         widget.feed != null &&
         (childSessionId ?? '').isNotEmpty;
 
@@ -2154,10 +1959,9 @@ class _ToolCallTileState extends State<_ToolCallTile> {
             padding: const EdgeInsets.only(left: 6),
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: () => openSubagentDetail(
+              onTap: () => widget.actions!.openSubagent!(
                 context,
-                widget.gateway!,
-                feed: widget.feed!,
+                widget.feed!,
                 childSessionId: childSessionId,
                 title: widget.subagent?['summaryText'] as String?,
                 subagentType: widget.subagent?['subagentType'] as String?,
@@ -2294,13 +2098,14 @@ class _ToolCallTileState extends State<_ToolCallTile> {
                   // subscription follows the expansion.
                   if (_expanded &&
                       widget.feed != null &&
-                      widget.gateway != null &&
+                      widget.conversation != null &&
                       (childSessionId ?? '').isNotEmpty)
                     _AgentChildTimeline(
                       feed: widget.feed!,
                       childSessionId: childSessionId!,
-                      gateway: widget.gateway!,
+                      conversation: widget.conversation!,
                       preview: widget.preview,
+                      actions: widget.actions,
                     ),
                 ],
               ),
@@ -2458,14 +2263,16 @@ class _AgentChildTimeline extends StatefulWidget {
   /// the main-chat [ChatRow] — same boxes, same tokens — flat (no turn
   /// grouping; the nested expansion mirrors the child window like the
   /// official inline childToolCalls).
-  final ChatGateway gateway;
+  final ConversationPort conversation;
   final ChatPreview preview;
+  final ChatPageActions? actions;
 
   const _AgentChildTimeline({
     required this.feed,
     required this.childSessionId,
-    required this.gateway,
+    required this.conversation,
     required this.preview,
+    this.actions,
   });
 
   @override
@@ -2560,7 +2367,7 @@ class _AgentChildTimelineState extends State<_AgentChildTimeline> {
             for (final row in window)
               ChatRow(
                 row: row,
-                gateway: widget.gateway,
+                conversation: widget.conversation,
                 sessionId: widget.childSessionId,
                 // Read-only inline rows: everything send-shaped is gated
                 // off inside ChatRow; nothing here dispatches writes.
@@ -2570,6 +2377,7 @@ class _AgentChildTimelineState extends State<_AgentChildTimeline> {
                 state: child,
                 preview: widget.preview,
                 feed: widget.feed,
+                actions: widget.actions,
                 readOnly: true,
               ),
           ],
@@ -2782,7 +2590,7 @@ class _TurnHeaderState extends State<_TurnHeader> {
 /// "N 个文件已更改 +8 -12" card with a 撤销 (rewind) button.
 class _FileChangesBar extends StatelessWidget {
   final Map<String, dynamic> changes;
-  final ChatGateway gateway;
+  final ConversationPort conversation;
   final String sessionId;
   final Map<String, dynamic> row;
   final Future<void> Function(String, Future<dynamic> Function()) onAction;
@@ -2794,7 +2602,7 @@ class _FileChangesBar extends StatelessWidget {
 
   const _FileChangesBar({
     required this.changes,
-    required this.gateway,
+    required this.conversation,
     required this.sessionId,
     required this.row,
     required this.onAction,
@@ -2860,12 +2668,12 @@ class _FileChangesBar extends StatelessWidget {
     final action = onAction(
       tr(context, 'chat.action.rewind.failed'),
       () async {
-        final preview = await gateway.conversationCommands.fileRewindPreview(sessionId,
+        final preview = await conversation.conversationCommands.fileRewindPreview(sessionId,
             target: target);
         if (!context.mounted) return null;
         final ok = await _showPreviewDialog(context, preview);
         if (ok != true) return null;
-        return gateway.conversationCommands.applyFileRewind(sessionId, target);
+        return conversation.conversationCommands.applyFileRewind(sessionId, target);
       },
     );
     await action;
@@ -3080,18 +2888,21 @@ String _subagentStatusWord(BuildContext context, String status) {
 
 class _SubagentTile extends StatelessWidget {
   final Map<String, dynamic> row;
-  final ChatGateway gateway;
   final String sessionId;
 
   /// Terminal-hysteresis view over the raw row status (a replayed running
   /// report within the window keeps the terminal caption).
   final SubagentFeed? feed;
 
+  /// Page-level navigation callbacks (ADR-0008 rule ii); the tile itself
+  /// needs no conversation role — its whole tap is the drill-in.
+  final ChatPageActions? actions;
+
   const _SubagentTile({
     required this.row,
-    required this.gateway,
     required this.sessionId,
     this.feed,
+    this.actions,
   });
 
   @override
@@ -3105,12 +2916,11 @@ class _SubagentTile extends StatelessWidget {
     final pooledFeed = feed;
     return InkWell(
       // Whole tile opens the read-only child-session detail page.
-      onTap: pooledFeed == null
+      onTap: pooledFeed == null || actions?.openSubagent == null
           ? null
-          : () => openSubagentDetail(
+          : () => actions!.openSubagent!(
                 context,
-                gateway,
-                feed: pooledFeed,
+                pooledFeed,
                 childSessionId: row['childSessionId'] as String?,
                 subagentType: row['subagentType'] as String?,
                 workId: row['workId'] as String?,
@@ -3171,7 +2981,7 @@ class _SubagentTile extends StatelessWidget {
 /// falls back to the chat default.
 void openSubagentDetail(
   BuildContext context,
-  ChatGateway gateway, {
+  ChatPageHost host, {
   required SubagentFeed feed,
   required String? childSessionId,
   String? title,
@@ -3186,7 +2996,7 @@ void openSubagentDetail(
   Navigator.of(context).push(
     zRoute(
       (_) => SubagentDetailPage(
-        gateway: gateway,
+        host: host,
         feed: feed,
         childSessionId: sid,
         title: title,
@@ -3204,7 +3014,7 @@ void openSubagentDetail(
 /// 「终端 · N 个命令」 — tap expands the individual tool cards.
 class ToolGroupCard extends StatefulWidget {
   final List<Map<String, dynamic>> rows;
-  final ChatGateway gateway;
+  final ConversationPort conversation;
   final String sessionId;
   final Future<void> Function(String, Future<dynamic> Function()) onAction;
   final ConversationState state;
@@ -3213,11 +3023,9 @@ class ToolGroupCard extends StatefulWidget {
   /// Workspace file-preview plumbing (tappable file entries).
   final ChatPreview preview;
 
-  /// Fork parity: the source page's workspace chip label for the fork flow.
-  final String? workspaceLabel;
-
-  /// Source page's theme controller — rides the fork flow to the new page.
-  final ThemeController? theme;
+  /// Page-level navigation callbacks (ADR-0008 rule ii) — forwarded to
+  /// the expanded rows.
+  final ChatPageActions? actions;
 
   /// Read-only boundary (design D2) — forwarded to the expanded rows.
   final bool readOnly;
@@ -3225,13 +3033,12 @@ class ToolGroupCard extends StatefulWidget {
   const ToolGroupCard({
     super.key,
     required this.rows,
-    required this.gateway,
+    required this.conversation,
     required this.sessionId,
     required this.onAction,
     required this.state,
     required this.preview,
-    required this.workspaceLabel,
-    this.theme,
+    this.actions,
     this.feed,
     this.readOnly = false,
   });
@@ -3319,14 +3126,13 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
                     ChatRow(
                       row: r,
                       showFeedback: false,
-                      gateway: widget.gateway,
+                      conversation: widget.conversation,
                       sessionId: widget.sessionId,
                       onAction: widget.onAction,
                       state: widget.state,
                       preview: widget.preview,
                       feed: widget.feed,
-                      workspaceLabel: widget.workspaceLabel,
-                      theme: widget.theme,
+                      actions: widget.actions,
                       readOnly: widget.readOnly,
                     ),
                 ],

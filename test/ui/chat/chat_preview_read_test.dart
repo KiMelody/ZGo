@@ -6,7 +6,7 @@ import 'package:zgo/protocol/file_service.dart';
 import 'package:zgo/ui/chat/file_read_result.dart';
 import 'package:zgo/ui/chat/timeline.dart';
 
-import '../../helpers/recording_chat_gateway.dart';
+import '../../helpers/chat_role_fakes.dart';
 
 /// The desktop's server-side clamp (research/official-large-text §1).
 const _step = 256 * 1024;
@@ -14,26 +14,44 @@ const _step = 256 * 1024;
 /// The app-side per-file read cap (design §1.3).
 const _cap = 2 * 1024 * 1024;
 
-/// Scripted [ChatGateway.fileReadText]: every call pops one entry — a
-/// [TextChunk] is answered, anything else is thrown (error-path
-/// programming). All (offset, length) pairs are recorded.
-class _ScriptedTextGateway extends RecordingChatGateway {
-  _ScriptedTextGateway(this.script);
+/// Scripted [FileServicePort.readText] (the workspace-file port behind
+/// `ChatPreview`): every call pops one entry — a [TextChunk] is answered,
+/// anything else is thrown (error-path programming). All (offset, length)
+/// pairs are recorded.
+class _ScriptedFileServicePort extends RecordingFileServicePort {
+  _ScriptedFileServicePort(super.recording, this.script);
 
   final List<Object> script;
   final List<(int, int)> textCalls = [];
 
   @override
-  Future<TextChunk> fileReadText(String workspacePath, String path,
-      {int offset = 0, required int length}) async {
+  Future<TextChunk> readText(
+    String workspacePath,
+    String path, {
+    int offset = 0,
+    required int length,
+  }) {
     textCalls.add((offset, length));
     if (script.isEmpty) {
       fail('fileReadText called past the end of the script');
     }
     final next = script.removeAt(0);
-    if (next is TextChunk) return next;
-    throw next;
+    if (next is TextChunk) return Future.value(next);
+    return Future.error(next);
   }
+}
+
+class _ScriptedTextGateway extends FakeChatGateway {
+  _ScriptedTextGateway(this.script);
+
+  final List<Object> script;
+
+  @override
+  late final FileServicePort fileService =
+      _ScriptedFileServicePort(recording, script);
+
+  List<(int, int)> get textCalls =>
+      (fileService as _ScriptedFileServicePort).textCalls;
 }
 
 /// Server-faithful chunk list for a file of [size] filler bytes ('a' — one

@@ -5,7 +5,7 @@ import 'package:zgo/protocol/channel_client.dart';
 import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/protocol/remote_client.dart' show BridgeSession;
 
-import '../helpers/recording_chat_gateway.dart';
+import '../helpers/chat_role_fakes.dart';
 
 /// Subtype + degraded-forwarding lock for [ConversationCommands]
 /// (task 10-29-conversation-commands-grouping): the interface is the UI's

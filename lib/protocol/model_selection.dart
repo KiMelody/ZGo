@@ -11,7 +11,7 @@
 ///     models: [ { modelId, config: { enabled, properties{…} } } ] } ] }
 /// ```
 ///
-/// Only the mapping lives here; the call itself is DeviceSession's
+/// Only the mapping lives here; the call itself lives on the device session
 /// modelProviderCatalog (same cache/failure contract as the legacy
 /// `getAll` branch). `revision` is noted but unused: the catalog is
 /// cached for the session lifetime and a desktop does not change its
