@@ -72,6 +72,13 @@ class DesktopCapabilities {
 
   // --- Protocol capabilities -------------------------------------------------
 
+  /// 3.17.1 archived-row delete pair (`deleteArchivedTask` /
+  /// `deleteArchivedTasks`) — the archive view's delete entries. The task
+  /// service gained the methods in 3.16.3 but the channel registration is
+  /// only confirmed for 3.17.1, hence live-then-snapshot.
+  bool get archivedDelete =>
+      _gate(3, 17, 1, source: CapabilitySource.liveThenSnapshot);
+
   /// 3.16.3 bridge-open project/host addressing second leg.
   bool get bridgeAddressing =>
       _gate(3, 16, 3, source: CapabilitySource.liveThenSnapshot);

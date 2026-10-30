@@ -105,6 +105,35 @@ class TaskCommandsPort {
   /// Workspace-level scope — the empty taskId, not any single task's owner.
   Future<dynamic> listArchived() => call('listArchivedTasks', [scopeOf('')]);
 
+  /// Deletes ONE archived task (`deleteArchivedTask`, desktop 3.17.1). The
+  /// desktop refuses live rows — it validates `archived === 1` before
+  /// deleting, so a miss returns null (not archived / already gone), NOT an
+  /// error; callers surface that as "skipped". Semantically distinct from
+  /// [delete] (no fallback chain): only the archive view calls this, gated
+  /// by `DesktopCapabilities.archivedDelete`.
+  Future<dynamic> deleteArchived(String taskId) =>
+      _probe.run('deleteArchived', const ['deleteArchivedTask'],
+          argsOf: (method) => <Object?>[_payload(taskId)]);
+
+  /// Batch-deletes archived tasks of one workspace (`deleteArchivedTasks`,
+  /// desktop 3.17.1) → `{deletedTaskIds, skippedTaskIds, failedTaskIds}`
+  /// (no transaction: per-row buckets). The [scope] is the target group's
+  /// OWN workspace scope — the archive view spans every workspace, so the
+  /// caller passes the group's {workspacePath, workspaceIdentity} instead
+  /// of leaning on the port's active-workspace default; `taskIds` must be
+  /// pre-grouped per workspace by the caller.
+  Future<dynamic> deleteArchivedBatch(
+    List<String> taskIds, {
+    required Map<String, dynamic> scope,
+  }) =>
+      _probe.run(
+        'deleteArchivedBatch',
+        const ['deleteArchivedTasks'],
+        argsOf: (method) => <Object?>[
+          {...scope, 'taskIds': taskIds},
+        ],
+      );
+
   /// Native session log file path of one task (`getTaskNativeSessionLogFile`,
   /// desktop ZCodeTaskService — 3.14.4 bundle @270902091; the path lives
   /// desktop-side only: `ZCODE_LOG_DIR || ~/.zcode/cli/log` +

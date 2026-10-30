@@ -2325,6 +2325,198 @@ void main() {
     expect(find.text('live归档假象'), findsNothing);
   });
 
+  group('archive delete (3.17.1 deleteArchivedTask(s))', () {
+    /// One archived relay row on '/repo/app'; opens the archive view.
+    Future<FakeDeviceSession> setupArchiveSession(
+      WidgetTester tester, {
+      String? desktopVersion,
+      Future<dynamic> Function(
+              String channel, String method, List<Object?> args)?
+          channelHandler,
+    }) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        desktopVersionOverride: desktopVersion,
+        entries: const [],
+        workspaces: [
+          {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+        ],
+        relayTasks: [
+          {
+            'taskId': 'a1',
+            'title': '归档任务一',
+            'workspacePath': '/repo/app',
+            'workspaceIdentity': 'app-id',
+            'displayStatus': 'idle',
+            'updatedAt': now - 5,
+            'archived': true,
+          },
+        ],
+        channelHandler: channelHandler,
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('查看归档'));
+      await tester.pumpAndSettle();
+      return session;
+    }
+
+    testWidgets('delete-all entry shows on 3.17.1 (gate open)',
+        (tester) async {
+      await setupArchiveSession(tester, desktopVersion: '3.17.1');
+      expect(find.text('全部删除'), findsOneWidget);
+    });
+
+    // Separate testWidgets: a second pumpWidget in the SAME test would reuse
+    // the page State (archive view left open), and the entry menu read
+    // 退出归档视图 instead of 查看归档.
+    testWidgets('delete-all entry hides below 3.17.1 (gate closed)',
+        (tester) async {
+      await setupArchiveSession(tester, desktopVersion: '3.16.3');
+      expect(find.text('全部删除'), findsNothing);
+    });
+
+    testWidgets('clear-archive batches per workspace scope and reports '
+        'the three buckets', (tester) async {
+      final batches = <Map<String, dynamic>>[];
+      await setupArchiveSession(
+        tester,
+        desktopVersion: '3.17.1',
+        channelHandler: (channel, method, args) async {
+          switch (method) {
+            case 'deleteArchivedTasks':
+              final payload = (args.single as Map).cast<String, dynamic>();
+              batches.add(payload);
+              return {
+                'deletedTaskIds': payload['taskIds'],
+                'skippedTaskIds': const <String>[],
+                'failedTaskIds': const <String>[],
+              };
+            case 'listTaskList':
+              return const {
+                'items': <dynamic>[],
+                'total': 0,
+                'hasMore': false,
+              };
+            case 'listPinnedTaskIds':
+            case 'listArchivedTasks':
+              return const <dynamic>[];
+          }
+          return null;
+        },
+      );
+
+      await tester.tap(find.text('全部删除'));
+      await tester.pumpAndSettle();
+      // Official confirmation copy, count-interpolated.
+      expect(find.text('删除这 1 个归档会话？'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, '全部删除'));
+      await tester.pumpAndSettle();
+
+      // One wire batch per workspace group — the group's OWN scope.
+      expect(batches, hasLength(1));
+      expect(batches.single, {
+        'workspacePath': '/repo/app',
+        'workspaceIdentity': 'app-id',
+        'taskIds': ['a1'],
+      });
+      // Official three-bucket result toast.
+      expect(find.text('成功 1 项，失败 0 项，已变化跳过 0 项'), findsOneWidget);
+      // Tombstoned locally — the row is gone before any push arrives.
+      expect(find.text('归档任务一'), findsNothing);
+    });
+
+    /// Long-press → sheet → 删除 → confirm on the archived row; the callers
+    /// record the wire method the page actually picked.
+    Future<void> deleteViaSheet(WidgetTester tester) async {
+      await tester.longPress(find.text('归档任务一'));
+      await tester.pumpAndSettle();
+      // The sheet's ListTile, not the row's swipe action (same label).
+      await tester.tap(find.widgetWithText(ListTile, '删除'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '删除'));
+      await tester.pumpAndSettle();
+    }
+
+    Future<dynamic> Function(String, String, List<Object?>)
+        recordingHandler(List<String> methods, {Object? onArchivedDelete}) =>
+            (channel, method, args) async {
+              methods.add(method);
+              switch (method) {
+                case 'deleteArchivedTask':
+                  return onArchivedDelete;
+                case 'deleteTask':
+                  return const {'taskId': 'a1'};
+                case 'listTaskList':
+                  return const {
+                    'items': <dynamic>[],
+                    'total': 0,
+                    'hasMore': false,
+                  };
+                case 'listPinnedTaskIds':
+                case 'listArchivedTasks':
+                  return const <dynamic>[];
+              }
+              return null;
+            };
+
+    testWidgets('archived row delete routes to deleteArchivedTask on 3.17.1',
+        (tester) async {
+      final methods = <String>[];
+      await setupArchiveSession(
+        tester,
+        desktopVersion: '3.17.1',
+        channelHandler: recordingHandler(methods, onArchivedDelete: const {'taskId': 'a1'}),
+      );
+
+      await deleteViaSheet(tester);
+      expect(methods, contains('deleteArchivedTask'));
+      expect(methods, isNot(contains('deleteTask')));
+      // Tombstone: the row dropped locally.
+      expect(find.text('归档任务一'), findsNothing);
+    });
+
+    testWidgets('null answer (row changed underneath) skips with the toast',
+        (tester) async {
+      final methods = <String>[];
+      await setupArchiveSession(
+        tester,
+        desktopVersion: '3.17.1',
+        channelHandler: recordingHandler(methods, onArchivedDelete: null),
+      );
+
+      await deleteViaSheet(tester);
+      expect(find.text('任务已变化，跳过删除'), findsOneWidget);
+      expect(methods, isNot(contains('deleteTask')));
+    });
+
+    testWidgets('below 3.17.1 the archived row keeps the deleteTask route',
+        (tester) async {
+      final methods = <String>[];
+      await setupArchiveSession(
+        tester,
+        desktopVersion: '3.16.3',
+        channelHandler: recordingHandler(methods),
+      );
+
+      await deleteViaSheet(tester);
+      expect(methods, contains('deleteTask'));
+      expect(methods, isNot(contains('deleteArchivedTask')));
+    });
+  });
+
   group("task open scope follows the task's true workspace (09-19)", () {
     Future<FakeDeviceSession> setupScopeSession(
       WidgetTester tester, {

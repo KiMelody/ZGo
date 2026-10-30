@@ -1577,26 +1577,31 @@ class _TaskListPageState extends State<TaskListPage>
   /// from the merged task directory, grouped by workspace. Rows long-press
   /// into the shared action sheet (取消归档 / 删除 live there).
   List<Widget> _archiveView(BuildContext context, DeviceSession session) {
-    final widgets = <Widget>[];
-    var total = 0;
-    // Same activity order as the cards. The key is the non-archived one, so
-    // a workspace whose live directory is empty (archived rows only) keeps
-    // the null key and sorts last — deliberate, so the archive view never
-    // contradicts the home card order.
-    // Conversation rows are keyed to the default group; their archived
-    // rows already surface under that group below (no draft header) —
-    // [_orderedWorkspaces] filters those workspaces out.
-    for (final ws in _orderedWorkspaces(session)) {
+    final groups = _archiveGroups(session);
+    final total = groups.fold<int>(0, (n, g) => n + g.$2.length);
+    final widgets = <Widget>[
+      // 「全部删除」entry (desktop 3.17.1 deleteArchivedTasks; the official
+      // web's archive-delete-all is the same view-level destructive button).
+      // Hidden below the capability gate — the method only ships in 3.17.1.
+      if (session.capabilities.archivedDelete && total > 0)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Row(
+            children: [
+              const Spacer(),
+              TextButton(
+                onPressed: () => _clearArchiveDialog(session, groups),
+                style: TextButton.styleFrom(
+                  foregroundColor: ZInk.dangerTone(context),
+                ),
+                child: Text(tr(context, 'tasks.archive.deleteAll')),
+              ),
+            ],
+          ),
+        ),
+    ];
+    for (final (ws, entries) in groups) {
       final dirKey = workspaceKeyOf(ws);
-      final entries = _sortedEntries(dirKey == null
-          ? const <SessionEntry>[]
-          : [
-              for (final (e, _) in session.taskDirectory
-                  .entriesFor(dirKey, includeArchived: true))
-                e,
-            ]);
-      if (entries.isEmpty) continue;
-      total += entries.length;
       widgets
         ..add(
           Padding(
@@ -1638,6 +1643,98 @@ class _TaskListPageState extends State<TaskListPage>
       );
     }
     return widgets;
+  }
+
+  /// The archive view's workspace groups — one (workspace, sorted entries)
+  /// per workspace holding archived rows. Shared by the view builder and
+  /// the batch-delete dialog so the confirmation count and the wire batches
+  /// can never drift apart. Same activity order as the cards: the key is
+  /// the non-archived one, so a workspace whose live directory is empty
+  /// (archived rows only) keeps the null key and sorts last — deliberate,
+  /// so the archive view never contradicts the home card order. Conversation
+  /// rows are keyed to the default group; their archived rows already
+  /// surface under that group (no draft header) — [_orderedWorkspaces]
+  /// filters those workspaces out.
+  List<(Map<String, dynamic>, List<SessionEntry>)> _archiveGroups(
+      DeviceSession session) {
+    final groups = <(Map<String, dynamic>, List<SessionEntry>)>[];
+    for (final ws in _orderedWorkspaces(session)) {
+      final dirKey = workspaceKeyOf(ws);
+      final entries = _sortedEntries(dirKey == null
+          ? const <SessionEntry>[]
+          : [
+              for (final (e, _) in session.taskDirectory
+                  .entriesFor(dirKey, includeArchived: true))
+                e,
+            ]);
+      if (entries.isNotEmpty) groups.add((ws, entries));
+    }
+    return groups;
+  }
+
+  /// 「全部删除」confirmation for the archive view (`deleteArchivedTasks`,
+  /// desktop 3.17.1). One wire batch PER WORKSPACE group — the method
+  /// addresses a single workspace scope (the official web splits by source
+  /// the same way). The result toast follows the official archives.result
+  /// copy: succeeded / failed / skipped-after-change.
+  Future<void> _clearArchiveDialog(
+    DeviceSession session,
+    List<(Map<String, dynamic>, List<SessionEntry>)> groups,
+  ) async {
+    final total = groups.fold<int>(0, (n, g) => n + g.$2.length);
+    if (total == 0) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      useRootNavigator: false,
+      builder: (dialogCtx) => AlertDialog(
+        title: Text(trP(dialogCtx, 'tasks.archive.deleteTitle', ['$total'])),
+        content: Text(tr(dialogCtx, 'tasks.archive.deleteDesc')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(false),
+            child: Text(tr(dialogCtx, 'common.cancel')),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialogCtx).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(dialogCtx).pop(true),
+            child: Text(tr(dialogCtx, 'tasks.archive.deleteAll')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await _runOp(() async {
+      var ok = 0;
+      var failed = 0;
+      var skipped = 0;
+      for (final (ws, entries) in groups) {
+        final res = await session.deleteArchivedAll(
+          [for (final e in entries) e.sessionId],
+          scope: {
+            'workspacePath': ws['workspacePath'],
+            if (ws['workspaceIdentity'] != null)
+              'workspaceIdentity': ws['workspaceIdentity'],
+          },
+        );
+        // Unexpected answer shapes count as nothing — the reload below is
+        // the ground truth for what actually went away.
+        if (res is! Map) continue;
+        ok += (res['deletedTaskIds'] as List?)?.length ?? 0;
+        failed += (res['failedTaskIds'] as List?)?.length ?? 0;
+        skipped += (res['skippedTaskIds'] as List?)?.length ?? 0;
+      }
+      await _reloadTasks(session);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            trP(context, 'tasks.archive.result', ['$ok', '$failed', '$skipped']),
+          ),
+        ),
+      );
+    });
   }
 
   /// Bucket labels (taskTimeline): today / yesterday /
@@ -2723,9 +2820,29 @@ class _TaskListPageState extends State<TaskListPage>
     if (confirmed != true) return;
     final isDraft =
         session.taskDirectory.sessionOnlyIds.contains(entry.sessionId);
+    // Archived rows route through the restricted 3.17.1 delete (the official
+    // web's archive view does the same — delete-archived kind); the desktop
+    // refuses live rows there, so only the archived bit decides.
+    final viaArchivedDelete =
+        entry.raw['archived'] == true && session.capabilities.archivedDelete;
     await _runOp(() async {
       if (isDraft) {
         await session.deleteSession(entry.sessionId);
+      } else if (viaArchivedDelete) {
+        final res = await session.deleteArchived(entry.sessionId);
+        if (res == null) {
+          // The row changed underneath (unarchived / deleted elsewhere):
+          // nothing was deleted — surface the skip and refresh so the row's
+          // true state replaces the stale archived bit.
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(tr(context, 'tasks.archive.deleteSkipped')),
+            ),
+          );
+          await _reloadTasks(session);
+          return;
+        }
       } else {
         try {
           await session.deleteTask(entry.sessionId);

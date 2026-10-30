@@ -20,6 +20,7 @@ import 'package:zgo/protocol/desktop_capabilities.dart';
 /// | 9 | `workspaceHookReviewUi`       | 3.12.3    | snapshot         | unchanged        | -               | RC:438               |
 /// | 10| `modelSelectionCatalog`       | 3.14.0    | snapshot         | unchanged        | -               | DS:2908              |
 /// | 11| `modelProviderUi`             | 3.14.0    | snapshot+verdict | unchanged        | providerVerdict | TL:893/894/903; MP:41/47 |
+/// | 12| `archivedDelete`              | 3.17.1    | liveThenSnapshot | (new 10-30)      | -               | TLP:2060-2076        |
 ///
 /// Step 2 is the shipped state: the `step2 source` column is authoritative
 /// and `_caps` mirrors it; the `step1 source` column records the frozen
@@ -63,6 +64,8 @@ final List<_Cap> _caps = [
       (c) => c.workspaceHookReviewUi),
   _Cap('modelSelectionCatalog', 3, 14, 0, CapabilitySource.snapshot,
       (c) => c.modelSelectionCatalog),
+  _Cap('archivedDelete', 3, 17, 1, CapabilitySource.liveThenSnapshot,
+      (c) => c.archivedDelete),
 ];
 
 RemoteConnectionParams _paramsOf(String? version) =>
@@ -101,6 +104,7 @@ void main() {
       (snapshot: '3.16.3', live: '3.12.2'), // live reverse
       (snapshot: '3.16.3', live: null), // new snapshot
       (snapshot: '3.12.2', live: '3.16.3-beta'), // malformed live
+      (snapshot: '3.17.1', live: null), // archivedDelete opens on its own
     ];
 
     for (final row in rows) {

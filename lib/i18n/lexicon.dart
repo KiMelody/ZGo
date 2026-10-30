@@ -146,6 +146,13 @@ const _zh = {
   'tasks.traceIdCopied': 'TraceID 已复制',
   'tasks.action.deleteTitle': '删除这个任务？',
   'tasks.action.deleteDesc': '任务「\$0」会从当前工作区移除，现有记录无法恢复。',
+  // Archive-view batch delete (copy aligned with the official web archives.*
+  // lexicon, desktop 3.17.1 bundle).
+  'tasks.archive.deleteAll': '全部删除',
+  'tasks.archive.deleteTitle': '删除这 \$0 个归档会话？',
+  'tasks.archive.deleteDesc': '只删除当前确认范围内的会话。删除后无法在应用中恢复。',
+  'tasks.archive.result': '成功 \$0 项，失败 \$1 项，已变化跳过 \$2 项',
+  'tasks.archive.deleteSkipped': '任务已变化，跳过删除',
   'tasks.workspaceKind.local': '本地',
   'tasks.workspaceKind.conversation': '对话',
   'tasks.workspaceKind.remote': '远程',
@@ -1426,6 +1433,12 @@ const _en = {
   'tasks.action.deleteTitle': 'Delete this task?',
   'tasks.action.deleteDesc':
       'Task "\$0" will be removed from the workspace. Existing records cannot be recovered.',
+  'tasks.archive.deleteAll': 'Delete all',
+  'tasks.archive.deleteTitle': 'Delete \$0 archived sessions?',
+  'tasks.archive.deleteDesc':
+      'Only the sessions in this confirmed selection will be deleted. You cannot restore them in the app.',
+  'tasks.archive.result': 'Succeeded: \$0; failed: \$1; skipped after changes: \$2',
+  'tasks.archive.deleteSkipped': 'Task changed; delete skipped',
   'tasks.workspaceKind.local': 'Local',
   'tasks.workspaceKind.conversation': 'Conversation',
   'tasks.workspaceKind.remote': 'Remote',

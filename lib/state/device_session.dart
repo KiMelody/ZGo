@@ -2860,6 +2860,44 @@ class DeviceSession extends ChangeNotifier
     return res;
   }
 
+  /// Deletes ONE archived row (`zcode-task.deleteArchivedTask`, desktop
+  /// 3.17.1 — archive view row delete, gated by
+  /// `capabilities.archivedDelete`). Returns the desktop's answer verbatim:
+  /// null means skipped (row no longer archived / already gone) — no
+  /// tombstone in that case, nothing was deleted. On a non-null answer the
+  /// row is tombstoned so the 30s poll window cannot resurrect it (same
+  /// discipline as [deleteTask]).
+  Future<dynamic> deleteArchived(String sessionId) async {
+    final res = await taskCommands.deleteArchived(sessionId);
+    if (res != null) {
+      _taskHome.rememberLocalDelete(sessionId);
+      notifyListeners();
+    }
+    return res;
+  }
+
+  /// Clears one workspace group's archived rows (`deleteArchivedTasks`,
+  /// desktop 3.17.1 — 归档视图「清空」, gated by
+  /// `capabilities.archivedDelete`). [scope] is the group's own workspace
+  /// scope; `taskIds` must all belong to it. Returns the desktop's
+  /// `{deletedTaskIds, skippedTaskIds, failedTaskIds}` verbatim — every
+  /// deleted id is tombstoned, skipped/failed rows stay put for the user
+  /// to see on the next render.
+  Future<dynamic> deleteArchivedAll(
+    List<String> taskIds, {
+    required Map<String, dynamic> scope,
+  }) async {
+    final res = await taskCommands.deleteArchivedBatch(taskIds, scope: scope);
+    final deleted = res is Map ? res['deletedTaskIds'] : null;
+    if (deleted is List && deleted.isNotEmpty) {
+      for (final id in deleted) {
+        if (id is String) _taskHome.rememberLocalDelete(id);
+      }
+      notifyListeners();
+    }
+    return res;
+  }
+
   /// Deletes a session through the V4 conversation command (`deleteSession`,
   /// addressed by sessionId — no task-registry resolve). C1 (10-05): fork
   /// drafts are parked outside the registry (createZCodeDeferredDraftRegistry,

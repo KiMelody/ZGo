@@ -85,6 +85,65 @@ void main() {
     expect(methods, ['deleteTask', 'listArchivedTasks']);
   });
 
+  test('deleteArchived: confirmed method + task-scoped payload; null is a '
+      'legal skip answer (not archived / already gone), a missing method '
+      'rethrows so the capability gate hides the entry', () async {
+    final calls = <(String, Map<String, Object?>)>[];
+    final port = TaskCommandsPort(
+      (method, args) async {
+        calls.add((method, (args.single as Map).cast<String, Object?>()));
+        return null; // the desktop's skip shape
+      },
+      scope: (taskId) =>
+          taskId.isEmpty ? {'workspacePath': '/archived'} : {'workspacePath': '/ws'},
+    );
+
+    final res = await port.deleteArchived('a1');
+    expect(res, isNull, reason: 'null = skipped, callers count it as such');
+    expect(calls.single.$1, 'deleteArchivedTask');
+    expect(calls.single.$2, {'workspacePath': '/ws', 'taskId': 'a1'});
+
+    final missing = TaskCommandsPort(
+      (method, args) async =>
+          throw ChannelRpcError('no such method: $method', null),
+    );
+    expect(
+      () => missing.deleteArchived('a1'),
+      throwsA(isA<ChannelRpcError>()),
+    );
+  });
+
+  test('deleteArchivedBatch: confirmed method, workspace-level scope (no '
+      'taskId key) + taskIds array', () async {
+    final calls = <(String, Map<String, Object?>)>[];
+    final port = TaskCommandsPort(
+      (method, args) async {
+        calls.add((method, (args.single as Map).cast<String, Object?>()));
+        return const {
+          'deletedTaskIds': ['a1'],
+          'skippedTaskIds': ['a2'],
+          'failedTaskIds': <String>[],
+        };
+      },
+      scope: (taskId) =>
+          taskId.isEmpty ? {'workspacePath': '/archived'} : {'workspacePath': '/ws'},
+    );
+
+    final res = await port.deleteArchivedBatch(
+      ['a1', 'a2'],
+      scope: const {'workspacePath': '/group-ws', 'workspaceIdentity': 'gid'},
+    ) as Map;
+    expect(calls.single.$1, 'deleteArchivedTasks');
+    expect(calls.single.$2, {
+      'workspacePath': '/group-ws',
+      'workspaceIdentity': 'gid',
+      'taskIds': ['a1', 'a2'],
+    });
+    expect(calls.single.$2.containsKey('taskId'), isFalse,
+        reason: 'batch addresses the workspace, ids ride the array');
+    expect(res['deletedTaskIds'], ['a1']);
+  });
+
   test('nativeSessionLogFile: confirmed method, task-scoped payload; '
       'a desktop without it rethrows (UI degrades to no-path)', () async {
     final calls = <(String, List<Object?>)>[];
