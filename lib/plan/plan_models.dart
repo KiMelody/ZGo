@@ -38,18 +38,72 @@ class PlanBucket {
   });
 }
 
-/// A billing-plane plan definition (`data.plans[]` row, from
-/// `billing/current`). Identity only — v0 UI renders buckets.
+/// One entitlement row of a plan definition (`data.plans[].entitlements[]`).
+/// The grant is a plan fact, not a balance: `grant_units` is what the plan
+/// allocates, never a remaining/used figure.
+class PlanEntitlement {
+  final String entitlementId;
+  final String showName;
+
+  /// `grant_units`; `null` = absent or wrong-typed in the payload.
+  final int? grantUnits;
+
+  /// `capabilities[]` items carrying the `model:` prefix, prefix stripped
+  /// (same discipline as [PlanBucket.modelCapabilities]).
+  final List<String> modelCapabilities;
+
+  /// `effective_at` — when the grant starts. The server may report the plan
+  /// active before this moment and before any balance bucket exists.
+  final DateTime? effectiveAt;
+
+  const PlanEntitlement({
+    required this.entitlementId,
+    required this.showName,
+    required this.grantUnits,
+    required this.modelCapabilities,
+    required this.effectiveAt,
+  });
+}
+
+/// A billing-plane plan definition (`data.plans[]` row, shared by
+/// `billing/balance` and `billing/current`).
 class PlanDefinition {
   final String id;
   final String name;
   final String status;
 
+  /// `starts_at` / `ends_at` (epoch on the wire; null when absent).
+  final DateTime? startsAt;
+  final DateTime? endsAt;
+
+  /// `entitlements[]`; empty when absent or unparseable.
+  final List<PlanEntitlement> entitlements;
+
   const PlanDefinition({
     required this.id,
     required this.name,
     required this.status,
+    this.startsAt,
+    this.endsAt,
+    this.entitlements = const [],
   });
+
+  /// The server's own plan-existence verdict (official `hasActiveStartPlan`):
+  /// status only. `ends_at` expiry is judged server-side; the card merely
+  /// renders the date it is given.
+  bool get isActive => status == 'active';
+
+  /// Latest `effective_at` across entitlements, `null` when none carries a
+  /// date. A plan whose max grant moment is still ahead has not started
+  /// granting yet.
+  DateTime? get latestEffectiveAt {
+    DateTime? latest;
+    for (final e in entitlements) {
+      final at = e.effectiveAt;
+      if (at != null && (latest == null || at.isAfter(latest))) latest = at;
+    }
+    return latest;
+  }
 }
 
 /// The account-level plan data pulled at one moment (the "数据时间" the UI
@@ -58,15 +112,30 @@ class PlanSnapshot {
   final DateTime fetchedAt;
   final List<PlanBucket> buckets;
 
+  /// `data.plans[]` — plan existence and grants. The server reports an
+  /// active plan before its balance buckets materialize, so the empty-bucket
+  /// state reads "has a plan" from here (official `hasActiveStartPlan`) and
+  /// only the numbers from [buckets].
+  final List<PlanDefinition> plans;
+
   const PlanSnapshot({
     required this.fetchedAt,
     required this.buckets,
+    this.plans = const [],
   });
 
   static final PlanSnapshot empty = PlanSnapshot(
     fetchedAt: DateTime.fromMillisecondsSinceEpoch(0),
     buckets: const [],
   );
+
+  /// Plans the server currently reports active, in wire order.
+  List<PlanDefinition> get activePlans => [
+        for (final p in plans)
+          if (p.isActive) p,
+      ];
+
+  bool get hasActivePlan => plans.any((p) => p.isActive);
 }
 
 /// Envelope `code` from a decoded response body (`{code,msg,data,logid}`);
@@ -82,8 +151,8 @@ int? envelopeCode(dynamic body) {
 dynamic envelopeData(dynamic body) => body is Map ? body['data'] : null;
 
 /// Parses the balance endpoint's `data` into a snapshot. Malformed input
-/// (wrong type, missing `balances`, junk rows) yields an empty snapshot —
-/// never a throw.
+/// (wrong type, missing `balances`/`plans`, junk rows) yields empty
+/// collections — never a throw.
 PlanSnapshot parseBalanceSnapshot(
   dynamic data, {
   DateTime? fetchedAt,
@@ -108,12 +177,15 @@ PlanSnapshot parseBalanceSnapshot(
   return PlanSnapshot(
     fetchedAt: fetchedAt ?? DateTime.now(),
     buckets: buckets,
+    plans: _parsePlans(data),
   );
 }
 
 /// Parses the plan definitions out of a `billing/current`-shaped `data`
 /// (same `plans[]` family as the balance response). Bad shapes → empty list.
-List<PlanDefinition> parsePlanDefinitions(dynamic data) {
+List<PlanDefinition> parsePlanDefinitions(dynamic data) => _parsePlans(data);
+
+List<PlanDefinition> _parsePlans(dynamic data) {
   final plans = data is Map ? data['plans'] : null;
   final out = <PlanDefinition>[];
   if (plans is List) {
@@ -123,8 +195,27 @@ List<PlanDefinition> parsePlanDefinitions(dynamic data) {
         id: _asString(row['plan_id']),
         name: _asString(row['name']),
         status: _asString(row['status']),
+        startsAt: _asEpoch(row['starts_at']),
+        endsAt: _asEpoch(row['ends_at']),
+        entitlements: _parseEntitlements(row['entitlements']),
       ));
     }
+  }
+  return out;
+}
+
+List<PlanEntitlement> _parseEntitlements(dynamic v) {
+  if (v is! List) return const [];
+  final out = <PlanEntitlement>[];
+  for (final row in v) {
+    if (row is! Map) continue;
+    out.add(PlanEntitlement(
+      entitlementId: _asString(row['entitlement_id']),
+      showName: _asString(row['show_name']),
+      grantUnits: _asInt(row['grant_units']),
+      modelCapabilities: _modelCapabilities(row['capabilities']),
+      effectiveAt: _asEpoch(row['effective_at']),
+    ));
   }
   return out;
 }

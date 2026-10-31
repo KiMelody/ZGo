@@ -594,6 +594,46 @@ void main() {
       expect(c.expiredOn, isNull);
     });
 
+    test('an active-plan-only snapshot (no buckets yet) never writes the memo',
+        () async {
+      final store = FakeTokenStore()..token = makeJwt();
+      final memo = FakePlanMemo();
+      final api = FakeApi()
+        ..nextBody = {
+          'code': 0,
+          'msg': '',
+          'data': {
+            'plans': [
+              {
+                'plan_id': 'weekend-build',
+                'name': 'Weekend Build',
+                'status': 'active',
+                'ends_at': kNow.millisecondsSinceEpoch ~/ 1000 + 86400,
+                'entitlements': [
+                  {
+                    'show_name': 'GLM-5.3-Flash',
+                    'grant_units': 300000000,
+                    'effective_at': kNow.millisecondsSinceEpoch ~/ 1000 + 3600,
+                  },
+                ],
+              },
+            ],
+            'balances': [],
+          },
+        };
+      final c = PlanController(
+          store: store, api: api.build(), memo: memo, now: () => kNow);
+
+      await c.ensureLoaded();
+
+      expect(c.snapshot.buckets, isEmpty);
+      expect(c.snapshot.activePlans, hasLength(1));
+      // The empty window is not expiry evidence: no plan-derived memo write.
+      expect(memo.writes, 0);
+      expect(memo.expiry, isNull);
+      expect(c.expiredOn, isNull);
+    });
+
     test('empty snapshot + past memo date classifies as expired', () async {
       final store = FakeTokenStore()..token = makeJwt();
       final memo = FakePlanMemo()

@@ -228,6 +228,146 @@ void main() {
     });
   });
 
+  group('parseBalanceSnapshot plans (empty-bucket window)', () {
+    final fetched = DateTime.utc(2026, 10, 11, 8);
+
+    PlanSnapshot parse(dynamic data) =>
+        parseBalanceSnapshot(data, fetchedAt: fetched);
+
+    test('plans[] rides the snapshot with identity, window and grants', () {
+      final snap = parse(envelopeData(balanceFixture()));
+
+      final p = snap.plans.single;
+      expect(p.id, 'weekend-build');
+      expect(p.name, 'ZCode Weekend Build');
+      expect(p.status, 'active');
+      expect(p.startsAt,
+          DateTime.fromMillisecondsSinceEpoch(1757836800 * 1000));
+      expect(p.endsAt, DateTime.fromMillisecondsSinceEpoch(1791849600 * 1000));
+
+      final e = p.entitlements.single;
+      expect(e.entitlementId, 'ent-1');
+      expect(e.showName, 'GLM-5.3-Flash');
+      expect(e.grantUnits, 300000000);
+      expect(e.modelCapabilities, ['glm-5.3-flash']);
+      expect(e.effectiveAt,
+          DateTime.fromMillisecondsSinceEpoch(1757836800 * 1000));
+    });
+
+    test('active detection reads status only (official hasActiveStartPlan)',
+        () {
+      final snap = parse(envelopeData(balanceFixture()));
+      expect(snap.hasActivePlan, isTrue);
+      expect(snap.activePlans.single.id, 'weekend-build');
+
+      final mixed = parse({
+        'plans': [
+          {'plan_id': 'old', 'status': 'expired'},
+          {'plan_id': 'live', 'status': 'active'},
+        ],
+        'balances': [],
+      });
+      expect(mixed.hasActivePlan, isTrue);
+      expect(mixed.activePlans.single.id, 'live');
+
+      final none = parse({
+        'plans': [
+          {'plan_id': 'old', 'status': 'expired'},
+        ],
+        'balances': [],
+      });
+      expect(none.hasActivePlan, isFalse);
+      expect(none.activePlans, isEmpty);
+    });
+
+    test('latestEffectiveAt takes the max across entitlements', () {
+      final snap = parse({
+        'plans': [
+          {
+            'plan_id': 'p',
+            'status': 'active',
+            'entitlements': [
+              {'show_name': 'a', 'effective_at': 1000},
+              {'show_name': 'b', 'effective_at': 3000},
+              {'show_name': 'no-date'},
+            ],
+          },
+        ],
+        'balances': [],
+      });
+      expect(
+        snap.activePlans.single.latestEffectiveAt,
+        DateTime.fromMillisecondsSinceEpoch(3000000),
+      );
+      expect(snap.plans.single.entitlements, hasLength(3));
+    });
+
+    test('bad plan rows and entitlements degrade, never throw', () {
+      for (final data in <dynamic>[
+        null,
+        'nope',
+        7,
+        {'plans': 'gone'},
+        {
+          'plans': [1, 'x', null],
+        },
+      ]) {
+        final snap = parse(data);
+        expect(snap.plans, isEmpty);
+        expect(snap.activePlans, isEmpty);
+        expect(snap.buckets, isEmpty);
+      }
+
+      final snap = parse({
+        'plans': [
+          {
+            'plan_id': 9,
+            'name': null,
+            'status': 1,
+            'starts_at': 'soon',
+            'ends_at': true,
+            'entitlements': [
+              7,
+              'x',
+              {
+                'entitlement_id': 3,
+                'show_name': 2,
+                'grant_units': 'nope',
+                'capabilities': 'model:x',
+                'effective_at': [1],
+              },
+            ],
+          },
+        ],
+        'balances': [],
+      });
+      final p = snap.plans.single;
+      expect(p.id, isEmpty);
+      expect(p.name, isEmpty);
+      expect(p.isActive, isFalse);
+      expect(p.startsAt, isNull);
+      expect(p.endsAt, isNull);
+      final e = p.entitlements.single;
+      expect(e.entitlementId, isEmpty);
+      expect(e.showName, isEmpty);
+      expect(e.grantUnits, isNull);
+      expect(e.modelCapabilities, isEmpty);
+      expect(e.effectiveAt, isNull);
+      expect(p.latestEffectiveAt, isNull);
+    });
+
+    test('a missing plans[] leaves the buckets path untouched', () {
+      final snap = parse({
+        'balances': [
+          {'entitlement_id': 'only-bucket'},
+        ],
+      });
+      expect(snap.plans, isEmpty);
+      expect(snap.hasActivePlan, isFalse);
+      expect(snap.buckets.single.entitlementId, 'only-bucket');
+    });
+  });
+
   group('parsePlanDefinitions', () {
     test('parses id / name / status', () {
       final plans = parsePlanDefinitions(envelopeData(balanceFixture()));

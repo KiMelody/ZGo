@@ -16,6 +16,26 @@ typedef PlanUrlLauncher = Future<bool> Function(Uri url);
 /// the expired empty state.
 String _fmtPlanDate(DateTime t) => t.toLocal().toString().substring(0, 10);
 
+/// yyyy-MM-dd HH:mm in the local zone for entitlement activation moments:
+/// a grant starts at a wall-clock time (e.g. 23:00), so the date-only
+/// format would lose the information the note exists to convey. Minute
+/// precision matches the wire (whole-minute activation moments).
+String _fmtPlanDateTime(DateTime t) =>
+    t.toLocal().toString().substring(0, 16);
+
+/// Thousands separators for the tabular metric values ('—' when absent).
+String _grouped(int? n) {
+  if (n == null) return '—';
+  final s = '$n';
+  final buf = StringBuffer();
+  for (var i = 0; i < s.length; i++) {
+    final rem = s.length - i;
+    buf.write(s[i]);
+    if (rem > 1 && rem % 3 == 1) buf.write(',');
+  }
+  return buf.toString();
+}
+
 /// Account-level coding-plan quotas (z.ai billing plane) — bucket list
 /// with "remaining" semantics, mirroring the relay quota panel's visual
 /// language (usageBlue bars, usageGreen expiry line) without touching its
@@ -164,6 +184,14 @@ class _PlanPageState extends State<PlanPage> {
                             child: CircularProgressIndicator(strokeWidth: 2),
                           ),
                         )
+                      else if (snap.buckets.isEmpty &&
+                          snap.activePlans.isNotEmpty)
+                        // Plans decide existence, balances only the numbers:
+                        // an active plan with no buckets yet outranks both
+                        // stale memo-derived copy variants (official
+                        // hasActiveStartPlan semantics).
+                        for (final plan in snap.activePlans)
+                          _ActivePlanCard(plan: plan)
                       else if (snap.buckets.isEmpty)
                         Padding(
                           padding: const EdgeInsets.all(ZSpacing.emptyState),
@@ -496,18 +524,85 @@ class _BucketCard extends StatelessWidget {
     if (total == null || remaining == null || total <= 0) return 0;
     return (remaining / total).clamp(0.0, 1.0);
   }
+}
 
-  /// Thousands separators for the tabular metric values ('—' when absent).
-  String _grouped(int? n) {
-    if (n == null) return '—';
-    final s = '$n';
-    final buf = StringBuffer();
-    for (var i = 0; i < s.length; i++) {
-      final rem = s.length - i;
-      buf.write(s[i]);
-      if (rem > 1 && rem % 3 == 1) buf.write(',');
-    }
-    return buf.toString();
+/// A plan the server reports active while its balance buckets are still
+/// absent (the pre-`effective_at` window): identity, expiry and the granted
+/// entitlements only. No bar and no used/remaining numbers — neither state
+/// has those facts, and inventing them would misreport the plan.
+class _ActivePlanCard extends StatelessWidget {
+  final PlanDefinition plan;
+
+  const _ActivePlanCard({required this.plan});
+
+  @override
+  Widget build(BuildContext context) {
+    final effectiveAt = plan.latestEffectiveAt;
+    // Max grant moment still ahead → the plan has not started granting;
+    // no date (or already past) with no buckets → the buckets lag.
+    final pending = effectiveAt != null && effectiveAt.isAfter(DateTime.now());
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(ZSpacing.card),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Text(
+                    plan.name.isEmpty ? plan.id : plan.name,
+                    style: ZType.bodyStrong,
+                  ),
+                ),
+                if (plan.endsAt != null) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    trP(context, 'plan.bucket.expires', [
+                      _fmtPlanDate(plan.endsAt!),
+                    ]),
+                    style: ZType.caption
+                        .copyWith(color: ZInk.usageGreen(context)),
+                  ),
+                ],
+              ],
+            ),
+            for (final e in plan.entitlements) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      e.showName.isEmpty ? e.entitlementId : e.showName,
+                      style: ZType.body,
+                    ),
+                  ),
+                  if (e.grantUnits != null) ...[
+                    const SizedBox(width: 8),
+                    Text(
+                      trP(context, 'plan.entitlement.grant',
+                          [_grouped(e.grantUnits)]),
+                      style: ZType.bodyStrong.copyWith(
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ],
+            const SizedBox(height: 10),
+            Text(
+              pending
+                  ? trP(context, 'plan.pendingUntil',
+                      [_fmtPlanDateTime(effectiveAt)])
+                  : tr(context, 'plan.pendingBuckets'),
+              style: ZType.sub.copyWith(color: ZInk.muted(context)),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
