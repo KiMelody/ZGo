@@ -89,6 +89,12 @@ class _TaskListPageState extends State<TaskListPage>
   String _groupBy = 'workspace';
   String _sortBy = 'updated';
 
+  /// Card-to-card ordering: `activity` keeps the pre-10-30 recency order
+  /// (default, also the fallback for archives without the key), `nameAsc` /
+  /// `nameDesc` sort by [workspaceTitle] codepoint order (en/numbers as
+  /// usual, CJK by Unicode codepoint — no intl collation).
+  String _cardSort = 'activity';
+
   /// Desktop sidebar 归档 filter: shows only archived task rows (the web
   /// sidebar carries the same entry; empty when nothing is archived).
   bool _showArchived = false;
@@ -171,6 +177,11 @@ class _TaskListPageState extends State<TaskListPage>
         if (saved['sortBy'] == 'created' || saved['sortBy'] == 'updated') {
           _sortBy = saved['sortBy'];
         }
+        if (saved['cardSort'] == 'activity' ||
+            saved['cardSort'] == 'nameAsc' ||
+            saved['cardSort'] == 'nameDesc') {
+          _cardSort = saved['cardSort'];
+        }
       });
     } catch (_) {}
   }
@@ -179,7 +190,11 @@ class _TaskListPageState extends State<TaskListPage>
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
       _organizePrefsKey,
-      jsonEncode({'groupBy': _groupBy, 'sortBy': _sortBy}),
+      jsonEncode({
+        'groupBy': _groupBy,
+        'sortBy': _sortBy,
+        'cardSort': _cardSort,
+      }),
     );
   }
 
@@ -280,7 +295,10 @@ class _TaskListPageState extends State<TaskListPage>
       ..sort((a, b) => b.lastActivityAt.compareTo(a.lastActivityAt));
   }
 
-  /// Workspace cards ordered by most recent activity, using the SAME key
+  /// Workspace cards ordered by [_cardSort]: recency by default, or the
+  /// workspace title in codepoint order (A→Z / Z→A over en, numbers and CJK).
+  ///
+  /// Activity order uses the SAME key
   /// the card chip prints: `max(lastActivityAt)` over the workspace's
   /// non-archived directory rows (default [TaskDirectory.entriesFor]
   /// scope, no `includeArchived`). Wire entries and synthesized completion
@@ -289,11 +307,28 @@ class _TaskListPageState extends State<TaskListPage>
   ///
   /// Conversation workspaces own no card (see [_isConversationWorkspace]),
   /// so the gate lives here instead of repeating at each call site. A null
-  /// key — no workspace key, or an empty non-archived directory (no tasks
-  /// at all, or archived only) — sorts last. Ties, including null-null,
+  /// activity key — no workspace key, or an empty non-archived directory (no
+  /// tasks at all, or archived only) — sorts last. Ties, including null-null,
   /// break on the title and then on the key so the order is total: Dart's
-  /// sort is not stable, never rely on the incoming list order.
+  /// sort is not stable, never rely on the incoming list order. The title
+  /// modes break title ties on the key for the same reason; nameDesc is the
+  /// exact reverse of nameAsc.
   List<Map<String, dynamic>> _orderedWorkspaces(DeviceSession session) {
+    if (_cardSort != 'activity') {
+      final workspaces = <Map<String, dynamic>>[
+        for (final ws in session.workspaces)
+          if (!_isConversationWorkspace(ws)) ws,
+      ];
+      workspaces.sort((a, b) {
+        final byTitle = workspaceTitle(a).compareTo(workspaceTitle(b));
+        if (byTitle != 0) return byTitle;
+        return (workspaceKeyOf(a) ?? '').compareTo(workspaceKeyOf(b) ?? '');
+      });
+      return _cardSort == 'nameDesc'
+          ? workspaces.reversed.toList()
+          : workspaces;
+    }
+
     int? activityOf(Map<String, dynamic> ws) {
       final dirKey = workspaceKeyOf(ws);
       if (dirKey == null) return null;
@@ -1172,8 +1207,9 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// 整理任务 panel: group (workspace / timeline) + sort
-  /// (created / updated), radio-style like the web popover.
+  /// 整理任务 panel: group (workspace / timeline), task-row sort
+  /// (created / updated) and card order (activity / name A→Z / Z→A),
+  /// radio-style like the web popover.
   ///
   /// The sheet is its own route: the page-level [setState] below never
   /// rebuilds it (the radio visuals froze on the first selection, B2), so a
@@ -1247,6 +1283,43 @@ class _TaskListPageState extends State<TaskListPage>
                   for (final (value, label) in [
                     ('created', tr(context, 'tasks.tidy.sort.created')),
                     ('updated', tr(context, 'tasks.tidy.sort.updated')),
+                  ])
+                    RadioListTile<String>(
+                      value: value,
+                      title: Text(label),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const Divider(
+                height: 1, indent: ZSpacing.screen, endIndent: ZSpacing.screen),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                  ZSpacing.screen, 12, ZSpacing.screen, 4),
+              child: Text(
+                tr(sheetCtx, 'tasks.tidy.cardSortLabel'),
+                style: ZType.sub.copyWith(
+                  fontWeight: FontWeight.w600,
+                  color: ZInk.faint(sheetCtx),
+                ),
+              ),
+            ),
+            RadioGroup<String>(
+              groupValue: _cardSort,
+              onChanged: (v) {
+                setState(() => _cardSort = v ?? _cardSort);
+                setSheetState(() {});
+                _saveOrganizePrefs();
+              },
+              child: Column(
+                children: [
+                  for (final (value, label) in [
+                    ('activity', tr(context, 'tasks.tidy.cardSort.activity')),
+                    ('nameAsc', tr(context, 'tasks.tidy.cardSort.nameAsc')),
+                    ('nameDesc', tr(context, 'tasks.tidy.cardSort.nameDesc')),
                   ])
                     RadioListTile<String>(
                       value: value,

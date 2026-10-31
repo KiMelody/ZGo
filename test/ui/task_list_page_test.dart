@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -3426,8 +3427,9 @@ void main() {
 
       // Both radio groups live in the sheet; the sheet is its own route, so
       // their groupValue only moves when the SHEET rebuilds (the B2 freeze).
+      // (A third group — card order, 10-30 — sits after these two.)
       Finder groupOf() => find.byType(RadioGroup<String>).first;
-      Finder sortOf() => find.byType(RadioGroup<String>).last;
+      Finder sortOf() => find.byType(RadioGroup<String>).at(1);
       expect(tester.widget<RadioGroup<String>>(groupOf()).groupValue,
           'workspace');
       expect(tester.widget<RadioGroup<String>>(sortOf()).groupValue,
@@ -3768,6 +3770,204 @@ void main() {
       expect(find.byType(TaskSearchPage), findsOneWidget);
       // Lands on the 全部 tab with the search hint visible.
       expect(find.text('搜索任务、命令与文件'), findsOneWidget);
+    });
+  });
+
+  // ---- 10-30: card-to-card order — activity (default) / name A→Z / Z→A ----
+  //
+  // Three workspace cards whose activity order (alpha > 工作区 > zeta) is
+  // deliberately different from the codepoint order (alpha < zeta < 工作区,
+  // CJK codepoints sort after ASCII). The active first workspace (zeta) keeps
+  // two live rows so the card-internal order stays observable.
+  group('workspace card order (10-30)', () {
+    const organizePrefsKey = 'zgo_task_organize_v1';
+    const cardTitles = ['alpha', 'zeta', '工作区'];
+
+    Future<void> pumpCardSort(
+      WidgetTester tester, {
+      Map<String, Object?>? organize,
+    }) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      if (organize != null) {
+        SharedPreferences.setMockInitialValues({
+          organizePrefsKey: jsonEncode(organize),
+        });
+      }
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        // zeta is the active (first) workspace: its rows come from the live
+        // sessions-index, and it is expanded by default.
+        entries: [
+          {
+            'sessionId': 'z-new',
+            'title': '新任务',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now - 3000,
+          },
+          {
+            'sessionId': 'z-old',
+            'title': '旧任务',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now - 4000,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/zeta', 'workspaceIdentity': 'zeta'},
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+          {'workspacePath': '/repo/工作区', 'workspaceIdentity': '工作区'},
+        ],
+        relayTasks: [
+          {
+            'taskId': 'ta',
+            'title': '任务甲',
+            'workspacePath': '/repo/alpha',
+            'workspaceIdentity': 'alpha',
+            'displayStatus': 'idle',
+            'updatedAt': now - 1000,
+          },
+          {
+            'taskId': 'tw',
+            'title': '任务乙',
+            'workspacePath': '/repo/工作区',
+            'workspaceIdentity': '工作区',
+            'displayStatus': 'idle',
+            'updatedAt': now - 2000,
+          },
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    /// Card titles in the order the list lays them out (y position).
+    List<String> cardOrder(WidgetTester tester) {
+      final y = {
+        for (final title in cardTitles)
+          title: tester.getTopLeft(find.text(title)).dy,
+      };
+      return [...cardTitles]..sort((a, b) => y[a]!.compareTo(y[b]!));
+    }
+
+    Future<void> openSheet(WidgetTester tester) async {
+      await tester.tap(find.byTooltip('整理任务'));
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> closeSheet(WidgetTester tester) async {
+      await tester.tapAt(const Offset(20, 30));
+      await tester.pumpAndSettle();
+    }
+
+    Finder cardSortGroup() => find.byType(RadioGroup<String>).last;
+
+    testWidgets('default activity order matches the pre-10-30 baseline; the '
+        'panel shows the three-way card order group', (tester) async {
+      await pumpCardSort(tester);
+
+      // Newest max(lastActivityAt) first: alpha > 工作区 > zeta.
+      expect(cardOrder(tester), ['alpha', '工作区', 'zeta']);
+
+      await openSheet(tester);
+      expect(find.byType(RadioGroup<String>), findsNWidgets(3));
+      expect(tester.widget<RadioGroup<String>>(cardSortGroup()).groupValue,
+          'activity');
+      expect(find.text('卡片排序'), findsOneWidget);
+      expect(find.text('按最近活动'), findsOneWidget);
+      expect(find.text('按名称 A→Z'), findsOneWidget);
+      expect(find.text('按名称 Z→A'), findsOneWidget);
+    });
+
+    testWidgets('name A→Z sorts by codepoint (en before CJK), persists, and '
+        'keeps the task rows sorted by updated', (tester) async {
+      await pumpCardSort(tester);
+
+      await openSheet(tester);
+      await tester.tap(find.text('按名称 A→Z'));
+      await tester.pumpAndSettle();
+      // The sheet stays open and its visual follows the selection.
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(tester.widget<RadioGroup<String>>(cardSortGroup()).groupValue,
+          'nameAsc');
+
+      final prefs = await SharedPreferences.getInstance();
+      final saved = jsonDecode(prefs.getString(organizePrefsKey)!);
+      expect(saved['cardSort'], 'nameAsc');
+      expect(saved['groupBy'], 'workspace',
+          reason: 'the same prefs record keeps the other keys');
+
+      await closeSheet(tester);
+      // 'alpha' < 'zeta' < '工作区' (U+5DE5 sorts after ASCII).
+      expect(cardOrder(tester), ['alpha', 'zeta', '工作区']);
+      // The card-internal order is untouched: updated mode, newest first.
+      expect(
+        tester.getTopLeft(find.text('新任务')).dy,
+        lessThan(tester.getTopLeft(find.text('旧任务')).dy),
+      );
+    });
+
+    testWidgets('name Z→A is the exact reverse of A→Z', (tester) async {
+      await pumpCardSort(tester);
+
+      await openSheet(tester);
+      await tester.tap(find.text('按名称 A→Z'));
+      await tester.pumpAndSettle();
+      await closeSheet(tester);
+      final ascending = cardOrder(tester);
+
+      await openSheet(tester);
+      await tester.tap(find.text('按名称 Z→A'));
+      await tester.pumpAndSettle();
+      await closeSheet(tester);
+
+      expect(cardOrder(tester), ascending.reversed.toList());
+    });
+
+    testWidgets('a persisted cardSort restores after a page restart',
+        (tester) async {
+      await pumpCardSort(tester, organize: {
+        'groupBy': 'workspace',
+        'sortBy': 'updated',
+        'cardSort': 'nameDesc',
+      });
+
+      expect(cardOrder(tester), ['工作区', 'zeta', 'alpha']);
+
+      await openSheet(tester);
+      expect(tester.widget<RadioGroup<String>>(cardSortGroup()).groupValue,
+          'nameDesc');
+    });
+
+    testWidgets('archives without cardSort fall back to activity; illegal '
+        'values do too', (tester) async {
+      // Old archive: the key predates 10-30 (no cardSort at all).
+      await pumpCardSort(tester, organize: {
+        'groupBy': 'workspace',
+        'sortBy': 'updated',
+      });
+      expect(cardOrder(tester), ['alpha', '工作区', 'zeta']);
+
+      // Garbage in the key is ignored the same way.
+      await tester.pumpWidget(wrap(const SizedBox.shrink()));
+      await tester.pump();
+      await pumpCardSort(tester, organize: {
+        'groupBy': 'workspace',
+        'sortBy': 'updated',
+        'cardSort': 'bogus',
+      });
+      expect(cardOrder(tester), ['alpha', '工作区', 'zeta']);
+
+      await openSheet(tester);
+      expect(tester.widget<RadioGroup<String>>(cardSortGroup()).groupValue,
+          'activity');
     });
   });
 }
