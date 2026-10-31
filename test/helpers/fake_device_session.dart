@@ -24,6 +24,7 @@ class FakeDeviceSession extends DeviceSession {
     required super.params,
     super.sidecarCooldown,
     super.projectResolverFactory,
+    super.taskGroupResolverFactory,
     List<Map<String, dynamic>> entries = const [],
     List<Map<String, dynamic>> workspaces = const [],
     this.relayTasks = const [],

@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../protocol/channel_client.dart';
 import '../protocol/conversation.dart';
+import '../protocol/project_resolver.dart';
 import '../protocol/task_groups.dart';
 import '../state/device_session.dart';
 import '../state/device_store.dart';
@@ -92,11 +93,17 @@ class _TaskListPageState extends State<TaskListPage>
   /// sidebar carries the same entry; empty when nothing is archived).
   bool _showArchived = false;
 
-  /// Grouped task view of the current session (3.12.3 read-only): loaded
-  /// once per session instance, null until the fetch lands. Null/empty
-  /// keeps the flat timeline (R4 silent degrade).
+  /// Grouped task view of the current session (3.17.1 direct read): the
+  /// resolver caches 30 s, so the page re-asks after [_groupedViewTtl].
+  /// Null/empty keeps the flat timeline (R4 silent degrade).
   GroupedTaskView? _groupedView;
   DeviceSession? _groupedViewSession;
+  DateTime? _groupedViewLoadedAt;
+
+  /// Page-level counterpart of the task-group resolver's 30 s cache: a
+  /// panel open after this window re-pulls (group writes have no push
+  /// surface).
+  static const _groupedViewTtl = Duration(seconds: 30);
 
   /// Per-task token-usage futures (3.12.3): one RPC per task per reload
   /// window ([_reloadTasks] clears the map, so a refresh re-issues the
@@ -1350,8 +1357,9 @@ class _TaskListPageState extends State<TaskListPage>
   /// 按时间线 grouping: day buckets (今天 / N 天前 / 上周 / 更早)
   /// with one row per task, each prefixed with its workspace name. Covers
   /// every workspace via the relay task list (web mobile-home semantics).
-  /// 3.12.3 task groups render as their own sections (色点 + 标题) above the
-  /// day buckets; tasks in no group keep the buckets untouched.
+  /// 3.17.1 task groups (direct sqlite read) render as their own sections
+  /// (色点 + 标题) above the day buckets; tasks in no group keep the buckets
+  /// untouched.
   List<Widget> _timelineGroups(BuildContext context, DeviceSession session) {
     final pairs = session.taskDirectory.allEntries();
     final entries = _sortedEntries([for (final (e, _) in pairs) e]);
@@ -1381,9 +1389,15 @@ class _TaskListPageState extends State<TaskListPage>
         _groupSections(context, session, grouped, byId, wsKeyOf),
       );
       claimed = {
+        // Bucket suppression mirrors the section membership judgment
+        // (workspace-bearing join). Pinned members stay claimed on purpose:
+        // their only rendering is the 已置顶 card, so a day bucket must not
+        // repeat them.
         for (final g in grouped.groups)
           for (final m in grouped.membersOf(g.id))
-            if (byId.containsKey(m.taskId)) m.taskId,
+            if (byId.containsKey(m.taskId) &&
+                _memberMatchesDirectory(m, wsKeyOf))
+              m.taskId,
       };
     }
     final now = DateTime.now();
@@ -1440,11 +1454,19 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  /// Kick the once-per-session grouped-view load; the result lands via
-  /// setState after the async RPC (a rejection lands as null → flat view).
+  /// Kick the grouped-view load when the session changed or the 30 s page
+  /// TTL expired; the result lands via setState after the async read
+  /// (a miss lands as null → flat view). The session stamp still guards
+  /// against a stale answer landing on a different session.
   void _ensureGroupedView(DeviceSession session) {
-    if (identical(_groupedViewSession, session)) return;
+    final loadedAt = _groupedViewLoadedAt;
+    if (identical(_groupedViewSession, session) &&
+        loadedAt != null &&
+        DateTime.now().difference(loadedAt) < _groupedViewTtl) {
+      return;
+    }
     _groupedViewSession = session;
+    _groupedViewLoadedAt = DateTime.now();
     session.groupedTaskView().then((view) {
       if (mounted && identical(_groupedViewSession, session)) {
         setState(() => _groupedView = view);
@@ -1452,10 +1474,12 @@ class _TaskListPageState extends State<TaskListPage>
     });
   }
 
-  /// Group sections in wire order (manual sortOrder, createdAt fallback),
-  /// one header row + its member rows each. Groups without a visible task
-  /// render no header. Member rows reuse the shared task row (workspace
-  /// prefix label from the member's workspace key).
+  /// Group sections in desktop order (ascending sort_order, createdAt
+  /// fallback), one header row + its member rows each. A member renders only
+  /// when the directory has its row in the member's OWN workspace and the
+  /// row is not pinned (desktop renderer: `!pinned && !archived`). Groups
+  /// without a visible task render no header. Member rows reuse the shared
+  /// task row (workspace prefix label from the member's workspace key).
   List<Widget> _groupSections(
     BuildContext context,
     DeviceSession session,
@@ -1467,7 +1491,13 @@ class _TaskListPageState extends State<TaskListPage>
     for (final group in view.orderedGroups()) {
       final members = [
         for (final m in view.membersOf(group.id))
-          if (byId[m.taskId] != null) m,
+          if (byId[m.taskId] != null &&
+              _memberMatchesDirectory(m, wsKeyOf) &&
+              // Desktop renderer: `!pinned && !archived`. A pinned task's
+              // only rendering is its 已置顶 card (archived rows never enter
+              // the directory set, so that half is already filtered).
+              byId[m.taskId]!.raw['pinned'] != true)
+            m,
       ];
       if (members.isEmpty) continue;
       sections.add(_groupHeader(context, group));
@@ -1550,20 +1580,48 @@ class _TaskListPageState extends State<TaskListPage>
     _ => ZColors.neutral400,
   };
 
+  /// Whether a group member has a live directory row in its OWN workspace —
+  /// the desktop joins members on `(workspace_key, task_id)`, not the task
+  /// id alone. A dangling member (no desktop task row) can share its id
+  /// with a real copy in another workspace; matching by id alone would
+  /// render that copy twice. Both spellings normalize through
+  /// [ProjectResolver.normalizeProjectRoot] (Windows path fold, POSIX
+  /// case-sensitive; identity strings pass through verbatim).
+  bool _memberMatchesDirectory(
+    TaskGroupMember member,
+    Map<String, String?> wsKeyOf,
+  ) {
+    final rowKey = wsKeyOf[member.taskId];
+    if (rowKey == null) return false;
+    return ProjectResolver.normalizeProjectRoot(rowKey) ==
+        ProjectResolver.normalizeProjectRoot(member.workspaceKey);
+  }
+
   /// B8: taskId → its task group's palette dot. The SAME grouped view the
   /// timeline headers render is the source, so a task grouped under the
   /// cron group (blue) carries the same blue dot in the workspace view —
-  /// one membership judgment, both groupings. Empty while the once-per-
-  /// session load is in flight or unsupported (R4 silent degrade).
+  /// one membership judgment, both groupings. A member missing from the
+  /// directory, sitting in another workspace, or pinned (the 已置顶 card
+  /// carries no group dot) contributes nothing. Empty while the grouped
+  /// read is in flight or unavailable (R4 silent degrade).
   Map<String, Color> _groupDotOf(DeviceSession session) {
     final grouped = identical(_groupedViewSession, session)
         ? _groupedView
         : null;
     if (grouped == null) return const {};
-    return {
-      for (final g in grouped.groups)
-        for (final m in grouped.membersOf(g.id)) m.taskId: _groupColor(g.color),
-    };
+    final pairs = session.taskDirectory.allEntries();
+    final byId = {for (final (e, _) in pairs) e.sessionId: e};
+    final wsKeyOf = {for (final (e, key) in pairs) e.sessionId: key};
+    final dots = <String, Color>{};
+    for (final g in grouped.groups) {
+      for (final m in grouped.membersOf(g.id)) {
+        final row = byId[m.taskId];
+        if (row == null || !_memberMatchesDirectory(m, wsKeyOf)) continue;
+        if (row.raw['pinned'] == true) continue;
+        dots[m.taskId] = _groupColor(g.color);
+      }
+    }
+    return dots;
   }
 
   /// Row prefix label: the task's own workspace (timeline grouping), else
@@ -1781,8 +1839,9 @@ class _TaskListPageState extends State<TaskListPage>
     // Highlight: the "current" task row (latest running, else the
     // most recently active) gets a rounded white/10 background.
     final current = _currentEntry(entries);
-    // B8: the grouped-view load is kicked here too so workspace rows can
-    // carry the group dot; a miss (older desktops) keeps the flat rows.
+    // B8: the grouped-view read is kicked here too so workspace rows can
+    // carry the group dot; a miss (missing tables / no home) keeps the
+    // flat rows.
     _ensureGroupedView(session);
     final groupDotOf = _groupDotOf(session);
 

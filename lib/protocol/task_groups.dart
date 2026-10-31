@@ -1,119 +1,115 @@
-/// Parsed wire models of the 3.12.3 task-list additions on the
-/// `zcode-task` channel — `listGroupedTaskViewStructure` and
-/// `getTaskTokenUsage` (live-probed 2026-09-18).
+/// Models of the desktop task-group surface and the per-task token usage.
 ///
-/// Read-only 一期: the app renders group titles/colors/ordering and the
-/// per-task token total; write operations (create/rename/recolor/reorder)
-/// stay desktop-side. Both sources are pure增量 reads — callers treat any
-/// miss (pre-3.12.3 desktops reject the methods) as "feature absent" and
-/// keep the flat views (R4 silent degrade).
+/// Grouped view (一期, read-only): the desktop 3.17.1 removed its
+/// grouped-task RPC; the same data now lives in the `task_group_*` tables
+/// of `tasks-index.sqlite`, which `TaskGroupResolver` reads directly.
+/// Callers treat any miss (no home, missing tables, desktop too old) as
+/// "feature absent" and keep the flat views (R4 silent degrade).
 ///
-/// Widget-free: plain parsing of the raw maps the session's channel RPC
-/// returns.
+/// Ordering is the DESKTOP's, not the retired wire convention: ascending
+/// everywhere (group order rows ascending; unordered groups appended by
+/// `(createdAt, id)` ascending; members by their effective sort ascending —
+/// see [TaskGroupMember.effectiveSort]).
+///
+/// [TaskTokenUsage] remains a wire parse of `zcode-task.getTaskTokenUsage`
+/// (live-probed 2026-09-18).
+///
+/// Widget-free: plain models.
 library;
 
-/// One task group (`groups[]` row of the grouped view).
+/// One task group (`task_groups` row).
 class TaskGroupInfo {
+  const TaskGroupInfo({
+    required this.id,
+    required this.title,
+    this.color,
+    this.createdAt = 0,
+  });
+
   final String id;
   final String title;
   final String? color;
   final int createdAt;
-
-  TaskGroupInfo.fromMap(Map<dynamic, dynamic> raw)
-    : id = '${raw['id'] ?? ''}',
-      title = '${raw['title'] ?? ''}',
-      color = raw['color'] as String?,
-      createdAt = (raw['createdAt'] as num?)?.toInt() ?? 0;
 }
 
-/// One membership row (`members[]`): a task inside a group.
+/// One membership row (`task_group_members`): a task inside a group.
 class TaskGroupMember {
-  final String groupId;
-  final String taskId;
-  final int? sortOrder;
-  final int addedAt;
+  const TaskGroupMember({
+    required this.groupId,
+    required this.workspaceKey,
+    required this.taskId,
+    required this.effectiveSort,
+  });
 
-  TaskGroupMember.fromMap(Map<dynamic, dynamic> raw)
-    : groupId = '${raw['groupId'] ?? ''}',
-      taskId = '${raw['taskId'] ?? ''}',
-      sortOrder = (raw['sortOrder'] as num?)?.toInt(),
-      addedAt = (raw['addedAt'] as num?)?.toInt() ?? 0;
+  final String groupId;
+
+  /// The desktop's `workspace_key` in its native spelling — the match key
+  /// between a membership and the task directory across workspaces.
+  final String workspaceKey;
+
+  final String taskId;
+
+  /// The desktop's ordering value: `coalesce(sort_order, -added_at)` —
+  /// never-manually-sorted members (NULL `sort_order`) sort by newest
+  /// `added_at` first once ascending order is applied.
+  final int effectiveSort;
 }
 
 /// The grouped task view: groups, their members and the top-level manual
-/// ordering. Malformed payloads parse to null — the caller then renders the
-/// flat list.
+/// ordering. Built by `TaskGroupResolver` from the index database; callers
+/// keep the flat lists when it is null.
 class GroupedTaskView {
+  GroupedTaskView({
+    required this.groups,
+    required this.membersByGroup,
+    this.groupSortOrder = const {},
+  });
+
   final List<TaskGroupInfo> groups;
   final Map<String, List<TaskGroupMember>> membersByGroup;
 
-  /// `sortOrder` of the `type: 'group'` rows in `topLevelOrders` (manual
-  /// top-level order; `type: 'task'` rows are ignored — ungrouped tasks
-  /// keep the page's own ordering).
+  /// `sort_order` of the `node_type: 'group'` rows in
+  /// `task_group_view_node_orders`; `node_type: 'task'` rows (the
+  /// ungrouped tasks' top-level order) are not consumed.
   final Map<String, int> groupSortOrder;
 
-  GroupedTaskView._(this.groups, this.membersByGroup, this.groupSortOrder);
-
-  static GroupedTaskView? fromMap(Object? raw) {
-    if (raw is! Map) return null;
-    final rawGroups = raw['groups'];
-    final rawMembers = raw['members'];
-    if (rawGroups is! List || rawMembers is! List) return null;
-    final membersByGroup = <String, List<TaskGroupMember>>{};
-    for (final m in rawMembers) {
-      if (m is! Map) continue;
-      final member = TaskGroupMember.fromMap(m);
-      if (member.groupId.isEmpty || member.taskId.isEmpty) continue;
-      membersByGroup.putIfAbsent(member.groupId, () => []).add(member);
-    }
-    final groupSortOrder = <String, int>{};
-    final orders = raw['topLevelOrders'];
-    if (orders is List) {
-      for (final o in orders) {
-        if (o is! Map || o['type'] != 'group') continue;
-        final id = o['groupId'];
-        final sort = (o['sortOrder'] as num?)?.toInt();
-        if (id is String && id.isNotEmpty && sort != null) {
-          groupSortOrder[id] = sort;
-        }
-      }
-    }
-    return GroupedTaskView._(
-      [
-        for (final g in rawGroups) if (g is Map) TaskGroupInfo.fromMap(g),
-      ],
-      membersByGroup,
-      groupSortOrder,
-    );
-  }
-
-  /// Render order of the groups: manual `sortOrder` descending (the wire's
-  /// top-level convention); groups without an order entry — and only those
-  /// — fall back to `createdAt` descending, always after the ordered ones.
+  /// Render order of the groups, ascending (desktop `children()` +
+  /// renderer): groups carrying an order row sort by
+  /// `(sort_order, group id)`; order rows naming a deleted group are
+  /// ignored; groups with no order row are appended by `(createdAt, id)`.
   List<TaskGroupInfo> orderedGroups() {
-    int compare(TaskGroupInfo a, TaskGroupInfo b) {
-      final sa = groupSortOrder[a.id];
-      final sb = groupSortOrder[b.id];
-      if (sa != null && sb != null) return sb.compareTo(sa);
-      if (sa != null) return -1;
-      if (sb != null) return 1;
-      return b.createdAt.compareTo(a.createdAt);
+    final byId = {for (final g in groups) g.id: g};
+    final ordered = <TaskGroupInfo>[];
+    final seen = <String>{};
+    final entries = groupSortOrder.entries.toList()
+      ..sort((a, b) {
+        final bySort = a.value.compareTo(b.value);
+        return bySort != 0 ? bySort : a.key.compareTo(b.key);
+      });
+    for (final entry in entries) {
+      final group = byId[entry.key];
+      if (group != null && seen.add(group.id)) ordered.add(group);
     }
-
-    return [...groups]..sort(compare);
+    final rest = [
+      for (final g in groups)
+        if (!seen.contains(g.id)) g,
+    ]..sort((a, b) {
+        final byCreated = a.createdAt.compareTo(b.createdAt);
+        return byCreated != 0 ? byCreated : a.id.compareTo(b.id);
+      });
+    return [...ordered, ...rest];
   }
 
-  /// Members of [groupId] in render order: manual `sortOrder` descending;
-  /// never-manually-sorted members (null) by `addedAt` descending.
+  /// Members of [groupId] in render order: [TaskGroupMember.effectiveSort]
+  /// ascending, ties broken by `(workspaceKey, taskId)` — the desktop's
+  /// `ORDER BY sort_order, workspace_key, task_id`.
   List<TaskGroupMember> membersOf(String groupId) {
     final list = [...(membersByGroup[groupId] ?? const <TaskGroupMember>[])];
     list.sort((a, b) {
-      final sa = a.sortOrder;
-      final sb = b.sortOrder;
-      if (sa != null && sb != null) return sb.compareTo(sa);
-      if (sa != null) return -1;
-      if (sb != null) return 1;
-      return b.addedAt.compareTo(a.addedAt);
+      final bySort = a.effectiveSort.compareTo(b.effectiveSort);
+      if (bySort != 0) return bySort;
+      final byWorkspace = a.workspaceKey.compareTo(b.workspaceKey);
+      return byWorkspace != 0 ? byWorkspace : a.taskId.compareTo(b.taskId);
     });
     return list;
   }

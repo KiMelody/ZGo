@@ -28,6 +28,7 @@ import '../protocol/relay_client.dart';
 import '../protocol/relay_v2.dart' show RelayV2StartException;
 import '../protocol/remote_client.dart';
 import '../protocol/task_commands.dart';
+import '../protocol/task_group_resolver.dart';
 import '../protocol/task_groups.dart';
 import 'chat_draft_store.dart';
 import 'device_store.dart';
@@ -608,6 +609,15 @@ class DeviceSession extends ChangeNotifier
     List<Map<String, dynamic>> Function() bootstrapWorkspaces,
   )? projectResolverFactory;
 
+  /// Test seam: builds the lazily created [TaskGroupResolver] (desktop
+  /// 3.17.1 direct read of the `task_group_*` tables). The production
+  /// resolver reads through the file channel, which needs an open bridge —
+  /// state-level tests inject one answering from a local fixture. The
+  /// callback parameter is the home seam bridged from the project resolver.
+  @visibleForTesting
+  final TaskGroupResolver Function(String? Function() homeOf)?
+      taskGroupResolverFactory;
+
   /// Desktop-home cache seam for the project resolver
   /// (resolver-home-fallback, 10-23): `loadCachedHome` answers the home a
   /// previous connection learned, `saveCachedHome` persists a wire-derived
@@ -643,6 +653,7 @@ class DeviceSession extends ChangeNotifier
     this.draftsRoot,
     this.clientFactory,
     this.projectResolverFactory,
+    this.taskGroupResolverFactory,
     this.jwtProvider,
     this.loadCachedHome,
     this.saveCachedHome,
@@ -2787,6 +2798,21 @@ class DeviceSession extends ChangeNotifier
     return range.bytes;
   }
 
+  /// 3.17.1 task groups (task-group-resolver, 10-30): the desktop removed
+  /// its grouped-task RPC and its renderer now derives groups from the
+  /// `task_group_*` tables in the same `tasks-index.sqlite`
+  /// [ProjectResolver] reads. One home source (the project resolver's wire
+  /// first / cached fallback) and the same row-range seam; built at the
+  /// same time as the project resolver (connection lifetime) with a 30 s
+  /// answer cache inside.
+  late final TaskGroupResolver _taskGroupResolver =
+      taskGroupResolverFactory?.call(() => _projectResolver.knownHome) ??
+          TaskGroupResolver(
+            homeOf: () => _projectResolver.knownHome,
+            readRange: _readProjectIndexRange,
+            onLog: _log,
+          );
+
   /// `createSession`'s project id — the transport consults it only there.
   /// Explicit 3.16.2 gate (design decision 1): older desktops have no
   /// project layer, so nothing is read and the payload stays unchanged.
@@ -2918,35 +2944,16 @@ class DeviceSession extends ChangeNotifier
     return res;
   }
 
-  /// Grouped task view of every known workspace (`zcode-task
-  /// .listGroupedTaskViewStructure`, desktop 3.12.3 — live-probed
-  /// 2026-09-18).
+  /// Grouped task view of every known workspace, read directly from the
+  /// desktop's `tasks-index.sqlite` (`task_group_*` tables). The 3.12.3
+  /// grouped-task RPC on `zcode-task` is gone in desktop 3.17.1 — the old
+  /// body was deleted on purpose (no dual path: the table family predates
+  /// 3.16.2, a missing table is the only version gate).
   /// Read-only 一期: group titles/colors/ordering only. Null on any miss
-  /// (pre-3.12.3 desktops reject the method; no workspace open) — callers
-  /// keep the flat list, no version gate (R4 silent degrade).
-  Future<GroupedTaskView?> groupedTaskView() async {
-    final scopes = [
-      for (final ws in workspaces)
-        {
-          'workspacePath': ws['workspacePath'],
-          if (ws['workspaceIdentity'] != null)
-            'workspaceIdentity': ws['workspaceIdentity'],
-        },
-    ];
-    if (scopes.isEmpty) return null;
-    try {
-      final res = await callChannel(
-        'zcode-task',
-        'listGroupedTaskViewStructure',
-        [
-          {'workspaceScopes': scopes},
-        ],
-      );
-      return GroupedTaskView.fromMap(res);
-    } catch (_) {
-      return null;
-    }
-  }
+  /// (no desktop home, missing tables, unreadable index) — callers keep the
+  /// flat list, no version gate (R4 silent degrade). Cached for 30 s inside
+  /// the resolver; the panel re-asks after the TTL.
+  Future<GroupedTaskView?> groupedTaskView() => _taskGroupResolver.load();
 
   /// Token usage of one task (`zcode-task.getTaskTokenUsage`, desktop
   /// 3.12.3 — live-probed 2026-09-18). Flat

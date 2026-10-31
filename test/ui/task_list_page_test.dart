@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/task_group_resolver.dart';
+import 'package:zgo/protocol/task_groups.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/state/device_store.dart';
 import 'package:zgo/state/task_directory.dart';
@@ -61,6 +64,58 @@ class _GatedReloadSession extends FakeDeviceSession {
   @override
   Future<void> reloadTasks() => gate.future;
 }
+
+/// A [TaskGroupResolver] answering a fixed view without touching the
+/// desktop index — the UI-side seam for the 3.17.1 direct-read path.
+class _StubGroupResolver extends TaskGroupResolver {
+  _StubGroupResolver(this.view)
+      : super(
+          homeOf: () => null,
+          readRange: (path, offset, length) async => Uint8List(0),
+        );
+
+  final GroupedTaskView? view;
+
+  @override
+  Future<GroupedTaskView?> load() async => view;
+}
+
+GroupedTaskView groupView({
+  List<TaskGroupInfo> groups = const [],
+  List<TaskGroupMember> members = const [],
+  Map<String, int> order = const {},
+}) {
+  final byGroup = <String, List<TaskGroupMember>>{};
+  for (final m in members) {
+    byGroup.putIfAbsent(m.groupId, () => []).add(m);
+  }
+  return GroupedTaskView(
+    groups: groups,
+    membersByGroup: byGroup,
+    groupSortOrder: order,
+  );
+}
+
+TaskGroupInfo groupInfo(
+  String id,
+  String title, {
+  String color = 'blue',
+  int createdAt = 5,
+}) =>
+    TaskGroupInfo(id: id, title: title, color: color, createdAt: createdAt);
+
+TaskGroupMember groupMember(
+  String groupId,
+  String taskId, {
+  String workspaceKey = 'app-id',
+  int effectiveSort = 0,
+}) =>
+    TaskGroupMember(
+      groupId: groupId,
+      workspaceKey: workspaceKey,
+      taskId: taskId,
+      effectiveSort: effectiveSort,
+    );
 
 Widget wrap(Widget child) => MaterialApp(
       theme: buildDarkTheme(),
@@ -701,28 +756,10 @@ void main() {
       workspaces: [
         {'workspacePath': '/repo/app'},
       ],
-      channelHandler: (c, m, a) async => m == 'listGroupedTaskViewStructure'
-          ? {
-              'groups': [
-                {
-                  'id': 'g1',
-                  'title': '重点任务组',
-                  'color': 'blue',
-                  'createdAt': 5,
-                },
-              ],
-              'members': [
-                {
-                  'groupId': 'g1',
-                  'taskId': 's1',
-                  'workspaceKey': null,
-                  'sortOrder': null,
-                  'addedAt': 3,
-                },
-              ],
-              'topLevelOrders': <dynamic>[],
-            }
-          : null,
+      taskGroupResolverFactory: (_) => _StubGroupResolver(groupView(
+        groups: [groupInfo('g1', '重点任务组', color: 'blue')],
+        members: [groupMember('g1', 's1', workspaceKey: '/repo/app')],
+      )),
     );
     await tester.pumpWidget(wrap(TaskListPage(
       store: store,
@@ -2054,12 +2091,10 @@ void main() {
     });
   });
 
-  group('timeline task groups (3.12.3 read-only)', () {
+  group('timeline task groups (3.17.1 direct read)', () {
     Future<FakeDeviceSession> setupTimeline(
       WidgetTester tester, {
-      required Future<dynamic> Function(
-              String channel, String method, List<Object?> args)
-          channelHandler,
+      required GroupedTaskView? view,
     }) async {
       usePhone(tester);
       final (store, device) = await setupDevice();
@@ -2084,7 +2119,7 @@ void main() {
         workspaces: [
           {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
         ],
-        channelHandler: channelHandler,
+        taskGroupResolverFactory: (_) => _StubGroupResolver(view),
       );
       await tester.pumpWidget(wrap(TaskListPage(
         store: store,
@@ -2101,31 +2136,15 @@ void main() {
       return session;
     }
 
-    Object groupedView() => {
-      'groups': [
-        {'id': 'g1', 'title': '重点任务组', 'color': 'blue', 'createdAt': 5},
-      ],
-      'members': [
-        {
-          'groupId': 'g1',
-          'taskId': 's2',
-          'workspaceKey': 'app-id',
-          'sortOrder': null,
-          'addedAt': 3,
-        },
-      ],
-      'topLevelOrders': [
-        {'type': 'group', 'groupId': 'g1', 'sortOrder': 4},
-      ],
-    };
+    GroupedTaskView groupedView() => groupView(
+          groups: [groupInfo('g1', '重点任务组')],
+          members: [groupMember('g1', 's2', effectiveSort: -3)],
+          order: {'g1': 4},
+        );
 
     testWidgets('grouped tasks render under a title header, rest stays flat',
         (tester) async {
-      await setupTimeline(
-        tester,
-        channelHandler: (c, m, a) async =>
-            m == 'listGroupedTaskViewStructure' ? groupedView() : null,
-      );
+      await setupTimeline(tester, view: groupedView());
       expect(find.text('重点任务组'), findsOneWidget);
       expect(find.text('组内任务'), findsOneWidget);
       // The ungrouped task keeps its day bucket — no second header set.
@@ -2134,35 +2153,145 @@ void main() {
     });
 
     testWidgets('empty groups keep the flat timeline', (tester) async {
-      await setupTimeline(
-        tester,
-        channelHandler: (c, m, a) async =>
-            m == 'listGroupedTaskViewStructure'
-                ? {
-                    'groups': <dynamic>[],
-                    'members': <dynamic>[],
-                    'topLevelOrders': <dynamic>[],
-                  }
-                : null,
-      );
+      await setupTimeline(tester, view: groupView());
       expect(find.text('今天'), findsOneWidget);
       expect(find.text('未分组任务'), findsOneWidget);
       expect(find.text('组内任务'), findsOneWidget);
     });
 
-    testWidgets('a desktop without the method keeps the flat timeline',
+    testWidgets('a desktop without the group tables keeps the flat timeline',
         (tester) async {
-      await setupTimeline(
-        tester,
-        channelHandler: (c, m, a) async {
-          if (m == 'listGroupedTaskViewStructure') {
-            throw ChannelRpcError('Method not found: $m', null);
-          }
-          return null;
-        },
-      );
+      await setupTimeline(tester, view: null);
       expect(find.text('今天'), findsOneWidget);
       expect(find.text('未分组任务'), findsOneWidget);
+    });
+  });
+
+  group('task group member visibility (desktop renderer filters)', () {
+    Future<FakeDeviceSession> pumpTimeline(
+      WidgetTester tester, {
+      required List<Map<String, dynamic>> workspaces,
+      required List<Map<String, dynamic>> entries,
+      required List<Map<String, dynamic>> relayTasks,
+      required GroupedTaskView view,
+    }) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: entries,
+        workspaces: workspaces,
+        relayTasks: relayTasks,
+        taskGroupResolverFactory: (_) => _StubGroupResolver(view),
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.tap(find.byTooltip('整理任务'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('按时间线'));
+      await tester.pumpAndSettle();
+      return session;
+    }
+
+    testWidgets('a pinned member never enters its group; the pinned card '
+        'still shows it', (tester) async {
+      const wsPath = r'F:\tmp\ws-a';
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await pumpTimeline(
+        tester,
+        workspaces: [
+          {'workspacePath': wsPath},
+        ],
+        entries: [
+          {
+            'sessionId': 's-pin',
+            'title': '置顶任务',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now,
+          },
+          {
+            'sessionId': 's-free',
+            'title': '组内任务',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now - 10,
+          },
+        ],
+        relayTasks: [
+          {
+            'taskId': 's-pin',
+            'title': '置顶任务',
+            'workspacePath': wsPath,
+            'pinned': true,
+            'displayStatus': 'idle',
+            'updatedAt': now,
+          },
+        ],
+        view: groupView(
+          groups: [
+            groupInfo('g1', '重点任务组', createdAt: 1),
+            groupInfo('g2', '可见组', createdAt: 2),
+          ],
+          members: [
+            groupMember('g1', 's-pin', workspaceKey: wsPath),
+            groupMember('g2', 's-free', workspaceKey: wsPath),
+          ],
+          order: {'g1': 1, 'g2': 2},
+        ),
+      );
+
+      expect(find.text('已置顶'), findsOneWidget);
+      expect(find.text('置顶任务'), findsOneWidget,
+          reason: 'the pinned card is the pinned task\'s only rendering — '
+              'not the group section and not a day bucket');
+      expect(find.text('重点任务组'), findsNothing,
+          reason: 'the group has no visible member left, so no header');
+      expect(find.text('可见组'), findsOneWidget);
+      expect(find.text('组内任务'), findsOneWidget);
+    });
+
+    testWidgets('a dangling member cannot claim a same-id copy in another '
+        'workspace', (tester) async {
+      const wsPath = r'F:\tmp\ws-a';
+      const danglingPath = r'F:\tmp\ws-b';
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await pumpTimeline(
+        tester,
+        workspaces: [
+          {'workspacePath': wsPath},
+        ],
+        entries: [
+          {
+            'sessionId': 's-shared',
+            'title': '真身任务',
+            'phase': 'completedSuccess',
+            'lastActivityAt': now,
+          },
+        ],
+        relayTasks: const [],
+        view: groupView(
+          groups: [groupInfo('g1', '重点任务组', createdAt: 1)],
+          members: [
+            // The real copy's workspace, spelled differently (Windows
+            // folding must still match).
+            groupMember('g1', 's-shared', workspaceKey: r'F:/tmp/WS-A'),
+            // A dangling member (no desktop row in ws-b) sharing the id.
+            groupMember('g1', 's-shared', workspaceKey: danglingPath),
+          ],
+          order: {'g1': 1},
+        ),
+      );
+
+      expect(find.text('重点任务组'), findsOneWidget);
+      expect(find.text('真身任务'), findsOneWidget,
+          reason: 'only the member in the directory row\'s own workspace '
+              'matches; the dangling ws-b member must not render the copy '
+              'a second time');
     });
   });
 
@@ -3390,22 +3519,10 @@ void main() {
         workspaces: [
           {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
         ],
-        channelHandler: (c, m, a) async => m == 'listGroupedTaskViewStructure'
-            ? {
-                'groups': [
-                  {
-                    'id': 'g1',
-                    'title': 'cron',
-                    'color': 'blue',
-                    'createdAt': 5,
-                  },
-                ],
-                'members': [
-                  {'groupId': 'g1', 'taskId': 's2', 'addedAt': 3},
-                ],
-                'topLevelOrders': <dynamic>[],
-              }
-            : null,
+        taskGroupResolverFactory: (_) => _StubGroupResolver(groupView(
+          groups: [groupInfo('g1', 'cron')],
+          members: [groupMember('g1', 's2', effectiveSort: -3)],
+        )),
       );
       await tester.pumpWidget(wrap(TaskListPage(
         store: store,
@@ -3415,7 +3532,7 @@ void main() {
       )));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
-      // Let the once-per-session grouped-view RPC land and the page rebuild.
+      // Let the grouped-view read land and the page rebuild.
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
@@ -3576,25 +3693,11 @@ void main() {
         workspaces: [
           {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
         ],
-        channelHandler: (c, m, a) async => m == 'listGroupedTaskViewStructure'
-            ? {
-                'groups': [
-                  {'id': groupId, 'title': title, 'color': 'blue', 'createdAt': 5},
-                ],
-                'members': [
-                  {
-                    'groupId': groupId,
-                    'taskId': 's2',
-                    'workspaceKey': 'app-id',
-                    'sortOrder': null,
-                    'addedAt': 3,
-                  },
-                ],
-                'topLevelOrders': [
-                  {'type': 'group', 'groupId': groupId, 'sortOrder': 4},
-                ],
-              }
-            : null,
+        taskGroupResolverFactory: (_) => _StubGroupResolver(groupView(
+          groups: [groupInfo(groupId, title)],
+          members: [groupMember(groupId, 's2', effectiveSort: -3)],
+          order: {groupId: 4},
+        )),
       );
       await tester.pumpWidget(wrap(TaskListPage(
         store: store,
