@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.5] - 2026-11-01
+
+### Added
+
+- **Task grouping via sqlite direct read**: organize-panel task groups are
+  read straight from the desktop sqlite store after the RPC was removed in
+  desktop 3.17.1 (pure-Dart page reader); archived tasks can now be deleted
+  (`deleteArchivedTask(s)` adaptation), and workspace cards gained an
+  alphabetical sort group (`activity` / `nameAsc` / `nameDesc`).
+- **Inactive workspace runtime truth**: running/terminal state for
+  workspaces without an open terminal comes from a sidecar
+  `sessions-index` subscription merged under a four-tier priority; new
+  sessions in inactive workspaces refresh via a dual trigger (create edge
+  at 0 ms + terminal-state edge, bypassing the anti-flap throttle),
+  fixing 20 s-level card staleness; cold start shows an inactive-card
+  skeleton with persisted activity keys.
+- **Workspace runtime cold-start routing**: dedicated sentinel for the
+  window-gate dead end, consumer-point copy in four places, watchdog
+  parking with forced reopen.
+- **Plan empty-window rendering**: `plans[]` from the balance response
+  enters the snapshot; the active card wins over expired/none copy.
+
+### Changed
+
+- **ADR-0008 UI surface narrowing**: `ConversationCommands` extraction
+  (35 commands) + `prepareWorkspace` on AutomationHost/OffPeakHost,
+  `ChatGateway` split into 7 role interfaces, `WorkspaceOpenResult` sealed
+  typing, `DesktopCapabilities` single-source version gates, relay V1/V2
+  kernel merge, `TaskHomeService` consolidation, `TranscriptViewport`
+  deepening, `copy_mappings` localization sink.
+- **Task list ordering**: active cards sort by name within the active
+  band, finished cards by time below — no more shuffling with multiple
+  active tasks.
+- **Model selection and labels**: composer and detail page share one
+  `modelLabelOf` rule (official labels for builtin models); composite
+  model values split on the first slash so providers whose model id
+  contains `/` resolve correctly, with explicit draft choices preserved.
+
+### Fixed
+
+- **Permission prompts**: options localize by `kind` — English wire
+  labels no longer override zh button copy.
+- **Bridge disposal**: recovery paths guard every notifier write against
+  a session disposed mid-flight (degraded stamp, reopen, rebuild
+  callbacks).
+
 ## [1.15.2] - 2026-10-27
 
 ### Changed
