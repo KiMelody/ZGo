@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:zgo/protocol/automation.dart';
+import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/state/device_store.dart';
 import 'package:zgo/state/scheduled_store.dart';
@@ -21,6 +22,10 @@ class FakeAutomationHost implements AutomationHost {
   @override
   Map<String, dynamic> get automationScope =>
       const {'workspacePath': '/repo'};
+
+  @override
+  Future<WorkspacePrep> prepareWorkspace() async =>
+      WorkspacePrep.fromMap(const {});
 
   final List<Map<String, dynamic>> items;
   final List<(String, List<Object?>)> calls = [];

@@ -287,6 +287,9 @@ abstract interface class AutomationHost {
   /// Active workspace scope (`workspacePath`/`workspaceIdentity`) attached
   /// to run-now triggers; the desktop requires it server-side.
   Map<String, dynamic> get automationScope;
+
+  /// `prepareWorkspace` loader for the sheet's model / thought selectors.
+  Future<WorkspacePrep> prepareWorkspace();
 }
 
 /// Same for the off-peak UI: live status, the off-peak port and the
@@ -297,6 +300,10 @@ abstract interface class OffPeakHost {
 
   /// `workspacePath` (+ identity) of the active workspace for submissions.
   Map<String, dynamic> get offPeakScope;
+
+  /// `prepareWorkspace` fallback loader when the availability payload ships
+  /// no `allowedModels`.
+  Future<WorkspacePrep> prepareWorkspace();
 }
 
 /// A device link the notification hub can observe: live task phases plus
@@ -333,11 +340,11 @@ class ChatHandle {
 /// [DeviceSession] implements it against the live transport; tests fake it
 /// (recording calls, answering from a real [ConversationState] fed by hand).
 ///
-/// Lifecycle and state reading stay on the gateway; the whole conversation
-/// command surface collapses into [conversationCommands] (a
-/// [ConversationTransport] accessor — UI-holding protocol types has
-/// precedent in [ConversationState], so no layering rule is broken and no
-/// narrower command interface is invented for a single implementation).
+/// Lifecycle and state reading stay on the gateway; the named conversation
+/// command surface is exposed through [ConversationCommands] (task
+/// 10-29-conversation-commands-grouping) — the transport's infrastructure
+/// members (subscribe/prepare/skills bookkeeping) and the raw sendCommand
+/// envelope are deliberately not on that interface.
 abstract interface class ChatGateway
     implements Listenable, QuotaResetGateway {
   DeviceStatus get status;
@@ -347,7 +354,7 @@ abstract interface class ChatGateway
   /// Conversation V4 commands of the active workspace (sendText / stop /
   /// queue / model switches / row actions / attachments / …). The session
   /// owns the transport; throws when no workspace is open.
-  ConversationTransport get conversationCommands;
+  ConversationCommands get conversationCommands;
 
   /// Offline replayable-command queue (3.12.3 `web-remote-replayable`):
   /// sendText failures at bridge level land here and are replayed via
@@ -2595,11 +2602,11 @@ class DeviceSession extends ChangeNotifier
   }
 
   /// Conversation V4 command surface (ChatGateway): the live transport of
-  /// the active workspace. Commands go straight to it — no per-command
-  /// forwarding — while lifecycle (subscribe/prepare/skills) and state
-  /// reading stay on the session below.
+  /// the active workspace, narrowed to [ConversationCommands]. Commands go
+  /// straight to it — no per-command forwarding — while lifecycle
+  /// (subscribe/prepare/skills) and state reading stay on the session below.
   @override
-  ConversationTransport get conversationCommands => _requireConversation;
+  ConversationCommands get conversationCommands => _requireConversation;
 
   /// Offline replayable-command queue (ChatGateway), version-gated the
   /// same way as the automation/off-peak wire gates above: pre-3.12.3

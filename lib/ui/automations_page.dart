@@ -233,8 +233,7 @@ class _AutomationsPaneState extends State<AutomationsPane> {
       isScrollControlled: true,
       builder: (c) => AutomationSheet(
         initial: edit?.toInput(),
-        loadOptions:
-            session is DeviceSession ? session.prepareWorkspace : null,
+        loadOptions: session?.prepareWorkspace,
       ),
     );
     if (input == null) return;
@@ -448,8 +447,7 @@ Future<void> _pickTemplate() async {
     isScrollControlled: true,
     builder: (c) => AutomationSheet(
       template: (title: title, prompt: prompt, cronExpr: picked.cron),
-      loadOptions:
-          session is DeviceSession ? session.prepareWorkspace : null,
+      loadOptions: session?.prepareWorkspace,
     ),
   );
   if (completed == null || session == null || !mounted) return;

@@ -163,8 +163,7 @@ class _OffPeakPageState extends State<OffPeakPage>
       builder: (c) => OffPeakSheet(
         session: session,
         editing: editing,
-        loadOptions:
-            session is DeviceSession ? session.prepareWorkspace : null,
+        loadOptions: session.prepareWorkspace,
         allowedModels: _allowedModels.isEmpty ? null : _allowedModels,
         allowedModelConfigs: _allowedModelConfigs,
       ),

@@ -48,6 +48,10 @@ class FakeNotifiableSession extends ChangeNotifier
   @override
   Map<String, dynamic> get automationScope => const {'workspacePath': '/repo'};
 
+  @override
+  Future<WorkspacePrep> prepareWorkspace() async =>
+      WorkspacePrep.fromMap(const {});
+
   List<Map<String, dynamic>> automationItems = [];
   List<Map<String, dynamic>> offPeakTasks = [];
 

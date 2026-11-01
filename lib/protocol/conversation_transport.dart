@@ -1,6 +1,9 @@
 // Newer style lints are suppressed so this file keeps its protocol
-// handling readable as a single, self-contained unit.
+// handling readable as a single, self-contained unit. `annotate_overrides`
+// is suppressed because the 35 command methods mirror [ConversationCommands]
+// verbatim — annotations would only add noise to the bundle-diff anchor.
 // ignore_for_file: use_null_aware_elements, prefer_initializing_formals
+// ignore_for_file: annotate_overrides
 import 'dart:async';
 import 'dart:convert';
 
@@ -8,6 +11,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 import 'channel_client.dart';
+import 'conversation_commands.dart';
 import 'conversation_state.dart';
 import 'conversation_subscription.dart';
 import 'id.dart';
@@ -20,7 +24,13 @@ import 'replayable_queue.dart';
 // / SendTextResult, ack predicates, rowsRange response parsing). Split out
 // of the former single-file conversation.dart; bundle diffs for these
 // functions land here (see docs/adr/0013 appendix for the grep procedure).
-class ConversationTransport {
+//
+// The named command surface is exposed through [ConversationCommands]
+// (native interface, task 10-29-conversation-commands-grouping): UI code
+// holds that type, so the raw sendCommand envelope and the bridge session
+// stay out of its reach. The implementations and wire payloads below are
+// unchanged.
+class ConversationTransport implements ConversationCommands {
   static const channel = Channels.zcodeAgent;
 
   final BridgeSession session;
@@ -51,6 +61,11 @@ class ConversationTransport {
   /// decide the conversationSubscribe body key (official @270820092).
   bool get workflowRunDeltas =>
       workspaceHookReviewUi && !_workflowRunDeltasDegraded;
+
+  /// [ConversationCommands.degraded] — the bridge session's degradation
+  /// flag, the one session member the UI still reads (loading placeholder).
+  @override
+  ValueListenable<String?> get degraded => session.degraded;
 
   final void Function(String line)? onLog;
 

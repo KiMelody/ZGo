@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/protocol/off_peak.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/state/device_store.dart';
@@ -46,6 +47,10 @@ class FakeOffPeakHost implements OffPeakHost {
     'workspacePath': '/repo',
     'workspaceIdentity': 'repo-id',
   };
+
+  @override
+  Future<WorkspacePrep> prepareWorkspace() async =>
+      WorkspacePrep.fromMap(const {});
 
   @override
   late final OffPeakPort offPeak =

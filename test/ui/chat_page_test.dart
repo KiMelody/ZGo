@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
     show MethodChannel, SystemChannels, Uint8List;
@@ -6266,13 +6267,16 @@ class _DegradedBridgeSession implements BridgeSession {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-/// Transport stand-in that only exposes the bridge session; everything
-/// else is never exercised on the loading path.
+/// Transport stand-in that only exposes the bridge degraded flag (the
+/// loading path's status source); everything else is never exercised.
 class _DegradedTransport implements ConversationTransport {
   _DegradedTransport(this.session);
 
   @override
   final BridgeSession session;
+
+  @override
+  ValueListenable<String?> get degraded => session.degraded;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => null;

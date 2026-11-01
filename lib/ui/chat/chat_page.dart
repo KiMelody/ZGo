@@ -2466,7 +2466,7 @@ class _ChatPageState extends State<ChatPage> {
   /// workspace) — the placeholder then just tracks the slow hint.
   ValueListenable<String?>? _bridgeDegraded() {
     try {
-      return widget.gateway.conversationCommands.session.degraded;
+      return widget.gateway.conversationCommands.degraded;
     } catch (_) {
       return null;
     }

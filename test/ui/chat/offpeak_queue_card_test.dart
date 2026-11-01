@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/protocol/off_peak.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/ui/chat/chat_page.dart';
@@ -21,6 +22,10 @@ class FakeOffPeakHost implements OffPeakHost {
 
   @override
   Map<String, dynamic> offPeakScope = const {'workspacePath': '/repo'};
+
+  @override
+  Future<WorkspacePrep> prepareWorkspace() async =>
+      WorkspacePrep.fromMap(const {});
 
   @override
   late final OffPeakPort offPeak =
