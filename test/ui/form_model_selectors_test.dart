@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:zgo/protocol/automation.dart';
+import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/state/device_store.dart';
 import 'package:zgo/ui/automations_page.dart';
@@ -169,5 +170,67 @@ void main() {
     // provider/model string until options load (offline desktop).
     expect(find.text('kimi/moonshot-v2'), findsOneWidget);
     expect(find.text('最高'), findsNothing); // thought stays default
+  });
+
+  testWidgets('automation wire splits a slashy model id on the first slash',
+      (tester) async {
+    const provider = 'ee6c256c-d8fa-4419-9ed4-bead8bf652bd';
+    const value = '$provider/deepseek/deepseek-v4.1-flash';
+    final prep = WorkspacePrep.fromMap(const {
+      'configOptions': [
+        {
+          'id': 'model',
+          'name': '模型',
+          'currentValue': 'builtin/glm-5.2',
+          'options': [
+            {'value': 'builtin/glm-5.2', 'name': 'GLM-5.2'},
+            {
+              'value': value,
+              'name': 'deepseek/deepseek-v4.1-flash',
+              'modelProviderName': 'Command Code',
+            },
+          ],
+        },
+      ],
+      'slashCommands': <Map<String, dynamic>>[],
+    });
+    AutomationInput? submitted;
+    await tester.pumpWidget(wrap(Scaffold(
+      body: Builder(
+        builder: (context) => Center(
+          child: TextButton(
+            onPressed: () async {
+              submitted = await showModalBottomSheet<AutomationInput>(
+                context: context,
+                builder: (_) => AutomationSheet(
+                  loadOptions: () async => prep,
+                ),
+              );
+            },
+            child: const Text('open'),
+          ),
+        ),
+      ),
+    )));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.widgetWithText(TextField, '任务标题'), '晨报');
+    await tester.enterText(
+        find.widgetWithText(TextField, '指令'), '汇总昨日改动');
+    await tester.tap(find.text('默认模型'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('deepseek/deepseek-v4.1-flash'));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('保存'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+
+    expect(submitted, isNotNull);
+    expect(submitted!.provider, provider);
+    expect(submitted!.model, 'deepseek/deepseek-v4.1-flash');
   });
 }

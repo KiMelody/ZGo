@@ -46,6 +46,59 @@ Map<String, dynamic> _modelChangeRow(
     };
 
 void main() {
+  group('modelLabelOf', () {
+    test('official providers (account plans) return the bare model id', () {
+      expect(modelLabelOf('GLM-5.3', 'account:zai-start-plan'), 'GLM-5.3');
+      expect(
+        modelLabelOf('GLM-5.3-Flash', 'account:zai-individual-coding-plan'),
+        'GLM-5.3-Flash',
+      );
+      expect(
+        modelLabelOf('GLM-5.3', 'account:bigmodel-team-coding-plan'),
+        'GLM-5.3',
+      );
+      expect(modelLabelOf('X', 'glm'), 'X');
+      expect(modelLabelOf('GLM-5.3', ''), 'GLM-5.3');
+      expect(modelLabelOf('GLM-5.3', '   '), 'GLM-5.3');
+    });
+
+    test('the desktop-internal builtin family counts as official (asar: the '
+        'desktop canonicalizes builtin:* to zai-api/account:* before its own '
+        'label rule)', () {
+      expect(modelLabelOf('glm-5.2', 'builtin'), 'glm-5.2');
+      expect(modelLabelOf('GLM-5.2', 'builtin:zai'), 'GLM-5.2');
+      expect(modelLabelOf('GLM-5.2', 'builtin:zai-coding-plan'), 'GLM-5.2');
+      expect(modelLabelOf('GLM-5.2', 'builtin:bigmodel-start-plan'), 'GLM-5.2');
+    });
+
+    test('third-party providers prefix provider/model', () {
+      expect(
+        modelLabelOf('deepseek-v4-flash', 'personal-huancheng'),
+        'personal-huancheng/deepseek-v4-flash',
+      );
+      expect(modelLabelOf('gpt-5.2', 'openrouter'), 'openrouter/gpt-5.2');
+    });
+
+    test('empty model stays empty for every provider class', () {
+      expect(modelLabelOf('', ''), '');
+      expect(modelLabelOf('', 'account:zai-start-plan'), '');
+      expect(modelLabelOf('', 'personal-huancheng'), '');
+    });
+
+    test('already-prefixed model is not double-prefixed', () {
+      expect(
+        modelLabelOf('openrouter/gpt-5.2', 'openrouter'),
+        'openrouter/gpt-5.2',
+      );
+    });
+
+    test('provider is trimmed before matching and prefixing', () {
+      expect(modelLabelOf('X', ' glm '), 'X');
+      expect(modelLabelOf('X', ' account:zai-start-plan '), 'X');
+      expect(modelLabelOf('m', ' openrouter '), 'openrouter/m');
+    });
+  });
+
   test('empty / missing model renders empty label', () {
     expect(chatModelLabel(_stateWith(null)), '');
     expect(

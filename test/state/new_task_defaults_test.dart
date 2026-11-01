@@ -107,6 +107,30 @@ void main() {
       expect(config['model'], 'anything');
     });
 
+    test('model ids may contain "/": the composite splits on the FIRST slash '
+        '(desktop FC semantics)', () {
+      // The live accident shape: Command Code's model id is itself
+      // "deepseek/deepseek-v4.1-flash", so the option value is a three-part
+      // string. A trailing-slash split would corrupt both halves.
+      const provider = 'ee6c256c-d8fa-4419-9ed4-bead8bf652bd';
+      const value = '$provider/deepseek/deepseek-v4.1-flash';
+      final config = sanitizeNewTaskConfig(
+        {'model': value, 'mode': '', 'thought': ''},
+        prep(models: [value], thoughtCurrent: 'high'),
+      );
+      expect(config['provider'], provider);
+      expect(config['model'], 'deepseek/deepseek-v4.1-flash');
+    });
+
+    test('slash-less model keeps the current drop behavior', () {
+      final config = sanitizeNewTaskConfig(
+        {'model': 'bare-model', 'mode': '', 'thought': ''},
+        prep(models: ['bare-model'], thoughtCurrent: 'high'),
+      );
+      expect(config.containsKey('provider'), isFalse);
+      expect(config.containsKey('model'), isFalse);
+    });
+
     test('A4: mode outside prep options ∪ fallback vocabulary → dropped', () {
       final config = sanitizeNewTaskConfig(
         {'mode': 'sudo', 'model': '', 'thought': ''},
@@ -187,6 +211,88 @@ void main() {
       );
       expect(kept['mode'], 'plan');
       expect(kept['thought'], 'max');
+    });
+  });
+
+  group('sanitizeNewTaskConfig explicitKeys (user picks vs seeds)', () {
+    test('explicit model ships when prep is null', () {
+      final config = sanitizeNewTaskConfig(
+        {'model': 'uuid/deepseek/deepseek-v4.1-flash', 'mode': '', 'thought': ''},
+        null,
+        explicitKeys: {'model'},
+      );
+      expect(config['provider'], 'uuid');
+      expect(config['model'], 'deepseek/deepseek-v4.1-flash');
+      expect(config['thought'], 'max');
+    });
+
+    test('explicit model ships when prep options no longer list it', () {
+      final config = sanitizeNewTaskConfig(
+        {'model': 'uuid/deepseek-v4.1-flash', 'mode': '', 'thought': ''},
+        prep(models: ['builtin/glm'], thoughtCurrent: 'high'),
+        explicitKeys: {'model'},
+      );
+      expect(config['provider'], 'uuid');
+      expect(config['model'], 'deepseek-v4.1-flash');
+    });
+
+    test('seeded model (no explicit key) keeps dropping without prep', () {
+      final config = sanitizeNewTaskConfig(
+        {'model': 'uuid/deepseek-v4.1-flash', 'mode': '', 'thought': ''},
+        null,
+      );
+      expect(config.containsKey('provider'), isFalse);
+      expect(config.containsKey('model'), isFalse);
+    });
+
+    test('explicit mode ships without prep / outside the vocabulary', () {
+      final config = sanitizeNewTaskConfig(
+        {'mode': 'agent', 'model': '', 'thought': ''},
+        null,
+        explicitKeys: {'mode'},
+      );
+      expect(config['mode'], 'agent');
+    });
+
+    test('seeded mode outside the vocabulary still drops with prep', () {
+      final config = sanitizeNewTaskConfig(
+        {'mode': 'agent', 'model': '', 'thought': ''},
+        prep(modes: ['build'], thoughtCurrent: 'high'),
+      );
+      expect(config.containsKey('mode'), isFalse);
+    });
+
+    test('explicit thought ships verbatim when prep is null', () {
+      final config = sanitizeNewTaskConfig(
+        {'mode': '', 'model': '', 'thought': 'high'},
+        null,
+        explicitKeys: {'thought'},
+      );
+      expect(config['thought'], 'high');
+    });
+
+    test('seeded thought keeps the follow-the-desktop chain', () {
+      final config = sanitizeNewTaskConfig(
+        {'mode': '', 'model': '', 'thought': 'high'},
+        prep(thoughts: ['max'], thoughtCurrent: 'max'),
+      );
+      expect(config['thought'], 'max');
+    });
+  });
+
+  group('explicitNewTaskKeys', () {
+    test('every non-empty per-message value marks its key', () {
+      expect(
+        explicitNewTaskKeys(
+          {'mode': 'plan', 'model': 'p/m', 'thought': 'high'},
+        ),
+        {'mode', 'model', 'thought'},
+      );
+    });
+
+    test('missing / empty per-message values are not explicit', () {
+      expect(explicitNewTaskKeys({'model': '', 'mode': 'yolo'}), {'mode'});
+      expect(explicitNewTaskKeys(null), isEmpty);
     });
   });
 

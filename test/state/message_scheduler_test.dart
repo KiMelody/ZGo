@@ -123,8 +123,8 @@ void main() {
       expect(session.configs.single, {'thought': 'max'});
     });
 
-    test('A7: prep unreachable → model dropped, four-tier mode kept, '
-        'thought=max', () async {
+    test('A7: prep unreachable → explicit per-message picks still ship '
+        '(model-value-split §3)', () async {
       final (store, session, scheduler) = await setup(null);
       session.prepFails = true;
       await store.add(
@@ -139,11 +139,16 @@ void main() {
       );
       await scheduler.debugTickForTest();
 
-      expect(session.configs.single, {'mode': 'plan', 'thought': 'max'});
+      expect(session.configs.single, {
+        'provider': 'kimi',
+        'model': 'moonshot-v2',
+        'mode': 'plan',
+        'thought': 'high',
+      });
       expect(store.items.single.sent, isTrue);
     });
 
-    test('A7: prep unreachable + non-four-tier mode → mode dropped too',
+    test('A7: prep unreachable + explicit non-four-tier mode ships too',
         () async {
       final (store, session, scheduler) = await setup(null);
       session.prepFails = true;
@@ -157,7 +162,28 @@ void main() {
       );
       await scheduler.debugTickForTest();
 
+      expect(session.configs.single, {'mode': 'agent', 'thought': 'max'});
+    });
+
+    test('A7: persisted global defaults (not per-message picks) keep the '
+        'silent follow-the-desktop drop', () async {
+      final ui = UiSettings()
+        ..newTaskMode = 'agent'
+        ..newTaskModel = 'kimi/moonshot-v2'
+        ..newTaskThought = 'high';
+      final (store, session, scheduler) = await setup(ui);
+      session.prepFails = true;
+      await store.add(
+        deviceId: session.deviceId,
+        deviceLabel: 'Desktop',
+        text: 'run the sweep',
+        fireAt: DateTime.now().subtract(const Duration(minutes: 1))
+            .millisecondsSinceEpoch,
+      );
+      await scheduler.debugTickForTest();
+
       expect(session.configs.single, {'thought': 'max'});
+      expect(store.items.single.sent, isTrue);
     });
   });
 }

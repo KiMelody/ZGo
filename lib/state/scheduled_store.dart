@@ -269,8 +269,10 @@ class MessageScheduler {
       }
       // New-task config: per-message overrides merged over the global
       // defaults, validated against the live prepareWorkspace options.
-      // prep failure must not kill the unattended send (PRD A7): sanitize
-      // then drops the model, keeps only four-tier modes, thought → 'max'.
+      // prep failure must not kill the unattended send (PRD A7): the
+      // persisted defaults keep the silent drop (model dropped, four-tier
+      // modes only, thought → 'max'), while per-message picks ship as
+      // explicit user choices (comment below).
       WorkspacePrep? prep;
       try {
         prep = await session.prepareWorkspace();
@@ -278,13 +280,17 @@ class MessageScheduler {
         prep = null;
       }
       final u = ui;
+      // Per-message values are explicit user picks (恒发送, even without
+      // prep); the persisted UiSettings defaults keep the silent "follow
+      // the desktop" drop (PRD model-value-split §3).
+      final perMessage = {
+        if (m.mode != null) 'mode': m.mode!,
+        if (m.model != null) 'model': m.model!,
+        if (m.thought != null) 'thought': m.thought!,
+      };
       final config = sanitizeNewTaskConfig(
         mergeNewTaskConfig(
-          {
-            if (m.mode != null) 'mode': m.mode!,
-            if (m.model != null) 'model': m.model!,
-            if (m.thought != null) 'thought': m.thought!,
-          },
+          perMessage,
           {
             'mode': u?.newTaskMode ?? '',
             'model': u?.newTaskModel ?? '',
@@ -292,6 +298,7 @@ class MessageScheduler {
           },
         ),
         prep,
+        explicitKeys: explicitNewTaskKeys(perMessage),
       );
       await session.createTaskWithMessage(m.text, config: config);
       store.markSent(m.id);

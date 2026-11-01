@@ -452,15 +452,41 @@ int? rowTimestamp(Map<String, dynamic>? row) {
   return null;
 }
 
-/// Model label for the subagent detail page's AppBar subtitle (design D4):
-/// the official web's provider display rule (`JMe` semantics) — a bare
-/// model id for the default/official provider, `provider/model` for
-/// third-party providers. Empty when the snapshot carries no model.
+/// Shared model label rule for the composer chip and the subagent detail
+/// page's AppBar subtitle (design D4) — the official web's provider display
+/// rule (`JMe` / composer `$V` semantics): a bare model id for the
+/// default/official providers, `provider/model` for third-party providers.
+/// Empty when [model] is empty.
 ///
-/// Official providers: empty, `glm`, and the coding-plan account ids
+/// Official providers: empty, `glm`, the desktop-internal `builtin` /
+/// `builtin:*` family, and the coding-plan account ids
 /// `account:(zai|bigmodel)-*` (the repo's [parsePlanAccess] family rule,
 /// live-probed session config carries e.g. `account:zai-individual-coding-
 /// plan`) — everything else is a custom provider and prefixes the id.
+///
+/// The `builtin` family is accepted alongside the live `account:*` ids
+/// because the desktop itself canonicalizes it before labeling (asar
+/// 3.17.1: `builtin:zai` → `zai-api`, `builtin:*-plan` → `account:*`), and
+/// older desktops / the model-provider catalog still hand ZGo those ids.
+/// Its official predicate only matches plan account ids, so treating
+/// `builtin*` as a third-party provider would prefix labels the desktop
+/// never shows.
+String modelLabelOf(String model, String provider) {
+  if (model.isEmpty) return '';
+  final p = provider.trim();
+  final official = p.isEmpty ||
+      p == 'glm' ||
+      p == 'builtin' ||
+      p.startsWith('builtin:') ||
+      RegExp(r'^account:(zai|bigmodel)-').hasMatch(p);
+  if (official) return model;
+  if (model.startsWith('$p/')) return model;
+  return '$p/$model';
+}
+
+/// Model label for the subagent detail page's AppBar subtitle (design D4):
+/// [modelLabelOf] over the snapshot config, with the child-session
+/// `modelChange` marker as the fallback model source.
 String chatModelLabel(ConversationState state) {
   var model = state.currentModel;
   if (model.isEmpty) {
@@ -476,14 +502,7 @@ String chatModelLabel(ConversationState state) {
       }
     }
   }
-  if (model.isEmpty) return '';
-  final provider = '${state.config?['provider'] ?? ''}'.trim();
-  final official = provider.isEmpty ||
-      provider == 'glm' ||
-      RegExp(r'^account:(zai|bigmodel)-').hasMatch(provider);
-  if (official) return model;
-  if (model.startsWith('$provider/')) return model;
-  return '$provider/$model';
+  return modelLabelOf(model, '${state.config?['provider'] ?? ''}');
 }
 
 /// Page-level navigation callbacks threaded down the timeline construction

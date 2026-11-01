@@ -381,5 +381,29 @@ void main() {
       );
       expect(plan!.targetOption.value, '$coding/GLM-5.3-Flash');
     });
+
+    test('a three-part value (model id contains "/") with no '
+        'modelProviderId still resolves its first-segment provider', () {
+      // First-slash split (desktop FC): the provider is only the leading
+      // segment. A trailing-slash split would read the provider as
+      // "account:zai-individual-coding-plan/deepseek" and miss the target.
+      const optionValue = '$coding/deepseek/deepseek-v4.1-flash';
+      final plan = StartPlanAutoSwitch.evaluate(
+        view: exhausted(),
+        entitledIds: {start, coding},
+        currentProviderId: start,
+        currentModelId: 'GLM-5.3',
+        modelOptions: [
+          ConfigOptionValue(
+            value: optionValue,
+            name: 'deepseek/deepseek-v4.1-flash',
+            modelProviderId: null,
+          ),
+          option(start, 'GLM-5.3'),
+        ],
+      );
+      expect(plan, isNotNull);
+      expect(plan!.targetOption.value, optionValue);
+    });
   });
 }

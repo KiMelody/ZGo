@@ -922,12 +922,15 @@ class AutomationSheetState extends State<AutomationSheet> {
   }
 
   void _submit() {
-    // Split the composite option value back into the wire's provider+model.
+    // Split the composite option value back into the wire's provider+model
+    // on the FIRST slash (desktop FC semantics): model ids may themselves
+    // contain '/' (deepseek/deepseek-v4.1-flash), a trailing-slash split
+    // would corrupt the provider.
     String? provider;
     String? model;
     final mv = _modelValue;
     if (mv != null && mv.isNotEmpty) {
-      final idx = mv.lastIndexOf('/');
+      final idx = mv.indexOf('/');
       if (idx > 0) {
         provider = mv.substring(0, idx);
         model = mv.substring(idx + 1);

@@ -34,6 +34,15 @@ Map<String, String> mergeNewTaskConfig(
   };
 }
 
+/// [perMessage] 里用户当场设置的键（非空值）——定时消息编辑器的选择，
+/// 与 persisted（UiSettings 全局默认）的「跟随桌面」语义相对。
+/// 传给 [sanitizeNewTaskConfig] 的 `explicitKeys`：这些值即使在
+/// prepareWorkspace 失败或选项漂移后也恒发送（PRD model-value-split §3）。
+Set<String> explicitNewTaskKeys(Map<String, String>? perMessage) => {
+  for (final key in const ['mode', 'model', 'thought'])
+    if ((perMessage?[key] ?? '').isNotEmpty) key,
+};
+
 /// 校验并清洗为 createSession config 载荷（provider/model 拆分在此完成）：
 /// - model：prep 有模型选项时须 ∈ options，否则丢弃；prep 无模型选项时不校验
 ///   （与用户手选同语义，走 provider 目录兜底路径）；prep 为 null（无人值守
@@ -42,21 +51,32 @@ Map<String, String> mergeNewTaskConfig(
 ///   （guarded=桌面 3.15.1「自主模式」，edit=历史存储值，引擎层仍合法），否则丢弃。
 /// - thought：恒含合法值（见 [effectiveNewTaskThought]）——缺 thought 会让
 ///   冷启动的 createSession 直接失败。
+///
+/// [explicitKeys] 里的键跳过上述「跟随桌面」校验恒发送（用户当场选择：
+/// draft sheet 的 onDraftChange 或定时消息 perMessage 命中）——值来自用户
+/// 刚看到的列表，prep 缺失/选项漂移不构成丢弃理由。种子默认值（UiSettings
+/// 全局默认）不在集合内，保持静默降级（PRD model-value-split §3）。
+///
+/// 复合值按**首个** `/` 拆分（桌面 `FC` 语义）：provider=首段，model=余下
+/// 全部——model id 本身可含 `/`（如 Command Code 的
+/// `deepseek/deepseek-v4.1-flash`），尾斜杠拆分会把 provider 拼错。
 Map<String, dynamic> sanitizeNewTaskConfig(
   Map<String, String> merged,
-  WorkspacePrep? prep,
-) {
+  WorkspacePrep? prep, {
+  Set<String> explicitKeys = const {},
+}) {
   final config = <String, dynamic>{};
 
   final model = merged['model'] ?? '';
   final modelOptions = prep?.option('model')?.options;
-  final modelAllowed = prep != null &&
-      model.isNotEmpty &&
-      (modelOptions == null ||
-          modelOptions.isEmpty ||
-          modelOptions.any((v) => v.value == model));
+  final modelAllowed = (explicitKeys.contains('model') && model.isNotEmpty) ||
+      (prep != null &&
+          model.isNotEmpty &&
+          (modelOptions == null ||
+              modelOptions.isEmpty ||
+              modelOptions.any((v) => v.value == model)));
   if (modelAllowed) {
-    final idx = model.lastIndexOf('/');
+    final idx = model.indexOf('/');
     if (idx > 0) {
       config['provider'] = model.substring(0, idx);
       config['model'] = model.substring(idx + 1);
@@ -67,13 +87,18 @@ Map<String, dynamic> sanitizeNewTaskConfig(
   final modeOption = prep?.option('mode');
   const fallbackModes = {'build', 'edit', 'guarded', 'plan', 'yolo'};
   final modeAllowed = mode.isNotEmpty &&
-      (fallbackModes.contains(mode) ||
+      (explicitKeys.contains('mode') ||
+          fallbackModes.contains(mode) ||
           (modeOption?.options.any((v) => v.value == mode) ?? false));
   if (modeAllowed) {
     config['mode'] = mode;
   }
 
-  config['thought'] = effectiveNewTaskThought(merged, prep);
+  final thought = merged['thought'] ?? '';
+  config['thought'] =
+      explicitKeys.contains('thought') && thought.isNotEmpty
+      ? thought
+      : effectiveNewTaskThought(merged, prep);
   return config;
 }
 

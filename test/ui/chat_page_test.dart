@@ -16,6 +16,7 @@ import 'package:zgo/state/entitlement_poller.dart';
 import 'package:zgo/state/quota_reset.dart';
 import 'package:zgo/ui/chat/chat_page.dart';
 import 'package:zgo/ui/chat/subagent_detail_page.dart';
+import 'package:zgo/ui/chat/timeline.dart';
 import 'package:zgo/ui/quota_reset_dialog.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
@@ -194,6 +195,14 @@ class _PrepGateway extends FakeChatGateway {
 
   @override
   Future<WorkspacePrep> prepareWorkspace() async => prep;
+}
+
+/// prepareWorkspace that fails (prep unreachable) — the draft-explicit test
+/// reaches the model sheet through the provider-catalog fallback instead.
+class _FailingPrepGateway extends FakeChatGateway {
+  @override
+  Future<WorkspacePrep> prepareWorkspace() async =>
+      throw StateError('prep unavailable');
 }
 
 Widget wrap(Widget child) => MaterialApp(
@@ -4011,6 +4020,220 @@ void main() {
 
   // ------------------- chat config fixes (PRD internal-task)
 
+  testWidgets('composer model chip: an official account-plan draft value '
+      'splits into the bare model id', (tester) async {
+    final prep = WorkspacePrep.fromMap(const {
+      'configOptions': [
+        {
+          'id': 'model',
+          'name': 'Model',
+          'currentValue': 'account:zai-start-plan/GLM-5.3',
+          'options': [
+            {'value': 'account:zai-start-plan/GLM-5.3', 'name': 'GLM-5.3'},
+          ],
+        },
+      ],
+      'slashCommands': <Map<String, dynamic>>[],
+    });
+    await tester.pumpWidget(
+      wrap(ChatPage(host: _PrepGateway(prep), title: '新任务')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('GLM-5.3'), findsOneWidget);
+    expect(find.text('account:zai-start-plan/GLM-5.3'), findsNothing);
+  });
+
+  testWidgets('composer model chip follows the shared label rule: the draft '
+      'composite and the live config render the same string, equal to '
+      'chatModelLabel(state)', (tester) async {
+    // The draft path receives the prep's composite value; the live path
+    // receives the config's split provider/model pair. Same provider and
+    // model → same chip copy (10-31 model-label unify, plan A).
+    final prep = WorkspacePrep.fromMap(const {
+      'configOptions': [
+        {
+          'id': 'model',
+          'name': '模型',
+          'currentValue': 'personal-huancheng/deepseek-v4-flash',
+          'options': [
+            {
+              'value': 'personal-huancheng/deepseek-v4-flash',
+              'name': 'DeepSeek V4 Flash',
+            },
+          ],
+        },
+        {
+          'id': 'thought_level',
+          'name': '思考等级',
+          'currentValue': 'enabled',
+          'options': [
+            {'value': 'enabled', 'name': '开启'},
+          ],
+        },
+      ],
+      'slashCommands': <Map<String, dynamic>>[],
+    });
+
+    await tester.pumpWidget(
+      wrap(ChatPage(host: _PrepGateway(prep), title: '新任务')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('personal-huancheng/deepseek-v4-flash'), findsOneWidget);
+
+    final gateway = FakeChatGateway()
+      ..snapshotExtra = {
+        'config': {
+          'provider': 'personal-huancheng',
+          'model': 'deepseek-v4-flash',
+          'thought': 'enabled',
+        },
+      };
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    expect(find.text('personal-huancheng/deepseek-v4-flash'), findsOneWidget);
+    expect(
+      chatModelLabel(gateway.state),
+      'personal-huancheng/deepseek-v4-flash',
+    );
+  });
+
+  testWidgets('composer model chip: a three-part draft value keeps the model '
+      'id intact (first-slash split)', (tester) async {
+    // Command Code's model id is itself "deepseek/deepseek-v4.1-flash", so
+    // the prep option value carries three segments. Splitting on the last
+    // slash would read provider="uuid/deepseek" and shorten the model id.
+    const provider = 'ee6c256c-d8fa-4419-9ed4-bead8bf652bd';
+    const value = '$provider/deepseek/deepseek-v4.1-flash';
+    final prep = WorkspacePrep.fromMap(const {
+      'configOptions': [
+        {
+          'id': 'model',
+          'name': '模型',
+          'currentValue': value,
+          'options': [
+            {'value': value, 'name': 'deepseek/deepseek-v4.1-flash'},
+          ],
+        },
+      ],
+      'slashCommands': <Map<String, dynamic>>[],
+    });
+    await tester.pumpWidget(
+      wrap(ChatPage(host: _PrepGateway(prep), title: '新任务')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text(value), findsOneWidget);
+  });
+
+  testWidgets('draft: an explicit slashy model pick ships the full model id '
+      'in createSession (first-slash split)', (tester) async {
+    const provider = 'ee6c256c-d8fa-4419-9ed4-bead8bf652bd';
+    const value = '$provider/deepseek/deepseek-v4.1-flash';
+    final prep = WorkspacePrep.fromMap(const {
+      'configOptions': [
+        {
+          'id': 'model',
+          'name': '模型',
+          'currentValue': 'builtin/glm-5.2',
+          'options': [
+            {'value': 'builtin/glm-5.2', 'name': 'GLM-5.2'},
+            {'value': value, 'name': 'deepseek/deepseek-v4.1-flash'},
+          ],
+        },
+        {
+          'id': 'thought_level',
+          'name': '思考等级',
+          'currentValue': 'enabled',
+          'options': [
+            {'value': 'enabled', 'name': '开启'},
+          ],
+        },
+      ],
+      'slashCommands': <Map<String, dynamic>>[],
+    });
+    final gateway = _PrepGateway(prep);
+    await tester.pumpWidget(wrap(ChatPage(host: gateway, title: '新任务')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('glm-5.2')); // composer model chip
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('deepseek/deepseek-v4.1-flash'));
+    await tester.pumpAndSettle();
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '开始分析');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    final call = gateway.calls
+        .where((c) => c.$1 == 'createSession')
+        .toList()
+        .single;
+    expect(call.$2[2], {
+      'provider': provider,
+      'model': 'deepseek/deepseek-v4.1-flash',
+      'thought': 'enabled',
+    });
+  });
+
+  testWidgets('draft: an explicit catalog pick survives a missing prep at '
+      'send time (no silent drop)', (tester) async {
+    const provider = 'ee6c256c-d8fa-4419-9ed4-bead8bf652bd';
+    const model = 'deepseek/deepseek-v4.1-flash';
+    final settings = UiSettings()..newTaskModel = 'builtin/glm-5.2';
+    final gateway = _FailingPrepGateway()
+      ..modelProviderCatalogResult = [
+        {
+          'id': provider,
+          'name': 'Command Code',
+          'models': [
+            {'id': model},
+          ],
+        },
+      ];
+    await tester.pumpWidget(MaterialApp(
+      theme: buildDarkTheme(),
+      darkTheme: buildDarkTheme(),
+      builder: (context, child) =>
+          UiSettingsProvider(settings: settings, child: child!),
+      home: ChatPage(host: gateway, title: '新任务'),
+    ));
+    await tester.pumpAndSettle();
+
+    // The seeded global default keeps the chip visible; prep is unreachable,
+    // so the sheet lists the provider catalog and the pick is a first-class
+    // user choice that must ship (sanitize's silent drop is for seeds only).
+    await tester.tap(find.text('glm-5.2'));
+    await tester.pumpAndSettle();
+    expect(find.text('Command Code'), findsWidgets);
+    await tester.tap(find.text(model));
+    await tester.pumpAndSettle();
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '开始分析');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    final call = gateway.calls
+        .where((c) => c.$1 == 'createSession')
+        .toList()
+        .single;
+    expect(call.$2[2], {'provider': provider, 'model': model, 'thought': 'max'});
+  });
+
   testWidgets('empty model config keeps the composer model/thought chips '
       'with placeholder labels', (tester) async {
     final gateway = FakeChatGateway();
@@ -4033,6 +4256,71 @@ void main() {
     await tester.tap(find.text('模型'));
     await tester.pumpAndSettle();
     expect(find.text('GLM-5.2'), findsNWidgets(2));
+  });
+
+  testWidgets('thought chip: live switch sends the config bare provider/model '
+      'pair (slashy model id intact)', (tester) async {
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport)
+      ..snapshotExtra = {
+        'config': {
+          'provider': 'ee6c256c-d8fa-4419-9ed4-bead8bf652bd',
+          'model': 'deepseek/deepseek-v4.1-flash',
+          'thought': 'enabled',
+          'mode': 'build',
+        },
+      };
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    // The chip label is the prep option name for the current value.
+    await tester.tap(find.text('开启'));
+    await tester.pumpAndSettle();
+    // The dialog lists the raw option values.
+    await tester.tap(find.text('off'));
+    await tester.pumpAndSettle();
+
+    expect(transport.switches, hasLength(1));
+    expect(
+      transport.switches.single.provider,
+      'ee6c256c-d8fa-4419-9ed4-bead8bf652bd',
+    );
+    expect(
+      transport.switches.single.model,
+      'deepseek/deepseek-v4.1-flash',
+    );
+    expect(transport.switches.single.thought, 'off');
+  });
+
+  testWidgets('thought chip: config not landed → no command is sent',
+      (tester) async {
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport);
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    expect(find.text('思考'), findsOneWidget); // placeholder chip
+    await tester.tap(find.text('思考'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('off'));
+    await tester.pumpAndSettle();
+
+    expect(
+      transport.switches,
+      isEmpty,
+      reason: 'provider/model are empty without a config — the guard keeps '
+          'the empty pair off the wire',
+    );
   });
 
   testWidgets('config-sheet fallback: no prep options renders the '

@@ -401,6 +401,12 @@ class _ChatPageState extends State<ChatPage> {
   /// `config` to createSession on first send.
   final Map<String, String> _draftConfig = {};
 
+  /// Keys the user picked explicitly in the config sheet (`onDraftChange`).
+  /// They skip sanitizeNewTaskConfig's silent "follow the desktop" drop,
+  /// while the initState seeds from the global UiSettings defaults keep it
+  /// (PRD model-value-split §3).
+  final Set<String> _draftExplicit = {};
+
   /// Whether to keep the view pinned to the newest message. Starts true so
   /// opening the chat lands at the bottom; the user scrolling up unpins it.
   bool _stickToBottom = true;
@@ -1625,8 +1631,11 @@ class _ChatPageState extends State<ChatPage> {
   /// picks) validated against the live prepareWorkspace options, plus an
   /// always-legal thought. Shared with the scheduled-send fire path so
   /// both ship identical payloads.
-  Map<String, dynamic> _buildDraftConfig() =>
-      sanitizeNewTaskConfig(_draftConfig, _prep);
+  Map<String, dynamic> _buildDraftConfig() => sanitizeNewTaskConfig(
+    _draftConfig,
+    _prep,
+    explicitKeys: _draftExplicit,
+  );
 
   Future<String?> _askHeldQueueDisposition() {
     return showDialog<String>(
@@ -1855,7 +1864,10 @@ class _ChatPageState extends State<ChatPage> {
         entitledIds: entitledIds,
         currentProviderId: _sheetCurrentProviderId,
         onDraftChange: (key, value) {
-          setState(() => _draftConfig[key] = value);
+          setState(() {
+            _draftConfig[key] = value;
+            _draftExplicit.add(key);
+          });
         },
         onSwitchIssued: (record) => _lastSwitch = record,
         onSwitchModel: switchModel,
@@ -5775,8 +5787,13 @@ class _QuestionItem extends StatelessWidget {
 /// ---------------------------------------------------------------- sheets
 
 /// 'builtin:zai-coding-plan/GLM-5.2' → (provider, model)
+/// 'uuid/deepseek/deepseek-v4.1-flash' → (uuid, 'deepseek/deepseek-v4.1-flash')
+/// Split on the FIRST slash, mirroring the desktop `FC` parse: the provider
+/// is the leading segment and the model is everything after it — model ids
+/// may themselves contain '/' (Command Code's deepseek family), so a
+/// trailing-slash split would put part of the model into the provider.
 (String, String) _splitModelValue(String value) {
-  final idx = value.lastIndexOf('/');
+  final idx = value.indexOf('/');
   if (idx <= 0) return (value, value);
   return (value.substring(0, idx), value.substring(idx + 1));
 }
@@ -7264,29 +7281,30 @@ class _InputBarState extends State<_InputBar> {
       ? (draftConfig?['mode'] ?? 'build')
       : (state?.currentMode ?? 'build');
 
+  /// Shared with the subagent detail page's subtitle ([modelLabelOf]):
+  /// draft values are `provider/model` composites and get split first
+  /// (the first slash, conditional — a bare model id carries no provider;
+  /// the model half may keep its own slashes); live sessions keep the
+  /// config's bare model + provider pair.
   String get _modelLabel {
     if (isDraft) {
-      final v = draftConfig?['model'];
-      if (v != null && v.isNotEmpty) {
-        final idx = v.lastIndexOf('/');
-        return idx > 0 ? v.substring(idx + 1) : v;
-      }
-      final current = prep?.option('model')?.currentValue;
-      if (current != null && '$current'.isNotEmpty) {
-        final idx = '$current'.lastIndexOf('/');
-        return idx > 0 ? '$current'.substring(idx + 1) : '$current';
-      }
-      return '';
+      final picked = draftConfig?['model'] ?? '';
+      final value = picked.isNotEmpty
+          ? picked
+          : '${prep?.option('model')?.currentValue ?? ''}';
+      if (value.isEmpty) return '';
+      // Conditional split, unlike [_splitModelValue] (which echoes a
+      // slash-less value as both provider and model). First slash: the
+      // model segment may itself contain '/' (deepseek/deepseek-v4.1-flash).
+      final idx = value.indexOf('/');
+      return idx > 0
+          ? modelLabelOf(value.substring(idx + 1), value.substring(0, idx))
+          : modelLabelOf(value, '');
     }
-    final model = state?.currentModel ?? '';
-    if (model.isEmpty) return '';
-    // Friendly option name from workspace prep when available.
-    for (final o
-        in prep?.option('model')?.options ?? const <ConfigOptionValue>[]) {
-      if (o.value == model) return o.name;
-    }
-    final idx = model.lastIndexOf('/');
-    return idx > 0 ? model.substring(idx + 1) : model;
+    return modelLabelOf(
+      state?.currentModel ?? '',
+      '${state?.config?['provider'] ?? ''}',
+    );
   }
 
   String get _thoughtLabel {
@@ -7620,13 +7638,17 @@ class _InputBarState extends State<_InputBar> {
     );
     if (value == null || value == _thoughtLabel) return;
     if (isDraft || sid == null) return; // draft chips go through the sheet
-    final modelValue =
-        '${state?.config?['provider'] ?? ''}/${state?.config?['model'] ?? ''}';
-    final idx = modelValue.lastIndexOf('/');
+    // Pass the config's bare values straight through (the desktop's
+    // switchModelConfig wants provider+model, not a composite string — the
+    // old join-then-split round trip re-broke model ids containing '/').
+    // Config not landed yet → nothing legal to switch; send nothing.
+    final provider = '${state?.config?['provider'] ?? ''}';
+    final model = '${state?.config?['model'] ?? ''}';
+    if (provider.isEmpty || model.isEmpty) return;
     conversation.conversationCommands.switchModelConfig(
       sid,
-      provider: idx > 0 ? modelValue.substring(0, idx) : modelValue,
-      model: idx > 0 ? modelValue.substring(idx + 1) : modelValue,
+      provider: provider,
+      model: model,
       thought: value,
     );
   }
