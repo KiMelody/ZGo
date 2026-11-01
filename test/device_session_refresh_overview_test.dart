@@ -121,12 +121,19 @@ void main() {
   /// stub's openBridge by design — the refresh tests only need `connected`;
   /// the failed open leaves an error string behind, so failure assertions
   /// match on the bootstrap message, not on `error == null`).
-  Future<DeviceSession> connectSession(OverviewStubClient stub) async {
+  ///
+  /// [overviewRefreshThrottle] defaults to zero — the leg tests drive rounds
+  /// back to back; the throttle has its own test below.
+  Future<DeviceSession> connectSession(
+    OverviewStubClient stub, {
+    Duration overviewRefreshThrottle = Duration.zero,
+  }) async {
     final session = DeviceSession(
       deviceId: 'd1',
       params: paramsOf(),
       timings: fastTimings,
       clientFactory: () => stub,
+      overviewRefreshThrottle: overviewRefreshThrottle,
     );
     unawaited(session.connect());
     await until(() => session.status == DeviceStatus.connected,
@@ -163,6 +170,7 @@ void main() {
         created += 1;
         return stub;
       },
+      overviewRefreshThrottle: Duration.zero,
     );
     unawaited(session.connect());
     await until(() => session.status == DeviceStatus.connected,
@@ -184,7 +192,8 @@ void main() {
     await session.dispose();
   });
 
-  test('overlapping refreshes share one in-flight bootstrap', () async {
+  test('a call landing on an in-flight round waits it out, then re-dials '
+      '(anti-swallow: the old round was built from stale state)', () async {
     final stub = OverviewStubClient(paramsOf());
     final session = await connectSession(stub);
     final bootstrapsBefore = stub.bootstrapCalls;
@@ -192,18 +201,74 @@ void main() {
     stub.hangBootstrap = Completer<Map<String, dynamic>>();
     final f1 = session.refreshTaskOverview();
     final f2 = session.refreshTaskOverview();
-    expect(identical(f1, f2), isTrue,
-        reason: 'calls while one refresh is in flight share its future');
     expect(stub.bootstrapCalls, bootstrapsBefore + 1,
-        reason: 'two overlapping refreshes must issue ONE bootstrap');
+        reason: 'the second call must not stack a dial while the round is '
+            'still in flight — it waits the stale round out first');
 
-    stub.hangBootstrap!.complete(overviewStubResult('/repo2', 'i2', 't2'));
+    // Let the second round dial fresh once the parked one settles.
+    final hang = stub.hangBootstrap!;
+    stub.hangBootstrap = null;
+    stub.bootstrapResult = overviewStubResult('/repo2', 'i2', 't2');
+    hang.complete(overviewStubResult('/repo2', 'i2', 't2'));
     await Future.wait([f1, f2]);
+    expect(stub.bootstrapCalls, bootstrapsBefore + 2,
+        reason: 'the second call re-dials instead of joining the stale round '
+            '(a create landing mid-refresh must not be swallowed)');
     expect(session.workspaces.single['workspacePath'], '/repo2');
+    await session.dispose();
+  });
 
-    // Completed refreshes are no longer shared: the next call re-fetches.
+  test('a trigger inside the throttle window joins the round just finished',
+      () async {
+    final stub = OverviewStubClient(paramsOf());
+    final session = await connectSession(
+      stub,
+      overviewRefreshThrottle: const Duration(minutes: 5),
+    );
+    final bootstrapsBefore = stub.bootstrapCalls;
+
     await session.refreshTaskOverview();
-    expect(stub.bootstrapCalls, bootstrapsBefore + 2);
+    await session.refreshTaskOverview();
+    expect(stub.bootstrapCalls, bootstrapsBefore + 1,
+        reason: 'the second trigger inside the throttle window must not dial '
+            'another three-leg round');
+    await session.dispose();
+  });
+
+  test('bypassThrottle: a user-action trigger inside the window still waits '
+      'the stale round out and then re-dials', () async {
+    final stub = OverviewStubClient(paramsOf());
+    final session = await connectSession(
+      stub,
+      overviewRefreshThrottle: const Duration(minutes: 5),
+    );
+    final bootstrapsBefore = stub.bootstrapCalls;
+
+    // A cadence round parks mid-flight; the create/turn-terminal trigger then
+    // lands inside the throttle window. The bypass must neither join the
+    // stale round nor stack a dial before it settles.
+    stub.hangBootstrap = Completer<Map<String, dynamic>>();
+    final cadence = session.refreshTaskOverview();
+    final userTrigger = session.refreshTaskOverview(bypassThrottle: true);
+    expect(stub.bootstrapCalls, bootstrapsBefore + 1,
+        reason: 'the anti-swallow wait is not weakened by the bypass');
+
+    final hang = stub.hangBootstrap!;
+    stub.hangBootstrap = null;
+    stub.bootstrapResult = overviewStubResult('/repo2', 'i2', 't2');
+    hang.complete(overviewStubResult('/repo2', 'i2', 't2'));
+    await Future.wait([cadence, userTrigger]);
+    expect(stub.bootstrapCalls, bootstrapsBefore + 2,
+        reason: 'the bypass re-dials after the stale round settles — the '
+            'create row must never be swallowed by a cadence window');
+    expect(session.workspaces.single['workspacePath'], '/repo2',
+        reason: 'the new round carries the fresh answer');
+
+    // The bypass advances the throttle anchor: a NON-bypass call right after
+    // it is throttled again (stable semantics for the 30 s cadence).
+    await session.refreshTaskOverview();
+    expect(stub.bootstrapCalls, bootstrapsBefore + 2,
+        reason: 'the window restarts from the latest trigger');
     await session.dispose();
   });
 
@@ -215,6 +280,7 @@ void main() {
       params: paramsOf(),
       timings: fastTimings,
       clientFactory: () => stub,
+      overviewRefreshThrottle: Duration.zero,
     );
     await session.refreshTaskOverview();
     expect(stub.bootstrapCalls, 0);

@@ -63,21 +63,33 @@ bool isActiveForOrder(int? lastActivityAt, DateTime now) =>
 /// frame. Idle cards follow by key descending (the pre-10-31 recency order;
 /// their key no longer changes), null keys last. Idle and null ties break on
 /// the title then the key, exactly as before, so the order is total.
+///
+/// [fallbackActivityA]/[fallbackActivityB] are the PERSISTED activity keys
+/// (design 11-01 §4), used for the idle order while a card has no live rows
+/// yet (cold start: its sidecar sessions-index has not delivered). They never
+/// join the active tier — the 60 s window only accepts live keys, so a
+/// restored key can only stabilize the idle layer.
 @visibleForTesting
 int compareWorkspaceCardsByActivity(
   Map<String, dynamic> a,
   int? activityA,
   Map<String, dynamic> b,
   int? activityB,
-  DateTime now,
-) {
+  DateTime now, {
+  int? fallbackActivityA,
+  int? fallbackActivityB,
+}) {
   final activeA = isActiveForOrder(activityA, now);
   final activeB = isActiveForOrder(activityB, now);
   if (activeA != activeB) return activeA ? -1 : 1;
-  if (!activeA && activityA != activityB) {
-    if (activityA == null) return 1;
-    if (activityB == null) return -1;
-    return activityB.compareTo(activityA);
+  if (!activeA) {
+    final keyA = activityA ?? fallbackActivityA;
+    final keyB = activityB ?? fallbackActivityB;
+    if (keyA != keyB) {
+      if (keyA == null) return 1;
+      if (keyB == null) return -1;
+      return keyB.compareTo(keyA);
+    }
   }
   final byTitle = workspaceTitle(a).compareTo(workspaceTitle(b));
   if (byTitle != 0) return byTitle;
@@ -314,6 +326,23 @@ class _TaskListPageState extends State<TaskListPage>
       identical(session.activeWorkspace, ws) ||
       workspaceKeyOf(ws) == workspaceKeyOf(session.activeWorkspace ?? const {});
 
+  /// Whether a NON-active workspace card's rows are still loading, so the
+  /// empty-state copy would be a lie (design 11-01 §3). Two sources:
+  /// - the workspace's sidecar sessions-index is subscribed but its first
+  ///   snapshot has not landed (`false` in [DeviceSession.sidecarReadiness]);
+  /// - the session has not landed its first relay overview yet (cold start
+  ///   between the bootstrap workspaces and the first task pull) — an
+  ///   absent readiness key then means "not loaded", not "no tasks".
+  /// An absent key after the overview landed = relay-only rows are the whole
+  /// truth, so the empty-state copy is correct.
+  bool _cardRowsPending(DeviceSession session, String? dirKey) {
+    if (dirKey == null) return false;
+    final readiness = session.sidecarReadiness[dirKey];
+    if (readiness != null) return !readiness;
+    return session.status == DeviceStatus.connected &&
+        !session.taskOverviewLoaded;
+  }
+
   /// Whether opening a task/draft must re-point the bridge first. A cold
   /// runtime failure means the previous open failed: even the active
   /// workspace needs a successful re-open to clear the banner and rebuild
@@ -459,22 +488,34 @@ class _TaskListPageState extends State<TaskListPage>
       return newest;
     }
 
-    final ordered = <(Map<String, dynamic>, int?)>[
+    // Persisted activity fallback (design 11-01 §4): a cold-start card
+    // whose sidecar sessions-index has not delivered yet keeps its previous
+    // idle position instead of sinking to the bottom and jumping back up.
+    int? persistedActivityOf(Map<String, dynamic> ws) {
+      final dirKey = workspaceKeyOf(ws);
+      if (dirKey == null) return null;
+      return session.persistedWorkspaceActivity(dirKey);
+    }
+
+    final ordered = <(Map<String, dynamic>, int?, int?)>[
       for (final ws in session.workspaces)
-        if (!_isConversationWorkspace(ws)) (ws, activityOf(ws)),
+        if (!_isConversationWorkspace(ws))
+          (ws, activityOf(ws), persistedActivityOf(ws)),
     ];
     ordered.sort((a, b) {
-      final (wsA, activityA) = a;
-      final (wsB, activityB) = b;
+      final (wsA, activityA, persistedA) = a;
+      final (wsB, activityB, persistedB) = b;
       return compareWorkspaceCardsByActivity(
         wsA,
         activityA,
         wsB,
         activityB,
         now,
+        fallbackActivityA: persistedA,
+        fallbackActivityB: persistedB,
       );
     });
-    return [for (final (ws, _) in ordered) ws];
+    return [for (final (ws, _, _) in ordered) ws];
   }
 
   // ------------------------------------------------- merged task data source
@@ -884,7 +925,22 @@ class _TaskListPageState extends State<TaskListPage>
               groupDot: groupDotOf[e.sessionId],
             ),
           // Empty-group feedback (B7); the archive filter keeps its own copy.
-          if (entries.isEmpty)
+          // A non-active folder whose rows are still in flight shows the
+          // loading spinner instead of the false 「暂无任务」 (design 11-01
+          // §3) — not for the archive filter, whose rows come from the relay
+          // overview only.
+          if (entries.isEmpty &&
+              !_showArchived &&
+              _cardRowsPending(session, dirKey))
+            const Padding(
+              padding: EdgeInsets.fromLTRB(24, 4, 8, 8),
+              child: SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            )
+          else if (entries.isEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(24, 2, 8, 6),
               child: Text(
@@ -2111,7 +2167,13 @@ class _TaskListPageState extends State<TaskListPage>
           ),
           if (expanded && (isActive ? sessions != null : true)) ...[
             Divider(height: 1, color: ZInk.hairline(context)),
-            if (isActive && sessions != null && !sessions.ready)
+            if ((isActive && sessions != null && !sessions.ready) ||
+                (!isActive && entries.isEmpty &&
+                    _cardRowsPending(session, dirKey)))
+              // Loading gate (design 11-01 §3): the active index before its
+              // first snapshot, and a non-active card whose sidecar/overview
+              // has not landed yet. The empty-state copy below would claim
+              // 「暂无任务」 while the rows are simply still in flight.
               const Padding(
                 padding: EdgeInsets.all(16),
                 child: Center(

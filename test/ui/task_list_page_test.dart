@@ -38,7 +38,7 @@ class _CountingSession extends FakeDeviceSession {
   int overviewRefreshes = 0;
 
   @override
-  Future<void> refreshTaskOverview() async {
+  Future<void> refreshTaskOverview({bool bypassThrottle = false}) async {
     overviewRefreshes += 1;
   }
 }
@@ -141,6 +141,13 @@ void useDesktop(WidgetTester tester) {
   tester.view.physicalSize = const Size(1280, 900);
   addTearDown(tester.view.reset);
 }
+
+/// The workspace card that carries [title] (name → ancestor Card; declared
+/// before the first test so every card assertion shares it).
+Finder cardOf(String title) => find.ancestor(
+      of: find.text(title),
+      matching: find.byType(Card),
+    );
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -571,6 +578,130 @@ void main() {
     )));
     await tester.pumpAndSettle();
     expect(find.text('暂无任务'), findsOneWidget);
+  });
+
+  testWidgets('11-01 §3: a non-active card before the first overview lands '
+      'shows the loading skeleton, not the empty copy', (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: const [],
+      workspaces: [
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        {'workspacePath': '/repo/beta', 'workspaceIdentity': 'beta'},
+      ],
+    )..taskOverviewLoaded = false; // cold start: no task pull has landed
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.text('beta'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(
+      find.descendant(
+          of: cardOf('beta'), matching: find.byType(CircularProgressIndicator)),
+      findsOneWidget,
+      reason: 'the rows are still in flight — an empty-state copy would be a '
+          'lie',
+    );
+    expect(
+      find.descendant(of: cardOf('beta'), matching: find.text('暂无任务')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('11-01 §3: a subscribed sidecar that has not delivered its '
+      'snapshot shows the skeleton', (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: const [],
+      workspaces: [
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        {'workspacePath': '/repo/beta', 'workspaceIdentity': 'beta'},
+      ],
+    );
+    // beta carries one ARCHIVED relay row: it never shows in the timeline
+    // half, but it makes beta a sidecar candidate. The sidecar state never
+    // receives a frame → not ready.
+    session.applyRelayOverview([
+      {
+        'taskId': 't-old',
+        'title': '旧任务',
+        'workspacePath': '/repo/beta',
+        'workspaceIdentity': 'beta',
+        'archived': true,
+        'createdAt': 1,
+        'updatedAt': 5,
+        'displayStatus': 'idle',
+      },
+    ]);
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(session.sidecarReadiness['beta'], isFalse,
+        reason: 'the sidecar is subscribed but has not delivered a snapshot');
+    await tester.tap(find.text('beta'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(
+      find.descendant(
+          of: cardOf('beta'), matching: find.byType(CircularProgressIndicator)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: cardOf('beta'), matching: find.text('暂无任务')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('11-01 §3: once the overview landed, an empty relay-only card '
+      'keeps the empty copy', (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: const [],
+      workspaces: [
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        {'workspacePath': '/repo/beta', 'workspaceIdentity': 'beta'},
+      ],
+    ); // taskOverviewLoaded defaults true in the fake
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.text('beta'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(
+      find.descendant(of: cardOf('beta'), matching: find.text('暂无任务')),
+      findsOneWidget,
+      reason: 'no sidecar subscription and a landed overview = the empty '
+          'state is genuine',
+    );
   });
 
   testWidgets('online connection banner is always visible', (tester) async {
@@ -1162,11 +1293,6 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     return (store, device, session);
   }
-
-  Finder cardOf(String title) => find.ancestor(
-        of: find.text(title),
-        matching: find.byType(Card),
-      );
 
   testWidgets('default: only the active workspace is expanded', (tester) async {
     await setupTwoWorkspaces(tester);
@@ -4044,6 +4170,102 @@ void main() {
       };
       return [...titles]..sort((a, b) => y[a]!.compareTo(y[b]!));
     }
+
+    /// Cards in comparator order with a persisted fallback key each —
+    /// (workspace, live key, persisted key).
+    List<String> cardKeysWithFallback(
+      List<(Map<String, dynamic>, int?, int?)> cards,
+      DateTime now,
+    ) {
+      final sorted = [...cards]
+        ..sort((a, b) => compareWorkspaceCardsByActivity(
+              a.$1,
+              a.$2,
+              b.$1,
+              b.$2,
+              now,
+              fallbackActivityA: a.$3,
+              fallbackActivityB: b.$3,
+            ));
+      return [for (final (ws, _, _) in sorted) workspaceKeyOf(ws) ?? ''];
+    }
+
+    test('11-01 §4: a live-null card falls back to its persisted idle key '
+        '(the active tier stays live-only)', () {
+      final now = t0();
+      final alpha = card('alpha');
+      final zulu = card('zulu');
+      // Cold start: neither card has live rows. The persisted recency order
+      // puts zulu first; without the fallback both null keys tie and the
+      // title order would give alpha first.
+      expect(
+        cardKeysWithFallback(
+          [(alpha, null, ago(now, 900)), (zulu, null, ago(now, 800))],
+          now,
+        ),
+        ['zulu', 'alpha'],
+      );
+      // The persisted key never joins the ACTIVE tier: even 1 s old it
+      // sorts behind a live-active card.
+      expect(
+        cardKeysWithFallback(
+          [(zulu, null, ago(now, 1)), (alpha, ago(now, 2), null)],
+          now,
+        ),
+        ['alpha', 'zulu'],
+      );
+      // A live key wins over the persisted fallback for the idle order.
+      expect(
+        cardKeysWithFallback(
+          [(alpha, ago(now, 900), ago(now, 1)), (zulu, ago(now, 800), null)],
+          now,
+        ),
+        ['zulu', 'alpha'],
+      );
+    });
+
+    testWidgets('11-01 §4: the page orders idle cards by the persisted key '
+        'while their live rows are missing', (tester) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        // alpha is live and just active: it leads the active tier on its own
+        // live key. beta/zulu have no live rows (cold start) — only the
+        // persisted keys order them.
+        entries: [
+          {
+            'sessionId': 'sa',
+            'title': '任务甲',
+            'phase': 'completedSuccess',
+            'lastActivityAt': DateTime.now().millisecondsSinceEpoch,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+          {'workspacePath': '/repo/beta', 'workspaceIdentity': 'beta'},
+          {'workspacePath': '/repo/zulu', 'workspaceIdentity': 'zulu'},
+        ],
+      );
+      // beta/zulu have no live rows (cold start): their persisted keys put
+      // zulu first, while the title order would put beta first.
+      session.workspaceActivityStore.record('beta', 800);
+      session.workspaceActivityStore.record('zulu', 900);
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(
+        cardOrder(tester, ['alpha', 'beta', 'zulu']),
+        ['alpha', 'zulu', 'beta'],
+        reason: 'the persisted idle keys keep the pre-cold-start order',
+      );
+    });
 
     test('AC1: concurrent streaming cards keep the name order even when the '
         'activity keys flip', () {

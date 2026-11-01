@@ -284,4 +284,38 @@ void main() {
     await settle();
     expect(s.taskDirectory.sidecarIndexes.containsKey('/repo/b'), isFalse);
   });
+
+  // ---- 11-01 §3: the UI-facing readiness seam ----
+  test('sidecarReadiness: absent = relay-only, false = subscribed but no '
+      'snapshot yet, true = live layer in', () async {
+    final s = session();
+    // No overview yet: no candidates, no keys at all.
+    expect(s.sidecarReadiness, isEmpty);
+
+    s.applyRelayOverview([task('t-b', '/repo/b', 100)]);
+    await settle();
+    expect(s.sidecarReadiness['/repo/b'], isFalse,
+        reason: 'the subscribe landed but the index has no snapshot yet');
+    expect(s.sidecarReadiness['/repo/c'], isNull,
+        reason: 'a workspace without any relay row never subscribes — its '
+            'empty card is genuine');
+
+    s.sidecarStates['/repo/b']!.applyFrame({
+      'toSeq': 1,
+      'payload': {
+        'kind': 'snapshot',
+        'snapshot': {
+          'workspaceId': 'ws-b',
+          'sessions': [
+            {'sessionId': 't-b', 'title': 'live-t-b', 'phase': 'running'},
+          ],
+        },
+      },
+    }, onGap: () {});
+    expect(s.sidecarReadiness['/repo/b'], isTrue);
+
+    // Teardown drops the key: the card falls back to relay-only semantics.
+    s.sidecarManager.disposeAll();
+    expect(s.sidecarReadiness, isEmpty);
+  });
 }

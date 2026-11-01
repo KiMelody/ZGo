@@ -97,6 +97,9 @@ Future<DeviceSession> _connected(_OverviewStubClient stub) async {
     params: _params(),
     timings: _fastTimings,
     clientFactory: () => stub,
+    // These tests drive several rounds back to back and assert the leg
+    // merge, not the trigger throttle (design 11-01 §2).
+    overviewRefreshThrottle: Duration.zero,
   );
   await session.connect();
   return session;
@@ -179,7 +182,14 @@ void main() {
       };
     session.debugAttachGateForTest(gate);
 
+    expect(session.taskOverviewLoaded, isFalse,
+        reason: 'a 3.16.2 bootstrap carries no tasks — nothing landed yet');
     await session.refreshTaskOverview();
+    expect(session.taskOverviewLoaded, isTrue,
+        reason: 'a successful three-leg round is the first overview landing');
+    // 11-01 §4: the landing records each workspace's newest activity key for
+    // the cold-start idle ordering.
+    expect(session.persistedWorkspaceActivity('repo-id'), isNotNull);
 
     expect(
       session.relayTasks.map((r) => r['taskId']).toList(),

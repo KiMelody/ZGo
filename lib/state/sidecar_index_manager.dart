@@ -108,6 +108,26 @@ class SidecarIndexManager {
   /// Sidecar index states by key (live map, read by TaskHomeService).
   Map<String, SessionsIndexState> get indexes => _indexes;
 
+  /// Per-workspace sidecar readiness (design 11-01 §3): `key → true` once the
+  /// sidecar index delivered its snapshot. A workspace whose subscribe is
+  /// still in flight (`_starting`, or recorded but not ready yet) reports
+  /// false; a workspace with no sidecar subscription at all is ABSENT — its
+  /// rows come from the relay overview only, so an empty card is genuine and
+  /// must keep the empty-state copy instead of a loading skeleton.
+  Map<String, bool> get readinessByWorkspace {
+    final readiness = <String, bool>{};
+    for (final key in _starting) {
+      readiness[key] = false;
+    }
+    for (final key in _wireKeys) {
+      readiness[key] = _indexes[key]?.ready ?? false;
+    }
+    for (final MapEntry(key: key, value: state) in _indexes.entries) {
+      readiness[key] = state.ready;
+    }
+    return readiness;
+  }
+
   /// Recomputes the sidecar subscription set: candidates are the non-active
   /// workspaces with the newest relay-overview `updatedAt`, capped at
   /// [limit]; the set is diffed against the live subscriptions (new →

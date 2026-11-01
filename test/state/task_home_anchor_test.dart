@@ -578,4 +578,57 @@ void main() {
       expect(anchorOnly.taskDirectory.allEntries().single.$2, 'true-id');
     });
   });
+
+  // ---- 11-01: the TaskMetaPort create-time anchor seam (write source ①) ----
+  group('create-time anchor seam (11-01 §1)', () {
+    test('anchorCreatedTask canonicalizes a raw PATH spelling to the display '
+        'key through the workspace alias table', () {
+      final session = FakeDeviceSession(
+        deviceId: 'd1',
+        params: params,
+        workspaces: const [
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        ],
+      );
+      session.anchorCreatedTask('sess_new', '/repo/alpha');
+      expect(session.taskHomeStore.homeKeys['sess_new'], 'alpha',
+          reason: 'normalizeKey maps the path spelling to the identity key; '
+              'a raw write would fail bestRelayRow anchor matching');
+    });
+
+    test('a conversation draft path anchors at the default display group '
+        '(spec §3.8 canonical key)', () {
+      final session = FakeDeviceSession(
+        deviceId: 'd1',
+        params: params,
+        workspaces: const [
+          {
+            'workspacePath': r'C:\Users\me\.zcode\workspace\default',
+            'workspaceIdentity': 'default-id',
+            'label': 'default',
+          },
+          {'workspacePath': r'C:\Users\me\.zcode\workspace\draft-1'},
+        ],
+      );
+      session.anchorCreatedTask(
+        'sess_draft',
+        r'C:\Users\me\.zcode\workspace\draft-1',
+      );
+      expect(session.taskHomeStore.homeKeys['sess_draft'], 'default-id',
+          reason: 'the alias table folds conversation workspaces onto the '
+              'default display group');
+    });
+
+    test('a null target writes nothing (no workspace = no anchor)', () {
+      final session = FakeDeviceSession(
+        deviceId: 'd1',
+        params: params,
+        workspaces: const [
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        ],
+      );
+      session.anchorCreatedTask('sess_new', null);
+      expect(session.taskHomeStore.homeKeys, isEmpty);
+    });
+  });
 }

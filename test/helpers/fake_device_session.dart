@@ -369,4 +369,11 @@ class FakeDeviceSession extends DeviceSession {
 
   @override
   String? get chatWorkspaceId => 'ws-1';
+
+  /// The fake seeds its relay overview through [applyRelayOverview] (which
+  /// bypasses the production landing flag): treat the overview as landed so
+  /// non-active cards keep the empty-state copy instead of the cold-start
+  /// skeleton unless a test says otherwise.
+  @override
+  bool taskOverviewLoaded = true;
 }

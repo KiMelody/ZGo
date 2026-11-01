@@ -1204,6 +1204,95 @@ void main() {
     expect(call.$2[2], {'thought': 'enabled'});
   });
 
+  testWidgets('draft first send anchors the ACTIVE workspace path (not the '
+      'draft page path) and pulls the overview once', (tester) async {
+    final gateway = FakeChatGateway();
+    // The bridge's real landing point differs from the path the draft page
+    // was opened in — the anchor must follow the ACTIVE workspace (spec
+    // source ①), because `_openWorkspaceNow` prefers the bridge's own key.
+    gateway.workspaceContext.workspacePath = '/repo/active';
+    await tester.pumpWidget(wrap(ChatPage(
+      host: gateway,
+      title: '新任务',
+      draftWorkspacePath: '/repo/captured-draft',
+    )));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '开始分析');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(gateway.taskMeta.anchoredCreatedTasks, [
+      ('new-s1', '/repo/active'),
+    ], reason: 'write source ① anchors the active workspace, never the '
+        'draft page path');
+    expect(gateway.taskMeta.overviewRefreshes, 1,
+        reason: 'the create trigger pulls the overview immediately — the '
+            'new row is listed ~230 ms after the ack (run8)');
+    expect(gateway.taskMeta.overviewRefreshBypasses, [true],
+        reason: 'a user create action bypasses the cadence throttle');
+  });
+
+  testWidgets('a turn leaving the running class pulls the overview exactly '
+      'once (terminal trigger)', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot(const [
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    // Finite pumps: streaming/turn animations keep the tree busy.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(gateway.taskMeta.overviewRefreshes, 0,
+        reason: 'opening an idle session is not a terminal edge');
+
+    // Turn starts: control.phase enters the running class.
+    gateway.snapshotExtra = {
+      'control': {'phase': 'running'},
+    };
+    gateway.feedSnapshot(const [
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      {
+        'rowId': 2,
+        'kind': 'assistantText',
+        'text': 'working',
+        'streaming': true,
+      },
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(gateway.taskMeta.overviewRefreshes, 0,
+        reason: 'a running turn is not a terminal edge');
+
+    // Turn terminal: control.phase leaves the running class.
+    gateway.snapshotExtra = {
+      'control': {'phase': 'idle'},
+    };
+    gateway.feedSnapshot(const [
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      {'rowId': 2, 'kind': 'assistantText', 'text': 'done'},
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(gateway.taskMeta.overviewRefreshes, 1,
+        reason: 'the status-correction net fires once on the terminal edge');
+    expect(gateway.taskMeta.overviewRefreshBypasses, [true],
+        reason: 'the terminal edge is a user-action trigger → bypass');
+
+    // Repeated terminal frames never re-trigger: no running edge remains.
+    gateway.feedSnapshot(const [
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      {'rowId': 2, 'kind': 'assistantText', 'text': 'done'},
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(gateway.taskMeta.overviewRefreshes, 1);
+  });
+
   testWidgets('draft with no thought source ships the max fallback and the '
       'sheet preselects it', (tester) async {
     final gateway = _PrepGateway(prepWithoutThoughtCurrent());

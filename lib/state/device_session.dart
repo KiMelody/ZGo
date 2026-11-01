@@ -40,6 +40,7 @@ import 'sidecar_index_manager.dart';
 import 'task_directory.dart';
 import 'task_home_service.dart';
 import 'task_home_store.dart';
+import 'workspace_activity_store.dart';
 
 /// Fixed group key for conversation workspaces (3.16.2 desktop "New task"
 /// drafts: `.zcode/workspace/draft-<uuid>`). Their rows display under the
@@ -408,6 +409,36 @@ abstract interface class TaskMetaPort {
   /// Relay-overview display status (`idle|running|completed|error`) of one
   /// task; null when the relay view doesn't hold the session.
   String? taskDisplayStatus(String sessionId);
+
+  /// Anchor write source ① of the task registry (spec
+  /// task-registry-semantics §3.8): the phone created this session, so the
+  /// App is the source of truth for its home workspace.
+  /// [workspacePathOrKey] is the ACTIVE workspace's path/key — NOT a draft
+  /// page's captured path, which may not be the bridge's real landing point
+  /// (`_openWorkspaceNow` prefers the bridge's own key). The state layer
+  /// canonicalizes it through the workspace alias table (`normalizeKey`)
+  /// before writing.
+  void anchorCreatedTask(String sessionId, String? workspacePathOrKey);
+
+  /// Re-pulls the relay task overview now (bootstrap + the three
+  /// `listTaskList` legs) and notifies once it lands.
+  ///
+  /// Best-effort and silent: a failure keeps the old rows (the 30 s cadence
+  /// retries naturally). Callers are the two create-time triggers (design
+  /// 11-01 §2): the createSession ack (new row is listed ~230 ms after the
+  /// ack — run8) and the turn terminal (status-word correction).
+  ///
+  /// Anti-swallow: a call landing on a round built from the OLD state waits
+  /// that round out and re-dials instead of joining it.
+  ///
+  /// [bypassThrottle] skips the throttle window for one-shot USER-action
+  /// triggers (create / turn terminal) — they are not a storm source, and
+  /// letting a cadence round's window swallow them would reproduce the
+  /// visibility bug. The anti-swallow wait is NOT weakened: a bypass call
+  /// still waits the in-flight round out, then re-dials. A bypass call also
+  /// advances the throttle anchor, so later cadence calls keep a stable
+  /// window. The 30 s cadence keeps the default `false`.
+  Future<void> refreshTaskOverview({bool bypassThrottle = false});
 }
 
 /// Workspace context a chat surface reads: ids/paths, the draft store,
@@ -638,6 +669,15 @@ class DeviceSession extends ChangeNotifier
   @visibleForTesting
   final StallTimings timings;
 
+  /// Minimum spacing between two [refreshTaskOverview] rounds (design 11-01
+  /// §2): the create and turn-terminal triggers can land seconds apart, and
+  /// live-frame noise may re-arm the terminal edge — a trigger inside the
+  /// window joins the round already running instead of stacking another
+  /// three-leg pull. Tests that drive several rounds back to back pass
+  /// [Duration.zero].
+  @visibleForTesting
+  final Duration overviewRefreshThrottle;
+
   /// How long a workspace that answered its sidecar subscribe with the
   /// benign cold-runtime refusal stays out of the sidecar set (design
   /// 10-28: ~10 minutes). A collection change (the key leaving the top-N)
@@ -659,7 +699,9 @@ class DeviceSession extends ChangeNotifier
     this.saveCachedHome,
     this.timings = const StallTimings(),
     this.sidecarCooldown = const Duration(minutes: 10),
-  }) : _homeStore = TaskHomeStore(deviceId: deviceId) {
+    this.overviewRefreshThrottle = const Duration(milliseconds: 2500),
+  }) : _homeStore = TaskHomeStore(deviceId: deviceId),
+       _activityStore = WorkspaceActivityStore(deviceId: deviceId) {
     // Persisted task-home anchors + local delete tombstones (design
     // 10-15): fire-and-forget like every store load — until it lands the
     // directory keeps the cold-pick behavior; one notify re-groups rows
@@ -668,6 +710,12 @@ class DeviceSession extends ChangeNotifier
       // Only a disk state that actually merged in is worth a re-group
       // notify; an empty/cold store must not add noise notifies.
       if (!_disposed && _homeStore.hasPersistedState) notifyListeners();
+    }));
+    // Persisted workspace activity keys (design 11-01 §4): the cold-start
+    // card order gets its idle-tier keys back before any live rows land, so
+    // one notify re-sorts the cards with the restored values.
+    unawaited(_activityStore.load().then((_) {
+      if (!_disposed && _activityStore.hasPersistedState) notifyListeners();
     }));
     // Composer drafts (design 10-20): fire-and-forget warm-up like the
     // home store; page ops await the load themselves, so this only
@@ -797,6 +845,11 @@ class DeviceSession extends ChangeNotifier
   /// next rebuild.
   final TaskHomeStore _homeStore;
 
+  /// Persisted per-workspace activity keys (design 11-01 §4). Written at
+  /// every overview / live-frame landing, read by the task list as the
+  /// idle-tier fallback while a non-active workspace has no rows yet.
+  final WorkspaceActivityStore _activityStore;
+
   // --- Sidecar sessions-index subscriptions (design 10-28) ---
 
   /// Upper bound on sidecar (non-active workspace) index subscriptions:
@@ -857,6 +910,11 @@ class DeviceSession extends ChangeNotifier
   /// Kept private; the leg decision lives in [_applyRelayOverview] /
   /// [_refreshRelayTasksFromChannel].
   bool _tasksFromBootstrap = false;
+
+  /// Set once a relay task overview lands successfully (see
+  /// [taskOverviewLoaded]); reset on suspend/connect teardown so a cold
+  /// start never shows a stale "loaded" verdict.
+  bool _taskOverviewLanded = false;
 
   /// In-flight dedup for the channel task leg.
   Future<void>? _tasksRefresh;
@@ -999,6 +1057,8 @@ class DeviceSession extends ChangeNotifier
         // (30s cadence): reconcile anchors, then re-diff the recently
         // active non-active workspaces.
         _taskHome.applyRelayOverview(_normalizeRelayTasks(deduped.values));
+        _taskOverviewLanded = true;
+        _recordOverviewWorkspaceActivity();
         notifyListeners();
         await _mergePinnedTaskFlags();
       } catch (e) {
@@ -1107,7 +1167,9 @@ class DeviceSession extends ChangeNotifier
   /// / frame / probe) and the home-adjudication anchor write.
   @visibleForTesting
   void notifyMergedChanged() {
-    if (!_disposed) notifyListeners();
+    if (_disposed) return;
+    _recordLiveWorkspaceActivity();
+    notifyListeners();
   }
 
   /// The materialized merged directory — one `_merge()` per dirty revision
@@ -1413,6 +1475,8 @@ class DeviceSession extends ChangeNotifier
         for (final t in tasks)
           if (t is Map) t.cast<String, dynamic>(),
       ]));
+      _taskOverviewLanded = true;
+      _recordOverviewWorkspaceActivity();
     }
     notifyListeners();
   }
@@ -1973,6 +2037,7 @@ class DeviceSession extends ChangeNotifier
     _listWatchdog?.cancel();
     _listEscalations = 0;
     _softReloadFails = 0;
+    _recordLiveWorkspaceActivity();
     notifyListeners();
   }
 
@@ -2142,6 +2207,7 @@ class DeviceSession extends ChangeNotifier
       // `pinned` bit: the cross-workspace `listPinnedTaskIds` authority only
       // applies to the 3.16.2 channel leg (see [_mergePinnedTaskFlags]).
       _tasksFromBootstrap = true;
+      _taskOverviewLanded = true;
       // Fresh overview = fresh anchor evidence (tombstone expiry,
       // single-copy reconcile, absence prune) + a sidecar re-diff.
       _taskHome.applyRelayOverview(_normalizeRelayTasks([
@@ -2157,6 +2223,7 @@ class DeviceSession extends ChangeNotifier
       _taskHome.reconcileTaskHomes();
       _sidecars.reconcile();
     }
+    _recordOverviewWorkspaceActivity();
   }
 
   /// Stores a raw wire workspace list and recomputes the merged view from
@@ -2307,8 +2374,12 @@ class DeviceSession extends ChangeNotifier
   Future<void> debugRefreshProjectWorkspacesForTest() =>
       _refreshProjectWorkspaces();
 
-  /// In-flight dedup for [refreshTaskOverview].
+  /// In-flight round of [refreshTaskOverview].
   Future<void>? _overviewRefresh;
+
+  /// Start time of the last [refreshTaskOverview] round — the throttle
+  /// window anchor ([overviewRefreshThrottle]).
+  DateTime? _overviewRefreshStartedAt;
 
   /// Best-effort refresh of the relay task overview: one `client.bootstrap()`
   /// → `_workspaces`/relay rows → notify. Purpose-built for the task
@@ -2322,11 +2393,49 @@ class DeviceSession extends ChangeNotifier
   /// a forced rebuild after repeated failures. This refresh is silent by
   /// design — a failure keeps the old values, counts toward nothing,
   /// rebuilds nothing, and the next cadence tick naturally retries.
-  /// Overlapping calls share one in-flight bootstrap.
-  Future<void> refreshTaskOverview() {
+  ///
+  /// Two live triggers (design 11-01 §2) ride it: the createSession ack —
+  /// the new row is listed ~230 ms after the ack (run8), so the 0 ms pull
+  /// already sees it — and the turn terminal (status-word correction).
+  ///
+  /// Anti-swallow: a round already in flight was built from the OLD state
+  /// (e.g. before the create landed); joining it would hand back stale rows.
+  /// Same「先 await 在途，再重新发起」shape as
+  /// [_refreshTaskScopesAfterMerge]. [overviewRefreshThrottle] keeps a
+  /// trigger storm from stacking rounds; a call inside the window joins the
+  /// round already running (or just finished).
+  ///
+  /// [bypassThrottle] is for the one-shot user-action triggers (design 11-01
+  /// §2 create / turn terminal): they skip the window check so a cadence
+  /// round cannot swallow them, but still take the anti-swallow wait and
+  /// still advance the anchor (the next cadence window starts from them).
+  @override
+  Future<void> refreshTaskOverview({bool bypassThrottle = false}) {
     final client = _client;
     if (client == null || _disposed) return Future.value();
-    return _overviewRefresh ??= () async {
+    final startedAt = _overviewRefreshStartedAt;
+    if (!bypassThrottle &&
+        startedAt != null &&
+        clock.now().difference(startedAt) < overviewRefreshThrottle) {
+      return _overviewRefresh ?? Future.value();
+    }
+    _overviewRefreshStartedAt = clock.now();
+    final pending = _overviewRefresh;
+    final round = () async {
+      if (pending != null) {
+        try {
+          await pending;
+        } catch (_) {}
+      }
+      // `_tasksRefresh` may be a leg started by the stale round (or a push
+      // landing) — it would answer with the pre-create rows too.
+      final pendingLeg = _tasksRefresh;
+      if (pendingLeg != null) {
+        try {
+          await pendingLeg;
+        } catch (_) {}
+      }
+      if (_disposed || _client != client) return;
       try {
         final bootstrap = await client.bootstrap();
         // The link may have been suspended/replaced while the RPC was in
@@ -2338,13 +2447,64 @@ class DeviceSession extends ChangeNotifier
         // inside the helper). Failure keeps the old rows.
         await _refreshRelayTasksFromChannel();
         if (_disposed || _client != client) return;
+        _recordOverviewWorkspaceActivity();
         notifyListeners();
       } catch (e) {
         _log('[session] overview refresh failed (kept old values): $e');
-      } finally {
-        _overviewRefresh = null;
       }
     }();
+    _overviewRefresh = round;
+    // Clear only our own entry: a suspended link nulls the field, and the
+    // old round must not wipe the new connection's round.
+    unawaited(round.whenComplete(() {
+      if (identical(_overviewRefresh, round)) _overviewRefresh = null;
+    }));
+    return round;
+  }
+
+  /// Records the overview's per-workspace activity keys (design 11-01 §4).
+  /// Reads the merged directory — the same projection the card order uses,
+  /// so the persisted key is exactly what a live build would show for the
+  /// current rows.
+  void _recordOverviewWorkspaceActivity() {
+    if (_disposed) return;
+    final newest = <String, int>{};
+    for (final (entry, key) in _taskHome.directory.allEntries()) {
+      if (key == null) continue;
+      final at = entry.lastActivityAt;
+      final previous = newest[key];
+      if (previous == null || at > previous) newest[key] = at;
+    }
+    for (final MapEntry(key: key, value: at) in newest.entries) {
+      _activityStore.record(key, at);
+    }
+  }
+
+  /// Records the live indexes' per-workspace activity keys (design 11-01
+  /// §4) without materializing the directory: the active index and every
+  /// sidecar layer carry their subscribed workspace key and their rows'
+  /// `lastActivityAt` directly.
+  void _recordLiveWorkspaceActivity() {
+    if (_disposed) return;
+    void recordIndex(SessionsIndexState? state) {
+      if (state == null || !state.ready) return;
+      final key = state.subscribedWorkspaceKey;
+      if (key == null || key.isEmpty) return;
+      int? newest;
+      for (final entry in state.list) {
+        if (newest == null || entry.lastActivityAt > newest) {
+          newest = entry.lastActivityAt;
+        }
+      }
+      if (newest != null) {
+        _activityStore.record(_taskHome.normalizeKey(key), newest);
+      }
+    }
+
+    recordIndex(sessions);
+    for (final state in _sidecars.indexes.values) {
+      recordIndex(state);
+    }
   }
 
   Future<void> stopTask(String sessionId) async {
@@ -2547,6 +2707,28 @@ class DeviceSession extends ChangeNotifier
   /// inherits the seam).
   @visibleForTesting
   TaskHomeStore get taskHomeStore => _homeStore;
+
+  /// Test seam: the persisted workspace-activity store (design 11-01 §4).
+  @visibleForTesting
+  WorkspaceActivityStore get workspaceActivityStore => _activityStore;
+
+  /// Persisted last-activity epoch ms of one workspace — the task list's
+  /// idle-tier fallback while the workspace's live rows are still loading
+  /// (design 11-01 §4). Null when never recorded.
+  int? persistedWorkspaceActivity(String workspaceKey) =>
+      _activityStore.activityOf(workspaceKey);
+
+  /// Per-workspace sidecar readiness for the task-list card skeleton
+  /// (design 11-01 §3): absent key = no sidecar subscription (relay rows are
+  /// the whole truth); `false` = subscribed but the first snapshot has not
+  /// landed; `true` = the live layer is in.
+  Map<String, bool> get sidecarReadiness => _sidecars.readinessByWorkspace;
+
+  /// Whether the relay task overview has landed at least once since this
+  /// connection was established. False during the cold-start window between
+  /// the bootstrap workspaces and the first successful task pull — a
+  /// non-active card is then "not loaded yet", not "no tasks".
+  bool get taskOverviewLoaded => _taskOverviewLanded;
 
   /// Server-side automations of the connected desktop. Bound to the
   /// zcode-agent channel (listAllAutomations was probed there). The wire
@@ -2884,6 +3066,15 @@ class DeviceSession extends ChangeNotifier
     _taskHome.rememberLocalDelete(sessionId);
     notifyListeners();
     return res;
+  }
+
+  @override
+  void anchorCreatedTask(String sessionId, String? workspacePathOrKey) {
+    // The service canonicalizes the key (conversation workspaces anchor at
+    // their DISPLAY group key, spec §3.8) — the port takes whatever the
+    // caller knows (the active workspace's path), never a draft page's
+    // captured path.
+    _taskHome.anchorCreatedTask(sessionId, workspacePathOrKey);
   }
 
   /// Deletes ONE archived row (`zcode-task.deleteArchivedTask`, desktop
@@ -3669,8 +3860,11 @@ class DeviceSession extends ChangeNotifier
     _bootstrapWorkspaces = [];
     _workspaces = [];
     _tasksFromBootstrap = false;
+    _taskOverviewLanded = false;
     _tasksRefresh = null;
     _pinnedMerge = null;
+    _overviewRefresh = null;
+    _overviewRefreshStartedAt = null;
     // A project read in flight belongs to the closed link; a fresh
     // connection must start its own instead of joining the old answer
     // (whose late-merge guard would drop it anyway).

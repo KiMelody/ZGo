@@ -165,6 +165,9 @@ Future<DeviceSession> _connected(
     timings: _fastTimings,
     clientFactory: () => stub,
     projectResolverFactory: resolverFactory,
+    // Rounds are driven back to back here; the trigger throttle has its own
+    // test (design 11-01 §2).
+    overviewRefreshThrottle: Duration.zero,
   );
   // Attach before connect so the bootstrap-triggered completion (10-26 D3)
   // rides the gate exactly like the live channel does.

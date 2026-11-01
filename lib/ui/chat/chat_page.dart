@@ -262,6 +262,11 @@ class _ChatPageState extends State<ChatPage> {
   String? _error;
   bool _sending = false;
 
+  /// Observed turn phase of the active handle: the turn-terminal overview
+  /// refresh (design 11-01 §2) fires on the running→terminal edge, seeded
+  /// from the first snapshot so a page opened mid-turn still sees it.
+  bool _turnWasRunning = false;
+
   /// Off-peak queue-position card (D2): the bound task's live queue
   /// position (`>0` renders the card) and its title (empty → the official
   /// `chatCreated.defaultTitle`). Null position = no card. Fetched once
@@ -905,6 +910,33 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
+  /// Turn-terminal trigger of the task-overview refresh (design 11-01 §2).
+  ///
+  /// Observation point = `ConversationState.control.phase` leaving the
+  /// running class (`isRunning`: running/prewarming) — the same predicate
+  /// the stop button uses. Chosen over scanning `turnHeader.state` for
+  /// [turnTerminalPhases] because it is one control field on the live
+  /// snapshot, independent of which rows are inside the session's tail
+  /// window. `turnHeader.state` may also carry plain `completed` on the
+  /// wire (mapped by statusToPhase), so a raw-string compare would miss a
+  /// real terminal.
+  ///
+  /// The refresh is a status-correction net, not the visibility trigger: the
+  /// row already entered the overview at create time with `status=null`; the
+  /// terminal frame is what turns it into the real status word.
+  void _onTurnPhaseChanged() {
+    final state = _state;
+    if (state == null) return;
+    final running = state.isRunning;
+    final wasRunning = _turnWasRunning;
+    _turnWasRunning = running;
+    if (!wasRunning || running) return;
+    // User-action trigger: bypass the cadence throttle. The edge is already
+    // single-shot (`_turnWasRunning`) and a turn terminal is not a storm
+    // source — the anti-swallow wait inside the seam still applies.
+    unawaited(widget.host.refreshTaskOverview(bypassThrottle: true));
+  }
+
   Future<void> _subscribe() async {
     final sessionId = _sessionId;
     if (sessionId == null) return;
@@ -925,6 +957,11 @@ class _ChatPageState extends State<ChatPage> {
       handle.state.addListener(_scrollToBottom);
       handle.state.addListener(_onConfigMaybeReverted);
       handle.state.addListener(_refreshQueryDirectory);
+      // Turn-terminal trigger (design 11-01 §2): seed the observed phase
+      // from the first snapshot so a page opened mid-turn still sees the
+      // running→terminal edge.
+      handle.state.addListener(_onTurnPhaseChanged);
+      _turnWasRunning = handle.state.isRunning;
       // The snapshot may already be applied when the handle resolves —
       // seed the directory now (the memo key makes a redundant call free).
       _refreshQueryDirectory();
@@ -1512,6 +1549,19 @@ class _ChatPageState extends State<ChatPage> {
           config: _buildDraftConfig(),
         );
         if (!mounted) return;
+        // Anchor write source ① (spec task-registry-semantics §3.8): the
+        // phone created the session, so the App is the source of truth for
+        // its home workspace. The ACTIVE workspace is the target — never
+        // [ChatPage.draftWorkspacePath], which may name a path the bridge
+        // did not actually land on (`_openWorkspaceNow` prefers the bridge's
+        // own key). The state layer canonicalizes the key.
+        widget.host.anchorCreatedTask(sessionId, widget.host.workspacePath);
+        // Primary visibility trigger (design 11-01 §2): the new row is
+        // listed by listTaskList ~230 ms after the ack (run8), so the 0 ms
+        // pull already sees it. Fire-and-forget — sending must not wait.
+        // A user action is not a storm source: bypass the cadence throttle
+        // (the seam still waits out a stale in-flight round before dialing).
+        unawaited(widget.host.refreshTaskOverview(bypassThrottle: true));
         // The draft placeholder entry dies the moment the session exists —
         // its content continues under the session key via the debounced
         // writes, and a stale placeholder must not resurface in the next

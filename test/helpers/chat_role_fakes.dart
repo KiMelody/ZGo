@@ -413,6 +413,30 @@ class FakeTaskMeta implements TaskMetaPort {
   /// (shell-session error card tests); unlisted ids = lookup miss → null.
   final Map<String, String> taskDisplayStatuses = {};
 
+  /// Every [anchorCreatedTask] call as (sessionId, workspacePathOrKey) —
+  /// the create-time home anchor (design 11-01 §1).
+  final List<(String, String?)> anchoredCreatedTasks = [];
+
+  /// Every [refreshTaskOverview] call (design 11-01 §2 dual triggers).
+  int overviewRefreshes = 0;
+
+  /// `bypassThrottle` flag of every [refreshTaskOverview] call, in order —
+  /// the two user-action triggers must bypass, the cadence must not.
+  final List<bool> overviewRefreshBypasses = [];
+
+  @override
+  void anchorCreatedTask(String sessionId, String? workspacePathOrKey) {
+    anchoredCreatedTasks.add((sessionId, workspacePathOrKey));
+    recording.accept('anchorCreatedTask', [sessionId, workspacePathOrKey]);
+  }
+
+  @override
+  Future<void> refreshTaskOverview({bool bypassThrottle = false}) async {
+    overviewRefreshes += 1;
+    overviewRefreshBypasses.add(bypassThrottle);
+    recording.accept('refreshTaskOverview', [bypassThrottle]);
+  }
+
   @override
   Future<dynamic> renameTask(String sessionId, String title) async =>
       recording.accept('renameTask', [sessionId, title]);
@@ -898,6 +922,14 @@ class ChatGatewayBundle extends ChangeNotifier
   @override
   String? taskDisplayStatus(String sessionId) =>
       taskMeta.taskDisplayStatus(sessionId);
+
+  @override
+  void anchorCreatedTask(String sessionId, String? workspacePathOrKey) =>
+      taskMeta.anchorCreatedTask(sessionId, workspacePathOrKey);
+
+  @override
+  Future<void> refreshTaskOverview({bool bypassThrottle = false}) =>
+      taskMeta.refreshTaskOverview(bypassThrottle: bypassThrottle);
 
   List<Object?> get deleteTaskResults => taskMeta.deleteTaskResults;
   Map<String, String> get taskDisplayStatuses => taskMeta.taskDisplayStatuses;
