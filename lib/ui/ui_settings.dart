@@ -1,3 +1,4 @@
+import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -282,7 +283,7 @@ String relativeTime(BuildContext context, int ms) {
 
 /// List/sidebar compact relative time: `27分` / `1小时` / `13天`.
 String relativeTimeShort(BuildContext context, int ms) {
-  final diff = DateTime.now().difference(
+  final diff = clock.now().difference(
     DateTime.fromMillisecondsSinceEpoch(ms),
   );
   if (diff.inMinutes < 1) return tr(context, 'time.short.justNow');

@@ -2,11 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/conversation_state.dart';
 import 'package:zgo/protocol/task_group_resolver.dart';
 import 'package:zgo/protocol/task_groups.dart';
 import 'package:zgo/state/device_session.dart';
@@ -3775,10 +3777,13 @@ void main() {
 
   // ---- 10-30: card-to-card order — activity (default) / name A→Z / Z→A ----
   //
-  // Three workspace cards whose activity order (alpha > 工作区 > zeta) is
-  // deliberately different from the codepoint order (alpha < zeta < 工作区,
-  // CJK codepoints sort after ASCII). The active first workspace (zeta) keeps
-  // two live rows so the card-internal order stays observable.
+  // Three workspace cards whose idle-tier activity order
+  // (alpha > 工作区 > zeta) is deliberately different from the codepoint order
+  // (alpha < zeta < 工作区, CJK codepoints sort after ASCII). Every stamp sits
+  // outside the 60 s active window, so this group pins the idle-tier baseline
+  // (the dual-tier active front is covered by its own tests). The active first
+  // workspace (zeta) keeps two live rows so the card-internal order stays
+  // observable.
   group('workspace card order (10-30)', () {
     const organizePrefsKey = 'zgo_task_organize_v1';
     const cardTitles = ['alpha', 'zeta', '工作区'];
@@ -3799,19 +3804,21 @@ void main() {
         deviceId: device.id,
         params: device.params!,
         // zeta is the active (first) workspace: its rows come from the live
-        // sessions-index, and it is expanded by default.
+        // sessions-index, and it is expanded by default. The four stamps sit
+        // ~2 minutes back — outside the 60 s active window — so the card and
+        // row orders stay on the idle-tier recency baseline this group pins.
         entries: [
           {
             'sessionId': 'z-new',
             'title': '新任务',
             'phase': 'completedSuccess',
-            'lastActivityAt': now - 3000,
+            'lastActivityAt': now - 123000,
           },
           {
             'sessionId': 'z-old',
             'title': '旧任务',
             'phase': 'completedSuccess',
-            'lastActivityAt': now - 4000,
+            'lastActivityAt': now - 124000,
           },
         ],
         workspaces: [
@@ -3826,7 +3833,7 @@ void main() {
             'workspacePath': '/repo/alpha',
             'workspaceIdentity': 'alpha',
             'displayStatus': 'idle',
-            'updatedAt': now - 1000,
+            'updatedAt': now - 121000,
           },
           {
             'taskId': 'tw',
@@ -3834,7 +3841,7 @@ void main() {
             'workspacePath': '/repo/工作区',
             'workspaceIdentity': '工作区',
             'displayStatus': 'idle',
-            'updatedAt': now - 2000,
+            'updatedAt': now - 122000,
           },
         ],
       );
@@ -3869,11 +3876,12 @@ void main() {
 
     Finder cardSortGroup() => find.byType(RadioGroup<String>).last;
 
-    testWidgets('default activity order matches the pre-10-30 baseline; the '
+    testWidgets('idle cards keep the recency order (no active card); the '
         'panel shows the three-way card order group', (tester) async {
       await pumpCardSort(tester);
 
-      // Newest max(lastActivityAt) first: alpha > 工作区 > zeta.
+      // No card is inside the 60 s window, so the idle tier orders by
+      // descending max(lastActivityAt): alpha > 工作区 > zeta.
       expect(cardOrder(tester), ['alpha', '工作区', 'zeta']);
 
       await openSheet(tester);
@@ -3907,7 +3915,8 @@ void main() {
       await closeSheet(tester);
       // 'alpha' < 'zeta' < '工作区' (U+5DE5 sorts after ASCII).
       expect(cardOrder(tester), ['alpha', 'zeta', '工作区']);
-      // The card-internal order is untouched: updated mode, newest first.
+      // The card-internal order keeps the idle-tier recency rule: both rows
+      // sit outside the 60 s window, so updated mode sorts newest first.
       expect(
         tester.getTopLeft(find.text('新任务')).dy,
         lessThan(tester.getTopLeft(find.text('旧任务')).dy),
@@ -3968,6 +3977,503 @@ void main() {
       await openSheet(tester);
       expect(tester.widget<RadioGroup<String>>(cardSortGroup()).groupValue,
           'activity');
+    });
+  });
+
+  // ---- 10-31: dual-tier active order (multi-card jitter fix) ----
+  //
+  // The activity order is two-tiered: cards/rows active inside
+  // [activeOrderWindow] (60 s) sort by name/title in codepoint order with a
+  // total-order tiebreak, everything else keeps the recency order. The pure
+  // comparators are the unit-test seam: "several rebuilds at the same now" is
+  // exactly "one comparator evaluated repeatedly against one clock snapshot".
+  group('dual-tier active order (10-31)', () {
+    const organizePrefsKey = 'zgo_task_organize_v1';
+
+    DateTime t0() => DateTime(2026, 10, 31, 12);
+
+    int ago(DateTime now, int seconds) =>
+        now.subtract(Duration(seconds: seconds)).millisecondsSinceEpoch;
+
+    Map<String, dynamic> card(String identity) => {
+          'workspacePath': '/repo/$identity',
+          'workspaceIdentity': identity,
+        };
+
+    /// Cards in comparator order, as workspace keys (titles can collide).
+    List<String> cardKeys(
+      List<(Map<String, dynamic>, int?)> cards,
+      DateTime now,
+    ) {
+      final sorted = [...cards]
+        ..sort((a, b) => compareWorkspaceCardsByActivity(
+              a.$1,
+              a.$2,
+              b.$1,
+              b.$2,
+              now,
+            ));
+      return [for (final (ws, _) in sorted) workspaceKeyOf(ws) ?? ''];
+    }
+
+    SessionEntry row(String id, String title, int atMs) => SessionEntry({
+          'sessionId': id,
+          'title': title,
+          'lastActivityAt': atMs,
+        });
+
+    /// Rows in comparator order, as session ids.
+    List<String> rowIds(
+      List<SessionEntry> rows,
+      DateTime now, {
+      bool stabilizeActive = true,
+    }) {
+      final sorted = [...rows]
+        ..sort((a, b) => compareSessionEntriesByUpdated(
+              a,
+              b,
+              now: now,
+              stabilizeActive: stabilizeActive,
+            ));
+      return [for (final e in sorted) e.sessionId];
+    }
+
+    List<String> cardOrder(WidgetTester tester, List<String> titles) {
+      final y = {
+        for (final title in titles) title: tester.getTopLeft(find.text(title)).dy,
+      };
+      return [...titles]..sort((a, b) => y[a]!.compareTo(y[b]!));
+    }
+
+    test('AC1: concurrent streaming cards keep the name order even when the '
+        'activity keys flip', () {
+      final now = t0();
+      final zulu = card('zulu');
+      final alpha = card('alpha');
+      // Each frame one streaming card leads the other by a millisecond — the
+      // pre-10-31 millisecond key swapped them every frame; the active tier
+      // does not read the key.
+      for (final frame in [
+        [(zulu, ago(now, 1)), (alpha, ago(now, 2))],
+        [(zulu, ago(now, 2)), (alpha, ago(now, 1))],
+        [(zulu, ago(now, 0)), (alpha, ago(now, 0))],
+        [(alpha, ago(now, 1)), (zulu, ago(now, 2))],
+      ]) {
+        expect(cardKeys(frame, now), ['alpha', 'zulu']);
+      }
+    });
+
+    test('AC2: an idle card with brand-new activity rises on the next sort',
+        () {
+      final now = t0();
+      final alpha = card('alpha');
+      final zulu = card('zulu');
+      // Both idle: recency puts alpha (200 s) ahead of zulu (300 s).
+      expect(
+        cardKeys([(zulu, ago(now, 300)), (alpha, ago(now, 200))], now),
+        ['alpha', 'zulu'],
+      );
+      // The event lands ≈0 ms from now — inside the window, no 60 s wait.
+      expect(
+        cardKeys([(zulu, ago(now, 0)), (alpha, ago(now, 200))], now),
+        ['zulu', 'alpha'],
+      );
+    });
+
+    test('AC3: the 60 s boundary is exact and demotion lands in the idle tier',
+        () {
+      final now = t0();
+      final alpha = card('alpha');
+      final zulu = card('zulu');
+      // The classification itself is exact.
+      expect(isActiveForOrder(ago(now, 59) - 1, now), isTrue);
+      expect(isActiveForOrder(ago(now, 60), now), isFalse);
+
+      // Both cards active: the front tier sorts by name, alpha first.
+      expect(
+        cardKeys([(zulu, ago(now, 1)), (alpha, ago(now, 59) - 1)], now),
+        ['alpha', 'zulu'],
+      );
+      // alpha hits exactly 60_000 ms: it demotes behind the still-active
+      // zulu on the next evaluation.
+      final demoted = [(zulu, ago(now, 1)), (alpha, ago(now, 60))];
+      expect(cardKeys(demoted, now), ['zulu', 'alpha']);
+      // Same snapshot, repeated rebuilds (any source order): no movement.
+      expect(cardKeys(demoted.reversed.toList(), now), ['zulu', 'alpha']);
+      expect(cardKeys(demoted, now), ['zulu', 'alpha']);
+    });
+
+    test('AC4: same-title cards break on the key; active rows on the session '
+        'id', () {
+      final now = t0();
+      final b = {
+        'label': 'same',
+        'workspacePath': '/repo/b',
+        'workspaceIdentity': 'b',
+      };
+      final a = {
+        'label': 'same',
+        'workspacePath': '/repo/a',
+        'workspaceIdentity': 'a',
+      };
+      expect(cardKeys([(b, ago(now, 0)), (a, ago(now, 0))], now), ['a', 'b']);
+      expect(
+        cardKeys([(b, ago(now, 0)), (a, ago(now, 0))].reversed.toList(), now),
+        ['a', 'b'],
+      );
+
+      final rows = [
+        row('s3', '', ago(now, 1)),
+        row('s2', 'same', ago(now, 2)),
+        row('s1', '', ago(now, 3)),
+        row('s4', 'same', ago(now, 4)),
+      ];
+      // Empty titles first, session id total order inside each title group.
+      expect(rowIds(rows, now), ['s1', 's3', 's2', 's4']);
+      expect(rowIds(rows.reversed.toList(), now), ['s1', 's3', 's2', 's4']);
+    });
+
+    test('AC5: the active tier outranks idle cards even with a later name',
+        () {
+      final now = t0();
+      expect(
+        cardKeys([
+          (card('zulu'), ago(now, 1)),
+          (card('alpha'), ago(now, 300)),
+          (card('bravo'), null),
+        ], now),
+        ['zulu', 'alpha', 'bravo'],
+      );
+      // Two active cards: the name decides, not the activity key.
+      expect(
+        cardKeys([
+          (card('zulu'), ago(now, 1)),
+          (card('alpha'), ago(now, 1)),
+        ], now),
+        ['alpha', 'zulu'],
+      );
+    });
+
+    test('row order: active rows by title/session id, idle rows by recency',
+        () {
+      final now = t0();
+      final rows = [
+        row('idle-new', 'aaa', ago(now, 61)),
+        row('active-b', 'b task', ago(now, 1)),
+        row('active-a', 'a task', ago(now, 2)),
+        row('idle-old', 'zzz', ago(now, 500)),
+      ];
+      expect(
+        rowIds(rows, now),
+        ['active-a', 'active-b', 'idle-new', 'idle-old'],
+      );
+      // Opting out (timeline buckets / archive rows) keeps the plain recency
+      // comparator — the fresh row wins regardless of its title.
+      expect(
+        rowIds(rows, now, stabilizeActive: false),
+        ['active-b', 'active-a', 'idle-new', 'idle-old'],
+      );
+    });
+
+    test('row AC3: 59_999 ms is active, 60_000 ms is idle', () {
+      final now = t0();
+      final a = row('a', 'a task', ago(now, 60));
+      final b = row('b', 'b task', ago(now, 59) - 1);
+      // The tier beats the title: b is still active.
+      expect(rowIds([a, b], now), ['b', 'a']);
+      // At 60_000 ms both are idle at the same instant → title order.
+      final bIdle = row('b', 'b task', ago(now, 60));
+      expect(rowIds([a, bIdle], now), ['a', 'b']);
+    });
+
+    test('row order: idle ties fall to title then session id', () {
+      final now = t0();
+      final same = ago(now, 120);
+      final rows = [
+        row('s2', 'same', same),
+        row('s1', 'same', same),
+        row('s0', '', same),
+      ];
+      expect(rowIds(rows, now), ['s0', 's1', 's2']);
+    });
+
+    testWidgets('AC6: archive view card groups follow the dual-tier order',
+        (tester) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      const hour = 3600000;
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        workspaces: [
+          {'workspacePath': '/repo/zulu', 'workspaceIdentity': 'zulu'},
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        ],
+        relayTasks: [
+          // Both workspaces carry a live row inside the 60 s window plus one
+          // archived row, so both reach the archive view with an ACTIVE card
+          // key. Recency would put zulu first; the front tier sorts by name.
+          {
+            'taskId': 'z-live',
+            'title': 'zulu 活任务',
+            'workspacePath': '/repo/zulu',
+            'workspaceIdentity': 'zulu',
+            'displayStatus': 'idle',
+            'updatedAt': now - 1000,
+          },
+          {
+            'taskId': 'a-live',
+            'title': 'alpha 活任务',
+            'workspacePath': '/repo/alpha',
+            'workspaceIdentity': 'alpha',
+            'displayStatus': 'idle',
+            'updatedAt': now - 2000,
+          },
+          {
+            'taskId': 'z-arch',
+            'title': 'zulu 归档',
+            'workspacePath': '/repo/zulu',
+            'workspaceIdentity': 'zulu',
+            'displayStatus': 'idle',
+            'updatedAt': now - 2 * hour,
+            'archived': true,
+          },
+          {
+            'taskId': 'a-arch',
+            'title': 'alpha 归档',
+            'workspacePath': '/repo/alpha',
+            'workspaceIdentity': 'alpha',
+            'displayStatus': 'idle',
+            'updatedAt': now - 3 * hour,
+            'archived': true,
+          },
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('查看归档'));
+      await tester.pumpAndSettle();
+
+      final order = tester
+          .widgetList<Text>(find.byWidgetPredicate((w) =>
+              w is Text && const ['alpha', 'zulu'].contains(w.data)))
+          .map((t) => t.data)
+          .toList();
+      expect(order, ['alpha', 'zulu']);
+    });
+
+    testWidgets('AC2/AC3: clock-driven promotion and demotion land on the '
+        'next rebuild', (tester) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final start = t0();
+
+      Future<void> pumpCards(
+        DateTime now, {
+        required int zuluSecondsAgo,
+        required int alphaSecondsAgo,
+      }) {
+        return withClock(Clock.fixed(now), () async {
+          final session = FakeDeviceSession(
+            deviceId: device.id,
+            params: device.params!,
+            workspaces: [
+              {'workspacePath': '/repo/zulu', 'workspaceIdentity': 'zulu'},
+              {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+            ],
+            relayTasks: [
+              {
+                'taskId': 'z',
+                'title': 'zulu 任务',
+                'workspacePath': '/repo/zulu',
+                'workspaceIdentity': 'zulu',
+                'displayStatus': 'idle',
+                'updatedAt': now
+                    .subtract(Duration(seconds: zuluSecondsAgo))
+                    .millisecondsSinceEpoch,
+              },
+              {
+                'taskId': 'a',
+                'title': 'alpha 任务',
+                'workspacePath': '/repo/alpha',
+                'workspaceIdentity': 'alpha',
+                'displayStatus': 'idle',
+                'updatedAt': now
+                    .subtract(Duration(seconds: alphaSecondsAgo))
+                    .millisecondsSinceEpoch,
+              },
+            ],
+          );
+          await tester.pumpWidget(wrap(TaskListPage(
+            store: store,
+            hub: DeviceSessionHub(nativeListEnabled: () => false),
+            device: device,
+            sessionOverride: session,
+          )));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 100));
+        });
+      }
+
+      // Promotion: both idle → recency puts alpha first; a fresh zulu event
+      // takes the front tier on that build.
+      await pumpCards(start, zuluSecondsAgo: 300, alphaSecondsAgo: 200);
+      expect(cardOrder(tester, ['alpha', 'zulu']), ['alpha', 'zulu']);
+      await pumpCards(start, zuluSecondsAgo: 0, alphaSecondsAgo: 200);
+      expect(cardOrder(tester, ['alpha', 'zulu']), ['zulu', 'alpha']);
+
+      // Demotion: both active at start (title order), alpha crosses the
+      // window on the next rebuild while zulu stays active.
+      await pumpCards(start, zuluSecondsAgo: 0, alphaSecondsAgo: 30);
+      expect(cardOrder(tester, ['alpha', 'zulu']), ['alpha', 'zulu']);
+      final later = start.add(const Duration(seconds: 31));
+      await pumpCards(later, zuluSecondsAgo: 31, alphaSecondsAgo: 61);
+      expect(cardOrder(tester, ['alpha', 'zulu']), ['zulu', 'alpha']);
+      // Same clock snapshot again: the order is stable.
+      await pumpCards(later, zuluSecondsAgo: 31, alphaSecondsAgo: 61);
+      expect(cardOrder(tester, ['alpha', 'zulu']), ['zulu', 'alpha']);
+    });
+
+    testWidgets('the mobile card stabilizes active rows by title (R2)',
+        (tester) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 's-b',
+            'title': 'b 任务',
+            'phase': 'running',
+            'lastActivityAt': now - 1000,
+          },
+          {
+            'sessionId': 's-a',
+            'title': 'a 任务',
+            'phase': 'running',
+            'lastActivityAt': now - 2000,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Both rows are active; the title order wins over the (older) recency.
+      expect(
+        tester.getTopLeft(find.text('a 任务')).dy,
+        lessThan(tester.getTopLeft(find.text('b 任务')).dy),
+      );
+    });
+
+    testWidgets('the timeline keeps the recency row order (no stabilization)',
+        (tester) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      SharedPreferences.setMockInitialValues({
+        organizePrefsKey: jsonEncode({
+          'groupBy': 'timeline',
+          'sortBy': 'updated',
+          'cardSort': 'activity',
+        }),
+      });
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 's-b',
+            'title': 'b 任务',
+            'phase': 'running',
+            'lastActivityAt': now - 1000,
+          },
+          {
+            'sessionId': 's-a',
+            'title': 'a 任务',
+            'phase': 'running',
+            'lastActivityAt': now - 2000,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // R2: the day buckets keep the pre-10-31 updated order (newest first).
+      expect(
+        tester.getTopLeft(find.text('b 任务')).dy,
+        lessThan(tester.getTopLeft(find.text('a 任务')).dy),
+      );
+    });
+
+    testWidgets('the desktop sidebar folder stabilizes active rows by title '
+        '(R2)', (tester) async {
+      useDesktop(tester);
+      final (store, device) = await setupDevice();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 's-b',
+            'title': 'b 任务',
+            'phase': 'running',
+            'lastActivityAt': now - 1000,
+          },
+          {
+            'sessionId': 's-a',
+            'title': 'a 任务',
+            'phase': 'running',
+            'lastActivityAt': now - 2000,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(
+        tester.getTopLeft(find.text('a 任务')).dy,
+        lessThan(tester.getTopLeft(find.text('b 任务')).dy),
+      );
     });
   });
 }

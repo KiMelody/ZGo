@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -28,6 +29,91 @@ import 'ui_settings.dart';
 import 'widgets/device_name.dart';
 import 'widgets/sheet_scaffold.dart';
 import 'widgets/swipe_actions.dart';
+
+/// Activity window of the dual-tier task order (2026-10-31): a card or row
+/// counts as ACTIVE while its most recent activity lies closer to `now` than
+/// this window; everything else is IDLE.
+///
+/// 60 s carries two reasons:
+/// - It covers the agent's thinking gaps: a turn that is still in flight must
+///   not drop out of the active tier between two output frames.
+/// - It matches the 「刚刚」 window of [relativeTimeShort] (the label switches
+///   to `N分` at `diff.inMinutes >= 1`), so the order flip and the visible
+///   label flip happen at the same moment.
+///
+/// Crossing the window demotes on the NEXT rebuild — the page runs no 60 s
+/// ticker (its own cadence is the ~30 s overview timer), so the demotion
+/// rides the next build; no timer is added.
+@visibleForTesting
+const Duration activeOrderWindow = Duration(seconds: 60);
+
+/// Whether an epoch-millisecond activity stamp is inside [activeOrderWindow]
+/// at the [now] snapshot. A null key (workspace without a directory) is never
+/// active.
+@visibleForTesting
+bool isActiveForOrder(int? lastActivityAt, DateTime now) =>
+    lastActivityAt != null &&
+    now.millisecondsSinceEpoch - lastActivityAt <
+        activeOrderWindow.inMilliseconds;
+
+/// Card comparator of the activity card order: the active tier (see
+/// [activeOrderWindow]) first, by [workspaceTitle] codepoint order with the
+/// workspace key as tiebreak — the millisecond activity key does NOT order
+/// the front tier, so concurrent streaming cards cannot swap places frame by
+/// frame. Idle cards follow by key descending (the pre-10-31 recency order;
+/// their key no longer changes), null keys last. Idle and null ties break on
+/// the title then the key, exactly as before, so the order is total.
+@visibleForTesting
+int compareWorkspaceCardsByActivity(
+  Map<String, dynamic> a,
+  int? activityA,
+  Map<String, dynamic> b,
+  int? activityB,
+  DateTime now,
+) {
+  final activeA = isActiveForOrder(activityA, now);
+  final activeB = isActiveForOrder(activityB, now);
+  if (activeA != activeB) return activeA ? -1 : 1;
+  if (!activeA && activityA != activityB) {
+    if (activityA == null) return 1;
+    if (activityB == null) return -1;
+    return activityB.compareTo(activityA);
+  }
+  final byTitle = workspaceTitle(a).compareTo(workspaceTitle(b));
+  if (byTitle != 0) return byTitle;
+  return (workspaceKeyOf(a) ?? '').compareTo(workspaceKeyOf(b) ?? '');
+}
+
+/// Row comparator of the 更新时间 order. With [stabilizeActive] the rows are
+/// two-tiered like the cards: rows active within [activeOrderWindow] sort
+/// first by [SessionEntry.title] codepoint order with
+/// [SessionEntry.sessionId] as tiebreak (empty/equal titles still get a total
+/// order — Dart's sort is not stable, a missing tiebreak would be a fresh
+/// swap source); idle rows follow by `lastActivityAt` descending, then title,
+/// then session id. Without [stabilizeActive] this is the plain recency
+/// comparator, so timeline buckets and archive rows keep their pre-10-31
+/// order.
+@visibleForTesting
+int compareSessionEntriesByUpdated(
+  SessionEntry a,
+  SessionEntry b, {
+  required DateTime now,
+  bool stabilizeActive = false,
+}) {
+  final byActivity = b.lastActivityAt.compareTo(a.lastActivityAt);
+  if (!stabilizeActive) return byActivity;
+  final activeA = isActiveForOrder(a.lastActivityAt, now);
+  final activeB = isActiveForOrder(b.lastActivityAt, now);
+  if (activeA != activeB) return activeA ? -1 : 1;
+  final byTitle = a.title.compareTo(b.title);
+  if (activeA) {
+    if (byTitle != 0) return byTitle;
+    return a.sessionId.compareTo(b.sessionId);
+  }
+  if (byActivity != 0) return byActivity;
+  if (byTitle != 0) return byTitle;
+  return a.sessionId.compareTo(b.sessionId);
+}
 
 /// Native task list of one device (mobile layout): a connection
 /// banner, the "workspaces and tasks" header with stats, and one card per
@@ -89,10 +175,10 @@ class _TaskListPageState extends State<TaskListPage>
   String _groupBy = 'workspace';
   String _sortBy = 'updated';
 
-  /// Card-to-card ordering: `activity` keeps the pre-10-30 recency order
-  /// (default, also the fallback for archives without the key), `nameAsc` /
-  /// `nameDesc` sort by [workspaceTitle] codepoint order (en/numbers as
-  /// usual, CJK by Unicode codepoint — no intl collation).
+  /// Card-to-card ordering: `activity` is the default dual-tier order (active
+  /// cards by title, idle cards by recency — see [_orderedWorkspaces]),
+  /// `nameAsc` / `nameDesc` sort by [workspaceTitle] codepoint order (en/
+  /// numbers as usual, CJK by Unicode codepoint — no intl collation).
   String _cardSort = 'activity';
 
   /// Desktop sidebar 归档 filter: shows only archived task rows (the web
@@ -284,35 +370,63 @@ class _TaskListPageState extends State<TaskListPage>
 
   /// 整理任务 ordering: 更新时间 = lastActivityAt (device default),
   /// 创建时间 = createdAt.
-  List<SessionEntry> _sortedEntries(List<SessionEntry> entries) {
+  ///
+  /// [stabilizeActive] opts the container into the dual-tier activity order
+  /// (10-31): rows active within [activeOrderWindow] sort by title (codepoint
+  /// order, session id tiebreak) so several streaming rows cannot trade
+  /// places on every output frame; idle rows keep the recency order. Off by
+  /// default — the timeline buckets and the archive rows keep their pre-10-31
+  /// order, only the card containers (mobile card, desktop sidebar folder)
+  /// opt in.
+  List<SessionEntry> _sortedEntries(
+    List<SessionEntry> entries, {
+    bool stabilizeActive = false,
+  }) {
     if (_sortBy == 'created') {
       return [...entries]..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     }
     // 更新时间 (device default): recency by last activity. The merged
     // directory's source order is the relay overview's and appends
     // live-only rows at the tail, so the default must sort actively too.
+    // One clock snapshot per sort: the comparator must not re-read the clock
+    // mid-sort or tier membership could drift inside one comparison.
+    final now = clock.now();
     return [...entries]
-      ..sort((a, b) => b.lastActivityAt.compareTo(a.lastActivityAt));
+      ..sort((a, b) => compareSessionEntriesByUpdated(
+            a,
+            b,
+            now: now,
+            stabilizeActive: stabilizeActive,
+          ));
   }
 
-  /// Workspace cards ordered by [_cardSort]: recency by default, or the
-  /// workspace title in codepoint order (A→Z / Z→A over en, numbers and CJK).
+  /// Workspace cards ordered by [_cardSort]: the dual-tier activity order by
+  /// default (10-31), or the workspace title in codepoint order (A→Z / Z→A
+  /// over en, numbers and CJK).
   ///
-  /// Activity order uses the SAME key
-  /// the card chip prints: `max(lastActivityAt)` over the workspace's
-  /// non-archived directory rows (default [TaskDirectory.entriesFor]
-  /// scope, no `includeArchived`). Wire entries and synthesized completion
-  /// entries share this key — a completion entry no longer defaults to the
-  /// tail (PRD R1/R2).
+  /// Activity order uses the SAME key the card chip prints:
+  /// `max(lastActivityAt)` over the workspace's non-archived directory rows
+  /// (default [TaskDirectory.entriesFor] scope, no `includeArchived`). Wire
+  /// entries and synthesized completion entries share this key.
+  ///
+  /// The order is two-tiered. A card whose key lies inside
+  /// [activeOrderWindow] is ACTIVE: the front tier sorts by title codepoint
+  /// order (workspace key tiebreak), NOT by the millisecond key, so two live
+  /// streaming cards can no longer trade places on every output frame. The
+  /// remaining IDLE cards sort behind by key descending — the pre-10-31
+  /// recency order, naturally stable now that their keys stop moving. A new
+  /// activity event (distance to now ≈ 0) promotes a card into the front tier
+  /// on the very next rebuild; crossing the window demotes it on the next
+  /// rebuild as well.
   ///
   /// Conversation workspaces own no card (see [_isConversationWorkspace]),
   /// so the gate lives here instead of repeating at each call site. A null
   /// activity key — no workspace key, or an empty non-archived directory (no
-  /// tasks at all, or archived only) — sorts last. Ties, including null-null,
-  /// break on the title and then on the key so the order is total: Dart's
-  /// sort is not stable, never rely on the incoming list order. The title
-  /// modes break title ties on the key for the same reason; nameDesc is the
-  /// exact reverse of nameAsc.
+  /// tasks at all, or archived only) — is never active and sorts last among
+  /// the idle cards. Ties, including null-null, break on the title and then
+  /// on the key so the order is total: Dart's sort is not stable, never rely
+  /// on the incoming list order. The title modes break title ties on the key
+  /// for the same reason; nameDesc is the exact reverse of nameAsc.
   List<Map<String, dynamic>> _orderedWorkspaces(DeviceSession session) {
     if (_cardSort != 'activity') {
       final workspaces = <Map<String, dynamic>>[
@@ -328,6 +442,10 @@ class _TaskListPageState extends State<TaskListPage>
           ? workspaces.reversed.toList()
           : workspaces;
     }
+
+    // One clock snapshot per sort: the comparator must not re-read the clock
+    // mid-sort or a card's tier could drift inside one comparison.
+    final now = clock.now();
 
     int? activityOf(Map<String, dynamic> ws) {
       final dirKey = workspaceKeyOf(ws);
@@ -348,14 +466,13 @@ class _TaskListPageState extends State<TaskListPage>
     ordered.sort((a, b) {
       final (wsA, activityA) = a;
       final (wsB, activityB) = b;
-      if (activityA != activityB) {
-        if (activityA == null) return 1;
-        if (activityB == null) return -1;
-        return activityB.compareTo(activityA);
-      }
-      final byTitle = workspaceTitle(wsA).compareTo(workspaceTitle(wsB));
-      if (byTitle != 0) return byTitle;
-      return (workspaceKeyOf(wsA) ?? '').compareTo(workspaceKeyOf(wsB) ?? '');
+      return compareWorkspaceCardsByActivity(
+        wsA,
+        activityA,
+        wsB,
+        activityB,
+        now,
+      );
     });
     return [for (final (ws, _) in ordered) ws];
   }
@@ -689,15 +806,19 @@ class _TaskListPageState extends State<TaskListPage>
     final expanded = _isWorkspaceExpanded(key, isActive: isActive);
     // Merged directory view: the live index overrides the relay rows per
     // task id; the archive toggle picks its half. Same ordering as the
-    // mobile card — relay order alone appends live-only rows at the tail.
+    // mobile card, including the dual-tier active row order — relay order
+    // alone appends live-only rows at the tail.
     final dirKey = workspaceKeyOf(ws);
     final entries = dirKey == null
         ? const <SessionEntry>[]
-        : _sortedEntries([
-            for (final (e, _) in session.taskDirectory
-                .entriesFor(dirKey, includeArchived: _showArchived))
-              e,
-          ]);
+        : _sortedEntries(
+            [
+              for (final (e, _) in session.taskDirectory
+                  .entriesFor(dirKey, includeArchived: _showArchived))
+                e,
+            ],
+            stabilizeActive: true,
+          );
     // C2 parity: sidebar rows under a workspace folder carry the same
     // group palette dot the mobile card rows do (same grouped-view source;
     // a miss on older desktops keeps the plain rows).
@@ -1905,7 +2026,9 @@ class _TaskListPageState extends State<TaskListPage>
         : [
             for (final (e, _) in session.taskDirectory.entriesFor(dirKey)) e,
           ];
-    entries = _sortedEntries(entries);
+    // Dual-tier active row order (10-31): several streaming rows must not
+    // trade places on every output frame (see [_sortedEntries]).
+    entries = _sortedEntries(entries, stabilizeActive: true);
     final lastActivity = entries.isEmpty
         ? null
         : entries.map((e) => e.lastActivityAt).reduce((a, b) => a > b ? a : b);
