@@ -88,8 +88,10 @@ class SidecarIndexManager {
 
   final void Function(String line) log;
 
-  /// Upper bound on sidecar subscriptions (recently active non-active
-  /// workspaces, newest `updatedAt` first).
+  /// Upper bound on the RANKED sidecar set (recently active non-active
+  /// workspaces, newest `updatedAt` first, key lexicographic tie-break).
+  /// Retained running-row layers and switch carry-over stale layers may
+  /// exceed it — this bounds the resubscribe wave, not the subscription count.
   final int limit;
 
   /// Per-key cooldown window after the benign cold-runtime refusal. It ends
@@ -420,6 +422,11 @@ class SidecarIndexManager {
   /// map before `take(limit)`) so the cooldown gate compares the candidate's
   /// current relay activity without re-scanning the rows.
   ///
+  /// Ranking ties break on the key's lexicographic order: `List.sort` is not
+  /// stable, so without it the [limit]-th slot would flip between equal
+  /// `updatedAt` rows and the subscription set would churn (design 11-02 §1,
+  /// review P3-4).
+  ///
   /// Conversation (draft-*) workspaces are skipped: they are ephemeral
   /// one-chat directories whose rows already display in the default group,
   /// so subscribing them would burn the whole budget on drafts.
@@ -427,7 +434,10 @@ class SidecarIndexManager {
   _candidates() {
     final latest = _latestByKey();
     final ranked = latest.entries.toList()
-      ..sort((a, b) => b.value.updatedAt.compareTo(a.value.updatedAt));
+      ..sort((a, b) {
+        final byUpdatedAt = b.value.updatedAt.compareTo(a.value.updatedAt);
+        return byUpdatedAt != 0 ? byUpdatedAt : a.key.compareTo(b.key);
+      });
     return [
       for (final entry in ranked.take(limit))
         (

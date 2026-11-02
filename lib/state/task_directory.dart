@@ -403,7 +403,7 @@ class TaskDirectory {
   /// P1-1). Without the inheritance every live overlay strips the pin /
   /// unread affordances and the Copy-TraceID meta off rows the list just
   /// refreshed — the active window had the same latent bug, the sidecar
-  /// tier would have spread it to the top-5 workspaces.
+  /// tier would have spread it to the top-12 workspaces.
   Map<String, dynamic> _withRelayMeta(
     Map<String, dynamic> raw,
     Map<String, dynamic>? relayRaw,

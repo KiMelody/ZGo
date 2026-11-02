@@ -853,10 +853,19 @@ class DeviceSession extends ChangeNotifier
   // --- Sidecar sessions-index subscriptions (design 10-28) ---
 
   /// Upper bound on the RANKED sidecar set (non-active workspaces, newest
-  /// `updatedAt` first). Retained running-row layers and the switch
-  /// carry-over's stale layers may exceed it — the bound exists so a bridge
-  /// swing's resubscribe wave stays cheap, not as a hard subscription cap.
-  static const int sidecarWorkspaceLimit = 5;
+  /// `updatedAt` first, key lexicographic tie-break). Retained running-row
+  /// layers and the switch carry-over's stale layers may exceed it — the
+  /// bound exists so a bridge swing's resubscribe wave stays cheap, not as a
+  /// hard subscription cap.
+  ///
+  /// 12 is evidence-backed (11-02 live probe): twelve concurrent
+  /// sessions-index subscriptions on one bridge all acked with independent
+  /// subscription ids — no per-connection subscription cap at 12. Cost per
+  /// bridge generation: 12 sidecars replay ≈590KB of event-layer JSON
+  /// (≈810KB on the wire) of first snapshots, vs ≈246KB (≈337KB) at 5;
+  /// between replays the traffic is incremental-only. Workspace counts are
+  /// usually lower, so the ceiling is rarely reached.
+  static const int sidecarWorkspaceLimit = 12;
 
   /// Wire handles of the sidecar subscriptions, by workspace key. The
   /// policy (candidate ranking / cooldown / in-flight / running slot /

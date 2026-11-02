@@ -23,6 +23,13 @@ void main() {
   const wsE = {'workspacePath': '/repo/e'};
   const wsF = {'workspacePath': '/repo/f'};
   const wsG = {'workspacePath': '/repo/g'};
+  const wsH = {'workspacePath': '/repo/h'};
+  const wsI = {'workspacePath': '/repo/i'};
+  const wsJ = {'workspacePath': '/repo/j'};
+  const wsK = {'workspacePath': '/repo/k'};
+  const wsL = {'workspacePath': '/repo/l'};
+  const wsM = {'workspacePath': '/repo/m'};
+  const wsN = {'workspacePath': '/repo/n'};
 
   Map<String, dynamic> task(String id, String path, int updatedAt) => {
         'taskId': id,
@@ -38,7 +45,22 @@ void main() {
       FakeDeviceSession(
         deviceId: 'd1',
         params: params,
-        workspaces: [activeWs, wsB, wsC, wsD, wsE, wsF, wsG],
+        workspaces: [
+          activeWs,
+          wsB,
+          wsC,
+          wsD,
+          wsE,
+          wsF,
+          wsG,
+          wsH,
+          wsI,
+          wsJ,
+          wsK,
+          wsL,
+          wsM,
+          wsN,
+        ],
         sidecarCooldown: cooldown,
       );
 
@@ -50,23 +72,44 @@ void main() {
     }
   }
 
-  test('the set is the top-5 non-active workspaces by newest relay row — the '
-      'active workspace and the tail never subscribe', () async {
+  test('the set is the top-12 non-active workspaces by newest relay row — the '
+      'active workspace and the 13th never subscribe', () async {
     final s = session();
     s.applyRelayOverview([
-      task('t-active', '/repo/active', 700),
-      task('t-b', '/repo/b', 600),
-      task('t-c', '/repo/c', 500),
-      task('t-d', '/repo/d', 400),
-      task('t-e', '/repo/e', 300),
-      task('t-f', '/repo/f', 200),
-      task('t-g', '/repo/g', 100),
+      task('t-active', '/repo/active', 1400),
+      task('t-b', '/repo/b', 1300),
+      task('t-c', '/repo/c', 1200),
+      task('t-d', '/repo/d', 1100),
+      task('t-e', '/repo/e', 1000),
+      task('t-f', '/repo/f', 900),
+      task('t-g', '/repo/g', 800),
+      task('t-h', '/repo/h', 700),
+      task('t-i', '/repo/i', 600),
+      task('t-j', '/repo/j', 500),
+      task('t-k', '/repo/k', 400),
+      task('t-l', '/repo/l', 300),
+      task('t-m', '/repo/m', 200),
+      task('t-n', '/repo/n', 100),
     ]);
     await settle();
     expect(
       [for (final (key, _) in s.sidecarSubscribeCalls) key],
-      ['/repo/b', '/repo/c', '/repo/d', '/repo/e', '/repo/f'],
-      reason: 'newest first, capped at 5, active workspace excluded',
+      [
+        '/repo/b',
+        '/repo/c',
+        '/repo/d',
+        '/repo/e',
+        '/repo/f',
+        '/repo/g',
+        '/repo/h',
+        '/repo/i',
+        '/repo/j',
+        '/repo/k',
+        '/repo/l',
+        '/repo/m',
+      ],
+      reason: 'newest first, capped at 12, active workspace excluded; the '
+          '13th (/repo/n) is taken off',
     );
     // The subscribe scope is the row's own workspace (same shape as the
     // live-probed cross-workspace subscribe).
@@ -231,46 +274,79 @@ void main() {
     final gate = Completer<void>();
     s.sidecarSubscribeGate = gate.future;
     s.applyRelayOverview([
-      task('t-b', '/repo/b', 700),
-      task('t-c', '/repo/c', 600),
-      task('t-d', '/repo/d', 500),
-      task('t-e', '/repo/e', 400),
-      task('t-f', '/repo/f', 300),
-      task('t-g', '/repo/g', 200),
+      task('t-b', '/repo/b', 1300),
+      task('t-c', '/repo/c', 1200),
+      task('t-d', '/repo/d', 1100),
+      task('t-e', '/repo/e', 1000),
+      task('t-f', '/repo/f', 900),
+      task('t-g', '/repo/g', 800),
+      task('t-h', '/repo/h', 700),
+      task('t-i', '/repo/i', 600),
+      task('t-j', '/repo/j', 500),
+      task('t-k', '/repo/k', 400),
+      task('t-l', '/repo/l', 300),
+      task('t-m', '/repo/m', 200),
+      task('t-n', '/repo/n', 100),
     ]);
     await settle();
-    expect(s.sidecarSubscribeCalls, hasLength(5));
-    // While every subscribe is parked, /repo/b falls to rank 6 and /repo/g
-    // enters the top-5 (its own subscribe starts and parks too).
+    expect(s.sidecarSubscribeCalls, hasLength(12));
+    // While every subscribe is parked, /repo/b falls to rank 13 and /repo/n
+    // enters the top-12 (its own subscribe starts and parks too).
     s.applyRelayOverview([
       task('t-b', '/repo/b', 100),
-      task('t-c', '/repo/c', 600),
-      task('t-d', '/repo/d', 500),
-      task('t-e', '/repo/e', 400),
-      task('t-f', '/repo/f', 300),
-      task('t-g', '/repo/g', 200),
+      task('t-c', '/repo/c', 1200),
+      task('t-d', '/repo/d', 1100),
+      task('t-e', '/repo/e', 1000),
+      task('t-f', '/repo/f', 900),
+      task('t-g', '/repo/g', 800),
+      task('t-h', '/repo/h', 700),
+      task('t-i', '/repo/i', 600),
+      task('t-j', '/repo/j', 500),
+      task('t-k', '/repo/k', 400),
+      task('t-l', '/repo/l', 300),
+      task('t-m', '/repo/m', 200),
+      task('t-n', '/repo/n', 150),
     ]);
     await settle();
-    expect(s.sidecarSubscribeCalls, hasLength(6));
+    expect(s.sidecarSubscribeCalls, hasLength(13));
     gate.complete();
     await settle();
-    expect(s.taskDirectory.sidecarIndexes.keys.toSet(),
-        {'/repo/c', '/repo/d', '/repo/e', '/repo/f', '/repo/g'});
+    expect(s.taskDirectory.sidecarIndexes.keys.toSet(), {
+      '/repo/c',
+      '/repo/d',
+      '/repo/e',
+      '/repo/f',
+      '/repo/g',
+      '/repo/h',
+      '/repo/i',
+      '/repo/j',
+      '/repo/k',
+      '/repo/l',
+      '/repo/m',
+      '/repo/n',
+    });
     expect(s.sidecarDisposed, contains('/repo/b'));
   });
 
   test('a running row keeps its workspace layer after it falls out of the '
-      'top-5, and the drop happens once the run ends (check P2-6)', () async {
+      'top-12, and the drop happens once the run ends (check P2-6)', () async {
     final s = session();
     List<Map<String, dynamic>> overview(int bActivity) => [
           task('t-b', '/repo/b', bActivity),
-          task('t-c', '/repo/c', 600),
-          task('t-d', '/repo/d', 500),
-          task('t-e', '/repo/e', 400),
-          task('t-f', '/repo/f', 300),
-          task('t-g', '/repo/g', 200),
+          task('t-c', '/repo/c', 1200),
+          task('t-d', '/repo/d', 1100),
+          task('t-e', '/repo/e', 1000),
+          task('t-f', '/repo/f', 900),
+          task('t-g', '/repo/g', 800),
+          task('t-h', '/repo/h', 700),
+          task('t-i', '/repo/i', 600),
+          task('t-j', '/repo/j', 500),
+          task('t-k', '/repo/k', 400),
+          task('t-l', '/repo/l', 300),
+          task('t-m', '/repo/m', 200),
+          task('t-n', '/repo/n', 150),
         ];
-    s.applyRelayOverview(overview(700));
+    s.applyRelayOverview(overview(1300));
     await settle();
     expect(s.taskDirectory.sidecarIndexes.containsKey('/repo/b'), isTrue);
 
@@ -287,7 +363,8 @@ void main() {
           },
         }, onGap: () {});
     frame('running');
-    // A newer relay row in /repo/g pushes /repo/b out of the top-5.
+    // /repo/n (150) stays ahead of the demoted /repo/b (100): b falls to
+    // rank 13, out of the top-12.
     s.applyRelayOverview(overview(100));
     await settle();
     expect(s.taskDirectory.sidecarIndexes.containsKey('/repo/b'), isTrue,

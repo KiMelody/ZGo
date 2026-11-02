@@ -62,6 +62,121 @@ void main() {
     expect(h.manager.indexes.keys.toSet(), {'/repo/b', '/repo/c'});
   });
 
+  test('limit boundary: the 12th ranked workspace subscribes and the 13th is '
+      'taken off; a tail overtake evicts the non-running 12th (R1)', () async {
+    h.limit = 12;
+    h.rows = [
+      for (var i = 0; i < 13; i++) task('t-w$i', '/repo/w$i', 1300 - i),
+    ];
+    h.manager.reconcile();
+    await settle();
+    expect(
+      [for (final (key, _) in h.subscribeCalls) key],
+      [for (var i = 0; i < 12; i++) '/repo/w$i'],
+      reason: 'newest first, capped at 12; the 13th (w12) never subscribes',
+    );
+    expect(h.manager.indexes.keys.toSet(),
+        {for (var i = 0; i < 12; i++) '/repo/w$i'});
+
+    // The 13th overtakes the newest slot: the workspace that falls to rank
+    // 13 has no running row, so the normal eviction applies.
+    h.rows[12] = task('t-w12', '/repo/w12', 2000);
+    h.manager.reconcile();
+    await settle();
+    expect([for (final (key, _) in h.subscribeCalls) key], hasLength(13));
+    expect(h.disposed, contains('/repo/w11'));
+    expect(h.manager.indexes.containsKey('/repo/w11'), isFalse,
+        reason: 'rank 13 without a running row is taken off');
+    expect(h.manager.indexes.keys.toSet(), {
+      for (var i = 0; i < 11; i++) '/repo/w$i',
+      '/repo/w12',
+    });
+  });
+
+  test('equal updatedAt ranks by key lexicographic order: the 12/13 boundary '
+      'is deterministic (R1 tie-break)', () async {
+    h.limit = 12;
+    // 13 candidates tied on updatedAt, supplied in REVERSE key order: the
+    // relay row order (List.sort is unstable and _latestByKey keeps the
+    // first row per key) must not decide the contested 12th slot.
+    h.rows = [
+      for (var code = 'm'.codeUnitAt(0); code >= 'a'.codeUnitAt(0); code--)
+        task('t-${String.fromCharCode(code)}',
+            '/repo/${String.fromCharCode(code)}', 500),
+    ];
+    h.manager.reconcile();
+    await settle();
+    expect(
+      [for (final (key, _) in h.subscribeCalls) key],
+      [
+        for (var code = 'a'.codeUnitAt(0); code <= 'l'.codeUnitAt(0); code++)
+          '/repo/${String.fromCharCode(code)}',
+      ],
+      reason: 'ties resolve on the key in ascending lexicographic order, so '
+          'the same 12 always win regardless of relay row order',
+    );
+    expect(h.manager.indexes.containsKey('/repo/m'), isFalse,
+        reason: 'the lexicographically last key loses the only contested '
+            'slot');
+    expect(h.subscribeCalls, hasLength(12));
+  });
+
+  test('limit boundary: a 13th-ranked running row keeps its layer until the '
+      'run ends (R1 + running slot)', () async {
+    h.limit = 12;
+    List<Map<String, dynamic>> overview(int w10Activity) => [
+          task('t-b', '/repo/b', 2000),
+          for (var i = 0; i < 10; i++)
+            task('t-w$i', '/repo/w$i', 1900 - i * 100),
+          task('t-w10', '/repo/w10', w10Activity),
+          task('t-n', '/repo/n', 800),
+        ];
+    h.rows = overview(900);
+    h.manager.reconcile();
+    await settle();
+    expect(h.manager.indexes.containsKey('/repo/w10'), isTrue,
+        reason: 'w10 is rank 12 among the 13 candidates');
+    expect(h.manager.indexes.containsKey('/repo/n'), isFalse);
+
+    void frame(String phase) =>
+        h.states['/repo/w10']!.applyFrame({
+              'toSeq': 1,
+              'payload': {
+                'kind': 'snapshot',
+                'snapshot': {
+                  'workspaceId': 'ws-w10',
+                  'sessions': [
+                    {
+                      'sessionId': 't-w10',
+                      'title': 'live-t-w10',
+                      'phase': phase,
+                    },
+                  ],
+                },
+              },
+            }, onGap: () {});
+    frame('running');
+
+    // w10's activity drops to 100 so it falls below the ranked ceiling;
+    // /repo/n (still 800) takes the freed rank-12 slot, and the running row
+    // keeps its layer past the ranked ceiling.
+    h.rows = overview(100);
+    h.manager.reconcile();
+    await settle();
+    expect(h.manager.indexes.containsKey('/repo/w10'), isTrue,
+        reason: 'dropping a running row would flip it back to the relay '
+            'last-turn outcome (false completion)');
+    expect(h.manager.indexes.containsKey('/repo/n'), isTrue,
+        reason: 'the 13th-ranked entrant subscribes');
+    expect(h.disposed, isNot(contains('/repo/w10')));
+
+    // The run ends; the next reconcile retires the extra layer.
+    frame('completedSuccess');
+    h.manager.reconcile();
+    await settle();
+    expect(h.manager.indexes.containsKey('/repo/w10'), isFalse);
+  });
+
   test('aliases normalize candidate keys (identity spelling → path key)',
       () async {
     h.rows = [task('t1', '/repo/b', 100, identity: '/repo/b-id')];
@@ -687,7 +802,7 @@ class _Harness {
   bool disposedFlag = false;
   bool coldRuntime = false;
   int changed = 0;
-  int limit = 5;
+  int limit = 12; // mirrors DeviceSession.sidecarWorkspaceLimit (R1)
   Duration cooldown = const Duration(minutes: 10);
   Duration staleTtl = const Duration(seconds: 60);
   Duration staleRunningCap = const Duration(minutes: 10);
