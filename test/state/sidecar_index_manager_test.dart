@@ -369,7 +369,7 @@ void main() {
   });
 
   test('available() false starts nothing; disposeAll is silent and clears '
-      'indexes + cooldowns', () async {
+      'indexes', () async {
     h.available = false;
     h.rows = [task('t1', '/repo/b', 100)];
     h.manager.reconcile();
@@ -387,12 +387,289 @@ void main() {
     expect(h.changed, changed, reason: 'teardown must not notify');
     expect(h.logs.join('\n'), contains('sidecars cleared (1)'));
 
-    // Cooldowns were cleared too: a re-entering key starts at once.
+    // A freshly entered key still subscribes at once after disposeAll.
     h.coldRuntime = true;
     h.rows = [task('t2', '/repo/c', 200)];
     h.manager.reconcile();
     await settle();
     expect(h.subscribeCalls, hasLength(2));
+  });
+
+  // ---- 11-02 §3: workspace-switch carry-over (stale layers) ----
+  Map<String, dynamic> frame(
+    String phase, {
+    String id = 't-b',
+  }) =>
+      {
+        'toSeq': 1,
+        'payload': {
+          'kind': 'snapshot',
+          'snapshot': {
+            'workspaceId': 'ws-b',
+            'sessions': [
+              {'sessionId': id, 'title': 'live-$id', 'phase': phase},
+            ],
+          },
+        },
+      };
+
+  test('detach keeps the layer as stale; reconcile re-subscribes and only a '
+      'ready fresh frame replaces it (P1-1/P2-3)', () async {
+    h.rows = [task('t1', '/repo/b', 100)];
+    h.manager.reconcile();
+    await settle();
+    final stale = h.manager.indexes['/repo/b']!;
+    stale.applyFrame(frame('running'), onGap: () {});
+    expect(h.manager.readinessByWorkspace['/repo/b'], isTrue);
+
+    final changedAfterInstall = h.changed;
+    h.manager.detachAll();
+    expect(h.manager.indexes['/repo/b'], same(stale));
+    expect(h.manager.readinessByWorkspace['/repo/b'], isTrue,
+        reason: 'ready carry-over data keeps reporting ready (readiness zero '
+            'change, P2-5)');
+    expect(h.changed, changedAfterInstall, reason: 'detach is silent');
+
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(2),
+        reason: 'a stale key counts as NOT installed — the wire must be '
+            're-subscribed on the new bridge (P1-1 regression lock)');
+    expect(h.manager.indexes['/repo/b'], same(stale),
+        reason: 'an ack alone must not replace the carry-over data (P2-3)');
+
+    final fresh = h.states['/repo/b']!;
+    expect(fresh, isNot(same(stale)));
+    fresh.applyFrame(frame('completedSuccess'), onGap: () {});
+    expect(h.manager.indexes['/repo/b'], same(fresh),
+        reason: 'the first ready frame replaces the stale layer');
+    expect(h.logs.join('\n'), contains('stale layer replaced'));
+
+    // The stale mark is gone: a later TTL sweep keeps the fresh layer.
+    h.now = h.now.add(const Duration(minutes: 2));
+    h.manager.reconcile();
+    await settle();
+    expect(h.manager.indexes['/repo/b'], same(fresh));
+    expect(h.subscribeCalls, hasLength(2));
+  });
+
+  test('a cold refusal against a stale key keeps the carry-over layer '
+      '(fresh wire dies, stale serves until TTL)', () async {
+    h.cooldown = const Duration(minutes: 10);
+    final base = h.now.millisecondsSinceEpoch;
+    h.rows = [task('t1', '/repo/b', base - 60000)];
+    h.manager.reconcile();
+    await settle();
+    final stale = h.manager.indexes['/repo/b']!;
+    stale.applyFrame(frame('running'), onGap: () {});
+
+    h.manager.detachAll();
+
+    // Fresh subscribe lands on the new bridge (state pending, stale still
+    // serving), then its resubscribe hook reports a cold runtime: the
+    // refusal must drop the WIRE only — dropping the state would reopen
+    // the phase-regression window the carry-over just closed.
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(2),
+        reason: 'stale counts as not installed — a fresh wire is attempted');
+    h.failures['/repo/b']!(
+      ChannelRpcError('ZCode Agent runtime is not running', null),
+    );
+    await settle();
+    expect(h.manager.indexes['/repo/b'], same(stale),
+        reason: 'the refusal drops the wire, not the carry-over data');
+    expect(h.disposed, contains('/repo/b'),
+        reason: 'the fresh wire itself IS disposed — only the layer data '
+            'survives for the merge');
+    expect(h.manager.readinessByWorkspace['/repo/b'], isTrue,
+        reason: 'the running row keeps serving from the stale layer');
+    expect(h.logs.join('\n'), contains('cold runtime on resubscribe'));
+
+    // The cooldown was written: the same watermark does not burn retries.
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(2));
+  });
+
+  test('seedStale accepts only ready states and rewrites the subscription '
+      'identity to the canonical key (P2-5/P3-9)', () async {
+    final notReady = SessionsIndexState();
+    h.manager.seedStale('/repo/b', notReady, now: h.now);
+    expect(h.manager.indexes, isEmpty,
+        reason: 'an unsnapshotted state has nothing to carry and would paint '
+            'a fake empty card');
+    expect(h.manager.readinessByWorkspace, isEmpty);
+    expect(h.changed, 0);
+
+    final ready = SessionsIndexState()
+      ..subscribedWorkspaceKey = '/repo/raw-b';
+    ready.applyFrame(frame('running'), onGap: () {});
+    h.manager.seedStale('/repo/b', ready, now: h.now);
+    expect(h.manager.indexes['/repo/b'], same(ready));
+    expect(ready.subscribedWorkspaceKey, '/repo/b',
+        reason: 'the open path records the raw active key; the manager map '
+            'key is the normalized spelling (P3-9)');
+    expect(h.manager.readinessByWorkspace['/repo/b'], isTrue);
+    expect(h.changed, 0, reason: 'seeding rides the switch path notify');
+  });
+
+  test('stale TTL retires the layer through the drop path (repaint), and '
+      'disposeAll clears stale carry-over too', () async {
+    h.staleTtl = const Duration(seconds: 30);
+    h.rows = [task('t1', '/repo/b', 100)];
+    h.manager.reconcile();
+    await settle();
+    h.manager.indexes['/repo/b']!.applyFrame(
+      frame('completedSuccess'),
+      onGap: () {},
+    );
+    final changed = h.changed;
+    h.manager.detachAll();
+    expect(h.manager.indexes, contains('/repo/b'));
+
+    h.now = h.now.add(const Duration(seconds: 31));
+    h.available = false; // isolate the TTL sweep from re-subscription
+    h.manager.reconcile();
+    await settle();
+    expect(h.manager.indexes, isEmpty);
+    expect(h.manager.readinessByWorkspace, isEmpty);
+    expect(h.changed, greaterThan(changed),
+        reason: 'TTL removal goes through _drop, so the list repaints '
+            '(P3-11)');
+    expect(h.logs.join('\n'), contains('stale TTL expired'));
+
+    // detachAll keeps the data, disposeAll (suspend/dispose) does not.
+    h.available = true;
+    h.now = h.now.add(const Duration(seconds: 61));
+    h.manager.reconcile();
+    await settle();
+    expect(h.manager.indexes, contains('/repo/b'));
+    h.manager.detachAll();
+    expect(h.manager.indexes, contains('/repo/b'));
+    h.manager.disposeAll();
+    expect(h.manager.indexes, isEmpty);
+    expect(h.manager.readinessByWorkspace, isEmpty);
+  });
+
+  test('a stale layer with a running row stays desired beyond the top-N and '
+      'survives TTL (P2-4 regression lock)', () async {
+    h.limit = 1;
+    h.rows = [task('t-b', '/repo/b', 700)];
+    h.manager.reconcile();
+    await settle();
+    final stale = h.manager.indexes['/repo/b']!;
+    stale.applyFrame(frame('running'), onGap: () {});
+    h.manager.detachAll();
+
+    // A newer workspace takes the only ranked slot: /repo/b is stale and
+    // out of the top-N, but its run is still live.
+    h.rows = [
+      task('t-c', '/repo/c', 900),
+      task('t-b', '/repo/b', 700),
+    ];
+    h.manager.reconcile();
+    await settle();
+    expect(h.manager.indexes.containsKey('/repo/b'), isTrue,
+        reason: 'eviction must not flip a running row to the relay outcome');
+    expect([for (final (key, _) in h.subscribeCalls) key],
+        containsAll(<String>['/repo/c', '/repo/b']),
+        reason: 'the stale-running key is desired, so it re-subscribes');
+
+    h.now = h.now.add(const Duration(minutes: 2));
+    h.manager.reconcile();
+    await settle();
+    expect(h.manager.indexes.containsKey('/repo/b'), isTrue,
+        reason: 'TTL must not clear a frozen running row (P2-4)');
+
+    // The run ends; the layer is already past its TTL (2min > 60s), so the
+    // exemption is gone and the next sweep retires it through the TTL path.
+    stale.applyFrame(frame('completedSuccess'), onGap: () {});
+    h.manager.reconcile();
+    await settle();
+    expect(h.manager.indexes.containsKey('/repo/b'), isFalse);
+  });
+
+  test('the running-row TTL exemption has a hard cap: a stale running layer '
+      'that never resubscribes drops at the cap (check P2-1)', () async {
+    h.limit = 1;
+    h.staleTtl = const Duration(seconds: 30);
+    h.staleRunningCap = const Duration(minutes: 5);
+    h.rows = [task('t-b', '/repo/b', 700)];
+    h.manager.reconcile();
+    await settle();
+    h.manager.indexes['/repo/b']!.applyFrame(
+      frame('running'),
+      onGap: () {},
+    );
+    h.manager.detachAll();
+    // Freeze resubscription from here: the stale layer never refreshes.
+    h.available = false;
+
+    // Past the TTL but inside the cap: the running layer stays (P2-4).
+    h.now = h.now.add(const Duration(minutes: 1));
+    h.manager.reconcile();
+    await settle();
+    expect(h.manager.indexes.containsKey('/repo/b'), isTrue,
+        reason: 'inside the cap the running exemption holds');
+
+    // Past the cap: the layer drops — the run must have ended (a live run
+    // implies a warm runtime, which implies the resubscribe would have
+    // succeeded), so the relay fallback is the real terminal state.
+    final changed = h.changed;
+    h.now = h.now.add(const Duration(minutes: 5));
+    h.manager.reconcile();
+    await settle();
+    expect(h.manager.indexes.containsKey('/repo/b'), isFalse);
+    expect(h.changed, greaterThan(changed),
+        reason: 'the capped drop repaints (drop path)');
+    expect(h.logs.join('\n'), contains('stale TTL expired'));
+  });
+
+  test('teardown clears the in-flight set: reconcile re-subscribes at once '
+      'and the late first continuation is disposed, not installed', () async {
+    h.rows = [task('t1', '/repo/b', 100)];
+    h.gate = Completer<void>();
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(1));
+
+    h.manager.detachAll();
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(2),
+        reason: 'waiting for the dead bridge\'s 60s ack timeout would keep '
+            'the key un-subscribable');
+
+    h.gate!.complete();
+    await settle();
+    expect(h.manager.indexes.containsKey('/repo/b'), isTrue,
+        reason: 'the post-switch attempt installs the layer');
+    expect(h.disposed, contains('/repo/b'),
+        reason: 'the pre-switch continuation disposed its wire via the '
+            'teardown epoch guard');
+  });
+
+  test('teardown keeps the cooldown + watermark (a bridge swing is not a '
+      'policy change)', () async {
+    h.coldRuntime = true;
+    final base = h.now.millisecondsSinceEpoch;
+    h.rows = [task('t1', '/repo/b', base - 60000)];
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(1));
+
+    h.manager.detachAll();
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(1),
+        reason: 'the same-row cooldown still gates the new bridge');
+
+    h.manager.disposeAll();
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(1),
+        reason: 'suspend teardown keeps the runtime cooldown too');
   });
 }
 
@@ -412,6 +689,8 @@ class _Harness {
   int changed = 0;
   int limit = 5;
   Duration cooldown = const Duration(minutes: 10);
+  Duration staleTtl = const Duration(seconds: 60);
+  Duration staleRunningCap = const Duration(minutes: 10);
   DateTime now = DateTime(2026, 10, 29, 12);
   Future<void>? get gateFuture => gate?.future;
   Future<void>? get probeGateFuture => probeGate?.future;
@@ -453,5 +732,7 @@ class _Harness {
     limit: limit,
     cooldown: cooldown,
     clock: () => now,
+    staleTtl: staleTtl,
+    staleRunningCap: staleRunningCap,
   );
 }

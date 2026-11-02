@@ -146,8 +146,18 @@ class _FakeBridge implements BridgeSession {
   /// (`{message, code}`).
   final Map<String, dynamic>? subscribeError;
 
+  /// Event-listener request ids registered on [channels], so a test can
+  /// deliver a `onDynamicSessionsIndexFrame` event exactly like the relay
+  /// fan-out does (every listener gets the same data; the subscription's
+  /// topic gate routes it).
+  final List<int> _eventListenIds = [];
+  int _frameSeq = 0;
+
   @override
   late final ChannelClient channels = _buildChannels();
+
+  /// Number of `EventListen` registrations (one per live subscription).
+  int get eventListenerCount => _eventListenIds.length;
 
   ChannelClient _buildChannels() {
     late final ChannelClient client;
@@ -155,7 +165,15 @@ class _FakeBridge implements BridgeSession {
       final reader = ValueReader(body);
       final header = decodeValue(reader) as List;
       decodeValue(reader); // the request args; answers are fixed here
+      final type = (header[0] as num).toInt();
       final id = header[1] as int;
+      // EventListen carries a free-form arg; the channel answers it with
+      // nothing (delivery happens through `resEventFire` below).
+      if (type == ChannelClient.reqEventListen) {
+        _eventListenIds.add(id);
+        return;
+      }
+      if (type == ChannelClient.reqEventDispose) return;
       final method = '${header[3]}';
       var resType = ChannelClient.resPromiseSuccess;
       Object? payload;
@@ -181,6 +199,40 @@ class _FakeBridge implements BridgeSession {
     encodeValue(init, [ChannelClient.resInitialize, 0]);
     client.handleMessage(init.toBytes());
     return client;
+  }
+
+  /// Delivers one complete sessions-index snapshot frame to every event
+  /// listener registered on this bridge (the relay's fan-out shape). The
+  /// topic follows the subscription scope: `sessions-index/<key>` where the
+  /// key is the scope's `workspaceIdentity` when present, else its path.
+  void fireIndexFrame({
+    required String topic,
+    required List<Map<String, dynamic>> sessions,
+    String subscriptionId = 'sub-1',
+  }) {
+    final frame = <String, dynamic>{
+      'wireVersion': 3,
+      'kind': 'complete',
+      'topic': topic,
+      'subscriptionId': subscriptionId,
+      'logicalFrameId': 'lf-${_frameSeq++}',
+      'frame': {
+        'topic': topic,
+        'subscriptionId': subscriptionId,
+        'fromSeq': 1,
+        'toSeq': 1,
+        'payload': {
+          'kind': 'snapshot',
+          'snapshot': {'workspaceId': topic, 'sessions': sessions},
+        },
+      },
+    };
+    for (final id in List.of(_eventListenIds)) {
+      final writer = ValueWriter();
+      encodeValue(writer, [ChannelClient.resEventFire, id]);
+      encodeValue(writer, frame);
+      channels.handleMessage(writer.toBytes());
+    }
   }
 
   @override
@@ -741,6 +793,103 @@ void main() {
     });
   });
 
+  group('workspace switch carry-over (11-02 R3)', () {
+    test('the switch seeds the old active layer (ready-only, normalized), '
+        're-subscribes on the new bridge, replaces it on the first ready '
+        'frame, and suspend clears everything', () async {
+      final bridges = <_FakeBridge>[];
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..desktopAppVersion = '3.16.3'
+        ..bootstrapWorkspaces = [
+          {'workspacePath': '/repo/a', 'workspaceIdentity': 'a-id'},
+          {'workspacePath': '/repo/b'},
+        ]
+        ..bootstrapTasks = [
+          {'taskId': 't-a', 'workspacePath': '/repo/a', 'updatedAt': 700},
+          {'taskId': 't-b', 'workspacePath': '/repo/b', 'updatedAt': 600},
+        ]
+        ..handler = (_) async {
+          final bridge = _FakeBridge();
+          bridges.add(bridge);
+          return bridge;
+        };
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+      await _settle();
+
+      // Reopen A with a path-only map (the shape the UI passes): the open
+      // records the RAW path on the subscription while the workspace list
+      // normalizes it to the identity key. The seed must speak the manager's
+      // normalized spelling (P3-9).
+      final reopened = await session.openWorkspace(_ws('/repo/a'));
+      expect(reopened, isA<WorkspaceOpenOpened>());
+      await _settle();
+      // The first open has no oldSub at all, so the seam's ready-only guard
+      // (manager unit case: seedStale ignores a non-ready state) is not
+      // exercised here — this asserts the visible effect: nothing carried.
+      expect(session.sidecarManager.indexes.containsKey('a-id'), isFalse,
+          reason: 'an unsnapshotted active state would seed a fake empty '
+              'card');
+
+      final activeA = session.sessions!;
+      expect(activeA.subscribedWorkspaceKey, '/repo/a',
+          reason: 'the open path records the raw active key');
+      bridges.last.fireIndexFrame(
+        topic: 'sessions-index//repo/a',
+        sessions: [
+          {'sessionId': 't-a', 'title': 'live-a', 'phase': 'running'},
+        ],
+      );
+      expect(activeA.ready, isTrue);
+
+      // Switch A -> B: the old active state is handed over as a stale layer
+      // before `_activeWorkspace` moves, and the sidecars detach (data
+      // kept) instead of being disposed.
+      final opened = await session.openWorkspace(_ws('/repo/b'));
+      expect(opened, isA<WorkspaceOpenOpened>());
+      await _settle();
+
+      final indexes = session.sidecarManager.indexes;
+      expect(indexes['a-id'], same(activeA),
+          reason: 'the ready old active state survives the bridge switch '
+              '(P1-2 seed under the normalized key)');
+      expect(activeA.subscribedWorkspaceKey, 'a-id',
+          reason: 'the seed rewrites the raw open key to the canonical one');
+      expect(session.sidecarReadiness['a-id'], isTrue,
+          reason: 'ready carry-over data keeps the card on the live layer');
+
+      final carried = session.taskDirectory.allEntries()
+          .firstWhere((e) => e.$1.sessionId == 't-a');
+      expect(carried.$1.phase, 'running',
+          reason: 'the run state must not flash back to the relay outcome '
+              'during the switch window');
+
+      // The new bridge's fresh subscribe is in flight. Its ack must NOT
+      // replace the stale layer (P2-3): wait until both the active B and
+      // the fresh A subscriptions hold event listeners.
+      final freshBridge = bridges.last;
+      await _pumpUntil(() => freshBridge.eventListenerCount >= 2);
+      expect(indexes['a-id'], same(activeA),
+          reason: 'the ack alone leaves the carry-over data in place');
+
+      freshBridge.fireIndexFrame(
+        topic: 'sessions-index/a-id',
+        sessions: [
+          {'sessionId': 't-a', 'title': 'fresh-a', 'phase': 'completedSuccess'},
+        ],
+      );
+      expect(indexes['a-id'], isNot(same(activeA)),
+          reason: 'the first READY frame replaces the stale layer');
+      expect(indexes['a-id']!.ready, isTrue);
+      expect(indexes['a-id']!.list.single.phase, 'completedSuccess');
+
+      await session.suspend();
+      expect(session.sidecarManager.indexes, isEmpty,
+          reason: 'suspend is still a cold start (disposeAll)');
+      expect(session.sidecarReadiness, isEmpty);
+    });
+  });
+
   group('draft send workspace guard', () {
     test('an already-active target answers opened without any RPC', () async {
       final client = _ScriptedClient(_params('3.16.3'))
@@ -1179,6 +1328,14 @@ Future<void> _settle() async {
   for (var i = 0; i < 5; i++) {
     await Future<void>.delayed(Duration.zero);
   }
+}
+
+/// Pumps microtasks until [condition] holds (test-side seam waits).
+Future<void> _pumpUntil(bool Function() condition) async {
+  for (var i = 0; i < 200 && !condition(); i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
+  expect(condition(), isTrue, reason: 'condition never became true');
 }
 
 void _answerWindowGate(_CapturingRelay relay, Map<String, dynamic> frame) {

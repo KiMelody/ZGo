@@ -852,9 +852,10 @@ class DeviceSession extends ChangeNotifier
 
   // --- Sidecar sessions-index subscriptions (design 10-28) ---
 
-  /// Upper bound on sidecar (non-active workspace) index subscriptions:
-  /// the recently active non-active workspaces, newest `updatedAt` first.
-  /// Bounded so a bridge swing's resubscribe wave stays cheap.
+  /// Upper bound on the RANKED sidecar set (non-active workspaces, newest
+  /// `updatedAt` first). Retained running-row layers and the switch
+  /// carry-over's stale layers may exceed it — the bound exists so a bridge
+  /// swing's resubscribe wave stays cheap, not as a hard subscription cap.
   static const int sidecarWorkspaceLimit = 5;
 
   /// Wire handles of the sidecar subscriptions, by workspace key. The
@@ -1688,6 +1689,11 @@ class DeviceSession extends ChangeNotifier
             'for requested key=$key');
       }
       final oldSub = _sessionsSub;
+      // The OLD active workspace key, captured before `_activeWorkspace`
+      // is replaced below: its ready state is the newest-sidecar seed of the
+      // carry-over (design 11-02 §3.1, review P1-2). Normalized like every
+      // manager map key.
+      final oldActiveKey = _sidecarActiveKey();
       final oldBridge = _bridge;
       final oldChats = List.of(_chatSubs.values);
       _sessionsSub = null;
@@ -1709,7 +1715,22 @@ class DeviceSession extends ChangeNotifier
       // Sidecar subscriptions live on the same bridge as the active one
       // (per-scope EventListens + subscribes): drop them BEFORE the old
       // bridge dies, or their recovery hooks and timers outlive it.
-      _sidecars.disposeAll();
+      // ORDER MATTERS: `_conversation = null` above must ALSO precede
+      // `detachAll()` — it is what stops in-flight sidecar subscribes from
+      // installing on the dying bridge (check 11-02 P3-1).
+      // The switch keeps their DATA as stale carry-over (design 11-02 §3):
+      // the merge renders the last real phases until the new bridge's fresh
+      // subscriptions deliver their first snapshots instead of flapping
+      // back to the relay's last-turn outcome.
+      _sidecars.detachAll();
+      final oldState = oldSub?.state;
+      if (oldActiveKey != null && oldState != null) {
+        // Seed the workspace being left; only a ready state is accepted
+        // (an unsnapshotted one has nothing to carry and would paint a fake
+        // empty card). `seedStale` rewrites the subscription identity to
+        // the canonical key (the open recorded the raw spelling).
+        _sidecars.seedStale(oldActiveKey, oldState, now: clock.now());
+      }
       _bridge = bridge;
       _activeWorkspace = active;
       // Fresh bridge = fresh channel client: re-hang the managed listeners.
