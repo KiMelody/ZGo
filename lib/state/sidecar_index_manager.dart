@@ -85,7 +85,9 @@ class SidecarIndexManager {
   /// workspaces, newest `updatedAt` first).
   final int limit;
 
-  /// Per-key cooldown after the benign cold-runtime refusal.
+  /// Per-key cooldown window after the benign cold-runtime refusal. It ends
+  /// at the deadline OR early when the workspace's relay rows show newer
+  /// activity than the watermark recorded at the refusal.
   final Duration cooldown;
 
   final DateTime Function() clock;
@@ -104,6 +106,13 @@ class SidecarIndexManager {
 
   /// Per-key cooldown deadline after the benign cold-runtime refusal.
   final Map<String, DateTime> _cooldownUntil = {};
+
+  /// Per-key relay-row activity watermark recorded when the cooldown was
+  /// written: the key's `max(updatedAt)` at refusal time (relay epoch ms —
+  /// the same domain as the candidate rows, never converted to the local
+  /// clock). A newer value means activity happened after the cooldown, so
+  /// reconcile may retry while the deadline is still running.
+  final Map<String, int> _cooldownWatermark = {};
 
   /// Sidecar index states by key (live map, read by TaskHomeService).
   Map<String, SessionsIndexState> get indexes => _indexes;
@@ -150,7 +159,12 @@ class SidecarIndexManager {
     }
     // "Cooldown ~10 min OR until the set changes": a workspace that fell
     // out and re-enters starts over instead of waiting out the old window.
+    // ORDER MATTERS: this prune must stay BEFORE the cooldown gate — it is
+    // what guarantees every key reaching the gate with a live cooldown is
+    // still in `desired`, so `candidate.updatedAt` is that key's current
+    // relay activity.
     _cooldownUntil.removeWhere((key, _) => !desiredKeys.contains(key));
+    _cooldownWatermark.removeWhere((key, _) => !desiredKeys.contains(key));
     if (!available()) return;
     for (final candidate in desired) {
       if (_indexes.containsKey(candidate.key) ||
@@ -158,8 +172,17 @@ class SidecarIndexManager {
           _starting.contains(candidate.key)) {
         continue;
       }
+      // Cooldown = deadline OR activity: retry when the key's relay rows
+      // moved past the watermark recorded at the refusal (a row refresh is
+      // new activity, not the same cold runtime being asked again). Both
+      // values are relay epoch ms — no cross-clock comparison.
       final until = _cooldownUntil[candidate.key];
-      if (until != null && clock().isBefore(until)) continue;
+      final watermark = _cooldownWatermark[candidate.key];
+      if (until != null &&
+          clock().isBefore(until) &&
+          (watermark == null || candidate.updatedAt <= watermark)) {
+        continue;
+      }
       unawaited(_start(candidate));
     }
   }
@@ -179,6 +202,7 @@ class SidecarIndexManager {
       log('[session] sidecars cleared (${keys.length})');
     }
     _cooldownUntil.clear();
+    _cooldownWatermark.clear();
   }
 
   /// Whether [key] is the workspace the conversation link is currently open
@@ -198,16 +222,12 @@ class SidecarIndexManager {
     return false;
   }
 
-  /// The top-[limit] non-active workspaces by newest relay row, with the
-  /// subscribe scope assembled from the row. The scope needs
-  /// `workspacePath` (every scoped wire call does); `workspaceIdentity` is
-  /// optional and only passed when the row carries it (3.16.2 relay rows
-  /// usually do not).
-  ///
-  /// Conversation (draft-*) workspaces are skipped: they are ephemeral
-  /// one-chat directories whose rows already display in the default group,
-  /// so subscribing them would burn the whole budget on drafts.
-  List<({String key, Map<String, dynamic> scope})> _candidates() {
+  /// The full per-key relay latest map (`key → newest row`), shared by the
+  /// candidate ranking and the cooldown watermark so both read the same
+  /// value in the same domain. The active workspace and conversation
+  /// (draft-*) paths are excluded exactly like the ranking.
+  Map<String, ({int updatedAt, String path, String? identity})>
+  _latestByKey() {
     final active = activeKey();
     final latest = <String, ({int updatedAt, String path, String? identity})>{};
     for (final task in relayRows()) {
@@ -230,6 +250,23 @@ class SidecarIndexManager {
         );
       }
     }
+    return latest;
+  }
+
+  /// The top-[limit] non-active workspaces by newest relay row, with the
+  /// subscribe scope assembled from the row. The scope needs
+  /// `workspacePath` (every scoped wire call does); `workspaceIdentity` is
+  /// optional and only passed when the row carries it (3.16.2 relay rows
+  /// usually do not). `updatedAt` rides along (filled from the full latest
+  /// map before `take(limit)`) so the cooldown gate compares the candidate's
+  /// current relay activity without re-scanning the rows.
+  ///
+  /// Conversation (draft-*) workspaces are skipped: they are ephemeral
+  /// one-chat directories whose rows already display in the default group,
+  /// so subscribing them would burn the whole budget on drafts.
+  List<({String key, Map<String, dynamic> scope, int updatedAt})>
+  _candidates() {
+    final latest = _latestByKey();
     final ranked = latest.entries.toList()
       ..sort((a, b) => b.value.updatedAt.compareTo(a.value.updatedAt));
     return [
@@ -241,13 +278,14 @@ class SidecarIndexManager {
             if (entry.value.identity != null)
               'workspaceIdentity': entry.value.identity,
           },
+          updatedAt: entry.value.updatedAt,
         ),
     ];
   }
 
   /// Starts ONE sidecar subscription and wires it into the directory.
   Future<void> _start(
-    ({String key, Map<String, dynamic> scope}) candidate,
+    ({String key, Map<String, dynamic> scope, int updatedAt}) candidate,
   ) async {
     final key = candidate.key;
     _starting.add(key);
@@ -284,7 +322,7 @@ class SidecarIndexManager {
       unawaited(_probeTombstones(key, state, candidate.scope));
     } catch (e) {
       if (isAgentRuntimeNotRunningError(e)) {
-        _cooldownUntil[key] = clock().add(cooldown);
+        _writeCooldown(key);
         log('[session] sidecar index $key: cold runtime, cooling down '
             '${cooldown.inMinutes}min');
       } else {
@@ -304,10 +342,21 @@ class SidecarIndexManager {
   /// retry.
   void _onSubscribeFailure(String key, Object error) {
     if (isDisposed() || !isAgentRuntimeNotRunningError(error)) return;
-    _cooldownUntil[key] = clock().add(cooldown);
+    _writeCooldown(key);
     log('[session] sidecar index $key: cold runtime on resubscribe, '
         'cooling down ${cooldown.inMinutes}min');
     _drop(key, reason: 'cold runtime');
+  }
+
+  /// Records the cooldown for [key]: the deadline plus the key's newest
+  /// relay-row `updatedAt` at refusal time (the watermark). A later relay
+  /// refresh above the watermark is activity after the cooldown — the cold
+  /// runtime may have been started by the desktop — so reconcile retries.
+  /// Both maps share the relay epoch-ms domain; the clock only sets the
+  /// deadline.
+  void _writeCooldown(String key) {
+    _cooldownUntil[key] = clock().add(cooldown);
+    _cooldownWatermark[key] = _latestByKey()[key]?.updatedAt ?? 0;
   }
 
   /// Pulls one workspace's registry-deleted task ids for the sidecar

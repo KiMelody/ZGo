@@ -105,13 +105,17 @@ void main() {
       'change clears the window', () async {
     h.cooldown = const Duration(minutes: 10);
     h.coldRuntime = true;
-    h.rows = [task('t1', '/repo/b', 100)];
+    // Clock-relative relay timestamps (relay epoch ms, same domain as the
+    // 2026 harness clock): the old 100/200 values were 1970 rows paired with
+    // a 2026 clock — assertions passed on the number ordering alone.
+    final base = h.now.millisecondsSinceEpoch;
+    h.rows = [task('t1', '/repo/b', base - 60000)];
     h.manager.reconcile();
     await settle();
     expect(h.subscribeCalls, hasLength(1));
     expect(h.logs.join('\n'), contains('cold runtime, cooling down 10min'));
 
-    // Same set, still cooling down.
+    // Same set, same row activity — still cooling down.
     h.now = h.now.add(const Duration(minutes: 5));
     h.manager.reconcile();
     await settle();
@@ -126,7 +130,7 @@ void main() {
     // A set change clears the (fresh) cooldown.
     h.rows = const [];
     h.manager.reconcile();
-    h.rows = [task('t1', '/repo/b', 300)];
+    h.rows = [task('t1', '/repo/b', base - 30000)];
     h.manager.reconcile();
     await settle();
     expect(h.subscribeCalls, hasLength(3));
@@ -203,7 +207,7 @@ void main() {
 
   test('resubscribe failure hook: cold runtime cools down and drops, other '
       'errors keep the built-in retry', () async {
-    h.rows = [task('t1', '/repo/b', 100)];
+    h.rows = [task('t1', '/repo/b', h.now.millisecondsSinceEpoch - 60000)];
     h.coldRuntime = false;
     h.manager.reconcile();
     await settle();
@@ -221,6 +225,121 @@ void main() {
     expect(h.changed, greaterThanOrEqualTo(2),
         reason: 'subscribe install + cold drop each notify once');
     expect(h.logs.join('\n'), contains('cold runtime on resubscribe'));
+  });
+
+  // ---- 11-02 §2: cooldown = deadline OR newer relay activity ----
+  test('cooldown lifted by newer relay activity (subscribe refusal): one '
+      'retry; an unchanged row stays blocked', () async {
+    h.coldRuntime = true;
+    final base = h.now.millisecondsSinceEpoch;
+    h.rows = [task('t1', '/repo/b', base - 60000)];
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(1));
+
+    // Same relay row: the watermark holds — a fake unlock must not retry.
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(1),
+        reason: 'unchanged updatedAt = no new activity = the deadline rules');
+
+    // The desktop touched the row after the cooldown: retry right away.
+    h.coldRuntime = false;
+    h.rows = [task('t1', '/repo/b', base - 30000)];
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(2),
+        reason: 'newer updatedAt than the stored watermark lifts the cooldown');
+    expect(h.manager.indexes.containsKey('/repo/b'), isTrue);
+  });
+
+  test('cooldown lifted by newer relay activity (resubscribe failure): one '
+      'retry; an unchanged row stays blocked', () async {
+    final base = h.now.millisecondsSinceEpoch;
+    h.rows = [task('t1', '/repo/b', base - 60000)];
+    h.manager.reconcile();
+    await settle();
+    expect(h.manager.indexes.containsKey('/repo/b'), isTrue);
+
+    h.failures['/repo/b']!(
+      ChannelRpcError('ZCode Agent runtime is not running', null),
+    );
+    await settle();
+    expect(h.manager.indexes.containsKey('/repo/b'), isFalse);
+    expect(h.disposed, contains('/repo/b'));
+
+    // Same relay row: the cooldown still blocks the resubscribe.
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(1),
+        reason: 'the resubscribe-failure write point records the same '
+            'watermark semantics');
+
+    // Newer row activity: the workspace resubscribes before the deadline.
+    h.rows = [task('t1', '/repo/b', base - 10000)];
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(2));
+    expect(h.manager.indexes.containsKey('/repo/b'), isTrue);
+  });
+
+  test('a cooldown key falling out of the desired set clears the cooldown; '
+      're-entry starts a fresh window', () async {
+    h.limit = 1;
+    h.coldRuntime = true;
+    final base = h.now.millisecondsSinceEpoch;
+    h.rows = [task('t-b', '/repo/b', base - 60000)];
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(1));
+
+    // A newer workspace takes the only slot: /repo/b leaves `desired`, so
+    // its cooldown + watermark are pruned (pre-existing set-change rule).
+    h.rows = [
+      task('t-b', '/repo/b', base - 60000),
+      task('t-c', '/repo/c', base - 30000),
+    ];
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(2));
+
+    // /repo/b re-enters inside the old 10-minute window: the pruned
+    // cooldown no longer blocks, so it starts over immediately.
+    h.rows = [
+      task('t-b', '/repo/b', base - 20000),
+      task('t-c', '/repo/c', base - 30000),
+    ];
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(3),
+        reason: 're-entering the set starts a new cooldown window');
+  });
+
+  test('restart-scan row refresh: one retry then a fresh watermark — the '
+      'retry loop stays bounded', () async {
+    h.coldRuntime = true;
+    final base = h.now.millisecondsSinceEpoch;
+    h.rows = [task('t1', '/repo/b', base - 60000)];
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(1));
+
+    // A desktop restart scan touches the row: one benign retry, refused
+    // again (the runtime is still cold).
+    h.rows = [task('t1', '/repo/b', base - 30000)];
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(2));
+
+    // The refreshed row is now the watermark of the NEW cooldown: later
+    // cadences with the same activity stay blocked — bounded, no cycle.
+    h.manager.reconcile();
+    await settle();
+    h.manager.reconcile();
+    await settle();
+    expect(h.subscribeCalls, hasLength(2),
+        reason: 'each refusal re-records the current watermark, so a restart '
+            'scan costs one retry, not an open retry loop');
   });
 
   test('tombstone probe writes deletedTaskIds and notifies once; a replaced '

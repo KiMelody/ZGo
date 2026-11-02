@@ -133,32 +133,48 @@ void main() {
         reason: 'sibling sidecars survive the switch');
   });
 
-  test('cold runtime: the refusal cools the workspace down and never enters '
-      'the retry path until the window expires or the set changes', () async {
-    final s = session(cooldown: const Duration(milliseconds: 80));
+  test('cold runtime: the refusal cools the workspace down until the window '
+      'expires, newer relay activity lifts it, a set change clears it',
+      () async {
+    final s = session(cooldown: const Duration(milliseconds: 200));
     s.sidecarColdRuntime = true;
-    s.applyRelayOverview([task('t-b', '/repo/b', 100)]);
+    // Clock-relative relay timestamps in the relay epoch-ms domain (the old
+    // 100/200 values were 1970 rows paired with a real clock — the
+    // assertion passed on number ordering alone, not on the semantics).
+    final base = DateTime.now().millisecondsSinceEpoch;
+    s.applyRelayOverview([task('t-b', '/repo/b', base - 60000)]);
     await settle();
     expect(s.sidecarSubscribeCalls, hasLength(1));
 
-    // Same set, new row activity — still cooling down, no retry.
-    s.applyRelayOverview([task('t-b', '/repo/b', 200)]);
+    // Same row activity — still cooling down, no retry.
+    s.applyRelayOverview([task('t-b', '/repo/b', base - 60000)]);
     await settle();
     expect(s.sidecarSubscribeCalls, hasLength(1));
 
-    // Window expiry retries once.
-    await Future<void>.delayed(const Duration(milliseconds: 120));
-    s.sidecarManager.reconcile();
+    // A newer row (desktop activity after the cooldown) lifts it: one
+    // retry, refused again; the refreshed row becomes the new watermark.
+    s.applyRelayOverview([task('t-b', '/repo/b', base - 30000)]);
     await settle();
     expect(s.sidecarSubscribeCalls, hasLength(2));
+
+    // The same refreshed row no longer lifts the fresh cooldown.
+    s.applyRelayOverview([task('t-b', '/repo/b', base - 30000)]);
+    await settle();
+    expect(s.sidecarSubscribeCalls, hasLength(2));
+
+    // Window expiry retries once.
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    s.sidecarManager.reconcile();
+    await settle();
+    expect(s.sidecarSubscribeCalls, hasLength(3));
 
     // A set change clears the (fresh) cooldown: dropping and re-entering
     // the workspace subscribes immediately.
     s.applyRelayOverview([]);
     await settle();
-    s.applyRelayOverview([task('t-b', '/repo/b', 300)]);
+    s.applyRelayOverview([task('t-b', '/repo/b', base - 10000)]);
     await settle();
-    expect(s.sidecarSubscribeCalls, hasLength(3));
+    expect(s.sidecarSubscribeCalls, hasLength(4));
   });
 
   test('a sidecar frame notifies the session and surfaces the live row in '
