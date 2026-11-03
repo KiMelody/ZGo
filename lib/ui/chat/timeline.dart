@@ -34,6 +34,7 @@ import 'markdown_view.dart';
 import 'subagent_detail_page.dart';
 import 'subagent_feed.dart';
 import 'tool_row_semantics.dart';
+import 'workflow_card.dart';
 
 export 'chat_preview.dart' show ChatPreview;
 
@@ -515,6 +516,7 @@ class ChatPageActions {
     this.fork,
     this.askInSideChat,
     this.openSubagent,
+    this.openWorkflowRun,
   });
 
   /// Message-action sheet / feedback 「分叉」: the page runs
@@ -542,6 +544,10 @@ class ChatPageActions {
     bool running,
     Duration? confirmWindow,
   })? openSubagent;
+
+  /// Drill-in to the read-only workflow run page (design 11-03 §6). Read-only
+  /// surfaces omit it; the workflow card's detail chevron then disappears.
+  final OpenWorkflowRun? openWorkflowRun;
 }
 
 class ChatTurnGroup extends StatefulWidget {
@@ -1115,6 +1121,7 @@ class ChatRow extends StatelessWidget {
       ),
       'toolCall' => _ToolCallTile(
         row: row,
+        state: state,
         preview: preview,
         conversation: conversation,
         sessionId: sessionId,
@@ -1122,6 +1129,7 @@ class ChatRow extends StatelessWidget {
         subagent: isAgentTool(row) ? _subagentRowFor(state.rows, row) : null,
         feed: feed,
         actions: actions,
+        readOnly: readOnly,
       ),
       // turnHeader rows are lifted out of the stream by ChatTurnGroup
       'turnHeader' => const SizedBox.shrink(),
@@ -1871,6 +1879,10 @@ class _ReasoningTile extends StatelessWidget {
 class _ToolCallTile extends StatefulWidget {
   final Map<String, dynamic> row;
 
+  /// Conversation state: the workflow tool-card dispatch joins the row's
+  /// display payload against the session's live `workflowRuns` mirror.
+  final ConversationState state;
+
   /// Agent rows only: the conversation role + sessionId + [subagent] wire
   /// the tile's drill-in chevron to the child-session detail page.
   final ConversationPort? conversation;
@@ -1888,14 +1900,22 @@ class _ToolCallTile extends StatefulWidget {
   /// Workspace file-preview plumbing (tappable file names).
   final ChatPreview preview;
 
+  /// Read-only boundary (D2): the workflow card must not inherit the host
+  /// page's run-detail drill-in (the inline child transcript renders the
+  /// parent's `actions` while readOnly). Other actions — the subagent
+  /// drill-in chain — stay available.
+  final bool readOnly;
+
   const _ToolCallTile({
     required this.row,
+    required this.state,
     required this.preview,
     this.conversation,
     this.sessionId,
     this.subagent,
     this.feed,
     this.actions,
+    this.readOnly = false,
   });
 
   @override
@@ -1910,6 +1930,18 @@ class _ToolCallTileState extends State<_ToolCallTile> {
   @override
   Widget build(BuildContext context) {
     final row = widget.row;
+    // Workflow family dispatch (design 11-03 §3): only rows with a workflow
+    // display or a live mirror run take the card; every other tool row —
+    // including workflow-named rows from an old desktop with neither source —
+    // keeps the bare rendering path below unchanged.
+    if (hasWorkflowCard(widget.state, row)) {
+      return WorkflowToolCard(
+        row: row,
+        state: widget.state,
+        openWorkflowRun:
+            widget.readOnly ? null : widget.actions?.openWorkflowRun,
+      );
+    }
     final status = row['status'] as String? ?? '';
     final inputText = row['inputText'] as String? ?? '';
     final output = row['output'];

@@ -12,6 +12,8 @@ import 'package:zgo/protocol/conversation.dart';
 import 'package:zgo/protocol/ipc_codec.dart';
 import 'package:zgo/protocol/remote_client.dart';
 
+import 'workflow_fixtures.dart';
+
 void main() {
   group('ConversationState delta application', () {
     late ConversationState state;
@@ -1637,7 +1639,135 @@ void main() {
       });
       expect(view.actorsCount, 2);
       expect(view.nodesTotal, 3);
-      expect(view.nodesSettled, 2);
+      // Official `Ye` projection: only `phase == 'settled'` counts. The
+      // `outcome == 'ok'` node without a settled phase is still running and
+      // must not inflate progress.
+      expect(view.nodesSettled, 1);
+    });
+
+    test('projection: real fixture adds the evicted-node counters', () {
+      final run = WorkflowRun(workflowRunFixture());
+      final settledNodes =
+          run.nodes.where((n) => n['phase'] == 'settled').length;
+
+      expect(run.nodes, hasLength(4));
+      expect(run.nodesUnlisted, 2);
+      expect(run.nodesTotal, run.nodes.length + run.nodesUnlisted);
+      expect(run.nodesTotal, 6);
+      expect(run.nodesUnlistedSettled, 1);
+      expect(run.nodesSettled, settledNodes + run.nodesUnlistedSettled);
+      expect(run.nodesSettled, 2);
+    });
+
+    test('projection: absent or empty usage means no unlisted nodes', () {
+      final withoutUsage = WorkflowRun({
+        'runId': 'r1',
+        'status': 'running',
+        'nodes': [
+          {'siteId': 'a', 'ordinal': 0, 'phase': 'settled'},
+        ],
+        'lastEventSequence': 1,
+      });
+      expect(withoutUsage.usage, isEmpty);
+      expect(withoutUsage.nodesUnlisted, 0);
+      expect(withoutUsage.nodesUnlistedSettled, 0);
+      expect(withoutUsage.nodesTotal, 1);
+      expect(withoutUsage.nodesSettled, 1);
+
+      final emptyUsage = WorkflowRun({
+        'runId': 'r1',
+        'status': 'running',
+        'usage': <String, Object?>{},
+        'nodes': <Object?>[],
+        'lastEventSequence': 1,
+      });
+      expect(emptyUsage.nodesTotal, 0);
+      expect(emptyUsage.nodesSettled, 0);
+    });
+
+    test('projection: malformed nodes/usage read as empty instead of throwing',
+        () {
+      final badNodes = WorkflowRun({
+        'runId': 'r1',
+        'status': 'running',
+        'usage': {'spentTokens': 1},
+        'nodes': 'not-a-list',
+        'lastEventSequence': 1,
+      });
+      expect(badNodes.nodes, isEmpty);
+      expect(badNodes.nodesTotal, 0);
+      expect(badNodes.nodesSettled, 0);
+
+      final badUsage = WorkflowRun({
+        'runId': 'r1',
+        'status': 'running',
+        'usage': 'not-a-map',
+        'nodes': [
+          'not-a-map',
+          {'siteId': 'a', 'ordinal': 0, 'phase': 'settled'},
+        ],
+        'lastEventSequence': 1,
+      });
+      expect(badUsage.usage, isEmpty);
+      expect(badUsage.nodes, hasLength(1));
+      expect(badUsage.nodesTotal, 1);
+      expect(badUsage.nodesSettled, 1);
+    });
+
+    test('typed views: real fixture exposes the run members', () {
+      final run = WorkflowRun(workflowRunFixture());
+
+      expect(run.runId, 'dwfrun-714b4217-a5d7-4f02-89b2-b5eed096edf1');
+      expect(run.status, 'running');
+      expect(run.stopReason, isNull);
+      expect(run.toolCallId, 'call_6314e8f0988a403ba9f39e53');
+      expect(run.spentTokens, 38994588);
+      expect(run.nodesUsed, 6);
+      expect(run.agentsRunning, 1);
+      expect(run.actors, hasLength(2));
+      expect(run.actors.first.name, '设计架构师');
+      expect(run.actors.last.model, 'provider/model-x');
+      expect(run.nodesView, hasLength(4));
+      expect(run.nodesView.first.kind, 'ask');
+      expect(run.nodesView.first.lastToolName, 'Read');
+      expect(run.nodesView.first.lastToolTarget, 'MainActivity.kt');
+      expect(run.nodesView[2].cached, isTrue);
+      expect(run.phases.map((p) => p.name), ['勘察现有界面', '落地品牌']);
+      expect(run.phases.last.rounds, 2);
+      expect(run.phaseNames, ['勘察现有界面', '落地品牌']);
+      expect(run.currentPhase, '落地品牌');
+      expect(run.pendingQuestions.single.qid, 'q1');
+      expect(run.pendingQuestions.single.question, '主色使用哪一版？');
+      expect(run.artifacts.single.title, '改造进度');
+      expect(run.artifacts.single.primary, isTrue);
+      expect(run.reports.single.artifactId, 'progress');
+      expect(run.unlistedByPhase.single.phaseName, '落地品牌');
+      expect(run.unlistedByPhase.single.settled, 1);
+      expect(run.subagentModel, 'provider/model-x');
+      expect(run.lastEventSequence, 42);
+      expect(run.truncated, isFalse);
+    });
+
+    test('typed views: malformed nested members read as empty', () {
+      final run = WorkflowRun({
+        'runId': 'r1',
+        'status': 'running',
+        'usage': {'spentTokens': 0},
+        'actors': 'nope',
+        'phases': [1, 'x'],
+        'pendingQuestions': {'qid': 'q1'},
+        'artifacts': [null],
+        'reports': 'nope',
+        'phaseNames': 'nope',
+        'lastEventSequence': 1,
+      });
+      expect(run.actors, isEmpty);
+      expect(run.phases, isEmpty);
+      expect(run.phaseNames, isEmpty);
+      expect(run.pendingQuestions, isEmpty);
+      expect(run.artifacts, isEmpty);
+      expect(run.reports, isEmpty);
+      expect(run.agentsRunning, 0);
     });
 
     test('updated: run patch merge + cleared', () {

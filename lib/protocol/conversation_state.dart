@@ -346,8 +346,21 @@ class WorkflowRuns {
   }
 }
 
+String? _asString(Object? value) {
+  if (value is String) {
+    final trimmed = value.trim();
+    if (trimmed.isNotEmpty) return trimmed;
+  }
+  return null;
+}
+
+int _asInt(Object? value) => value is num ? value.toInt() : 0;
+
+int? _asIntOrNull(Object? value) => value is num ? value.toInt() : null;
+
 /// Typed read view over one raw workflow run (wire schema renderer
-/// @269852039).
+/// @269852039). Nested members stay defensive: unknown or malformed shapes
+/// read as empty instead of throwing.
 class WorkflowRun {
   final Map<String, dynamic> raw;
 
@@ -355,7 +368,7 @@ class WorkflowRun {
 
   String get runId => '${raw['runId'] ?? ''}';
   String get status => '${raw['status'] ?? ''}';
-  String? get stopReason => raw['stopReason'] as String?;
+  String? get stopReason => _asString(raw['stopReason']);
 
   String? get toolCallId {
     final id = raw['toolCallId'];
@@ -364,30 +377,213 @@ class WorkflowRun {
 
   bool get resumable => raw['resumable'] == true;
 
-  int get actorsCount {
-    final actors = raw['actors'];
-    return actors is List ? actors.length : 0;
+  int get actorsCount => actors.length;
+
+  Map<String, dynamic> get usage {
+    final value = raw['usage'];
+    return value is Map ? value.cast<String, dynamic>() : const {};
   }
 
-  List<Map<String, dynamic>> get nodes => [
-    if (raw['nodes'] is List)
-      for (final n in raw['nodes'] as List)
-        if (n is Map) n.cast<String, dynamic>(),
+  int get spentTokens => _asInt(usage['spentTokens']);
+  int get nodesUsed => _asInt(usage['nodesUsed']);
+  int get nodesUnlisted => _asInt(usage['nodesUnlisted']);
+  int get nodesUnlistedSettled => _asInt(usage['nodesUnlistedSettled']);
+
+  List<WorkflowActor> get actors => [
+    for (final a in _entries(raw['actors'])) WorkflowActor(a),
   ];
 
-  int get nodesTotal => nodes.length;
+  int get agentsRunning {
+    var running = 0;
+    for (final a in actors) {
+      if (a.status == 'running') running++;
+    }
+    return running;
+  }
 
-  /// Nodes that reached a terminal phase (outcome set or phase `settled`) —
-  /// the official progress numerator. Exact official `iu` projection is not
-  /// re-derived here (bundle-resident); real-device shape check pending
-  /// (PRD acceptance).
+  List<Map<String, dynamic>> get nodes => _entries(raw['nodes']);
+
+  List<WorkflowNode> get nodesView => [
+    for (final n in nodes) WorkflowNode(n),
+  ];
+
+  List<WorkflowPhase> get phases => [
+    for (final p in _entries(raw['phases'])) WorkflowPhase(p),
+  ];
+
+  /// Wire order authority: `phaseNames` when present, else the `phases`
+  /// member order.
+  List<String> get phaseNames {
+    final names = [
+      if (raw['phaseNames'] is List)
+        for (final v in raw['phaseNames'] as List)
+          if (v is String && v.isNotEmpty) v,
+    ];
+    if (names.isNotEmpty) return names;
+    return [for (final p in phases) if (p.name.isNotEmpty) p.name];
+  }
+
+  String? get currentPhase => _asString(raw['currentPhase']);
+
+  List<WorkflowQuestion> get pendingQuestions => [
+    for (final q in _entries(raw['pendingQuestions'])) WorkflowQuestion(q),
+  ];
+
+  List<WorkflowArtifact> get artifacts => [
+    for (final a in _entries(raw['artifacts'])) WorkflowArtifact(a),
+  ];
+
+  List<WorkflowReport> get reports => [
+    for (final r in _entries(raw['reports'])) WorkflowReport(r),
+  ];
+
+  List<WorkflowUnlistedPhase> get unlistedByPhase => [
+    for (final p in _entries(raw['unlistedByPhase']))
+      WorkflowUnlistedPhase(p),
+  ];
+
+  String? get resultPreview => _asString(raw['resultPreview']);
+  String? get errorText => _asString(raw['error']);
+  String? get supersededBy => _asString(raw['supersededBy']);
+  String? get resumedFrom => _asString(raw['resumedFrom']);
+  bool get truncated => raw['truncated'] == true;
+  int get lastEventSequence => _asInt(raw['lastEventSequence']);
+  String? get subagentModel => _asString(raw['subagentModel']);
+
+  Map<String, dynamic>? get concurrency {
+    final value = raw['concurrency'];
+    return value is Map ? value.cast<String, dynamic>() : null;
+  }
+
+  int get nodesTotal => nodes.length + nodesUnlisted;
+
+  /// Official `Ye` projection (@349921493): only `phase == 'settled'` counts,
+  /// plus the evicted-node counter `usage.nodesUnlistedSettled`. `outcome`
+  /// alone is NOT a settled signal (a still-running phase can carry one and
+  /// would over-report progress).
   int get nodesSettled {
     var settled = 0;
     for (final n in nodes) {
-      if (n['outcome'] != null || n['phase'] == 'settled') settled++;
+      if (n['phase'] == 'settled') settled++;
     }
-    return settled;
+    return settled + nodesUnlistedSettled;
   }
+}
+
+/// One `actors[]` member of a workflow run.
+class WorkflowActor {
+  final Map<String, dynamic> raw;
+
+  WorkflowActor(this.raw);
+
+  String get siteId => '${raw['siteId'] ?? ''}';
+  int get ordinal => _asInt(raw['ordinal']);
+  String? get name => _asString(raw['name']);
+  String? get sessionId => _asString(raw['sessionId']);
+  String get status => _asString(raw['status']) ?? '';
+  String? get phaseName => _asString(raw['phaseName']);
+  String? get model => _asString(raw['model']);
+
+  String get key => '$siteId\u0000$ordinal';
+}
+
+/// One `nodes[]` member of a workflow run.
+class WorkflowNode {
+  final Map<String, dynamic> raw;
+
+  WorkflowNode(this.raw);
+
+  String get siteId => '${raw['siteId'] ?? ''}';
+  int get ordinal => _asInt(raw['ordinal']);
+  String? get kind => _asString(raw['kind']);
+  String get phase => _asString(raw['phase']) ?? '';
+  String? get outcome => _asString(raw['outcome']);
+  bool get cached => raw['cached'] == true;
+  String? get actorSiteId => _asString(raw['actorSiteId']);
+  int? get actorOrdinal => _asIntOrNull(raw['actorOrdinal']);
+  String? get phaseName => _asString(raw['phaseName']);
+  String? get instructionsHead => _asString(raw['instructionsHead']);
+  int? get turn => _asIntOrNull(raw['turn']);
+  int? get toolCalls => _asIntOrNull(raw['toolCalls']);
+
+  Map<String, dynamic>? get lastTool {
+    final value = raw['lastTool'];
+    return value is Map ? value.cast<String, dynamic>() : null;
+  }
+
+  String? get lastToolName => _asString(lastTool?['name']);
+  String? get lastToolTarget => _asString(lastTool?['target']);
+
+  String get key => '$siteId\u0000$ordinal';
+}
+
+/// One `phases[]` member: the launch order + round count.
+class WorkflowPhase {
+  final Map<String, dynamic> raw;
+
+  WorkflowPhase(this.raw);
+
+  String get name => _asString(raw['name']) ?? '';
+  int get rounds => _asInt(raw['rounds']);
+}
+
+/// One `pendingQuestions[]` member (a subagent's escalation awaiting an
+/// answer).
+class WorkflowQuestion {
+  final Map<String, dynamic> raw;
+
+  WorkflowQuestion(this.raw);
+
+  String get qid => '${raw['qid'] ?? ''}';
+  String? get actorSiteId => _asString(raw['actorSiteId']);
+  int? get actorOrdinal => _asIntOrNull(raw['actorOrdinal']);
+  String? get actorName => _asString(raw['actorName']);
+  String get question => _asString(raw['question']) ?? '';
+  String? get context => _asString(raw['context']);
+  int? get askedAt => _asIntOrNull(raw['askedAt']);
+}
+
+/// One `artifacts[]` member.
+class WorkflowArtifact {
+  final Map<String, dynamic> raw;
+
+  WorkflowArtifact(this.raw);
+
+  String get id => '${raw['id'] ?? ''}';
+  String get kind => _asString(raw['kind']) ?? '';
+  String? get title => _asString(raw['title']);
+  int get version => _asInt(raw['version']);
+  String? get contentType => _asString(raw['contentType']);
+  int? get bytes => _asIntOrNull(raw['bytes']);
+  int? get itemCount => _asIntOrNull(raw['itemCount']);
+  bool get primary => raw['primary'] == true;
+}
+
+/// One `reports[]` member.
+class WorkflowReport {
+  final Map<String, dynamic> raw;
+
+  WorkflowReport(this.raw);
+
+  String get siteId => '${raw['siteId'] ?? ''}';
+  int get ordinal => _asInt(raw['ordinal']);
+  String get preview => _asString(raw['preview']) ?? '';
+  String? get artifactId => _asString(raw['artifactId']);
+
+  String get key => '$siteId\u0000$ordinal';
+}
+
+/// One `unlistedByPhase[]` member: evicted-node counters per phase.
+class WorkflowUnlistedPhase {
+  final Map<String, dynamic> raw;
+
+  WorkflowUnlistedPhase(this.raw);
+
+  String? get phaseName => _asString(raw['phaseName']);
+  int get actors => _asInt(raw['actors']);
+  int? get actorsSettled => _asIntOrNull(raw['actorsSettled']);
+  int? get actorsFailed => _asIntOrNull(raw['actorsFailed']);
+  int get settled => _asInt(raw['settled']);
 }
 
 /// Official `workflowRunEntryKey` (`Oz` @1088066): `siteId\0ordinal`.

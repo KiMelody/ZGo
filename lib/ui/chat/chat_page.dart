@@ -31,6 +31,8 @@ import 'timeline.dart';
 import 'top_bounce_physics.dart';
 import 'transcript_viewport.dart';
 import 'turn_navigator.dart';
+import 'workflow_card.dart';
+import 'workflow_run_page.dart';
 
 /// Native chat view for one task (session), backed by Conversation V4 over
 /// the page-construction boundary [ChatPageHost] (ADR-0008 rule ii).
@@ -240,6 +242,28 @@ class _ChatPageState extends State<ChatPage> {
       running: running,
       confirmWindow: confirmWindow,
     ),
+    openWorkflowRun: (context, {
+      required runId,
+      display,
+      title,
+      workStartedAt,
+      workEndedAt,
+    }) {
+      final state = _state;
+      if (state == null) return;
+      Navigator.of(context).push(
+        zRoute(
+          (_) => WorkflowRunPage(
+            state: state,
+            runId: runId,
+            display: display,
+            title: title,
+            workStartedAt: workStartedAt,
+            workEndedAt: workEndedAt,
+          ),
+        ),
+      );
+    },
   );
 
   /// Marks the message list subtree for the history anchor-compensation
@@ -3822,8 +3846,16 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
     window: widget.confirmWindow,
     onConfirmed: () {
       if (!mounted) return;
-      if (_currentRunningTotal == 0) {
-        Navigator.of(context).pop();
+      if (_currentRunningTotal != 0) return;
+      // A drill-in page (workflow detail) can sit above the sheet: pop()
+      // would close that page instead. Remove the sheet's own route.
+      final route = ModalRoute.of(context);
+      if (route == null) return;
+      final navigator = Navigator.of(context);
+      if (route.isCurrent) {
+        navigator.pop();
+      } else {
+        navigator.removeRoute(route);
       }
     },
   );
@@ -3834,6 +3866,28 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
       if (w['kind'] == kind && w['status'] == 'running' && w['endedAt'] == null)
         w,
   ];
+
+  /// Terminal workflow runs for the sheet's ended sub-section (design 11-03
+  /// §5). A run already mirrored by a running work is excluded — the live
+  /// row owns it (joined by `workId → runId`, else `toolCallId`). Wire order
+  /// is preserved: a run snapshot carries no createdAt, so there is nothing
+  /// to sort by and its arrival order is the only honest ordering.
+  List<WorkflowRun> _endedWorkflowRuns(List<Map<String, dynamic>> running) {
+    final runs = widget.state.workflowRuns;
+    final liveRunIds = <String>{};
+    for (final w in running) {
+      final workId = '${w['workId'] ?? w['id'] ?? ''}';
+      if (workId.isEmpty) continue;
+      final run = runs.byRunId(workId) ?? runs.byToolCallId(workId);
+      if (run != null) liveRunIds.add(run.runId);
+    }
+    return [
+      for (final run in runs.views)
+        if (const {'completed', 'errored', 'stopped'}.contains(run.status) &&
+            !liveRunIds.contains(run.runId))
+          run,
+    ];
+  }
 
   int get _currentRunningTotal => _runningWorkTotal(
     _runningWorkCounts(
@@ -4048,6 +4102,7 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
         final ended = _endedRows();
         final bash = _runningWorks('bash');
         final workflow = _runningWorks('workflow');
+        final endedWorkflow = _endedWorkflowRuns(workflow);
         return SafeArea(
           child: ConstrainedBox(
             constraints: BoxConstraints(
@@ -4068,13 +4123,21 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
                     ),
                     for (final w in bash) _buildWorkItem(context, w),
                   ],
-                  if (workflow.isNotEmpty) ...[
+                  if (workflow.isNotEmpty || endedWorkflow.isNotEmpty) ...[
                     _buildSectionLabel(
                       context,
-                      'chat.composer.addWorkflow',
-                      workflow.length,
+                      'chat.bgSheet.sectionWorkflow',
+                      workflow.length + endedWorkflow.length,
                     ),
                     for (final w in workflow) _buildWorkflowItem(context, w),
+                    if (endedWorkflow.isNotEmpty) ...[
+                      _buildSectionLabel(
+                        context,
+                        'chat.subagentSheet.sectionEnded',
+                      ),
+                      for (final run in endedWorkflow)
+                        _buildEndedWorkflowItem(context, run),
+                    ],
                   ],
                   if (running.isNotEmpty || ended.isNotEmpty) ...[
                     _buildSectionLabel(
@@ -4202,56 +4265,139 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
   /// row authority; the session's `workflowRuns` mirror supplies progress
   /// when a run joins by workId/runId (best-effort — the wire carries no
   /// explicit backgroundWorks↔run link; real-device shape check pending).
+  /// The whole row opens the read-only detail page when a mirror run exists;
+  /// the ✕ keeps owning the right column (gesture-arena inner win).
   Widget _buildWorkflowItem(BuildContext context, Map<String, dynamic> work) {
     final title = '${work['title'] ?? ''}';
     final workId = '${work['workId'] ?? work['id'] ?? ''}';
     final runs = widget.state.workflowRuns;
     final run = runs.byRunId(workId) ?? runs.byToolCallId(workId);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const SizedBox(
-                width: 12,
-                height: 12,
-                child: CircularProgressIndicator(strokeWidth: 1.5),
+    final open = widget.actions?.openWorkflowRun;
+    return InkWell(
+      onTap: run == null || open == null
+          ? null
+          : () => open(
+                context,
+                runId: run.runId,
+                title: title.isEmpty ? null : title,
+                workStartedAt: (work['startedAt'] as num?)?.toInt(),
+                workEndedAt: (work['endedAt'] as num?)?.toInt(),
               ),
-              const SizedBox(width: 8),
-              Expanded(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(strokeWidth: 1.5),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: ZType.body.copyWith(color: ZInk.solid(context)),
+                  ),
+                ),
+                _SheetElapsed(startedAt: work['startedAt'] as num?),
+                IconButton(
+                  icon: Icon(Icons.close, size: 14, color: ZInk.muted(context)),
+                  tooltip: tr(context, 'chat.bgSheet.cancelWork'),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => _cancelWork(work),
+                ),
+              ],
+            ),
+            if (run != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 20, top: 2),
                 child: Text(
-                  title,
+                  trP(context, 'chat.bgSheet.workflowProgress', [
+                    '${run.nodesSettled}',
+                    '${run.nodesTotal}',
+                    '${run.actorsCount}',
+                  ]),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: ZType.body.copyWith(color: ZInk.solid(context)),
+                  style: ZType.caption.copyWith(color: ZInk.soft(context)),
                 ),
               ),
-              _SheetElapsed(startedAt: work['startedAt'] as num?),
-              IconButton(
-                icon: Icon(Icons.close, size: 14, color: ZInk.muted(context)),
-                tooltip: tr(context, 'chat.bgSheet.cancelWork'),
-                visualDensity: VisualDensity.compact,
-                onPressed: () => _cancelWork(work),
-              ),
-            ],
-          ),
-          if (run != null)
-            Padding(
-              padding: const EdgeInsets.only(left: 20, top: 2),
-              child: Text(
-                trP(context, 'chat.bgSheet.workflowProgress', [
-                  '${run.nodesSettled}',
-                  '${run.nodesTotal}',
-                  '${run.actorsCount}',
-                ]),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: ZType.caption.copyWith(color: ZInk.soft(context)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// One ended workflow row (design 11-03 §5): status glyph + resolved name
+  /// + a `settled/total nodes · N agents` caption (zero parts omitted).
+  /// The whole row opens the read-only detail page; the mirror carries no
+  /// work timestamps, so the page gets null bounds (no fabricated elapsed).
+  Widget _buildEndedWorkflowItem(BuildContext context, WorkflowRun run) {
+    final (icon, color) = switch (run.status) {
+      'completed' => (Icons.check, ZInk.successTone(context)),
+      'errored' => (Icons.close, ZInk.dangerTone(context)),
+      _ => (Icons.stop, ZInk.warningTone(context)),
+    };
+    final name = workflowRunName(
+          rows: widget.state.rows,
+          runId: run.runId,
+          toolCallId: run.toolCallId,
+        ) ??
+        tr(context, 'chat.workflowDetail.titleFallback');
+    final parts = <String>[
+      if (run.nodesTotal > 0)
+        trP(context, 'chat.workflowCard.steps', [
+          '${run.nodesSettled}',
+          '${run.nodesTotal}',
+        ]),
+      if (run.actorsCount > 0)
+        trP(context, 'chat.workflowCard.agents', ['${run.actorsCount}']),
+    ];
+    final open = widget.actions?.openWorkflowRun;
+    return InkWell(
+      onTap: open == null
+          ? null
+          : () => open(context, runId: run.runId, title: name),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        child: Row(
+          children: [
+            Icon(icon, size: 14, color: color),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: ZType.body.copyWith(color: ZInk.solid(context)),
+                  ),
+                  if (parts.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        parts.join(' · '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ZType.caption.copyWith(
+                          color: ZInk.soft(context),
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
-        ],
+            const SizedBox(width: 8),
+            Icon(Icons.chevron_right, size: 14, color: ZInk.ghost(context)),
+          ],
+        ),
       ),
     );
   }

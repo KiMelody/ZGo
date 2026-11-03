@@ -17,6 +17,7 @@ import 'package:zgo/state/quota_reset.dart';
 import 'package:zgo/ui/chat/chat_page.dart';
 import 'package:zgo/ui/chat/subagent_detail_page.dart';
 import 'package:zgo/ui/chat/timeline.dart';
+import 'package:zgo/ui/chat/workflow_run_page.dart';
 import 'package:zgo/ui/quota_reset_dialog.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
@@ -212,6 +213,12 @@ Widget wrap(Widget child) => MaterialApp(
       UiSettingsProvider(settings: UiSettings(), child: child!),
   home: child,
 );
+
+/// Locale-true copy for a lexicon key: the sheet assertions pin whatever the
+/// zh table resolves to, so a key that has no entry yet (the i18n step lands
+/// later) matches its key echo instead of a stale hard-coded string.
+String chatLabel(String key, [List<String> args = const []]) =>
+    trByKeyP('zh-CN', key, args);
 
 /// The message list's ListView — the FIRST one in the message-area Stack.
 /// The turn navigator strip (task 10-14) mounts its own scrollable as a
@@ -3288,7 +3295,10 @@ void main() {
 
     // Three partition labels, each with its running count.
     expect(find.text('终端 · 1'), findsOneWidget);
-    expect(find.text('工作流 · 1'), findsOneWidget);
+    expect(
+      find.text('${chatLabel('chat.bgSheet.sectionWorkflow')} · 1'),
+      findsOneWidget,
+    );
     expect(find.text('子智能体 · 1'), findsOneWidget);
     // One row per partition.
     expect(find.text('Download Flutter SDK'), findsOneWidget);
@@ -3298,6 +3308,475 @@ void main() {
     expect(find.text('1/2 节点 · 1 个智能体'), findsOneWidget);
     // The retired works bar is not part of the management surface.
     expect(find.textContaining('后台任务 1 个运行中'), findsNothing);
+  });
+
+  testWidgets('management sheet lists ended workflow runs after running '
+      'works (wire order, deduped against live works)', (tester) async {
+    final gateway = FakeChatGateway()
+      ..snapshotExtra = {
+        'backgroundWorks': [
+          {
+            'workId': 'wf_live',
+            'kind': 'workflow',
+            'title': '审计依赖',
+            'status': 'running',
+            'cancellable': true,
+            'startedAt': 1789279676224,
+          },
+          {
+            // The run behind this work is terminal, but the work itself is
+            // live: the live row owns it (toolCallId join), no ended repeat.
+            'workId': 'call_joined',
+            'kind': 'workflow',
+            'title': '会话内运行',
+            'status': 'running',
+            'cancellable': true,
+          },
+        ],
+        'workflowRuns': {
+          'revision': 6,
+          'runs': [
+            {
+              'runId': 'wf_live',
+              'status': 'running',
+              'nodes': [
+                {'siteId': 's', 'ordinal': 0, 'phase': 'settled'},
+                {'siteId': 's', 'ordinal': 1, 'phase': 'executing'},
+              ],
+              'actors': [
+                {'siteId': 's', 'ordinal': 0, 'status': 'running'},
+              ],
+            },
+            {
+              'runId': 'wf_joined',
+              'toolCallId': 'call_joined',
+              'status': 'completed',
+            },
+            {
+              'runId': 'wf_done',
+              'toolCallId': 'call_done',
+              'status': 'completed',
+              'nodes': [
+                {'siteId': 's', 'ordinal': 0, 'phase': 'settled'},
+                {'siteId': 's', 'ordinal': 1, 'phase': 'settled'},
+              ],
+              'actors': [
+                {'siteId': 's', 'ordinal': 0, 'status': 'completed'},
+                {'siteId': 's', 'ordinal': 1, 'status': 'completed'},
+              ],
+            },
+            {
+              'runId': 'wf_err',
+              'toolCallId': 'call_err',
+              'status': 'errored',
+              'nodes': [
+                {'siteId': 's', 'ordinal': 0, 'phase': 'settled'},
+                {'siteId': 's', 'ordinal': 1, 'phase': 'executing'},
+              ],
+            },
+            {'runId': 'wf_stop', 'status': 'stopped'},
+            // Neither running nor terminal → neither partition.
+            {'runId': 'wf_pending', 'status': 'pending'},
+          ],
+        },
+      };
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '跑工作流'},
+      {
+        'rowId': 2,
+        'kind': 'toolCall',
+        'toolName': 'CreateWorkflow',
+        'toolCallId': 'call_done',
+        'status': 'success',
+        'inputText': '{"name":"依赖审计收尾"}',
+      },
+      {
+        'rowId': 3,
+        'kind': 'toolCall',
+        'toolName': 'CreateWorkflow',
+        'toolCallId': 'call_err',
+        'status': 'success',
+        'inputText': '{"name":"构建发布"}',
+      },
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await openSubagentSheet(tester);
+    final sheet = find.byType(BottomSheet);
+
+    // Section count = running + ended; the deduped and pending runs are in
+    // neither partition.
+    expect(
+      find.text('${chatLabel('chat.bgSheet.sectionWorkflow')} · 5'),
+      findsOneWidget,
+    );
+    expect(
+      find.text(chatLabel('chat.subagentSheet.sectionEnded')),
+      findsOneWidget,
+    );
+
+    // Running rows first, in the works order.
+    final live = find.descendant(of: sheet, matching: find.text('审计依赖'));
+    final joined = find.descendant(of: sheet, matching: find.text('会话内运行'));
+    expect(live, findsOneWidget);
+    expect(joined, findsOneWidget);
+    expect(tester.getTopLeft(live).dy, lessThan(tester.getTopLeft(joined).dy));
+
+    // Ended rows follow in mirror wire order (never re-sorted: run
+    // snapshots carry no timestamp).
+    final done = find.descendant(of: sheet, matching: find.text('依赖审计收尾'));
+    final err = find.descendant(of: sheet, matching: find.text('构建发布'));
+    final stop = find.descendant(
+      of: sheet,
+      matching: find.text(chatLabel('chat.workflowDetail.titleFallback')),
+    );
+    expect(done, findsOneWidget);
+    expect(err, findsOneWidget);
+    // Exactly one fallback title = the deduped joined run was excluded.
+    expect(stop, findsOneWidget);
+    expect(tester.getTopLeft(joined).dy, lessThan(tester.getTopLeft(done).dy));
+    expect(tester.getTopLeft(done).dy, lessThan(tester.getTopLeft(err).dy));
+    expect(tester.getTopLeft(err).dy, lessThan(tester.getTopLeft(stop).dy));
+
+    // Status glyphs + progress caption (zero-valued parts omitted).
+    expect(
+      find.descendant(of: sheet, matching: find.byIcon(Icons.check)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: sheet, matching: find.byIcon(Icons.stop)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: sheet,
+        matching: find.text(
+          '${chatLabel('chat.workflowCard.steps', ['2', '2'])} · '
+          '${chatLabel('chat.workflowCard.agents', ['2'])}',
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: sheet,
+        matching: find.text(chatLabel('chat.workflowCard.steps', ['1', '2'])),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('clicking a running workflow row opens the detail page',
+      (tester) async {
+    final gateway = FakeChatGateway()
+      ..snapshotExtra = {
+        'backgroundWorks': [
+          {
+            'workId': 'wf_live',
+            'kind': 'workflow',
+            'title': '审计依赖',
+            'status': 'running',
+            'cancellable': true,
+            'startedAt': 1789279676224,
+          },
+        ],
+        'workflowRuns': {
+          'revision': 1,
+          'runs': [
+            {'runId': 'wf_live', 'status': 'running'},
+          ],
+        },
+      };
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '跑工作流'},
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await openSubagentSheet(tester);
+    await tester.tap(find.text('审计依赖'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(WorkflowRunPage), findsOneWidget);
+  });
+
+  testWidgets('auto-close behind the detail page removes only the sheet', (
+    tester,
+  ) async {
+    final gateway = FakeChatGateway()
+      ..snapshotExtra = {
+        'backgroundWorks': [
+          {
+            'workId': 'wf_live',
+            'kind': 'workflow',
+            'title': '审计依赖',
+            'status': 'running',
+            'cancellable': true,
+            'startedAt': 1789279676224,
+          },
+        ],
+        'workflowRuns': {
+          'revision': 1,
+          'runs': [
+            {'runId': 'wf_live', 'status': 'running'},
+          ],
+        },
+      };
+    await tester.pumpWidget(
+      wrap(
+        ChatPage(
+          host: gateway,
+          sessionId: 's1',
+          title: 't',
+          turnFooterConfirmWindow: const Duration(milliseconds: 150),
+        ),
+      ),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '跑工作流'},
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await openSubagentSheet(tester);
+    final sheetRoute = ModalRoute.of(
+      tester.element(find.byType(BottomSheet)),
+    )!;
+    await tester.tap(find.text('审计依赖'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byType(WorkflowRunPage), findsOneWidget);
+
+    // Every running work goes terminal while the detail page sits above the
+    // sheet; the auto-close timer fires behind it.
+    gateway.state.applyFrame({
+      'toSeq': gateway.state.seq + 1,
+      'payload': {
+        'kind': 'deltas',
+        'deltas': [
+          {
+            'op': 'state.updated',
+            'patch': {
+              'backgroundWorks': [
+                {
+                  'workId': 'wf_live',
+                  'kind': 'workflow',
+                  'title': '审计依赖',
+                  'status': 'completed',
+                  'endedAt': 1789279677999,
+                },
+              ],
+            },
+          },
+        ],
+      },
+    }, onGap: () => fail('unexpected gap'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    await tester.pump(const Duration(milliseconds: 350));
+
+    // pop() would have closed the detail page; only the sheet route is gone.
+    expect(find.byType(WorkflowRunPage), findsOneWidget);
+    expect(sheetRoute.isActive, isFalse);
+    expect(find.byType(BottomSheet, skipOffstage: false), findsNothing);
+
+    // Back from the detail page returns to the chat — the sheet must not
+    // reappear from under it.
+    await tester.pageBack();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(find.byType(WorkflowRunPage), findsNothing);
+    expect(find.byType(BottomSheet, skipOffstage: false), findsNothing);
+  });
+
+  testWidgets('clicking an ended workflow row opens the detail page',
+      (tester) async {
+    final gateway = FakeChatGateway()
+      ..snapshotExtra = {
+        // A live bash work keeps the management entry visible; the ended
+        // workflow run itself must not be what opens the sheet.
+        'backgroundWorks': [
+          {
+            'workId': 'bash_1',
+            'kind': 'bash',
+            'title': 'flutter test',
+            'status': 'running',
+            'cancellable': true,
+          },
+        ],
+        'workflowRuns': {
+          'revision': 2,
+          'runs': [
+            {
+              'runId': 'wf_done',
+              'toolCallId': 'call_done',
+              'status': 'completed',
+            },
+          ],
+        },
+      };
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '跑工作流'},
+      {
+        'rowId': 2,
+        'kind': 'toolCall',
+        'toolName': 'CreateWorkflow',
+        'toolCallId': 'call_done',
+        'status': 'success',
+        'inputText': '{"name":"依赖审计收尾"}',
+      },
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await openSubagentSheet(tester);
+    // The chat tool card carries the same name — tap the sheet row.
+    await tester.tap(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.text('依赖审计收尾'),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(WorkflowRunPage), findsOneWidget);
+  });
+
+  testWidgets('ended workflow rows never keep the sheet alive', (tester) async {
+    final gateway = FakeChatGateway()
+      ..snapshotExtra = {
+        'backgroundWorks': [
+          {
+            'workId': 'bash_1',
+            'kind': 'bash',
+            'title': 'flutter test',
+            'status': 'running',
+            'cancellable': true,
+          },
+        ],
+        'workflowRuns': {
+          'revision': 2,
+          'runs': [
+            {
+              'runId': 'wf_done',
+              'status': 'completed',
+              'nodes': [
+                {'siteId': 's', 'ordinal': 0, 'phase': 'settled'},
+              ],
+            },
+          ],
+        },
+      };
+    await tester.pumpWidget(
+      wrap(ChatPage(
+        host: gateway,
+        sessionId: 's1',
+        title: 't',
+        turnFooterConfirmWindow: const Duration(milliseconds: 150),
+      )),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '跑工作流'},
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await openSubagentSheet(tester);
+    expect(
+      find.text(chatLabel('chat.subagentSheet.sectionEnded')),
+      findsOneWidget,
+    );
+
+    // Every running work goes terminal; the ended run stays mirrored.
+    gateway.state.applyFrame({
+      'toSeq': gateway.state.seq + 1,
+      'payload': {
+        'kind': 'deltas',
+        'deltas': [
+          {
+            'op': 'state.updated',
+            'patch': {
+              'backgroundWorks': [
+                {
+                  'workId': 'bash_1',
+                  'kind': 'bash',
+                  'title': 'flutter test',
+                  'status': 'completed',
+                  'endedAt': 1789279677999,
+                },
+              ],
+            },
+          },
+        ],
+      },
+    }, onGap: () => fail('unexpected gap'));
+    await tester.pump();
+    expect(find.text('运行中的后台任务'), findsOneWidget);
+
+    // The ended rows do not hold the sheet: the running-count gate closes
+    // it after the confirm window.
+    await tester.pump(const Duration(milliseconds: 150));
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(find.text('运行中的后台任务'), findsNothing);
+    expect(gateway.state.workflowRuns.views.single.status, 'completed');
+  });
+
+  testWidgets('workflow row ✕ still cancels the work without opening details',
+      (tester) async {
+    final gateway = FakeChatGateway()
+      ..snapshotExtra = {
+        'backgroundWorks': [
+          {
+            'workId': 'wf_live',
+            'kind': 'workflow',
+            'title': '审计依赖',
+            'status': 'running',
+            'cancellable': true,
+            'startedAt': 1789279676224,
+          },
+        ],
+        'workflowRuns': {
+          'revision': 1,
+          'runs': [
+            {'runId': 'wf_live', 'status': 'running'},
+          ],
+        },
+      };
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '跑工作流'},
+    ]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await openSubagentSheet(tester);
+    // The inner ✕ owns the tap (gesture-arena inner win) — no detail push.
+    await tester.tap(find.byTooltip('取消此后台任务'));
+    await tester.pump();
+
+    final call = gateway.calls
+        .where((c) => c.$1 == 'cancelBackgroundWork')
+        .toList()
+        .single;
+    expect(call.$2, ['s1', 'wf_live']);
+    expect(find.byType(WorkflowRunPage), findsNothing);
   });
 
   testWidgets('slash bar folds subagents in as @name entries', (tester) async {
