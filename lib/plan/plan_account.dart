@@ -117,6 +117,10 @@ class PlanController extends ChangeNotifier {
 
   String? _token;
   bool _loaded = false;
+
+  /// Set by [restoreToken]: an imported identity must win over any later
+  /// (or already in-flight) [_readIdentity] disk read.
+  bool _identityRestored = false;
   Future<void>? _identityLoad;
   bool _signedIn = false;
   bool _authExpired = false;
@@ -202,14 +206,20 @@ class PlanController extends ChangeNotifier {
   }
 
   Future<void> _readIdentity() async {
+    if (_disposed || _identityRestored) return;
     // The expiry memo rides the same boot path as the token so an empty
     // snapshot right after startup can already be classified. A failed
     // read silently degrades to no memory (never-throw contract).
+    DateTime? memo;
     try {
-      _memoExpiry = await _memo.readPlanExpiry();
+      memo = await _memo.readPlanExpiry();
     } catch (_) {
-      _memoExpiry = null;
+      memo = null;
     }
+    // A restore may have landed while the memo read was in flight: the
+    // imported identity owns the state now (memo stays null).
+    if (_disposed || _identityRestored) return;
+    _memoExpiry = memo;
     String? token;
     try {
       token = await _store.readToken();
@@ -220,7 +230,7 @@ class PlanController extends ChangeNotifier {
       // auth-required and a later sign-in could never repair the relay.
       token = null;
     }
-    if (_disposed) return;
+    if (_disposed || _identityRestored) return;
     if (token == null || token.isEmpty) {
       notifyListeners();
       return;
@@ -229,6 +239,33 @@ class PlanController extends ChangeNotifier {
     _signedIn = true;
     _accountLabel = planAccountLabel(token);
     notifyListeners();
+  }
+
+  /// Adopts an account token imported from an encrypted backup. Persists it
+  /// first — a failed write throws and leaves the in-memory state untouched
+  /// (the caller still restores the device list) — then flips the controller
+  /// signed-in without a network fetch. The stale snapshot/error are dropped
+  /// and the fetch gate reopened, so entering the plan page fetches this
+  /// account once. [_identityRestored] makes any later or in-flight
+  /// [_readIdentity] read yield, so an older disk value cannot overwrite the
+  /// import.
+  Future<void> restoreToken(String token) async {
+    if (_disposed) return;
+    await _store.writeToken(token);
+    if (_disposed) return;
+    _token = token;
+    _signedIn = true;
+    _authExpired = false;
+    _accountLabel = planAccountLabel(token);
+    _snapshot = PlanSnapshot.empty;
+    _error = null;
+    _memoExpiry = null;
+    _loaded = false;
+    _identityRestored = true;
+    notifyListeners();
+    // Same identity-switch rule as [signIn]: the imported account must not
+    // inherit the previous account's expiry memo.
+    await _clearMemo();
   }
 
   /// v0 login path: paste a zcode JWT. Returns false (and does nothing)
@@ -342,6 +379,7 @@ class PlanController extends ChangeNotifier {
     _oauthFailure = null;
     _snapshot = PlanSnapshot.empty;
     _memoExpiry = null;
+    _identityRestored = false;
     notifyListeners();
     await _store.clearToken();
     await _clearMemo();

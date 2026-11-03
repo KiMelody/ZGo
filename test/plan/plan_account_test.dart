@@ -36,18 +36,25 @@ class FakeTokenStore implements PlanTokenStore {
   /// Simulates an unreadable secure store (MissingPluginException et al).
   bool throwOnRead = false;
 
+  /// Simulates a failed secure-storage write.
+  bool throwOnWrite = false;
+
   @override
   Future<String?> readToken() async {
     reads++;
+    // Snapshot before parking: a read already under way must return the
+    // value it saw on disk even if a later write lands while suspended.
+    final current = token;
     final gate = readGate;
     if (gate != null) await gate.future;
     if (throwOnRead) throw StateError('secure storage unavailable');
-    return token;
+    return current;
   }
 
   @override
   Future<void> writeToken(String value) async {
     writes++;
+    if (throwOnWrite) throw StateError('secure storage unavailable');
     token = value;
   }
 
@@ -518,6 +525,109 @@ void main() {
       expect(c.authExpired, isFalse);
       expect(c.error, isNull);
       expect(c.snapshot.buckets, isEmpty);
+    });
+
+    group('restoreToken', () {
+      test('persists the imported token and adopts it without any fetch',
+          () async {
+        final store = FakeTokenStore();
+        final memo = FakePlanMemo()
+          ..expiry = kNow.subtract(const Duration(days: 1));
+        final api = FakeApi();
+        final c = PlanController(
+            store: store, api: api.build(), memo: memo, now: () => kNow);
+
+        await c.restoreToken(makeJwt(userId: 'u-imported'));
+
+        expect(store.writes, 1);
+        expect(store.token, makeJwt(userId: 'u-imported'));
+        expect(c.token, makeJwt(userId: 'u-imported'));
+        expect(c.signedIn, isTrue);
+        expect(c.authExpired, isFalse);
+        expect(c.accountLabel, 'u-imported');
+        // The previous account's expiry memo is dropped, no data retained.
+        expect(memo.clears, 1);
+        expect(c.expiredOn, isNull);
+        expect(api.requests, isEmpty);
+      });
+
+      test('ensureLoaded after a restore fetches the imported account',
+          () async {
+        final store = FakeTokenStore();
+        final api = FakeApi();
+        final c = PlanController(store: store, api: api.build());
+
+        await c.restoreToken(makeJwt());
+        // The import itself never hits the network.
+        expect(api.requests, isEmpty);
+
+        // Entering the plan page is the deferred fetch design §1.3 promises.
+        await c.ensureLoaded();
+
+        expect(api.requests, hasLength(1));
+        expect(c.signedIn, isTrue);
+      });
+
+      test('a later loadIdentity is a no-op (disk read skipped)', () async {
+        final store = FakeTokenStore()..token = makeJwt(userId: 'u-disk');
+        final c = PlanController(store: store, api: FakeApi().build());
+
+        await c.restoreToken(makeJwt(userId: 'u-imported'));
+        await c.loadIdentity();
+
+        expect(store.reads, 0);
+        expect(c.token, makeJwt(userId: 'u-imported'));
+        expect(c.accountLabel, 'u-imported');
+      });
+
+      test('an in-flight loadIdentity cannot overwrite the import', () async {
+        final store = FakeTokenStore()..token = makeJwt(userId: 'u-disk');
+        final gate = Completer<void>();
+        store.readGate = gate;
+        final api = FakeApi();
+        final c = PlanController(store: store, api: api.build());
+
+        final boot = c.loadIdentity();
+        // Let the boot read reach the parked readToken call (it already
+        // snapshotted the old disk value).
+        await Future<void>.delayed(Duration.zero);
+        await c.restoreToken(makeJwt(userId: 'u-imported'));
+        gate.complete();
+        await boot;
+
+        expect(c.token, makeJwt(userId: 'u-imported'));
+        expect(c.accountLabel, 'u-imported');
+        expect(store.token, makeJwt(userId: 'u-imported'));
+        expect(api.requests, isEmpty);
+      });
+
+      test('a failed store write throws and leaves the memory state untouched',
+          () async {
+        final store = FakeTokenStore()..throwOnWrite = true;
+        final c = PlanController(store: store, api: FakeApi().build());
+
+        await expectLater(
+            c.restoreToken(makeJwt()), throwsA(isA<StateError>()));
+
+        expect(c.signedIn, isFalse);
+        expect(c.token, isNull);
+        expect(c.accountLabel, isNull);
+      });
+
+      test('signOut re-arms the disk identity path', () async {
+        final store = FakeTokenStore();
+        final c = PlanController(store: store, api: FakeApi().build());
+
+        await c.restoreToken(makeJwt(userId: 'u-imported'));
+        await c.signOut();
+        // A different process (or a later sign-in) writes to disk; the boot
+        // read must be able to pick it up again after signOut.
+        store.token = makeJwt(userId: 'u-disk');
+        await c.loadIdentity();
+
+        expect(c.accountLabel, 'u-disk');
+        expect(c.signedIn, isTrue);
+      });
     });
 
     test('dispose is idempotent and late fetches are dropped', () async {

@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -6,11 +9,13 @@ import '../notifications/keepalive_controller.dart';
 import '../plan/plan_account.dart';
 import '../plan/remote_device_api.dart';
 import '../protocol/connection_params.dart';
+import '../state/device_backup.dart';
 import '../state/device_session.dart';
 import '../state/device_store.dart';
 import '../state/quota_watch.dart';
 import '../state/scheduled_store.dart';
 import '../widgets/home_widget_bridge.dart';
+import 'device_backup_io.dart';
 import 'qr_scan_page.dart';
 import 'remote_page.dart';
 import 'scheduled_page.dart';
@@ -43,6 +48,13 @@ class DevicesPage extends StatefulWidget {
   /// Cloud device-directory client (task 10-22). Null on hosts without the
   /// feature — the cloud section is then never rendered.
   final RemoteDeviceApi? cloudApi;
+
+  /// Backup delivery seams (system save / share sheet / file picker).
+  /// Null falls back to the real platform implementations; widget tests
+  /// inject fakes so no plugin channel is touched.
+  final SaveBackupFile? saveBackupFile;
+  final ShareBackupFile? shareBackupFile;
+  final ReadBackupFile? readBackupFile;
   const DevicesPage({
     super.key,
     required this.store,
@@ -54,6 +66,9 @@ class DevicesPage extends StatefulWidget {
     this.quotaWatch,
     this.plan,
     this.cloudApi,
+    this.saveBackupFile,
+    this.shareBackupFile,
+    this.readBackupFile,
   });
 
   @override
@@ -445,11 +460,288 @@ class _DevicesPageState extends State<DevicesPage>
         mode: LaunchMode.externalApplication);
   }
 
-  void _showExport() async {
-    await Clipboard.setData(ClipboardData(text: widget.store.exportJson()));
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(tr(context, 'devices.export.done'))),
+  /// Local-date file name for the encrypted envelope.
+  String _backupFileName() {
+    final now = DateTime.now();
+    final month = now.month.toString().padLeft(2, '0');
+    final day = now.day.toString().padLeft(2, '0');
+    return 'zgo-backup-${now.year}-$month-$day.zgobak';
+  }
+
+  /// Maps a codec failure kind to its user-facing copy. `decryptFailed`
+  /// deliberately covers a wrong passphrase and a tampered file alike.
+  String _backupErrorKey(String? kind) => switch (kind) {
+        'passphraseRequired' => 'devices.import.passphraseNeeded',
+        'decryptFailed' || 'corrupt' => 'devices.import.badPassphrase',
+        'unsupportedVersion' => 'devices.import.unsupported',
+        _ => 'devices.import.notBackup',
+      };
+
+  Future<void> _showExport() async {
+    // A random passphrase is pre-filled so the common path is one tap; the
+    // user may overwrite it with anything of their own (≥8 chars). The
+    // confirm field follows the passphrase until it is edited by hand.
+    final generated = generateBackupPassphrase();
+    final passController = TextEditingController(text: generated);
+    final confirmController = TextEditingController(text: generated);
+    String? syncedPass = generated;
+    final signedOut = widget.plan?.signedIn != true;
+    final fileChannel = deviceBackupFileChannelAvailable;
+    var busy = false;
+    String? errorKey;
+
+    String? validationError() {
+      final pass = passController.text;
+      if (pass.isNotEmpty && pass.length < 8) {
+        return 'devices.export.tooShort';
+      }
+      if (confirmController.text.isNotEmpty &&
+          confirmController.text != pass) {
+        return 'devices.export.mismatch';
+      }
+      return null;
+    }
+
+    bool canSubmit() {
+      final pass = passController.text;
+      return !busy && pass.length >= 8 && confirmController.text == pass;
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (dialogCtx, setDialogState) {
+          Future<void> run(_ExportTarget target) async {
+            final pass = passController.text;
+            if (pass.length < 8) {
+              setDialogState(() => errorKey = 'devices.export.tooShort');
+              return;
+            }
+            if (confirmController.text != pass) {
+              setDialogState(() => errorKey = 'devices.export.mismatch');
+              return;
+            }
+            setDialogState(() {
+              busy = true;
+              errorKey = null;
+            });
+            final Map<String, Object?> result;
+            try {
+              result = await compute(encodeBackupJob, {
+                'devices':
+                    widget.store.devices.map((d) => d.toJson()).toList(),
+                'token': widget.plan?.token,
+                'passphrase': pass,
+              });
+            } catch (_) {
+              // Isolate spawn failure (never a codec error — the job maps
+              // those to `ok: false`): surface it instead of a dead button.
+              if (dialogCtx.mounted) {
+                setDialogState(() {
+                  busy = false;
+                  errorKey = 'devices.export.failed';
+                });
+              }
+              return;
+            }
+            if (!dialogCtx.mounted) return;
+            if (result['ok'] != true) {
+              setDialogState(() {
+                busy = false;
+                // The job only reports non-BackupException failures here
+                // (encode cannot fail on user input), so the import-specific
+                // "wrong passphrase" copy would be misleading.
+                errorKey = 'devices.export.failed';
+              });
+              return;
+            }
+            final blob = result['blob'] as String;
+            final bytes = utf8.encode(blob);
+            final fileName = _backupFileName();
+            try {
+              switch (target) {
+                case _ExportTarget.save:
+                  final save = widget.saveBackupFile ?? defaultSaveBackupFile;
+                  final saved = await save(fileName, bytes);
+                  if (!saved) {
+                    if (dialogCtx.mounted) {
+                      setDialogState(() => busy = false);
+                    }
+                    return;
+                  }
+                case _ExportTarget.share:
+                  final share =
+                      widget.shareBackupFile ?? defaultShareBackupFile;
+                  await share(fileName, bytes);
+                case _ExportTarget.copy:
+                  await Clipboard.setData(ClipboardData(text: blob));
+              }
+            } catch (_) {
+              // Plugin failure or a missing channel: keep the dialog open
+              // so the user can retry without re-entering the passphrase.
+              if (dialogCtx.mounted) {
+                setDialogState(() {
+                  busy = false;
+                  errorKey = 'devices.export.failed';
+                });
+              }
+              return;
+            }
+            if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
+            if (!mounted) return;
+            final doneKey = switch (target) {
+              _ExportTarget.save => 'devices.export.saved',
+              _ExportTarget.share => null,
+              _ExportTarget.copy => 'devices.export.copied',
+            };
+            if (doneKey != null) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(tr(context, doneKey))),
+              );
+            }
+          }
+
+          final liveError = errorKey ?? validationError();
+          return AlertDialog(
+            title: Text(tr(dialogCtx, 'devices.export.title')),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(tr(dialogCtx, 'devices.export.note'),
+                      style: ZType.body),
+                  const SizedBox(height: 8),
+                  Text(
+                    tr(dialogCtx, 'devices.export.generated'),
+                    style: ZType.sub.copyWith(color: ZInk.faint(dialogCtx)),
+                  ),
+                  if (signedOut) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      tr(dialogCtx, 'devices.export.signedOut'),
+                      style:
+                          ZType.sub.copyWith(color: ZInk.faint(dialogCtx)),
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  TextField(
+                    key: const Key('backup-export-passphrase'),
+                    controller: passController,
+                    enabled: !busy,
+                    // Visible on purpose: the user must be able to record the
+                    // generated value before it leaves this dialog.
+                    obscureText: false,
+                    enableSuggestions: false,
+                    autocorrect: false,
+                    onChanged: (value) {
+                      if (syncedPass != null &&
+                          confirmController.text == syncedPass) {
+                        confirmController.text = value;
+                        syncedPass = value;
+                      }
+                      setDialogState(() => errorKey = null);
+                    },
+                    decoration: InputDecoration(
+                      labelText: tr(dialogCtx, 'devices.export.passphrase'),
+                      suffixIcon: IconButton(
+                        key: const Key('backup-export-copy-passphrase'),
+                        tooltip:
+                            tr(dialogCtx, 'devices.export.copyPassphrase'),
+                        icon: const Icon(Icons.copy_outlined, size: 18),
+                        onPressed: busy
+                            ? null
+                            : () async {
+                                await Clipboard.setData(
+                                    ClipboardData(text: passController.text));
+                                if (!dialogCtx.mounted) return;
+                                ScaffoldMessenger.of(dialogCtx).showSnackBar(
+                                  SnackBar(
+                                    content: Text(tr(dialogCtx,
+                                        'devices.export.passphraseCopied')),
+                                  ),
+                                );
+                              },
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    key: const Key('backup-export-confirm'),
+                    controller: confirmController,
+                    enabled: !busy,
+                    obscureText: true,
+                    onChanged: (_) {
+                      // Manual edit wins: the passphrase stops driving it.
+                      syncedPass = null;
+                      setDialogState(() => errorKey = null);
+                    },
+                    decoration: InputDecoration(
+                      labelText: tr(dialogCtx, 'devices.export.confirm'),
+                    ),
+                  ),
+                  if (liveError != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      tr(dialogCtx, liveError),
+                      key: const Key('backup-export-error'),
+                      style: ZType.sub
+                          .copyWith(color: ZInk.dangerTone(dialogCtx)),
+                    ),
+                  ],
+                  if (busy) ...[
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            tr(dialogCtx, 'devices.export.busy'),
+                            style: ZType.sub
+                                .copyWith(color: ZInk.faint(dialogCtx)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed:
+                    busy ? null : () => Navigator.of(dialogCtx).pop(),
+                child: Text(tr(dialogCtx, 'common.cancel')),
+              ),
+              if (fileChannel) ...[
+                TextButton(
+                  key: const Key('backup-export-share'),
+                  onPressed:
+                      canSubmit() ? () => run(_ExportTarget.share) : null,
+                  child: Text(tr(dialogCtx, 'devices.export.share')),
+                ),
+                FilledButton(
+                  key: const Key('backup-export-save'),
+                  onPressed:
+                      canSubmit() ? () => run(_ExportTarget.save) : null,
+                  child: Text(tr(dialogCtx, 'devices.export.save')),
+                ),
+              ] else
+                FilledButton(
+                  key: const Key('backup-export-copy'),
+                  onPressed:
+                      canSubmit() ? () => run(_ExportTarget.copy) : null,
+                  child: Text(tr(dialogCtx, 'devices.export.copy')),
+                ),
+            ],
+          );
+        },
+      ),
     );
   }
 
@@ -464,39 +756,253 @@ class _DevicesPageState extends State<DevicesPage>
   }
 
   Future<void> _showImport() async {
-    final controller = TextEditingController();
-    final raw = await showDialog<String>(
+    final rawController = TextEditingController();
+    final passController = TextEditingController();
+    final fileChannel = deviceBackupFileChannelAvailable;
+    var busy = false;
+    var needsPassphrase = false;
+    String? errorKey;
+
+    await showDialog<void>(
       context: context,
-      builder: (c) => AlertDialog(
-        title: Text(tr(context, 'devices.import.title')),
-        content: TextField(
-          controller: controller,
-          maxLines: 5,
-          minLines: 3,
-          style: ZType.sub.copyWith(fontFamily: 'monospace'),
-          decoration: InputDecoration(hintText: tr(context, 'devices.import.hint')),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(c),
-              child: Text(tr(context, 'devices.add.cancel'))),
-          FilledButton(
-              onPressed: () => Navigator.pop(c, controller.text),
-              child: Text(tr(context, 'devices.import.confirm'))),
-        ],
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (dialogCtx, setDialogState) {
+          void syncNeedsPassphrase() {
+            var needs = false;
+            final raw = rawController.text.trim();
+            if (raw.isNotEmpty) {
+              try {
+                needs = backupNeedsPassphrase(raw);
+              } catch (_) {
+                needs = false;
+              }
+            }
+            setDialogState(() {
+              needsPassphrase = needs;
+              if (!needs) passController.clear();
+              errorKey = null;
+            });
+          }
+
+          Future<void> run() async {
+            final raw = rawController.text.trim();
+            if (raw.isEmpty) {
+              setDialogState(() => errorKey = 'devices.import.invalid');
+              return;
+            }
+            bool needs;
+            try {
+              needs = backupNeedsPassphrase(raw);
+            } on BackupException catch (e) {
+              // Surface the real kind (a newer version's backup, or a JSON
+              // that is not a ZGo backup) instead of the generic message.
+              setDialogState(() => errorKey = _backupErrorKey(e.kind.name));
+              return;
+            } catch (_) {
+              setDialogState(() => errorKey = 'devices.import.invalid');
+              return;
+            }
+            final pass = passController.text;
+            if (needs && pass.isEmpty) {
+              setDialogState(
+                  () => errorKey = 'devices.import.passphraseEmpty');
+              return;
+            }
+            setDialogState(() {
+              busy = true;
+              errorKey = null;
+            });
+            final Map<String, Object?> result;
+            try {
+              result = await compute(decodeBackupJob, {
+                'raw': raw,
+                'passphrase': needs ? pass : null,
+              });
+            } catch (_) {
+              if (dialogCtx.mounted) {
+                setDialogState(() {
+                  busy = false;
+                  errorKey = 'devices.import.invalid';
+                });
+              }
+              return;
+            }
+            if (!dialogCtx.mounted) return;
+            if (result['ok'] != true) {
+              setDialogState(() {
+                busy = false;
+                errorKey = _backupErrorKey(result['kind'] as String?);
+              });
+              return;
+            }
+            final int added;
+            try {
+              added = await widget.store
+                  .importJson(jsonEncode(result['devices']));
+            } catch (_) {
+              if (dialogCtx.mounted) {
+                setDialogState(() {
+                  busy = false;
+                  errorKey = 'devices.import.invalid';
+                });
+              }
+              return;
+            }
+            String? credentialKey;
+            final token = result['token'] as String?;
+            final plan = widget.plan;
+            if (token != null && plan != null) {
+              final expiry = jwtExpiry(token);
+              try {
+                await plan.restoreToken(token);
+                credentialKey =
+                    expiry != null && expiry.isBefore(DateTime.now())
+                        ? 'devices.import.credentialsExpired'
+                        : 'devices.import.credentialsRestored';
+              } catch (_) {
+                // The device list is already imported; only the sign-in
+                // hand-off failed, so report that separately.
+                credentialKey = 'devices.import.credentialsFailed';
+              }
+            }
+            if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
+            if (!mounted) return;
+            ScaffoldMessenger.of(context)
+              ..hideCurrentSnackBar()
+              ..showSnackBar(
+                SnackBar(
+                  content: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(trP(
+                          context, 'devices.import.done', ['$added'])),
+                      if (credentialKey != null)
+                        Text(tr(context, credentialKey)),
+                    ],
+                  ),
+                ),
+              );
+          }
+
+          return AlertDialog(
+            title: Text(tr(dialogCtx, 'devices.import.title')),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (fileChannel)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        key: const Key('backup-import-file'),
+                        onPressed: busy
+                            ? null
+                            : () async {
+                                final read = widget.readBackupFile ??
+                                    defaultReadBackupFile;
+                                String? text;
+                                try {
+                                  text = await read();
+                                } catch (_) {
+                                  // Cancelling returns null; a thrown read is
+                                  // a real failure the user must see.
+                                  if (dialogCtx.mounted) {
+                                    setDialogState(() => errorKey =
+                                        'devices.import.pickFailed');
+                                  }
+                                  return;
+                                }
+                                if (text == null || !dialogCtx.mounted) {
+                                  return;
+                                }
+                                rawController.text = text;
+                                syncNeedsPassphrase();
+                              },
+                        icon:
+                            const Icon(Icons.folder_open_outlined, size: 18),
+                        label: Text(tr(dialogCtx, 'devices.import.file')),
+                      ),
+                    ),
+                  TextField(
+                    key: const Key('backup-import-raw'),
+                    controller: rawController,
+                    enabled: !busy,
+                    minLines: 3,
+                    maxLines: 6,
+                    style: ZType.sub.copyWith(fontFamily: 'monospace'),
+                    decoration: InputDecoration(
+                      hintText: tr(dialogCtx, 'devices.import.hint'),
+                    ),
+                    onChanged: (_) => syncNeedsPassphrase(),
+                  ),
+                  if (needsPassphrase) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      tr(dialogCtx, 'devices.import.passphraseNeeded'),
+                      style:
+                          ZType.sub.copyWith(color: ZInk.faint(dialogCtx)),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      key: const Key('backup-import-passphrase'),
+                      controller: passController,
+                      enabled: !busy,
+                      obscureText: true,
+                      decoration: InputDecoration(
+                        labelText:
+                            tr(dialogCtx, 'devices.import.passphrase'),
+                      ),
+                    ),
+                  ],
+                  if (errorKey != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      tr(dialogCtx, errorKey!),
+                      key: const Key('backup-import-error'),
+                      style: ZType.sub
+                          .copyWith(color: ZInk.dangerTone(dialogCtx)),
+                    ),
+                  ],
+                  if (busy) ...[
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            tr(dialogCtx, 'devices.import.busy'),
+                            style: ZType.sub
+                                .copyWith(color: ZInk.faint(dialogCtx)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: busy ? null : () => Navigator.of(dialogCtx).pop(),
+                child: Text(tr(dialogCtx, 'common.cancel')),
+              ),
+              FilledButton(
+                key: const Key('backup-import-confirm'),
+                onPressed: busy ? null : run,
+                child: Text(tr(dialogCtx, 'devices.import.confirm')),
+              ),
+            ],
+          );
+        },
       ),
     );
-    if (raw == null || raw.trim().isEmpty) return;
-    try {
-      final n = await widget.store.importJson(raw);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(trP(context, 'devices.import.done', ['$n']))));
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(tr(context, 'devices.import.invalid'))));
-    }
   }
 
   @override
@@ -1106,3 +1612,7 @@ class _DevicesPageState extends State<DevicesPage>
     );
   }
 }
+
+/// Export delivery picked in the passphrase dialog: file save, system share
+/// sheet, or the clipboard fallback for platforms without either plugin.
+enum _ExportTarget { save, share, copy }

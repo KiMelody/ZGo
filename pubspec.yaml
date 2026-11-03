@@ -75,6 +75,17 @@ dependencies:
   # imported one file at a time — never `all.dart` — so tree-shaking keeps
   # unregistered grammars out of the build (see lib/ui/chat/source_highlight.dart).
   re_highlight: '>=0.0.3 <0.1.0'
+  # Encrypted device backup (lib/state/device_backup.dart): pure-Dart
+  # PBKDF2-HMAC-SHA256 + AES-256-GCM. No platform channels, so every target
+  # (including ohos) uses the same implementation.
+  pointycastle: '>=4.0.0 <5.0.0'
+  # Backup delivery through the system share sheet (device backup task).
+  # Android exports via the plugin's bundled FileProvider; the ohos target
+  # has no implementation and falls back to the clipboard path in the UI.
+  # Pinned to 12.x: 13.x pulls win32 ^6, which conflicts with
+  # flutter_secure_storage 9.x's win32 ^5 (see pub get resolution); the
+  # SharePlus.instance.share(ShareParams) API this task uses predates 13.
+  share_plus: '>=12.0.2 <13.0.0'
 
 dev_dependencies:
   flutter_test:

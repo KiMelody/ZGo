@@ -243,7 +243,9 @@ class DeviceStore extends ChangeNotifier {
     await _save();
   }
 
-  /// Backup/export envelope.
+  /// Backup/export envelope (legacy v1 plaintext shape). Production exports
+  /// go through `device_backup.dart` (v2, encrypted with the account token);
+  /// this stays as the v1 fixture/format reference.
   String exportJson() => jsonEncode({
         'app': 'zgo',
         'format': 'devices',
