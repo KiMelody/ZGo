@@ -166,6 +166,15 @@ flutter build apk --release       # the default channel
 flutter build ipa                 # requires a Mac
 ```
 
+> ⚠️ Never build a release with `--no-pub`. If `.flutter-plugins-dependencies`
+> is missing (a failed `flutter pub get`), Gradle compiles no plugin projects
+> and the APK ships as an "empty shell" whose platform channels all fail at
+> runtime. Before distributing any APK, run the artifact gate:
+>
+> ```bash
+> python3 tool/verify_apk.py build/app/outputs/flutter-apk/app-release.apk
+> ```
+
 The update check polls GitHub Releases and opens the browser to
 download. No build ships in-app APK download or install logic.
 

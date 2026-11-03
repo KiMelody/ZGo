@@ -78,6 +78,20 @@ jobs:
       - name: Build AAB (play channel)
         run: flutter build appbundle --release --dart-define=APP_CHANNEL=play
 
+      # 2026-11-02: a local release build had no `.flutter-plugins-dependencies`
+      # (pub get never succeeded) and ran with --no-pub, so Gradle compiled no
+      # plugin projects — the APK shipped as an "empty shell" whose channels
+      # all fail at runtime. This gate must stay AFTER the builds and BEFORE
+      # every upload (Play, artifact archives, and the Release assets consumed
+      # by the `release` job): a failed check has to block distribution.
+      - name: Verify artifacts contain Flutter plugins (empty-shell gate)
+        run: |
+          python3 tool/verify_apk.py \
+            ZGo-${{ github.ref_name }}-universal.apk \
+            ZGo-${{ github.ref_name }}-arm64.apk \
+            ZGo-${{ github.ref_name }}-arm32.apk \
+            build/app/outputs/bundle/release/app-release.aab
+
       - name: Detect optional credentials
         id: creds
         run: |

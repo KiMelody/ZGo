@@ -31,6 +31,10 @@ const _zh = {
   'app.title': 'ZGo',
   'devices.empty.title': '还没有设备',
   'devices.empty.body': '在桌面 ZCode 中打开「远程控制」，\n扫码或粘贴链接即可添加设备',
+  'devices.loadFailed.title': '应用组件加载失败',
+  'devices.loadFailed.body':
+      '偏好存储不可用，设备列表和设置无法保存。\n这通常是安装包不完整导致的，请重新安装官方安装包。',
+  'devices.loadFailed.retry': '重试',
   'devices.add': '添加设备',
   'devices.add.scan': '扫码添加',
   'devices.add.scanHint': '对准桌面端 ZCode 远程控制二维码',
@@ -1312,6 +1316,12 @@ const _en = {
   'devices.empty.title': 'No devices yet',
   'devices.empty.body':
       'Open "Remote Control" in ZCode desktop,\nthen scan or paste the link',
+  'devices.loadFailed.title': 'App components failed to load',
+  'devices.loadFailed.body':
+      'Preference storage is unavailable, so devices and settings cannot be '
+      'saved.\nThis is usually caused by an incomplete installation package — '
+      'reinstall the official package.',
+  'devices.loadFailed.retry': 'Retry',
   'devices.add': 'Add device',
   'devices.add.scan': 'Scan QR code',
   'devices.add.scanHint': 'Aim at the ZCode remote-control QR code',

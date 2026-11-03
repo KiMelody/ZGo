@@ -92,8 +92,17 @@ enum ThemeModeHint { dark, light }
 
 class DeviceStore extends ChangeNotifier {
   static const _key = 'zgo_devices_v1';
+
+  /// SharedPreferences factory. Injectable so tests can simulate a missing
+  /// plugin channel (an "empty shell" build throws on getInstance).
+  final Future<SharedPreferences> Function() _prefs;
+
   final List<Device> _devices = [];
   bool _loaded = false;
+  String? _loadError;
+
+  DeviceStore({Future<SharedPreferences> Function()? prefsProvider})
+      : _prefs = prefsProvider ?? SharedPreferences.getInstance;
 
   /// Devices sorted for display: pinned first, then [Device.sortOrder].
   List<Device> get devices {
@@ -109,25 +118,38 @@ class DeviceStore extends ChangeNotifier {
 
   bool get loaded => _loaded;
 
+  /// Non-null when the last [load] failed — e.g. the shared-preferences
+  /// plugin channel is missing in an "empty shell" build. Corrupt stored
+  /// JSON does NOT set this: it keeps the old "start empty" behavior.
+  String? get loadError => _loadError;
+
   Future<void> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_key);
-    if (raw != null && raw.isNotEmpty) {
-      try {
-        final list = jsonDecode(raw) as List<dynamic>;
-        _devices
-          ..clear()
-          ..addAll(list
-              .whereType<Map>()
-              .map((e) => Device.fromJson(Map<String, dynamic>.from(e)))
-              .where((d) => d.url.isNotEmpty));
-        _backfillSortOrders();
-      } catch (_) {
-        // Corrupt storage should not crash the app; start empty.
-      }
-    }
-    _loaded = true;
+    _loaded = false;
+    _loadError = null;
     notifyListeners();
+    try {
+      final prefs = await _prefs();
+      final raw = prefs.getString(_key);
+      if (raw != null && raw.isNotEmpty) {
+        try {
+          final list = jsonDecode(raw) as List<dynamic>;
+          _devices
+            ..clear()
+            ..addAll(list
+                .whereType<Map>()
+                .map((e) => Device.fromJson(Map<String, dynamic>.from(e)))
+                .where((d) => d.url.isNotEmpty));
+          _backfillSortOrders();
+        } catch (_) {
+          // Corrupt storage should not crash the app; start empty.
+        }
+      }
+    } catch (e) {
+      _loadError = e.toString();
+    } finally {
+      _loaded = true;
+      notifyListeners();
+    }
   }
 
   /// Old backups lack sortOrder — assign contiguous indices once.
@@ -151,7 +173,7 @@ class DeviceStore extends ChangeNotifier {
   }
 
   Future<void> _save() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await _prefs();
     await prefs.setString(
         _key, jsonEncode(_devices.map((d) => d.toJson()).toList()));
   }

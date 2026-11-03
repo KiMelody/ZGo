@@ -536,10 +536,17 @@ class _DevicesPageState extends State<DevicesPage>
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showAddSheet,
-        icon: const Icon(Icons.add),
-        label: Text(tr(context, 'devices.add')),
+      // Hidden when the store failed to load: nothing can be persisted, so
+      // adding a device would only produce a broken card.
+      floatingActionButton: AnimatedBuilder(
+        animation: widget.store,
+        builder: (context, _) => widget.store.loadError != null
+            ? const SizedBox.shrink()
+            : FloatingActionButton.extended(
+                onPressed: _showAddSheet,
+                icon: const Icon(Icons.add),
+                label: Text(tr(context, 'devices.add')),
+              ),
       ),
       body: AnimatedBuilder(
         animation: Listenable.merge([widget.store, widget.hub, widget.ui]),
@@ -547,6 +554,9 @@ class _DevicesPageState extends State<DevicesPage>
           final devices = widget.store.devices;
           if (!widget.store.loaded) {
             return const Center(child: CircularProgressIndicator());
+          }
+          if (widget.store.loadError != null) {
+            return _loadFailedState(context);
           }
           if (devices.isEmpty) return _emptyState(context);
           return RefreshIndicator(
@@ -602,6 +612,51 @@ class _DevicesPageState extends State<DevicesPage>
     if (!mounted) return;
     _syncConnections();
     _syncHomeWidget();
+  }
+
+  /// Failure state for an unreachable preference store (an "empty shell"
+  /// build lacks every plugin channel): devices and settings cannot be
+  /// loaded or saved, so the retry is the only action that makes sense.
+  Widget _loadFailedState(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(ZSpacing.emptyState),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
+                color: ZInk.dangerTone(context).withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(ZRadius.field),
+              ),
+              child: Icon(Icons.error_outline,
+                  size: 36, color: ZInk.dangerTone(context)),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              tr(context, 'devices.loadFailed.title'),
+              textAlign: TextAlign.center,
+              style: ZType.title.copyWith(color: ZInk.solid(context)),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              tr(context, 'devices.loadFailed.body'),
+              textAlign: TextAlign.center,
+              style: ZType.body.copyWith(color: ZInk.faint(context)),
+            ),
+            const SizedBox(height: 20),
+            FilledButton(
+              onPressed: () async {
+                await widget.store.load();
+              },
+              child: Text(tr(context, 'devices.loadFailed.retry')),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   /// Empty state, kept inside a scrollable so the pull gesture still reaches
