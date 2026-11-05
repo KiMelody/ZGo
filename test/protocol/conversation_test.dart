@@ -2137,6 +2137,351 @@ void main() {
     });
   });
 
+  group('contentChangeSeq: wire-content change detection (11-04 R2)', () {
+    late ConversationState state;
+
+    setUp(() {
+      state = ConversationState();
+    });
+
+    void applyDeltas(List<Map<String, dynamic>> deltas) {
+      state.applyFrame({
+        'payload': {'kind': 'deltas', 'deltas': deltas},
+        'fromSeq': state.seq,
+        'toSeq': state.seq + 1,
+      }, onGap: () => fail('unexpected gap'));
+    }
+
+    test('every snapshot counts: the resync silence window is reset by the '
+        'snapshot it returns', () {
+      expect(state.contentChangeSeq, 0);
+      _injectSnapshot(state, seq: 1);
+      expect(state.contentChangeSeq, 1);
+      // Identical content, new authoritative frame: still a content signal
+      // (design §3.1 "_applySnapshot 恒计").
+      _injectSnapshot(state, seq: 2);
+      expect(state.contentChangeSeq, 2);
+    });
+
+    test('row.upserted with a fresh instance but identical content (new '
+        'updatedAt only) does not count; the new face passes through', () {
+      final progress = {
+        'fraction': 0.25,
+        'total': 8,
+        'message': 'Reading files',
+        'updatedAt': 1000,
+      };
+      final preview = {
+        'text': 'line 1\nline 2',
+        'fullText': 'full output',
+        'totalLines': 42,
+        'totalBytes': 4096,
+        'linesEstimated': false,
+      };
+      _injectSnapshot(state, rows: [
+        {
+          'rowId': 1,
+          'kind': 'toolCall',
+          'status': 'running',
+          'progress': progress,
+          'outputPreview': preview,
+        },
+      ]);
+      final baseline = state.contentChangeSeq;
+
+      applyDeltas([
+        {
+          'op': 'row.upserted',
+          'row': {
+            'rowId': 1,
+            'kind': 'toolCall',
+            'status': 'running',
+            'progress': {...progress, 'updatedAt': 2000},
+            'outputPreview': {...preview},
+          },
+        },
+      ]);
+
+      expect(state.contentChangeSeq, baseline,
+          reason: 'field fingerprint: updatedAt is excluded, so a decoded '
+              'fresh instance with the same content is a no-op');
+      // Protocol stays a pure data projection: both maps land verbatim.
+      expect(state.rows.single['progress'], {...progress, 'updatedAt': 2000});
+      expect(state.rows.single['outputPreview'], preview);
+    });
+
+    test('every fingerprinted field counts when it moves', () {
+      Map<String, dynamic> base() => {
+        'rowId': 1,
+        'kind': 'toolCall',
+        'status': 'running',
+        'state': 'streaming',
+        'text': 'text',
+        'inputText': 'input',
+        'output': {'text': 'out'},
+        'summaryText': 'summary',
+        'error': {'message': 'boom'},
+        'progress': {'fraction': 0.1, 'total': 5, 'message': 'm'},
+        'outputPreview': {'text': 'p', 'totalLines': 3, 'totalBytes': 30},
+      };
+      final variants = <(String, Map<String, dynamic> Function())>[
+        ('status', () => {...base(), 'status': 'success'}),
+        ('state', () => {...base(), 'state': 'settled'}),
+        ('text', () => {...base(), 'text': 'text changed'}),
+        ('inputText', () => {...base(), 'inputText': 'input changed'}),
+        (
+          'output.text',
+          () => {
+            ...base(),
+            'output': {'text': 'out changed'},
+          },
+        ),
+        ('summaryText', () => {...base(), 'summaryText': 's2'}),
+        (
+          'error.message',
+          () => {
+            ...base(),
+            'error': {'message': 'other'},
+          },
+        ),
+        (
+          'progress.fraction',
+          () => {
+            ...base(),
+            'progress': {'fraction': 0.9, 'total': 5, 'message': 'm'},
+          },
+        ),
+        (
+          'progress.total',
+          () => {
+            ...base(),
+            'progress': {'fraction': 0.1, 'total': 6, 'message': 'm'},
+          },
+        ),
+        (
+          'progress.message',
+          () => {
+            ...base(),
+            'progress': {'fraction': 0.1, 'total': 5, 'message': 'n'},
+          },
+        ),
+        (
+          'outputPreview.text',
+          () => {
+            ...base(),
+            'outputPreview': {'text': 'q', 'totalLines': 3, 'totalBytes': 30},
+          },
+        ),
+        (
+          'outputPreview.totalLines',
+          () => {
+            ...base(),
+            'outputPreview': {'text': 'p', 'totalLines': 4, 'totalBytes': 30},
+          },
+        ),
+        (
+          'outputPreview.totalBytes',
+          () => {
+            ...base(),
+            'outputPreview': {'text': 'p', 'totalLines': 3, 'totalBytes': 31},
+          },
+        ),
+      ];
+      for (final (field, build) in variants) {
+        final fresh = ConversationState();
+        _injectSnapshot(fresh, rows: [base()]);
+        final before = fresh.contentChangeSeq;
+        fresh.applyFrame({
+          'payload': {
+            'kind': 'deltas',
+            'deltas': [
+              {'op': 'row.upserted', 'row': build()},
+            ],
+          },
+          'fromSeq': fresh.seq,
+          'toSeq': fresh.seq + 1,
+        }, onGap: () => fail('unexpected gap'));
+        expect(fresh.contentChangeSeq, before + 1,
+            reason: '$field change must count as wire content');
+      }
+    });
+
+    test('message-only progress is a legal wire form: it counts and is '
+        'stored exactly as sent (no cascade fallback)', () {
+      _injectSnapshot(state, rows: [
+        {'rowId': 1, 'kind': 'toolCall', 'status': 'running'},
+      ]);
+      final baseline = state.contentChangeSeq;
+
+      applyDeltas([
+        {
+          'op': 'row.upserted',
+          'row': {
+            'rowId': 1,
+            'kind': 'toolCall',
+            'status': 'running',
+            'progress': {'message': 'Waiting for approval'},
+          },
+        },
+      ]);
+
+      expect(state.contentChangeSeq, baseline + 1);
+      expect(state.rows.single['progress'], {'message': 'Waiting for approval'},
+          reason: 'no default fraction/bytes is synthesized at this layer');
+    });
+
+    test('row.upserted for a row outside the window (index -1) does not '
+        'count', () {
+      _injectSnapshot(state, rows: [
+        {'rowId': 1, 'kind': 'user', 'text': 'held'},
+      ]);
+      final baseline = state.contentChangeSeq;
+      applyDeltas([
+        {
+          'op': 'row.upserted',
+          'row': {'rowId': 99, 'kind': 'user', 'text': 'elsewhere'},
+        },
+      ]);
+      expect(state.contentChangeSeq, baseline,
+          reason: 'the window was not extended, nothing to render');
+      expect(state.rows, hasLength(1));
+    });
+
+    test('row.delta real append counts; a no-op (unknown path / kind '
+        'mismatch) does not and registers the word', () {
+      _injectSnapshot(state, rows: [
+        {'rowId': 1, 'kind': 'assistantText', 'text': 'Hello'},
+      ]);
+      var baseline = state.contentChangeSeq;
+
+      applyDeltas([
+        {'op': 'row.delta', 'rowId': 1, 'path': 'text', 'append': ' world'},
+      ]);
+      expect(state.contentChangeSeq, baseline + 1);
+      baseline = state.contentChangeSeq;
+
+      // Unknown path: _appendToRow returns the same instance.
+      applyDeltas([
+        {'op': 'row.delta', 'rowId': 1, 'path': 'futureField', 'append': 'x'},
+      ]);
+      expect(state.contentChangeSeq, baseline,
+          reason: 'a no-op delta must not look like wire content');
+      expect(state.unknownDeltaPaths, {'futureField'});
+      expect(state.seq, 7, reason: 'seq advancement is untouched');
+
+      // Kind mismatch: the path exists but this row kind cannot carry it.
+      applyDeltas([
+        {'op': 'row.delta', 'rowId': 1, 'path': 'inputText', 'append': 'x'},
+      ]);
+      expect(state.contentChangeSeq, baseline);
+      expect(state.unknownDeltaPaths, {'futureField', 'inputText'});
+    });
+
+    test('row.appended / row.removed / state.updated (non-empty patch) count '
+        'on occurrence; an empty patch does not', () {
+      _injectSnapshot(state, rows: [
+        {'rowId': 1, 'kind': 'user', 'text': 'a'},
+        {'rowId': 2, 'kind': 'assistantText', 'text': 'b'},
+      ]);
+      var baseline = state.contentChangeSeq;
+
+      applyDeltas([
+        {
+          'op': 'row.appended',
+          'row': {'rowId': 3, 'kind': 'user', 'text': 'c'},
+        },
+      ]);
+      expect(state.contentChangeSeq, baseline + 1);
+
+      baseline = state.contentChangeSeq;
+      applyDeltas([
+        {'op': 'row.removed', 'fromRowId': 3},
+      ]);
+      expect(state.contentChangeSeq, baseline + 1);
+
+      baseline = state.contentChangeSeq;
+      applyDeltas([
+        {
+          'op': 'state.updated',
+          'patch': {'control': {'phase': 'idle'}},
+        },
+      ]);
+      expect(state.contentChangeSeq, baseline + 1);
+
+      baseline = state.contentChangeSeq;
+      applyDeltas([
+        {'op': 'state.updated', 'patch': <String, dynamic>{}},
+      ]);
+      expect(state.contentChangeSeq, baseline,
+          reason: 'an empty patch carries no content');
+    });
+
+    test('an unknown op never crashes, advances seq, registers the word and '
+        'does not count', () {
+      _injectSnapshot(state, seq: 2);
+      final baseline = state.contentChangeSeq;
+
+      applyDeltas([
+        {'op': 'row.futureSurface', 'row': {'rowId': 5}},
+      ]);
+
+      expect(state.contentChangeSeq, baseline);
+      expect(state.unknownDeltaOps, {'row.futureSurface'});
+      expect(state.seq, 3);
+      expect(state.rows, isEmpty);
+    });
+
+    test('workflowRun deltas count on occurrence', () {
+      _injectSnapshot(state, snapshot: {
+        'workflowRuns': {'revision': 1, 'runs': []},
+      });
+      final baseline = state.contentChangeSeq;
+      applyDeltas([
+        {
+          'op': 'workflowRun.updated',
+          'runId': 'r1',
+          'revision': 2,
+          'run': {'runId': 'r1', 'status': 'running', 'usage': {}, 'lastEventSequence': 1},
+        },
+      ]);
+      expect(state.contentChangeSeq, baseline + 1);
+    });
+
+    test('local sources never count: they are not wire content', () {
+      _injectSnapshot(
+        state,
+        rows: [
+          {'rowId': 1, 'kind': 'assistantText', 'text': 'a'},
+        ],
+        snapshot: {
+          'queue': {
+            'items': [
+              {'queueItemId': 'q1', 'text': 'parked'},
+            ],
+            'autoDrain': true,
+          },
+        },
+      );
+      final baseline = state.contentChangeSeq;
+
+      state.optimisticPatch({'mode': 'yolo'});
+      state.optimisticRowUpdate(1, {'text': 'locally edited'});
+      state.optimisticRemoveQueueItem('q1');
+      state.prependOlderRows([
+        {'rowId': 0, 'kind': 'user', 'text': 'older page'},
+      ]);
+      state.applyUsageUpdate({'size': 100, 'used': 10});
+
+      expect(state.contentChangeSeq, baseline,
+          reason: 'optimistic projections / paging / usage are local, not '
+              'wire content — counting them would mask a real silence');
+      // The local effects themselves still landed.
+      expect(state.rows.first['rowId'], 0);
+      expect(state.queueItems, isEmpty);
+      expect(state.contextUsage.used, 10);
+    });
+  });
+
   group('subscribe stall defenses', () {
     late _ManualChannels channels;
     late List<String> logs;

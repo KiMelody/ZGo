@@ -78,3 +78,6 @@ app.*.map.json
 # endings on Windows; linux is not a release platform — see /windows/ above)
 /linux/flutter/generated_plugin_registrant.cc
 /linux/flutter/generated_plugins.cmake
+.zcode/agents/
+.claude/agents/
+.opencode/agents/

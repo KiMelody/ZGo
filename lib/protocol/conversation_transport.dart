@@ -97,6 +97,18 @@ class ConversationTransport implements ConversationCommands {
   /// Injectable so tests can shrink it.
   final Duration handshakeCallTimeout;
 
+  /// Cadence of the subscription watchdog tick (default 10s). Injectable so
+  /// tests can shrink it (protocol tests drive real timers, no fake_async).
+  final Duration watchdogTickInterval;
+
+  /// Content-silence threshold for the no-content watchdog criterion
+  /// (11-04 R2, default 20s): a turn that is active by
+  /// [ConversationState.activeStrict] while [ConversationState.contentChangeSeq]
+  /// has not moved for this long is resynced. Injectable like
+  /// [subscribeAckTimeout]; the adaptive escalation lives in
+  /// [contentSilenceBackoff].
+  final Duration contentSilenceThreshold;
+
   /// Desktop project id for a workspace path (3.16.2 project attribution,
   /// design 10-21 Part 2) — consulted ONLY by [createSession], whose outer
   /// channel parameters accept `projectId` as a sibling of `workspacePath`
@@ -118,6 +130,8 @@ class ConversationTransport implements ConversationCommands {
     this.workspaceHookReviewUi = false,
     this.subscribeAckTimeout = const Duration(seconds: 10),
     this.handshakeCallTimeout = const Duration(seconds: 10),
+    this.watchdogTickInterval = const Duration(seconds: 10),
+    this.contentSilenceThreshold = const Duration(seconds: 20),
     this.projectIdFor,
     this.onLog,
     this.onLinkLevelFailure,
@@ -165,6 +179,25 @@ class ConversationTransport implements ConversationCommands {
     final step = failedAttempts.clamp(0, 2).toInt();
     return Duration(seconds: 3 << step);
   }
+
+  /// Escalating window of the no-content watchdog criterion (11-04 R2,
+  /// design §3.2): consecutive triggers with the content still frozen double
+  /// the wait `20s → 40s → 80s`, capped at 120s — a resync storm must not
+  /// form while the desktop has genuinely nothing new to say. Any
+  /// [ConversationState.contentChangeSeq] movement resets the streak (the
+  /// caller drops its level back to 0). The no-frames and never-ready
+  /// criteria do NOT escalate: each has its own reconnect chain behind it.
+  ///
+  /// [consecutiveSilences] is the number of already-fired no-content
+  /// triggers in the current streak (0 = the base [contentSilenceThreshold]).
+  Duration contentSilenceBackoff(int consecutiveSilences) {
+    final step = consecutiveSilences.clamp(0, 3).toInt();
+    final scaled = contentSilenceThreshold * (1 << step);
+    return scaled > _contentSilenceCap ? _contentSilenceCap : scaled;
+  }
+
+  /// 6× the stock 20s base threshold.
+  static const Duration _contentSilenceCap = Duration(seconds: 120);
 
   Future<void> handshake() {
     if (_handshaken) return Future.value();

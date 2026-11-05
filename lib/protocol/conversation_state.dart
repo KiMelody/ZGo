@@ -901,6 +901,19 @@ List<Map<String, dynamic>> coalesceWorkflowRunDeltas(
   return out;
 }
 
+/// Tool-call row `status` values that mean the call is still in flight —
+/// the single protocol-layer home of that vocabulary (3.17.2 runtime guard
+/// / web schema word list; `pending` is ZGo's locally synthesized status for
+/// an optimistic row, timeline/tool_row_semantics). The no-content watchdog
+/// ([ConversationState.activeStrict]) is the consumer: new drift words land
+/// here, and nowhere else.
+const Set<String> activeToolCallStatuses = {
+  'pending',
+  'inputStreaming',
+  'pendingApproval',
+  'running',
+};
+
 /// Conversation snapshot + row state, from the `fke()`/`pke()` delta
 /// application.
 class ConversationState extends ChangeNotifier {
@@ -941,6 +954,61 @@ class ConversationState extends ChangeNotifier {
   /// rebuilds it (with the `workflowRunDeltas` capability the snapshot may
   /// omit the full list; without it the snapshot always carries all runs).
   WorkflowRuns workflowRuns = const WorkflowRuns();
+
+  /// Monotonic counter of *wire content* actually applied (11-04 R2
+  /// defensive layer). The subscription watchdog reads it to detect a
+  /// content freeze the line-frame-silence criterion is blind to (frames
+  /// arriving, every one a no-op). Not a rendering signal — the UI never
+  /// consumes it.
+  ///
+  /// Counts (design §3.1):
+  /// - `row.upserted` ONLY when the row is in the window AND its field
+  ///   fingerprint moved; a fresh decoded instance alone is not a change;
+  /// - `row.delta` only when [_appendToRow] produced a new instance;
+  /// - `row.appended` / `row.removed` / a non-empty `state.updated` patch /
+  ///   `workflowRun.*` on occurrence;
+  /// - every snapshot ([_applySnapshot]) — a resync resets the silence
+  ///   window by definition.
+  ///
+  /// Deliberately NOT counted (local projection, not wire content):
+  /// [optimisticPatch], [optimisticRowUpdate], [optimisticRemoveQueueItem],
+  /// [prependOlderRows], [applyUsageUpdate], [optimisticStop] — counting
+  /// them would mask a real wire silence with local echoes.
+  int contentChangeSeq = 0;
+
+  /// Unknown `op` words seen in deltas (drift observability, R3): recorded,
+  /// never applied, never sequenced, never notified. The subscription drains
+  /// these into one log line per word per lifetime.
+  final Set<String> unknownDeltaOps = <String>{};
+
+  /// Unknown or kind-mismatched `row.delta` paths (R3), same contract as
+  /// [unknownDeltaOps].
+  final Set<String> unknownDeltaPaths = <String>{};
+
+  /// A row is mid-stream when the wire tags it so (`row.delta 'text'` rows
+  /// carry `state:'streaming'` while tokens flow).
+  bool get anyStreaming => rows.any((r) => r['state'] == 'streaming');
+
+  /// Whether the turn looks active enough for the no-content watchdog
+  /// (design §3.2): a running turn, a streaming row, a tool call still in
+  /// one of [activeToolCallStatuses], or a running subagent row. A parked
+  /// queue alone is NOT active — an idle session holding a message must
+  /// never keep the watchdog resyncing.
+  bool get activeStrict {
+    if (isRunning || anyStreaming) return true;
+    for (final row in rows) {
+      final status = row['status'];
+      switch (row['kind']) {
+        case 'toolCall':
+          if (status is String && activeToolCallStatuses.contains(status)) {
+            return true;
+          }
+        case 'subagent':
+          if (status == 'running') return true;
+      }
+    }
+    return false;
+  }
 
   void applyFrame(
     Map<String, dynamic> frame, {
@@ -995,6 +1063,9 @@ class ConversationState extends ChangeNotifier {
   void _applySnapshot(Map<String, dynamic> snap, int toSeq) {
     _detectConfigRevert(snap);
     _optimisticStop = false; // authority spoke — recalibrate the projection
+    // A snapshot is authoritative content by definition: a resync resets the
+    // no-content silence window even when the bytes look identical (§3.1).
+    contentChangeSeq += 1;
     snapshot = snap;
     _usageEvent = null;
     if (_pendingPatch != null) {
@@ -1074,6 +1145,7 @@ class ConversationState extends ChangeNotifier {
         rows.add(row);
         totalCount += 1;
         firstRowId ??= (row['rowId'] as num?)?.toInt();
+        contentChangeSeq += 1;
         break;
       case 'row.upserted':
         final row = (delta['row'] as Map).cast<String, dynamic>();
@@ -1081,7 +1153,14 @@ class ConversationState extends ChangeNotifier {
         final index = rows.indexWhere(
           (r) => (r['rowId'] as num?)?.toInt() == id,
         );
-        if (index != -1) rows[index] = row;
+        if (index != -1) {
+          // Field fingerprint, NOT mapEquals: every upsert decodes a fresh
+          // instance, so shallow equality never holds. A row outside the
+          // window changes nothing on screen and does not count.
+          final moved = _rowContentChanged(rows[index], row);
+          rows[index] = row;
+          if (moved) contentChangeSeq += 1;
+        }
         break;
       case 'row.removed':
         // Delta application: KEEP rows with
@@ -1098,6 +1177,7 @@ class ConversationState extends ChangeNotifier {
         } else {
           totalCount = (totalCount - removed).clamp(0, 1 << 31);
         }
+        contentChangeSeq += 1;
         break;
       case 'row.delta':
         final rowId = (delta['rowId'] as num?)?.toInt();
@@ -1107,7 +1187,11 @@ class ConversationState extends ChangeNotifier {
           (r) => (r['rowId'] as num?)?.toInt() == rowId,
         );
         if (index != -1) {
-          rows[index] = _appendToRow(rows[index], path, append);
+          final next = _appendToRow(rows[index], path, append);
+          if (!identical(next, rows[index])) {
+            rows[index] = next;
+            contentChangeSeq += 1;
+          }
         }
         break;
       case 'state.updated':
@@ -1119,6 +1203,7 @@ class ConversationState extends ChangeNotifier {
           // true = stop rejected / a new turn already started — the
           // button returns).
           if (typedPatch['control'] is Map) _optimisticStop = false;
+          if (typedPatch.isNotEmpty) contentChangeSeq += 1;
           if (snapshot != null) {
             snapshot = {...snapshot!, ...typedPatch};
             // A patch carrying `workflowRuns` replaces the whole family
@@ -1139,9 +1224,64 @@ class ConversationState extends ChangeNotifier {
       case 'workflowRun.updated':
       case 'workflowRun.removed':
         workflowRuns = applyWorkflowRunDelta(workflowRuns, delta);
+        contentChangeSeq += 1;
+        break;
+      default:
+        // Unknown op (protocol drift, R3): record the word for the
+        // subscription's once-per-lifetime log, apply nothing, and do not
+        // touch seq/content accounting.
+        final op = delta['op'];
+        if (op is String && op.isNotEmpty) unknownDeltaOps.add(op);
         break;
     }
   }
+
+  /// Field-level row fingerprint for `row.upserted` (design §3.1) — the
+  /// fields that actually move while a row is live, compared individually
+  /// because `mapEquals` on freshly decoded maps is always unequal:
+  /// `status` / `state` / `text` / `inputText` / `output.text` /
+  /// `summaryText` / `error.message` / `progress.{fraction,total,message}` /
+  /// `outputPreview.{text,totalLines,totalBytes}`.
+  ///
+  /// Excluded on purpose: `progress.updatedAt` and `outputPreview` metadata
+  /// (the runtime stamps a new `updatedAt` on every progress upsert — Bash
+  /// and non-Bash alike — so including it makes the fingerprint always
+  /// differ). A missed field here only means one extra capped resync; a
+  /// spurious one means the watchdog can never see a content freeze.
+  static bool _rowContentChanged(
+    Map<String, dynamic> before,
+    Map<String, dynamic> after,
+  ) {
+    if (identical(before, after)) return false;
+    const scalarKeys = ['status', 'state', 'text', 'inputText', 'summaryText'];
+    for (final key in scalarKeys) {
+      if (before[key] != after[key]) return true;
+    }
+    if (_nested(before['output'], 'text') != _nested(after['output'], 'text')) {
+      return true;
+    }
+    if (_nested(before['error'], 'message') !=
+        _nested(after['error'], 'message')) {
+      return true;
+    }
+    const progressKeys = ['fraction', 'total', 'message'];
+    for (final key in progressKeys) {
+      if (_nested(before['progress'], key) != _nested(after['progress'], key)) {
+        return true;
+      }
+    }
+    const previewKeys = ['text', 'totalLines', 'totalBytes'];
+    for (final key in previewKeys) {
+      if (_nested(before['outputPreview'], key) !=
+          _nested(after['outputPreview'], key)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static Object? _nested(Object? container, String key) =>
+      container is Map ? container[key] : null;
 
   Map<String, dynamic>? _pendingPatch;
 
@@ -1248,7 +1388,10 @@ class ConversationState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Appends streamed text to a row field.
+  /// Appends streamed text to a row field. Returns [row] itself for an
+  /// unknown path or a kind mismatch — identity is the "no-op" signal
+  /// `row.delta` uses to skip [contentChangeSeq], and the word is recorded
+  /// in [unknownDeltaPaths] for the subscription's drift log.
   Map<String, dynamic> _appendToRow(
     Map<String, dynamic> row,
     String? path,
@@ -1259,12 +1402,12 @@ class ConversationState extends ChangeNotifier {
         if (row['kind'] == 'assistantText' || row['kind'] == 'reasoning') {
           return {...row, 'text': '${row['text'] ?? ''}$append'};
         }
-        return row;
+        return _unknownAppendPath(row, path);
       case 'inputText':
         if (row['kind'] == 'toolCall') {
           return {...row, 'inputText': '${row['inputText'] ?? ''}$append'};
         }
-        return row;
+        return _unknownAppendPath(row, path);
       case 'output.text':
         if (row['kind'] == 'toolCall' && row['output'] is Map) {
           final output = (row['output'] as Map).cast<String, dynamic>();
@@ -1273,15 +1416,26 @@ class ConversationState extends ChangeNotifier {
             'output': {...output, 'text': '${output['text'] ?? ''}$append'},
           };
         }
-        return row;
+        return _unknownAppendPath(row, path);
       case 'summaryText':
         if (row['kind'] == 'subagent') {
           return {...row, 'summaryText': '${row['summaryText'] ?? ''}$append'};
         }
-        return row;
+        return _unknownAppendPath(row, path);
       default:
-        return row;
+        return _unknownAppendPath(row, path);
     }
+  }
+
+  /// Records an unroutable `row.delta` path and returns the row unchanged.
+  /// Kind mismatches are recorded too: to this layer they mean the same
+  /// thing — a word/kind pair this build does not know how to apply.
+  Map<String, dynamic> _unknownAppendPath(
+    Map<String, dynamic> row,
+    String? path,
+  ) {
+    if (path != null && path.isNotEmpty) unknownDeltaPaths.add(path);
+    return row;
   }
 
   Map<String, dynamic>? get control =>

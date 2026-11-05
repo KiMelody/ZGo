@@ -5,6 +5,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 
 import 'channel_client.dart';
@@ -172,7 +173,7 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
   void _purgeFragments() {
     if (_disposed) return;
     final stale = <String>[];
-    final now = DateTime.now();
+    final now = clock.now();
     _fragments.forEach((id, a) {
       if (now.difference(a.createdAt).inSeconds > 60) stale.add(id);
     });
@@ -451,8 +452,25 @@ abstract class _SubscriptionBase<T extends ChangeNotifier> {
 class ConversationSubscription extends _SubscriptionBase<ConversationState> {
   final String sessionId;
 
-  DateTime _lastFrameAt = DateTime.now();
+  DateTime _lastFrameAt = clock.now();
   Timer? _watchdog;
+
+  /// Consecutive no-content resyncs with the content still frozen — drives
+  /// [ConversationTransport.contentSilenceBackoff] (20→40→80→120s). Reset by
+  /// any [ConversationState.contentChangeSeq] movement and by a fresh
+  /// subscribe generation.
+  int _contentSilenceStreak = 0;
+
+  /// `contentChangeSeq` observed at the previous watchdog tick — the
+  /// no-content criterion's "did content move since last look" comparator;
+  /// [_lastContentChangeAt] is the last tick that saw movement.
+  int _contentChangeMark = 0;
+  DateTime _lastContentChangeAt = clock.now();
+
+  /// Words already drained into the drift log — one line per op/path per
+  /// subscription lifetime (R3).
+  final _loggedUnknownDeltaOps = <String>{};
+  final _loggedUnknownDeltaPaths = <String>{};
 
   /// Internal: created by [ConversationTransport.subscribe]; not public API.
   ConversationSubscription(ConversationTransport transport, this.sessionId)
@@ -493,6 +511,17 @@ class ConversationSubscription extends _SubscriptionBase<ConversationState> {
 
   @override
   void _onStarted() {
+    // The FRAME clock restarts here: the old timestamps belong to the dead
+    // subscription id, and a fresh subscribe is a fresh wire generation.
+    _lastFrameAt = clock.now();
+    // The CONTENT clock must NOT restart. Content is a property of the
+    // conversation, not of the wire generation: a bridge that keeps
+    // flapping faster than the silence window (live: degraded→reopened
+    // every 30–120s) would otherwise reset the window on every resubscribe
+    // and leave the no-content criterion permanently unreachable — the
+    // exact drift it exists to catch. If the resubscribe lands a snapshot,
+    // _applySnapshot advances contentChangeSeq and the next tick resets the
+    // window through the normal content-movement path.
     _startWatchdog();
     _listenTaskStream();
   }
@@ -546,30 +575,92 @@ class ConversationSubscription extends _SubscriptionBase<ConversationState> {
   void _acceptLogicalFrame(Map<String, dynamic> frame) {
     final subId = subscriptionId;
     if (subId == null || frame['subscriptionId'] != subId) return;
-    _lastFrameAt = DateTime.now();
+    _lastFrameAt = clock.now();
     state.applyFrame(frame, onGap: _resync);
+    _drainUnknownDeltaWords();
   }
 
+  /// Drift observability (11-04 R3): after each applied frame, log any
+  /// unknown delta op / row.delta path the state recorded — once per word
+  /// per subscription lifetime, on the frame that carried it (no extra
+  /// timer, no seq/notify side effects).
+  void _drainUnknownDeltaWords() {
+    for (final op in state.unknownDeltaOps) {
+      if (_loggedUnknownDeltaOps.add(op)) {
+        _transport.log('[$_logTag] unknown delta op: $op');
+      }
+    }
+    for (final path in state.unknownDeltaPaths) {
+      if (_loggedUnknownDeltaPaths.add(path)) {
+        _transport.log('[$_logTag] unknown row.delta path: $path');
+      }
+    }
+  }
+
+  /// Watchdog (design §3.2): three OR-ed self-heal criteria, each logging
+  /// its own reason. Runs on the transport's injectable cadence with
+  /// [clock.now] as the single time source.
+  ///
+  /// Window vocabulary: the frame-silence window IS the base
+  /// [ConversationTransport.contentSilenceThreshold] (stock 20s, the value
+  /// the timeout table already records) — one seam, no second magic
+  /// number. Only the content criterion escalates; no-frames and never-ready
+  /// keep the base window (each has its own reconnect chain behind it).
   void _startWatchdog() {
     _watchdog?.cancel();
-    _watchdog = Timer.periodic(const Duration(seconds: 10), (_) {
+    final tick = _transport.watchdogTickInterval;
+    final frameSilenceWindow = _transport.contentSilenceThreshold;
+    _watchdog = Timer.periodic(tick, (_) {
       if (_disposed) return;
-      final quietSeconds = DateTime.now().difference(_lastFrameAt).inSeconds;
-      if (quietSeconds < 20) return;
-      final streaming = state.rows.any((r) => r['state'] == 'streaming');
-      if (state.isRunning || streaming) {
+      final now = clock.now();
+      final frameSilent = now.difference(_lastFrameAt) >= frameSilenceWindow;
+
+      // Criterion 1 — no frames (existing): the wire itself went silent
+      // while the turn should be producing. Claims the reason first so the
+      // two quiet criteria never double-fire on one tick.
+      if (frameSilent && (state.isRunning || state.anyStreaming)) {
         _transport.log(
-          '[v4] watchdog: no frames for ${quietSeconds}s while active, resync',
+          '[$_logTag] watchdog: no frames for '
+          '${now.difference(_lastFrameAt).inSeconds}s while active, resync',
         );
         _resync();
-      } else if (!state.ready) {
-        // Never-ready blind spot: the subscribe acked but no snapshot ever
-        // arrived. Observed live (2026-09-15): the desktop bridge can die
-        // mid-push of a large subagent snapshot, and without a forced
-        // resync the subscription idles forever — the detail page would
-        // spin indefinitely.
+        return;
+      }
+
+      // Criterion 2 — no content (new): frames arrive, but every one of
+      // them is a no-op (a dropped wire face, a content-freezing drift).
+      // `activeStrict` excludes the parked-queue case by construction. The
+      // window escalates 20→40→80→120s while the content stays frozen and
+      // drops back to the base on any content movement.
+      if (state.ready) {
+        if (state.contentChangeSeq != _contentChangeMark) {
+          _contentChangeMark = state.contentChangeSeq;
+          _lastContentChangeAt = now;
+          _contentSilenceStreak = 0;
+        } else {
+          final window = _transport.contentSilenceBackoff(
+            _contentSilenceStreak,
+          );
+          final silent = now.difference(_lastContentChangeAt);
+          if (silent >= window && state.activeStrict) {
+            _contentSilenceStreak += 1;
+            _transport.log(
+              '[$_logTag] watchdog: no content for ${silent.inSeconds}s '
+              'while active, resync (window ${window.inSeconds}s)',
+            );
+            _resync();
+            return;
+          }
+        }
+      }
+
+      // Criterion 3 — never-ready (existing): the subscribe acked but no
+      // snapshot ever arrived (desktop bridge died mid-push of a large
+      // subagent snapshot, 2026-09-15), so the page would spin forever.
+      if (!state.ready && frameSilent) {
         _transport.log(
-          '[v4] watchdog: no snapshot ${quietSeconds}s after subscribe, resync',
+          '[$_logTag] watchdog: no snapshot '
+          '${now.difference(_lastFrameAt).inSeconds}s after subscribe, resync',
         );
         _resync();
       }
@@ -580,7 +671,7 @@ class ConversationSubscription extends _SubscriptionBase<ConversationState> {
 class _LogicalFrameAssembly {
   final int count;
   final List<Uint8List?> parts;
-  final DateTime createdAt = DateTime.now();
+  final DateTime createdAt = clock.now();
   int received = 0;
 
   _LogicalFrameAssembly(this.count) : parts = List.filled(count, null);

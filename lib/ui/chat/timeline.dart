@@ -1948,6 +1948,10 @@ class _ToolCallTileState extends State<_ToolCallTile> {
     final outputText = output is Map ? output['text'] as String? ?? '' : '';
     final error = row['error'];
     final progress = row['progress'];
+    // Running Bash rows only: tail-line window of the live output. The
+    // runtime strips it on settle (incremental `clearSettledOutputPreviews`)
+    // and on backgrounded rows, so its presence is the running signal.
+    final outputPreview = row['outputPreview'];
     final display = row['display'];
     final diff = extractDiff(row);
 
@@ -2089,6 +2093,21 @@ class _ToolCallTileState extends State<_ToolCallTile> {
                       tr(context, 'chat.tool.input'),
                       inputText,
                       openPath: toolFilePath(inputText),
+                    ),
+                  // Bash tail preview (3.17.2 `outputPreview`, mock A3): the
+                  // running row's last lines, directly under the input block
+                  // (design §2 position) and above the live progress row
+                  // outside the expansion. Mutually exclusive with the full
+                  // output by direct condition swap — no AnimatedSwitcher:
+                  // the runtime strips `outputPreview` on settle, so the
+                  // preview condition stops matching in the same upsert that
+                  // makes the output kv non-empty.
+                  if (diff == null &&
+                      outputText.isEmpty &&
+                      outputPreview is Map)
+                    Padding(
+                      padding: ZTile.body,
+                      child: _BashOutputPreview(preview: outputPreview),
                     ),
                   if (diff == null && outputText.isNotEmpty)
                     _kv(
@@ -2438,6 +2457,48 @@ class _AgentChildTimelineState extends State<_AgentChildTimeline> {
   }
 }
 
+/// Strips the escape noise a Bash `outputPreview.text` carries: the runtime
+/// does not sanitize (`zcode.cjs` has zero `stripAnsi`), while a terminal's
+/// surviving glyphs are what a user expects to read.
+///
+/// - CSI sequences (colors, cursor moves, erases: `ESC [ params final`) are
+///   dropped wholesale — the payload only ever needs the visible text.
+/// - CRLF normalizes to LF, then each line keeps the segment after its last
+///   `\r`: a carriage return redraws the physical line, so the last segment
+///   is what the terminal leaves on screen (`10%` → `100%`).
+String sanitizeTerminalPreview(String text) {
+  var out = text.replaceAll(RegExp(r'\x1B\[[0-9;?]*[@-~]'), '');
+  out = out.replaceAll('\r\n', '\n');
+  if (!out.contains('\r')) return out;
+  return out
+      .split('\n')
+      .map((line) {
+        final i = line.lastIndexOf('\r');
+        return i < 0 ? line : line.substring(i + 1);
+      })
+      .join('\n');
+}
+
+/// The visible tail line of an `outputPreview` map (last non-blank line
+/// after sanitization), or null when the payload carries no text — the group
+/// card's tail hint is data-driven, never a placeholder.
+String? outputPreviewTailLine(Object? preview) {
+  if (preview is! Map) return null;
+  final raw = preview['text'];
+  if (raw is! String) return null;
+  final lines = sanitizeTerminalPreview(raw)
+      .split('\n')
+      .where((line) => line.trim().isNotEmpty);
+  return lines.isEmpty ? null : lines.last.trim();
+}
+
+/// Live progress line for a running tool row (design 11-04 §2, mock C1).
+///
+/// The 3.17.2 wire dropped `bytes` in favour of `{fraction, total, message}`
+/// and every field is independently optional (message-only / total-only are
+/// legal shapes). Each segment therefore renders on its own — the 0.0 KB
+/// default the old hard-coded `bytes ?? 0` produced is exactly the misleading
+/// readout R1 removes.
 class _ProgressRow extends StatelessWidget {
   final Map progress;
 
@@ -2445,29 +2506,262 @@ class _ProgressRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bytes = (progress['bytes'] as num?)?.toInt() ?? 0;
-    final preview = progress['previewLine'] as String? ?? '';
+    final message = (progress['message'] as String? ?? '').trim();
+    final fraction = (progress['fraction'] as num?)?.toDouble();
+    final total = (progress['total'] as num?)?.toInt();
+    // Legacy desktop shape (`{bytes, previewLine}`): both segments keep the
+    // pre-3.17.2 rendering, joined into the same single caption line.
+    final legacy = <String>[
+      if ((progress['previewLine'] as String? ?? '').isNotEmpty)
+        progress['previewLine'] as String,
+      if (progress.containsKey('bytes') && progress['bytes'] is num)
+        '${((progress['bytes'] as num).toInt() / 1024).toStringAsFixed(1)} KB',
+    ].join(' · ');
+
+    // Nothing to say (e.g. only `updatedAt`): no row at all, not a blank one.
+    if (message.isEmpty &&
+        legacy.isEmpty &&
+        fraction == null &&
+        total == null) {
+      return const SizedBox.shrink();
+    }
+
+    final caption = ZType.caption.copyWith(color: ZInk.faint(context));
     return Padding(
       padding: ZTile.body,
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const SizedBox(
-            width: 12,
-            height: 12,
-            child: CircularProgressIndicator(strokeWidth: 1.5),
+          const Padding(
+            padding: EdgeInsets.only(top: 2),
+            child: SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 1.5),
+            ),
           ),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
-              [
-                if (preview.isNotEmpty) preview,
-                '${(bytes / 1024).toStringAsFixed(1)} KB',
-              ].join(' · '),
-              style: ZType.caption.copyWith(color: ZInk.faint(context)),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Wire copy stays verbatim (message is model-authored text —
+                // never translated, single line elided).
+                if (message.isNotEmpty)
+                  Text(
+                    message,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: caption,
+                  ),
+                if (legacy.isNotEmpty)
+                  Text(
+                    legacy,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: caption,
+                  ),
+                if (fraction != null || total != null)
+                  Padding(
+                    padding: EdgeInsets.only(
+                      top: message.isEmpty && legacy.isEmpty ? 0 : 4,
+                    ),
+                    child: Row(
+                      children: [
+                        if (fraction != null)
+                          Expanded(
+                            child: ClipRRect(
+                              borderRadius:
+                                  BorderRadius.circular(ZRadius.mini),
+                              child: LinearProgressIndicator(
+                                value: fraction.clamp(0.0, 1.0),
+                                minHeight: ZSpacing.progressBar,
+                                backgroundColor: ZInk.barTrack(context),
+                                valueColor: const AlwaysStoppedAnimation(
+                                  ZColors.sky400,
+                                ),
+                              ),
+                            ),
+                          ),
+                        if (fraction != null) const SizedBox(width: 8),
+                        if (fraction != null)
+                          Text(
+                            '${(fraction * 100).round()}%',
+                            style: ZType.sub.copyWith(
+                              fontWeight: FontWeight.w600,
+                              color: ZInk.soft(context),
+                              fontFeatures: const [
+                                FontFeature.tabularFigures(),
+                              ],
+                            ),
+                          ),
+                        if (total != null) const SizedBox(width: 8),
+                        if (total != null)
+                          Text(
+                            trP(context, 'chat.tool.progress.total', ['$total']),
+                            style: caption,
+                          ),
+                      ],
+                    ),
+                  ),
+              ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Bash tail preview (`row.outputPreview`, mock A3): the last lines of a
+/// running command's output, bottom-anchored so the newest line never moves
+/// as older ones scroll away.
+///
+/// Mounted only while the tool card is expanded ([_ToolCallTileState]) — the
+/// density-first decision of the 11-04 mock: collapsed cards keep the running
+/// pill alone. The window shows [collapsedLines] by default; its own footer
+/// toggle lifts it to [expandedLines] without touching the card expansion
+/// (the toggle lives in the card body, so no bubbling is involved).
+class _BashOutputPreview extends StatefulWidget {
+  final Map preview;
+
+  const _BashOutputPreview({required this.preview});
+
+  @override
+  State<_BashOutputPreview> createState() => _BashOutputPreviewState();
+}
+
+class _BashOutputPreviewState extends State<_BashOutputPreview> {
+  static const int collapsedLines = 2;
+  static const int expandedLines = 5;
+
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final raw = widget.preview['text'];
+    final lines = sanitizeTerminalPreview(raw is String ? raw : '')
+        .split('\n')
+        .toList();
+    // Trailing blank lines carry no signal and would eat the window.
+    while (lines.isNotEmpty && lines.last.trim().isEmpty) {
+      lines.removeLast();
+    }
+    if (lines.isEmpty) return const SizedBox.shrink();
+
+    final total = (widget.preview['totalLines'] as num?)?.toInt();
+    final maxLines = _expanded ? expandedLines : collapsedLines;
+    final shown = lines.length <= maxLines
+        ? lines
+        : lines.sublist(lines.length - maxLines);
+    final canExpand = lines.length > collapsedLines;
+
+    final lineStyle = ZType.caption.copyWith(
+      fontFamily: 'monospace',
+      color: ZInk.solid(context),
+    );
+    // Window height is fixed at the tier's line box (caption 11 × 1.4) times
+    // the visible rows — the same discipline as the mock: a streaming run
+    // must not resize the card on every ~1s upsert. Bottom-anchored, so the
+    // newest line keeps its place while older ones scroll out of the window.
+    // The user's text scale multiplies the box (an enlarged caption would
+    // otherwise clip inside a fixed window).
+    final lineHeight = MediaQuery.textScalerOf(context).scale(
+      (ZType.caption.fontSize ?? 0) * (ZType.caption.height ?? 1),
+    );
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: ZInk.codeBlockBg(context),
+        borderRadius: BorderRadius.circular(ZRadius.field),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            height: lineHeight * maxLines,
+            child: Align(
+              alignment: Alignment.bottomLeft,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final line in shown)
+                    Text(
+                      line,
+                      maxLines: 1,
+                      softWrap: false,
+                      overflow: TextOverflow.ellipsis,
+                      style: lineStyle,
+                    ),
+                ],
+              ),
+            ),
+          ),
+          if (canExpand || total != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Container(
+                decoration: BoxDecoration(
+                  border: Border(
+                    top: BorderSide(color: ZInk.hairline(context)),
+                  ),
+                ),
+                child: Semantics(
+                  button: canExpand,
+                  expanded: canExpand ? _expanded : null,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(ZRadius.mini),
+                    onTap: canExpand
+                        ? () => setState(() => _expanded = !_expanded)
+                        : null,
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 5),
+                      child: Row(
+                        children: [
+                          if (canExpand) ...[
+                            Text(
+                              trP(
+                                context,
+                                _expanded
+                                    ? 'chat.tool.preview.collapse'
+                                    : 'chat.tool.preview.expand',
+                                ['$expandedLines'],
+                              ),
+                              style: ZType.caption.copyWith(
+                                color: ZInk.faint(context),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Icon(
+                              _expanded
+                                  ? Icons.keyboard_arrow_up
+                                  : Icons.keyboard_arrow_down,
+                              size: 12,
+                              color: ZInk.faint(context),
+                            ),
+                          ],
+                          const Spacer(),
+                          if (total != null)
+                            Text(
+                              trP(
+                                context,
+                                'chat.tool.preview.totalLines',
+                                ['$total'],
+                              ),
+                              style: ZType.caption.copyWith(
+                                color: ZInk.faint(context),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -3062,7 +3356,18 @@ void openSubagentDetail(
 }
 
 /// Collapsed run of consecutive execute-family tool rows:
-/// 「终端 · N 个命令」 — tap expands the individual tool cards.
+/// 「终端 · N 个命令」 — a two-layer collapse (design 11-04 §2 / mock B2).
+///
+/// - ① collapsed: header only.
+/// - ② the header's tail hint: the last RUNNING row's `outputPreview` tail
+///   line, mono and muted — the smallest "still moving" evidence a folded
+///   terminal run can give without a second data row.
+/// - ③ the command detail: every row, with the tail line sunk under the last
+///   running row (same datum, one place — never shown twice).
+///
+/// Switches: the header only does ①⇄② (and ③→① 全收起); the tail row is the
+/// ②→③ entry; the tail strip under the last running row goes ③→②. Neither
+/// bubbles into the other, same as the mock's independent handlers.
 class ToolGroupCard extends StatefulWidget {
   final List<Map<String, dynamic>> rows;
   final ConversationPort conversation;
@@ -3099,15 +3404,19 @@ class ToolGroupCard extends StatefulWidget {
 }
 
 class _ToolGroupCardState extends State<ToolGroupCard> {
-  bool _expanded = false;
+  /// Which layer is mounted: 0 collapsed, 1 tail hint, 2 command detail.
+  int _layer = 0;
 
   @override
   Widget build(BuildContext context) {
-    final n = widget.rows.length;
+    final rows = widget.rows;
+    final n = rows.length;
     var failed = 0;
     var stopped = 0;
     var lastCmd = '';
-    for (final r in widget.rows) {
+    var lastRunning = -1;
+    for (var i = 0; i < n; i++) {
+      final r = rows[i];
       final st = '${r['status'] ?? ''}';
       if (st == 'failed') failed += 1;
       if (st == 'stopped' || st == 'denied') stopped += 1;
@@ -3115,7 +3424,17 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
       if (lastCmd.isEmpty && input.isNotEmpty) {
         lastCmd = input.split('\n').first;
       }
+      // Single vocabulary source (protocol layer) — the local synthetic
+      // `pending` and the approval gate are in-flight there too.
+      if (activeToolCallStatuses.contains(st)) lastRunning = i;
     }
+    // Data-driven visibility (mock B2 note): the tail hint exists only while
+    // the last running row carries a preview. When the group settles the hint
+    // is gone and the card falls back to ① on its own.
+    final tailLine = lastRunning < 0
+        ? null
+        : outputPreviewTailLine(rows[lastRunning]['outputPreview']);
+    final layer = _layer == 1 && tailLine == null ? 0 : _layer;
     final bits = [
       trP(context, 'chat.tool.group.count', ['$n']),
       if (failed > 0) trP(context, 'chat.tool.group.failed', ['$failed']),
@@ -3131,51 +3450,106 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          InkWell(
-            borderRadius: BorderRadius.circular(ZRadius.field),
-            onTap: () {
-              HapticFeedback.lightImpact();
-              setState(() => _expanded = !_expanded);
-            },
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: zTouchHeight),
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                child: Row(
-                  children: [
-                    Icon(Icons.terminal,
-                        size: 14, color: ZInk.muted(context)),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        '${tr(context, 'chat.tool.group.terminal')} · $bits'
-                        '${lastCmd.isEmpty ? '' : '  ·  $lastCmd'}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: ZType.sub.copyWith(color: ZInk.soft(context)),
+          Semantics(
+            button: true,
+            expanded: layer != 0,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(ZRadius.field),
+              onTap: () {
+                HapticFeedback.lightImpact();
+                // Head owns ①⇄② only (③ goes straight back to ① — 全收起).
+                // Without a tail hint the detail is the only layer worth
+                // showing, so ① opens it directly.
+                setState(() {
+                  _layer = switch (layer) {
+                    0 => tailLine == null ? 2 : 1,
+                    1 => 0,
+                    _ => 0,
+                  };
+                });
+              },
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: zTouchHeight),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  child: Row(
+                    children: [
+                      Icon(Icons.terminal,
+                          size: 14, color: ZInk.muted(context)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '${tr(context, 'chat.tool.group.terminal')} · $bits'
+                          '${lastCmd.isEmpty ? '' : '  ·  $lastCmd'}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: ZType.sub.copyWith(color: ZInk.soft(context)),
+                        ),
                       ),
-                    ),
-                    Icon(
-                      _expanded
-                          ? Icons.keyboard_arrow_up
-                          : Icons.keyboard_arrow_down,
-                      size: 16,
-                      color: ZInk.ghost(context),
-                    ),
-                  ],
+                      Icon(
+                        layer == 0
+                            ? Icons.keyboard_arrow_down
+                            : Icons.keyboard_arrow_up,
+                        size: 16,
+                        color: ZInk.ghost(context),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
           ),
-          if (_expanded)
+          // Layer ②: the tail hint. It is its own affordance — tapping it
+          // enters the detail; the head above is untouched by that tap.
+          if (layer == 1 && tailLine != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(30, 0, 8, 10),
+              child: Semantics(
+                button: true,
+                expanded: false,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(ZRadius.mini),
+                  onTap: () {
+                    HapticFeedback.lightImpact();
+                    setState(() => _layer = 2);
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 4, vertical: 2),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            tailLine,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: ZType.caption.copyWith(
+                              fontFamily: 'monospace',
+                              color: ZInk.faint(context),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Icon(Icons.chevron_right,
+                            size: 14, color: ZInk.ghost(context)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          // Layer ③: the command detail. The tail line sinks under the last
+          // running row (one datum, one place) and that strip is the way back
+          // to ②.
+          if (layer == 2)
             Padding(
               padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
               child: Column(
                 children: [
-                  for (final r in widget.rows)
+                  for (var i = 0; i < n; i++) ...[
                     ChatRow(
-                      row: r,
+                      row: rows[i],
                       showFeedback: false,
                       conversation: widget.conversation,
                       sessionId: widget.sessionId,
@@ -3186,6 +3560,45 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
                       actions: widget.actions,
                       readOnly: widget.readOnly,
                     ),
+                    if (i == lastRunning && tailLine != null)
+                      Padding(
+                        // Text starts where the row titles start (8 + 18).
+                        padding: const EdgeInsets.fromLTRB(18, 0, 4, 6),
+                        child: Semantics(
+                          button: true,
+                          expanded: true,
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(ZRadius.mini),
+                            onTap: () {
+                              HapticFeedback.lightImpact();
+                              setState(() => _layer = 1);
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 4, vertical: 2),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      tailLine,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: ZType.caption.copyWith(
+                                        fontFamily: 'monospace',
+                                        color: ZInk.faint(context),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Icon(Icons.keyboard_arrow_up,
+                                      size: 12, color: ZInk.ghost(context)),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ],
               ),
             ),

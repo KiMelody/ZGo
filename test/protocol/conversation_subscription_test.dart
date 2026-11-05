@@ -8,6 +8,8 @@
 // the backoff is shrunk through the transport's injectable
 // [ConversationTransport.resubscribeBackoff] (same seam as
 // subscribeAckTimeout), so every wait here is milliseconds.
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -29,6 +31,431 @@ void main() {
       // Third failure onwards stays at the cap.
       expect(transport.resubscribeBackoff(3), const Duration(seconds: 12));
       expect(transport.resubscribeBackoff(99), const Duration(seconds: 12));
+    });
+  });
+
+  group('contentSilenceBackoff schedule (11-04 §3.2)', () {
+    test('stock transport: 20s → 40s → 80s, capped at 120s', () {
+      final transport = ConversationTransport(
+        session: _FakeBridgeSession(_autoChannels()),
+        scope: {'workspacePath': '/repo'},
+      );
+      expect(transport.contentSilenceThreshold, const Duration(seconds: 20));
+      expect(transport.watchdogTickInterval, const Duration(seconds: 10));
+      expect(transport.contentSilenceBackoff(0), const Duration(seconds: 20));
+      expect(transport.contentSilenceBackoff(1), const Duration(seconds: 40));
+      expect(transport.contentSilenceBackoff(2), const Duration(seconds: 80));
+      expect(transport.contentSilenceBackoff(3), const Duration(seconds: 120));
+      expect(transport.contentSilenceBackoff(99), const Duration(seconds: 120));
+    });
+  });
+
+  group('subscription watchdog: silence criteria (11-04 R2)', () {
+    // Real millisecond timers, no fake_async (spec §7): the watchdog cadence
+    // and both quiet windows shrink through the transport's injectable
+    // watchdogTickInterval / contentSilenceThreshold.
+    const tick = Duration(milliseconds: 5);
+    const quiet = Duration(milliseconds: 40);
+
+    late _ManualChannels channels;
+    late List<String> logs;
+    late Stopwatch clock;
+    late _FakeBridgeSession session;
+
+    setUp(() {
+      logs = [];
+      channels = _ManualChannels();
+    });
+
+    ConversationTransport makeTransport({Duration? base}) {
+      clock = Stopwatch()..start();
+      session = _FakeBridgeSession(channels.client);
+      return _FastBackoffTransport(
+        session: session,
+        scope: {'workspacePath': '/repo'},
+        watchdogTickInterval: tick,
+        contentSilenceThreshold: base ?? quiet,
+        onLog: logs.add,
+      );
+    }
+
+    Future<void> pumpUntil(
+      bool Function() test, {
+      Duration timeout = const Duration(seconds: 10),
+    }) async {
+      final deadline = DateTime.now().add(timeout);
+      while (!test()) {
+        if (DateTime.now().isAfter(deadline)) {
+          fail('pumpUntil: condition not met within $timeout\n'
+              'logs:\n${logs.join('\n')}');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 2));
+      }
+    }
+
+    /// Subscribes and acks with sub-1; the ack carries no snapshot — tests
+    /// drive the frame stream themselves.
+    Future<ConversationSubscription> open(ConversationTransport transport) async {
+      final done = transport.subscribe('s1');
+      await pumpUntil(() => channels.count('subscribeConversationV4') == 1);
+      channels.answer('subscribeConversationV4', {
+        'ack': {'subscriptionId': 'sub-1', 'logEpoch': 'e1'},
+      });
+      return done;
+    }
+
+    /// A `deltas` logical frame bound to sub-1.
+    Map<String, dynamic> frameFor(
+      ConversationSubscription sub,
+      List<Map<String, dynamic>> deltas,
+    ) =>
+        {
+          'wireVersion': 3,
+          'kind': 'complete',
+          'topic': 'conversation/s1',
+          'logicalFrameId': 'lf-${sub.state.seq + 1}',
+          'frame': {
+            'subscriptionId': 'sub-1',
+            'payload': {'kind': 'deltas', 'deltas': deltas},
+            'fromSeq': sub.state.seq,
+            'toSeq': sub.state.seq + 1,
+          },
+        };
+
+    /// Fires a frame that advances the wire seq but carries no content
+    /// (unknown row.delta path → a no-op) — "frames arrive, content does
+    /// not move".
+    void fireNoop(ConversationSubscription sub) => channels.fire(
+      'onDynamicConversationFrame',
+      frameFor(sub, [
+        {'op': 'row.delta', 'rowId': 1, 'path': 'futureField', 'append': 'x'},
+      ]),
+    );
+
+    void snapRunning(ConversationSubscription sub) => channels.fire(
+      'onDynamicConversationFrame',
+      {
+        'wireVersion': 3,
+        'kind': 'complete',
+        'topic': 'conversation/s1',
+        'logicalFrameId': 'snap-1',
+        'frame': {
+          'subscriptionId': 'sub-1',
+          'payload': {
+            'kind': 'snapshot',
+            'snapshot': {
+              'logEpoch': 'e1',
+              'rows': {'window': [], 'totalCount': 0},
+              'control': {'phase': 'running'},
+            },
+          },
+          'toSeq': sub.state.seq + 1,
+        },
+      },
+    );
+
+    List<String> reasons(String phrase) =>
+        [for (final l in logs) if (l.contains(phrase)) l];
+
+    test('frames keep arriving but content never changes: no-content fires '
+        'while no-frames stays silent', () async {
+      final transport = makeTransport();
+      final sub = await open(transport);
+      snapRunning(sub);
+      await pumpUntil(() => sub.state.ready);
+      // Frames at ~2x the tick: the frame-silence criterion never sees a
+      // quiet window long enough to matter.
+      final feeder = Timer.periodic(
+        tick,
+        (_) => fireNoop(sub),
+      );
+      await pumpUntil(() => reasons('no content for').isNotEmpty);
+      feeder.cancel();
+
+      expect(reasons('no content for'), isNotEmpty);
+      expect(reasons('no frames for'), isEmpty,
+          reason: 'the wire was never silent — line-frame silence is blind '
+              'to a content freeze');
+      await sub.dispose();
+    });
+
+    test('content that advances every frame never triggers', () async {
+      final transport = makeTransport();
+      final sub = await open(transport);
+      channels.fire('onDynamicConversationFrame', {
+        'wireVersion': 3,
+        'kind': 'complete',
+        'topic': 'conversation/s1',
+        'logicalFrameId': 'snap-1',
+        'frame': {
+          'subscriptionId': 'sub-1',
+          'payload': {
+            'kind': 'snapshot',
+            'snapshot': {
+              'logEpoch': 'e1',
+              'rows': {
+                'window': [
+                  {'rowId': 1, 'kind': 'assistantText', 'text': 'a'},
+                ],
+                'totalCount': 1,
+              },
+              'control': {'phase': 'running'},
+            },
+          },
+          'toSeq': sub.state.seq + 1,
+        },
+      });
+      await pumpUntil(() => sub.state.ready);
+      final feeder = Timer.periodic(tick, (_) {
+        channels.fire(
+          'onDynamicConversationFrame',
+          frameFor(sub, [
+            {'op': 'row.delta', 'rowId': 1, 'path': 'text', 'append': 'x'},
+          ]),
+        );
+      });
+      await Future<void>.delayed(quiet * 3);
+      feeder.cancel();
+
+      expect(reasons('no content for'), isEmpty,
+          reason: 'content kept moving — nothing to self-heal');
+      expect(reasons('no frames for'), isEmpty);
+      await sub.dispose();
+    });
+
+    test('a parked queue alone is not an active turn: no resync', () async {
+      final transport = makeTransport();
+      final sub = await open(transport);
+      channels.fire('onDynamicConversationFrame', {
+        'wireVersion': 3,
+        'kind': 'complete',
+        'topic': 'conversation/s1',
+        'logicalFrameId': 'snap-1',
+        'frame': {
+          'subscriptionId': 'sub-1',
+          'payload': {
+            'kind': 'snapshot',
+            'snapshot': {
+              'logEpoch': 'e1',
+              'rows': {
+                'window': [
+                  {'rowId': 1, 'kind': 'user', 'text': 'hi'},
+                ],
+                'totalCount': 1,
+              },
+              // Idle session, queue still holding a parked message.
+              'control': {'phase': 'idle', 'canStop': false},
+              'queue': {
+                'items': [
+                  {'queueItemId': 'q1', 'text': 'parked'},
+                ],
+                'autoDrain': true,
+              },
+            },
+          },
+          'toSeq': sub.state.seq + 1,
+        },
+      });
+      await pumpUntil(() => sub.state.ready);
+      final feeder = Timer.periodic(tick, (_) => fireNoop(sub));
+      await Future<void>.delayed(quiet * 3);
+      feeder.cancel();
+
+      expect(reasons('no content for'), isEmpty,
+          reason: 'a held queue must never keep the no-content watchdog '
+              'resyncing an idle session');
+      expect(reasons('no frames for'), isEmpty);
+      await sub.dispose();
+    });
+
+    test('line-frame silence on an active turn still reports no-frames', () async {
+      final transport = makeTransport();
+      final sub = await open(transport);
+      snapRunning(sub);
+      await pumpUntil(() => sub.state.ready);
+      // No further frames at all.
+      await pumpUntil(() => reasons('no frames for').isNotEmpty);
+
+      expect(reasons('no frames for'), isNotEmpty);
+      expect(reasons('no content for'), isEmpty,
+          reason: 'no-frames wins the reason once the wire itself is quiet');
+      await sub.dispose();
+    });
+
+    test('never-ready is preserved: an acked subscribe without any snapshot '
+        'still resyncs', () async {
+      final transport = makeTransport();
+      final sub = await open(transport);
+      await pumpUntil(() => reasons('no snapshot').isNotEmpty);
+      expect(reasons('no snapshot'), isNotEmpty);
+      await sub.dispose();
+    });
+
+    test('consecutive triggers escalate the silence window (base → 2x → 4x, '
+        'capped at 120s on the stock schedule) and any content change resets '
+        'it', () async {
+      final transport = makeTransport();
+      final sub = await open(transport);
+      snapRunning(sub);
+      await pumpUntil(() => sub.state.ready);
+      final feeder = Timer.periodic(tick, (_) => fireNoop(sub));
+
+      /// Elapsed time of each no-content trigger, sampled the moment the
+      /// trigger log line appears.
+      final times = <Duration>[];
+      var seen = 0;
+      await pumpUntil(() {
+        final count = reasons('no content for').length;
+        while (seen < count) {
+          times.add(clock.elapsed);
+          seen++;
+        }
+        return count >= 3;
+      });
+
+      expect(times, hasLength(greaterThanOrEqualTo(3)));
+      final gap1 = times[1] - times[0];
+      final gap2 = times[2] - times[1];
+      expect(gap2, greaterThan(gap1 * 1.4),
+          reason: 'the second wait must be the doubled window '
+              '(${gap1.inMilliseconds}ms → ${gap2.inMilliseconds}ms)');
+
+      // Content finally moves: the episode resets to the base window.
+      final before = reasons('no content for').length;
+      final contentAt = clock.elapsed;
+      channels.fire(
+        'onDynamicConversationFrame',
+        frameFor(sub, [
+          {'op': 'row.appended', 'row': {'rowId': 9, 'kind': 'user', 'text': 'x'}},
+        ]),
+      );
+      await pumpUntil(() => reasons('no content for').length > before);
+      final nextGap = clock.elapsed - contentAt;
+      feeder.cancel();
+
+      expect(nextGap, lessThan(quiet * 3),
+          reason: 'after any content change the next trigger rides the BASE '
+              'window again, not the escalated one '
+              '(${nextGap.inMilliseconds}ms)');
+      await sub.dispose();
+    });
+
+    test('a bridge flap mid-silence must not reset the content window: the '
+        'no-content criterion still fires (11-05 live gap)', () async {
+      // Live finding (2026-11-05 probe run): the desktop bridge degraded and
+      // reopened every 30–120s, and each recovery resubscribed the
+      // conversation. `_onStarted` reset _lastContentChangeAt on every
+      // resubscribe, so a 45s legal-silent Bash never accumulated the 20s
+      // window — the criterion was silently unreachable in that
+      // environment. The frame clock may restart per subscription (the old
+      // subscription id is dead), but the CONTENT clock must not: content
+      // is a property of the conversation, not of the wire generation.
+      final transport = makeTransport();
+      final sub = await open(transport);
+      snapRunning(sub);
+      await pumpUntil(() => sub.state.ready);
+      final feeder = Timer.periodic(tick, (_) => fireNoop(sub));
+
+      // Flap the bridge repeatedly, faster than the quiet window, the way
+      // the desktop did. Each flap resubscribes (new ack, new sub id).
+      var flaps = 0;
+      final flapper = Timer.periodic(
+        Duration(milliseconds: quiet.inMilliseconds ~/ 2),
+        (_) {
+          flaps++;
+          // The real signal is the bridge session's `recovered` notifier
+          // (conversation_subscription.dart:114), not a channel event.
+          session.recovered.value++;
+        },
+      );
+
+      // Re-ack every resubscribe attempt so `start()` completes again.
+      final acker = Timer.periodic(
+        Duration(milliseconds: (tick.inMilliseconds ~/ 2).clamp(1, 5)),
+        (_) {
+          while (channels.parked.any((p) => p.$1 == 'subscribeConversationV4')) {
+            channels.answer('subscribeConversationV4', {
+              'ack': {'subscriptionId': 'sub-re', 'logEpoch': 'e1'},
+            });
+          }
+        },
+      );
+
+      await pumpUntil(() => reasons('no content for').isNotEmpty);
+      feeder.cancel();
+      flapper.cancel();
+      acker.cancel();
+
+      expect(reasons('no content for'), isNotEmpty,
+          reason: 'the bridge kept flapping but no content ever arrived — '
+              'the watchdog must still self-heal (resubscribe resets the '
+              'frame window, never the content window); flaps=$flaps');
+      await sub.dispose();
+    });
+
+    test('unknown delta ops / row.delta paths are logged once per word per '
+        'subscription lifetime', () async {
+      final transport = makeTransport();
+      final sub = await open(transport);
+      channels.fire('onDynamicConversationFrame', {
+        'wireVersion': 3,
+        'kind': 'complete',
+        'topic': 'conversation/s1',
+        // The row must be IN the window: an out-of-window row.delta is
+        // dropped before path routing, so it can register nothing.
+        'logicalFrameId': 'snap-1',
+        'frame': {
+          'subscriptionId': 'sub-1',
+          'payload': {
+            'kind': 'snapshot',
+            'snapshot': {
+              'logEpoch': 'e1',
+              'rows': {
+                'window': [
+                  {'rowId': 1, 'kind': 'assistantText', 'text': 'a'},
+                ],
+                'totalCount': 1,
+              },
+            },
+          },
+          'toSeq': sub.state.seq + 1,
+        },
+      });
+      await pumpUntil(() => sub.state.ready);
+
+      channels.fire(
+        'onDynamicConversationFrame',
+        frameFor(sub, [
+          {'op': 'row.futureSurface', 'row': {'rowId': 5}},
+          {'op': 'row.delta', 'rowId': 1, 'path': 'futureField', 'append': 'x'},
+        ]),
+      );
+      await pumpUntil(
+        () => logs.any((l) => l.contains('unknown row.delta path')),
+      );
+
+      expect(logs, contains('[v4] unknown delta op: row.futureSurface'));
+      expect(logs, contains('[v4] unknown row.delta path: futureField'));
+
+      // Same words again: never re-logged (one line per word per lifetime).
+      final seqBefore = sub.state.seq;
+      channels.fire(
+        'onDynamicConversationFrame',
+        frameFor(sub, [
+          {'op': 'row.futureSurface', 'row': {'rowId': 6}},
+          {'op': 'row.delta', 'rowId': 1, 'path': 'futureField', 'append': 'y'},
+        ]),
+      );
+      await pumpUntil(() => sub.state.seq > seqBefore);
+      expect(
+        logs.where((l) => l.contains('unknown delta op: row.futureSurface')),
+        hasLength(1),
+      );
+      expect(
+        logs.where((l) => l.contains('unknown row.delta path: futureField')),
+        hasLength(1),
+      );
+      await sub.dispose();
     });
   });
 
@@ -291,6 +718,8 @@ class _FastBackoffTransport extends ConversationTransport {
     super.onLog,
     super.onLinkLevelFailure,
     super.onChannelSuccess,
+    super.watchdogTickInterval,
+    super.contentSilenceThreshold,
   });
 
   @override
@@ -314,6 +743,10 @@ class _ManualChannels {
   /// Wall clock of every `subscribeConversationV4` send, in call order.
   final subscribeAt = <DateTime>[];
 
+  /// Event listener ids by event name — [fire] fans a dynamic frame in at
+  /// the registered `onDynamicConversationFrame` listener.
+  final listeners = <String, int>{};
+
   late final ChannelClient client;
 
   _ManualChannels() {
@@ -323,9 +756,12 @@ class _ManualChannels {
       final header = decodeValue(reader) as List;
       final method = '${header[3]}';
       final id = header[1] as int;
-      if ((header[0] as num).toInt() == ChannelClient.reqEventListen) {
+      final reqType = (header[0] as num).toInt();
+      if (reqType == ChannelClient.reqEventListen) {
+        listeners[method] = id;
         return;
       }
+      if (reqType == ChannelClient.reqEventDispose) return;
       sent.add(method);
       if (method == 'subscribeConversationV4') {
         subscribeAt.add(DateTime.now());
@@ -335,6 +771,7 @@ class _ManualChannels {
           _reply(c, id, {'connectionId': 'conn-test'});
         case 'initializeConversationV4':
         case 'unsubscribeConversationV4':
+        case 'resyncConversationV4':
           _reply(c, id, const {'status': 'accepted'});
         default:
           parked.add((method, id));
@@ -344,6 +781,16 @@ class _ManualChannels {
     encodeValue(init, [ChannelClient.resInitialize, 0]);
     c.handleMessage(init.toBytes());
     client = c;
+  }
+
+  /// Fires a dynamic-frame event at the registered listener.
+  void fire(String event, Object? data) {
+    final id = listeners[event];
+    if (id == null) throw StateError('no event listener registered: $event');
+    final w = ValueWriter();
+    encodeValue(w, [ChannelClient.resEventFire, id]);
+    encodeValue(w, data);
+    client.handleMessage(w.toBytes());
   }
 
   void _reply(
