@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.7] - 2026-11-05
+
+### Added
+
+- **Encrypted device backup v2**: passphrase-encrypted credentials with a
+  file/share export channel — restore on a new device without re-login.
+- **Workflow run panel**: typed views + official settled projection in the
+  protocol layer; tool cards (create / resume / get / list), a read-only
+  run detail page, and a session section listing ended runs; zh/en copy,
+  44×48 chevron targets, sheet auto-close that never removes a drill-in
+  route, and actor-count summary fallback when nobody is running.
+- **APK artifact gate**: `tool/verify_apk.py` self-check for release
+  artifacts (fails on an "empty shell" build with no plugin classes) plus
+  plugin-channel error states.
+
+### Fixed
+
+- **Sidecar reliability series**: cooldown activity release (30 s-level
+  recovery of the cold-runtime 10 min blind spot), workspace-switch
+  carry-over (sidecar data survives bridge re-attach; phase-flicker fix,
+  TTL-exempt running rows with a 10 min hard cap), ranked set 5→12 with
+  key-lexicographic tie-break (slot-flip jitter under equal `updatedAt`),
+  and a regression lock for the cold-reject-keeps-stale branch.
+- **3.17.2 tool progress stall**: desktop 3.17.2 replaced the tool
+  progress face (bytes/previewLine → fraction/total/message) while ZGo
+  only understood the old face, freezing running tool rows — a content
+  watchdog (three mutually exclusive criteria, 20 s→40/80/120 s backoff),
+  progress faces rendered through the shared timeline (`_ProgressRow`
+  segments, Bash `outputPreview` tail window, terminal two-layer
+  collapse), and the content clock now survives resubscribes.
+
 ## [1.15.5] - 2026-11-01
 
 ### Added
