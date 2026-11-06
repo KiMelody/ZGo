@@ -249,9 +249,31 @@ class _TaskListPageState extends State<TaskListPage>
   void _startOverviewCadence({bool refreshNow = false}) {
     _overviewTimer?.cancel();
     _overviewTimer = Timer.periodic(widget.overviewInterval, (_) {
-      unawaited(_session?.refreshTaskOverview());
+      unawaited(_pullOverview());
     });
-    if (refreshNow) unawaited(_session?.refreshTaskOverview());
+    if (refreshNow) unawaited(_pullOverview());
+  }
+
+  /// One cadence pull plus the「最后同步」stamp. [refreshTaskOverview] keeps
+  /// its own RPC errors (old rows survive), so the stamp marks the moment the
+  /// round finished — it proves the cadence is alive, not that every leg
+  /// reached the desktop.
+  Future<void> _pullOverview() async {
+    final session = _session;
+    if (session == null) return;
+    await session.refreshTaskOverview();
+    if (!mounted) return;
+    setState(() => _lastSyncAt = clock.now());
+  }
+
+  /// `hh:mm` of a sync stamp — the 「最后同步」 line only needs the wall clock;
+  /// the relative-time family lives in `ui_settings.dart` and is not
+  /// borrowed here (i18n spec §4).
+  static String _clockLabel(DateTime at) {
+    final local = at.toLocal();
+    final hh = local.hour.toString().padLeft(2, '0');
+    final mm = local.minute.toString().padLeft(2, '0');
+    return '$hh:$mm';
   }
 
   @override
@@ -312,6 +334,12 @@ class _TaskListPageState extends State<TaskListPage>
   /// is about to be replaced, so the list surfaces go pointer-dead for the
   /// round-trip (no stale-row taps mid-reshuffle; page-level, not per row).
   bool _reloading = false;
+
+  /// When the last silent overview pull finished (B-02): the header shows it
+  /// as 「最后同步 hh:mm」 so an unchanged list still proves the cadence is
+  /// alive. `refreshTaskOverview` absorbs RPC errors internally, so this is
+  /// the last *attempt* — never a claim that every leg succeeded.
+  DateTime? _lastSyncAt;
 
   /// Layout breakpoint: Tailwind md — single column below, dual ≥768.
   static const double kDualPaneBreakpoint = 768;
@@ -755,6 +783,10 @@ class _TaskListPageState extends State<TaskListPage>
                 ],
               ),
             ),
+            // Same replace-window discipline as the mobile list: the sidebar
+            // tree goes pointer-dead (with the same 2dp bar) while a reload
+            // is in flight.
+            if (_reloading) const _ReloadBar(),
             Expanded(
               child: session == null || session.workspaces.isEmpty
                   ? _fallback(context, session)
@@ -1259,22 +1291,32 @@ class _TaskListPageState extends State<TaskListPage>
         ];
         // The replace window: while a reload RPC is in flight the list is
         // pointer-dead (stale-row taps would act on rows about to reshuffle).
-        return IgnorePointer(
-          ignoring: _reloading,
-          child: RefreshIndicator(
-            onRefresh: () async => session == null
-                ? widget.hub.ensure(widget.device)
-                : _reloadTasks(session),
-            child: ListView.builder(
-              // Always scrollable: a short list (one workspace, no tasks) must
-              // still accept the pull gesture for the refresh indicator.
-              physics: const AlwaysScrollableScrollPhysics(),
-              padding: zScreenPadding(
-                  context, top: 12, bottom: 32, horizontal: 12),
-              itemCount: rows.length,
-              itemBuilder: (context, i) => rows[i],
+        // The 2dp bar above it is the only visible trace of that window — a
+        // pointer-dead list with zero progress read as a hung page.
+        return Column(
+          children: [
+            if (_reloading) const _ReloadBar(),
+            Expanded(
+              child: IgnorePointer(
+                ignoring: _reloading,
+                child: RefreshIndicator(
+                  onRefresh: () async => session == null
+                      ? widget.hub.ensure(widget.device)
+                      : _reloadTasks(session),
+                  child: ListView.builder(
+                    // Always scrollable: a short list (one workspace, no
+                    // tasks) must still accept the pull gesture for the
+                    // refresh indicator.
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: zScreenPadding(
+                        context, top: 12, bottom: 32, horizontal: 12),
+                    itemCount: rows.length,
+                    itemBuilder: (context, i) => rows[i],
+                  ),
+                ),
+              ),
             ),
-          ),
+          ],
         );
       },
     );
@@ -1338,6 +1380,16 @@ class _TaskListPageState extends State<TaskListPage>
                 overflow: TextOverflow.ellipsis,
                 style: ZType.sub.copyWith(color: ZInk.faint(context)),
               ),
+              if (_lastSyncAt != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(
+                    trP(context, 'tasks.lastSync', [_clockLabel(_lastSyncAt!)]),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: ZType.caption.copyWith(color: ZInk.ghost(context)),
+                  ),
+                ),
             ],
           ),
         ),
@@ -3438,6 +3490,25 @@ String _errorCopy(BuildContext context, DeviceSession? session) {
     case WorkspaceOpenAborted():
     case null:
       return session?.error ?? tr(context, 'tasks.fallback.body');
+  }
+}
+
+/// Thin indeterminate bar over the pointer-dead replace window (B-02): the
+/// same 2dp shape the composer's upload bar uses, on the shared progress
+/// tokens.
+class _ReloadBar extends StatelessWidget {
+  const _ReloadBar();
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 2,
+      child: LinearProgressIndicator(
+        minHeight: 2,
+        backgroundColor: ZInk.barTrack(context),
+        valueColor: AlwaysStoppedAnimation(ZInk.usageBlue(context)),
+      ),
+    );
   }
 }
 

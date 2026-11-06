@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../notifications/keepalive_controller.dart';
+import '../notifications/notification_service.dart';
 import '../plan/plan_account.dart';
 import '../plan/remote_device_api.dart';
 import '../protocol/connection_params.dart';
@@ -45,6 +46,10 @@ class DevicesPage extends StatefulWidget {
   /// the feature is not wired).
   final PlanController? plan;
 
+  /// Notification service handed to the settings section for the
+  /// permission nudge (B-04); null on hosts without notifications.
+  final NotificationService? notifications;
+
   /// Cloud device-directory client (task 10-22). Null on hosts without the
   /// feature — the cloud section is then never rendered.
   final RemoteDeviceApi? cloudApi;
@@ -65,6 +70,7 @@ class DevicesPage extends StatefulWidget {
     required this.keepalive,
     this.quotaWatch,
     this.plan,
+    this.notifications,
     this.cloudApi,
     this.saveBackupFile,
     this.shareBackupFile,
@@ -1022,6 +1028,7 @@ class _DevicesPageState extends State<DevicesPage>
                 keepalive: widget.keepalive,
                 quotaWatch: widget.quotaWatch,
                 plan: widget.plan,
+                notifications: widget.notifications,
               ),
             )),
           ),

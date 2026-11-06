@@ -60,12 +60,19 @@ class _GatedReloadSession extends FakeDeviceSession {
     required super.params,
     super.entries,
     super.workspaces,
+    super.relayTasks,
   });
 
   final Completer<void> gate = Completer<void>();
 
   @override
   Future<void> reloadTasks() => gate.future;
+
+  /// The desktop-sidebar test enters the window through a row action (the
+  /// dual-pane narrows no refresh button): answer the command without a
+  /// client, then hang the reload on [gate].
+  @override
+  Future<dynamic> setTaskArchived(String sessionId, bool archived) async => {};
 }
 
 /// A [TaskGroupResolver] answering a fixed view without touching the
@@ -976,6 +983,154 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.byType(ChatPage), findsOneWidget);
+  });
+
+  testWidgets('the reload window shows a thin progress bar (B-02)',
+      (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = _GatedReloadSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 's1',
+          'title': '修复登录',
+          'phase': 'completedSuccess',
+          'lastActivityAt': DateTime.now().millisecondsSinceEpoch,
+        },
+      ],
+      workspaces: [
+        {'workspacePath': '/repo/app'},
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(LinearProgressIndicator), findsNothing,
+        reason: 'idle page — no replace window, no bar');
+
+    await tester.tap(find.byIcon(Icons.refresh));
+    await tester.pump();
+    final bars = find.byType(LinearProgressIndicator);
+    expect(bars, findsOneWidget);
+    expect(tester.getSize(bars).height, lessThanOrEqualTo(2),
+        reason: 'a hairline trace, not a full-width band');
+
+    session.gate.complete();
+    await tester.pumpAndSettle();
+    expect(find.byType(LinearProgressIndicator), findsNothing,
+        reason: 'the bar leaves with the window');
+  });
+
+  testWidgets('the cadence stamps 「最后同步 hh:mm」 once a pull completes '
+      '(B-02)', (tester) async {
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = _CountingSession(
+      deviceId: device.id,
+      params: device.params!,
+      workspaces: [
+        {'workspacePath': '/repo/app'},
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // The entry pull landed: one caption line with a zero-padded clock.
+    final stamp = find.textContaining(RegExp(r'^最后同步 \d{2}:\d{2}$'));
+    expect(stamp, findsOneWidget);
+
+    // A tick 30s later pulls again and re-stamps the line.
+    await tester.pump(const Duration(seconds: 30));
+    await tester.pump();
+    expect(session.overviewRefreshes, greaterThanOrEqualTo(2));
+    expect(
+      find.textContaining(RegExp(r'^最后同步 \d{2}:\d{2}$')),
+      findsOneWidget,
+    );
+
+    // Replace the page so the periodic timer is disposed.
+    await tester.pumpWidget(wrap(const SizedBox.shrink()));
+  });
+
+  testWidgets('the reload bar also covers the desktop sidebar (B-02)',
+      (tester) async {
+    useDesktop(tester);
+    final (store, device) = await setupDevice();
+    final session = _GatedReloadSession(
+      deviceId: device.id,
+      params: device.params!,
+      entries: [
+        {
+          'sessionId': 's1',
+          'title': '修复登录',
+          'phase': 'completedSuccess',
+          'lastActivityAt': DateTime.now().millisecondsSinceEpoch,
+        },
+      ],
+      workspaces: [
+        {'workspacePath': '/repo/app'},
+      ],
+      // A relay anchor for the same id: an anchor-less live row reads as a
+      // draft, and draft rows disable every task action (no reload entry).
+      relayTasks: [
+        {
+          'taskId': 's1',
+          'title': '修复登录',
+          'workspacePath': '/repo/app',
+          'displayStatus': 'idle',
+          'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        },
+      ],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // The dual-pane sidebar owns no refresh button; a row action is the
+    // page-level reload entry here (archive → reloadTasks). The sheet's
+    // archive ListTile is scoped inside the bottom sheet — the sidebar
+    // header carries the same word.
+    await tester.longPress(find.text('修复登录'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    final archiveItem = find.descendant(
+      of: find.byType(BottomSheet),
+      matching: find.widgetWithText(ListTile, '归档'),
+    );
+    expect(archiveItem, findsOneWidget, reason: 'the row action sheet');
+    expect(
+      tester.widget<ListTile>(archiveItem).enabled,
+      isTrue,
+      reason: 'a session-index row is not a draft',
+    );
+    await tester.tap(archiveItem);
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(LinearProgressIndicator), findsOneWidget,
+        reason: 'the sidebar tree is the only list surface in dual-pane');
+
+    session.gate.complete();
+    await tester.pumpAndSettle();
+    expect(find.byType(LinearProgressIndicator), findsNothing);
   });
 
   testWidgets(

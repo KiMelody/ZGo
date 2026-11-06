@@ -541,6 +541,7 @@ class _ZGoAppState extends State<ZGoApp>
             keepalive: _keepAlive,
             quotaWatch: _quotaWatch,
             plan: _plan,
+            notifications: _notifications,
             cloudApi: _remoteDevices,
           ),
         );

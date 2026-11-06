@@ -5176,7 +5176,15 @@ class _InteractionCardState extends State<_InteractionCard> {
         action: action,
         content: content,
       );
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[chat] resolveInteraction: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(tr(context, 'chat.interact.submitFailed')),
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -5447,7 +5455,15 @@ class _HookReviewCardState extends State<_HookReviewCard> {
     setState(() => _busy = true);
     try {
       await widget.onTrust(List.of(_checked));
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[chat] respondWorkspaceHookReview: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(tr(context, 'chat.interact.submitFailed')),
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -7898,10 +7914,14 @@ class _ControlChip extends StatelessWidget {
       return InkWell(
         borderRadius: BorderRadius.circular(ZRadius.tile),
         onTap: onTap,
-        child: SizedBox(
-          width: 28,
-          height: 28,
-          child: Icon(icon, size: 16, color: ZInk.muted(context)),
+        // Transparent touch box at the 44×48 floor; the painted icon stays
+        // ZTile.iconSize (only the hit area grows).
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(
+            minWidth: zTouchWidth,
+            minHeight: zTouchHeight,
+          ),
+          child: Icon(icon, size: ZTile.iconSize, color: ZInk.muted(context)),
         ),
       );
     }

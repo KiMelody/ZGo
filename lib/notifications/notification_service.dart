@@ -58,22 +58,46 @@ class NotificationService {
 
   /// Android 13+ / iOS runtime permission (asked once, lazily before the
   /// first notification).
-  Future<void> requestPermission() async {
-    if (_permissionAsked || !_initialized) return;
+  ///
+  /// Returns whether notifications are allowed — `null` when this host has
+  /// no platform implementation to ask (tests, unsupported platforms), the
+  /// ask threw, or the one-shot ask already ran. Callers therefore nudge
+  /// only on an explicit `false`.
+  ///
+  /// [force] re-asks despite that one-shot latch: the settings switch needs a
+  /// real answer every time it is turned on, not just on the first launch
+  /// that happened to fire a notification.
+  Future<bool?> requestPermission({bool force = false}) async {
+    if (!_initialized) return null;
+    if (_permissionAsked && !force) return null;
     _permissionAsked = true;
     try {
       final android = _plugin.resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>();
       if (android != null) {
-        await android.requestNotificationsPermission();
+        return await android.requestNotificationsPermission();
       }
       final ios = _plugin.resolvePlatformSpecificImplementation<
           IOSFlutterLocalNotificationsPlugin>();
       if (ios != null) {
-        await ios.requestPermissions(alert: true, badge: true, sound: true);
+        return await ios.requestPermissions(
+            alert: true, badge: true, sound: true);
       }
     } catch (e) {
       debugPrint('[notify] permission request failed: $e');
+    }
+    return null;
+  }
+
+  /// Opens the OS notification settings for this app. Android/iOS answer via
+  /// the plugin's `openAppNotificationSettings`; unsupported platforms throw
+  /// and are reported as `false` (never a crash path).
+  Future<bool> openAppNotificationSettings() async {
+    try {
+      return await _plugin.openAppNotificationSettings() ?? false;
+    } catch (e) {
+      debugPrint('[notify] openAppNotificationSettings failed: $e');
+      return false;
     }
   }
 

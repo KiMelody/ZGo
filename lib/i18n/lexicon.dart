@@ -522,6 +522,7 @@ const _zh = {
   'chat.interact.customAnswer': '自定义回答',
   'chat.interact.customHint': '输入自定义回答…',
   'chat.interact.answered': '已答 \$0/\$1',
+  'chat.interact.submitFailed': '提交失败，请重试',
   'chat.hook.title': '工作区 Hook 审阅',
   'chat.hook.summary': '\$0 个事件 · \$1 个 hook · \$2 项待审',
   'chat.hook.trustChecked': '信任勾选项',
@@ -772,6 +773,7 @@ const _zh = {
   // ---- task list (mobile layout) ----
   'tasks.sectionTitle': '当前设备上的工作区和任务',
   'tasks.stats': '\$0 个工作区 · \$1 个任务',
+  'tasks.lastSync': '最后同步 \$0',
   'tasks.collapseAll': '收起全部工作区',
   'tasks.tidy': '整理任务',
   'tasks.refreshAll': '刷新工作区和任务',
@@ -1310,6 +1312,8 @@ const _zh = {
   'notify.channel.automations.desc': '自动化定时触发的执行结果',
   'notify.channel.quota.name': '额度监控',
   'notify.channel.quota.desc': '套餐剩余额度监控与低额度告警',
+  'notify.permissionDenied': '系统未允许通知，任务完成提醒无法送达',
+  'notify.openSettings': '去设置',
   // Foreground-service notice (see keepalive_controller.dart): read via
   // trLocale and handed to the native side, which caches the last copy so a
   // STICKY restart can rebuild the notice.
@@ -1992,6 +1996,7 @@ const _en = {
   'chat.interact.customAnswer': 'Custom answer',
   'chat.interact.customHint': 'Type a custom answer…',
   'chat.interact.answered': 'Answered \$0/\$1',
+  'chat.interact.submitFailed': 'Submit failed, please try again',
   'chat.hook.title': 'Workspace hook review',
   'chat.hook.summary': '\$0 events · \$1 hooks · \$2 pending',
   'chat.hook.trustChecked': 'Trust checked',
@@ -2256,6 +2261,7 @@ const _en = {
   // ---- task list (mobile layout) ----
   'tasks.sectionTitle': 'Workspaces & tasks on this device',
   'tasks.stats': '\$0 workspaces · \$1 tasks',
+  'tasks.lastSync': 'Last sync \$0',
   'tasks.collapseAll': 'Collapse all workspaces',
   'tasks.tidy': 'Tidy tasks',
   'tasks.refreshAll': 'Refresh workspaces & tasks',
@@ -2829,6 +2835,10 @@ const _en = {
   'notify.channel.automations.desc': 'Results of scheduled automation runs',
   'notify.channel.quota.name': 'Quota watch',
   'notify.channel.quota.desc': 'Coding plan quota monitoring and low-quota alerts',
+  'notify.permissionDenied':
+      'Notifications are blocked in system settings — task alerts cannot '
+      'arrive',
+  'notify.openSettings': 'Settings',
   // Foreground-service notice (see the zh table note).
   'keepalive.channel.name': 'Background connection',
   'keepalive.notify.title': 'ZGo is keeping the connection alive',

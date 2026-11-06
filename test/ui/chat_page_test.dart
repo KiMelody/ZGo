@@ -57,6 +57,40 @@ class _HoldResolveGateway extends FakeChatGateway {
   ConversationTransport get conversationCommands => _hold;
 }
 
+/// Transport whose `resolveInteraction` / `respondWorkspaceHookReview` throw
+/// — the D-01 failure path (an RPC error must surface copy, not a silent
+/// catch).
+class _ThrowingInteractionTransport implements ConversationTransport {
+  @override
+  Future<dynamic> resolveInteraction(
+    String sessionId,
+    String interactionId, {
+    String? optionId,
+    String? freeText,
+    String? action,
+    Map<String, dynamic>? content,
+  }) async =>
+      throw StateError('resolve failed');
+
+  @override
+  Future<dynamic> respondWorkspaceHookReview(
+    String sessionId,
+    Map<String, dynamic> frame,
+    List<String> reviewItemIds,
+  ) async =>
+      throw StateError('trust failed');
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
+}
+
+class _ThrowingInteractionGateway extends FakeChatGateway {
+  final _throwing = _ThrowingInteractionTransport();
+
+  @override
+  ConversationTransport get conversationCommands => _throwing;
+}
+
 /// Programmable `switchModelConfig` for the sheet `_apply` tests (PRD
 /// 09-19): records the named args (the shared recording transport only
 /// keeps positional ones) and answers from [results] — an Exception/Error
@@ -206,11 +240,13 @@ class _FailingPrepGateway extends FakeChatGateway {
       throw StateError('prep unavailable');
 }
 
-Widget wrap(Widget child) => MaterialApp(
+Widget wrap(Widget child, {String locale = 'zh-CN'}) => MaterialApp(
   theme: buildDarkTheme(),
   darkTheme: buildDarkTheme(),
-  builder: (context, child) =>
-      UiSettingsProvider(settings: UiSettings(), child: child!),
+  builder: (context, child) => UiSettingsProvider(
+    settings: UiSettings()..locale = locale,
+    child: child!,
+  ),
   home: child,
 );
 
@@ -1030,6 +1066,110 @@ void main() {
     );
   });
 
+  // D-01: a failed resolve/trust used to vanish into an empty catch — the
+  // card snapped back to idle with zero copy and the user retried blindly.
+  testWidgets('a failed interaction resolve surfaces copy and resets busy',
+      (tester) async {
+    final gateway = _ThrowingInteractionGateway();
+    gateway.snapshotExtra = {
+      'pendingInteractions': [
+        {
+          'interactionId': 'i1',
+          'payload': {
+            'kind': 'permission',
+            'toolName': 'Bash',
+            'summary': 'rm -rf build',
+            'options': [
+              {'optionId': 'o1', 'kind': 'allowOnce'},
+            ],
+          },
+        },
+      ],
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('允许一次'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('提交失败，请重试'), findsOneWidget);
+    // Busy reset: the option is tappable again (the finally block ran).
+    expect(
+      tester.widget<OutlinedButton>(find.ancestor(
+        of: find.text('允许一次'),
+        matching: find.byType(OutlinedButton),
+      )).onPressed,
+      isNotNull,
+    );
+  });
+
+  testWidgets('a failed interaction resolve localizes the copy (en)',
+      (tester) async {
+    final gateway = _ThrowingInteractionGateway();
+    gateway.snapshotExtra = {
+      'pendingInteractions': [
+        {
+          'interactionId': 'i1',
+          'payload': {
+            'kind': 'permission',
+            'toolName': 'Bash',
+            'summary': 'rm -rf build',
+            'options': [
+              {'optionId': 'o1', 'kind': 'allowOnce'},
+            ],
+          },
+        },
+      ],
+    };
+    await tester.pumpWidget(
+      wrap(
+        ChatPage(host: gateway, sessionId: 's1', title: 't'),
+        locale: 'en-US',
+      ),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Allow once'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Submit failed, please try again'), findsOneWidget);
+  });
+
+  testWidgets('a failed hook trust surfaces copy and resets busy',
+      (tester) async {
+    final gateway = _ThrowingInteractionGateway();
+    gateway.snapshotExtra = {
+      'pendingInteractions': [hookReviewInteraction()],
+    };
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('信任勾选项'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('提交失败，请重试'), findsOneWidget);
+    expect(
+      tester.widget<FilledButton>(find.ancestor(
+        of: find.text('信任勾选项'),
+        matching: find.byType(FilledButton),
+      )).onPressed,
+      isNotNull,
+    );
+  });
+
   testWidgets('queue bar deletes a queued item', (tester) async {
     final gateway = FakeChatGateway();
     gateway.snapshotExtra = {
@@ -1059,6 +1199,38 @@ void main() {
         .toList()
         .single;
     expect(call.$2, ['s1', 'q1']);
+  });
+
+  testWidgets('icon-only control chip owns a 44×48 touch box while the '
+      'painted icon stays 16 (A-01)', (tester) async {
+    // Below the 640 composer breakpoint the chips drop their labels — the
+    // form the audit flagged as a 28×28 target.
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    final tuneInk = find
+        .ancestor(
+          of: find.byIcon(Icons.tune),
+          matching: find.byType(InkWell),
+        )
+        .first;
+    final size = tester.getSize(tuneInk);
+    expect(size.width, greaterThanOrEqualTo(zTouchWidth));
+    expect(size.height, greaterThanOrEqualTo(zTouchHeight));
+    // Hit area only — the glyph keeps the tile icon size.
+    expect(
+      tester.widget<Icon>(find.byIcon(Icons.tune)).size,
+      ZTile.iconSize,
+    );
   });
 
   testWidgets('composer hint switches to the queue wording when queued',

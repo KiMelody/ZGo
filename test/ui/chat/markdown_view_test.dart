@@ -46,6 +46,36 @@ void main() {
     expect(find.text('已复制'), findsOneWidget);
   });
 
+  testWidgets('copy button hit target reaches the 44×38 touch floor while the '
+      'painted icon stays 16 (A-01)', (tester) async {
+    await tester.pumpWidget(wrap(const AppMarkdown(
+        '```dart\nvoid main() {}\n```')));
+    await tester.pumpAndSettle();
+
+    final copyInk = find
+        .ancestor(
+          of: find.byIcon(Icons.copy_outlined),
+          matching: find.byType(InkWell),
+        )
+        .first;
+    final size = tester.getSize(copyInk);
+    expect(size.width, greaterThanOrEqualTo(44),
+        reason: 'the transparent hit box owns the 44dp width');
+    expect(size.height, greaterThanOrEqualTo(ZTile.headHeight),
+        reason: 'the hit box owns the shared 38dp header floor');
+    // Upper bound matters as much as the floor: minHeight:48 satisfies the
+    // >= 38 assertion above yet grows the shared tile header and misaligns
+    // reasoning/tool cards. Lock the header geometry from both sides.
+    expect(size.height, lessThan(zTouchHeight),
+        reason: '48 would grow the shared chat-tile header past '
+            'ZTile.headHeight and misalign reasoning/tool cards');
+    // Only the hit area grew — the glyph is still the tile icon size.
+    expect(
+      tester.widget<Icon>(find.byIcon(Icons.copy_outlined)).size,
+      ZTile.iconSize,
+    );
+  });
+
   testWidgets('fenced code block is collapsed by default and toggles',
       (tester) async {
     await tester.pumpWidget(wrap(const AppMarkdown(

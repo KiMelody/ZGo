@@ -6,6 +6,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../notifications/keepalive_controller.dart';
+import '../notifications/notification_service.dart';
 import '../plan/plan_account.dart';
 import '../state/device_store.dart';
 import '../state/quota_watch.dart';
@@ -32,6 +33,10 @@ class SettingsPage extends StatefulWidget {
   /// Plan-account controller (z.ai billing plane); null = the section is
   /// hidden (hosts / tests that don't wire the feature).
   final PlanController? plan;
+
+  /// Notification service, injected for the permission nudge (B-04). Null on
+  /// hosts without notifications — the master switch then just persists.
+  final NotificationService? notifications;
   const SettingsPage({
     super.key,
     required this.store,
@@ -40,6 +45,7 @@ class SettingsPage extends StatefulWidget {
     required this.keepalive,
     this.quotaWatch,
     this.plan,
+    this.notifications,
   });
 
   @override
@@ -73,6 +79,29 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() {
       _keepAliveRunning = widget.keepalive.isRunning();
     });
+  }
+
+  /// Master notification switch (B-04): turning it on is the user's consent,
+  /// so that is the moment to ask the OS — and the moment a denial is worth
+  /// saying out loud. An explicit `false` raises a one-shot prompt with a
+  /// 「去设置」 action; `null` (no platform implementation / unsupported
+  /// host) stays silent.
+  void _setNotifications(bool value) {
+    unawaited(widget.ui.setNotificationsEnabled(value));
+    final service = widget.notifications;
+    if (!value || service == null) return;
+    unawaited(service.requestPermission(force: true).then((granted) {
+      if (!mounted || granted != false) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(tr(context, 'notify.permissionDenied')),
+          action: SnackBarAction(
+            label: tr(context, 'notify.openSettings'),
+            onPressed: () => unawaited(service.openAppNotificationSettings()),
+          ),
+        ),
+      );
+    }));
   }
 
   /// Channel-aware update entry: store builds open their store listing;
@@ -237,7 +266,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   title: Text(tr(context, 'settings.notifications')),
                   subtitle: Text(tr(context, 'settings.notificationsHint')),
                   value: ui.notificationsEnabled,
-                  onChanged: (v) => ui.setNotificationsEnabled(v),
+                  onChanged: _setNotifications,
                 ),
                 if (ui.notificationsEnabled) ...[
                   // Child rows share one indent (parent title +16): the

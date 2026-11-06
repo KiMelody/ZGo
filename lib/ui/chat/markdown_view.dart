@@ -340,10 +340,19 @@ class _CodeBlockState extends State<_CodeBlock> {
                         ),
                       );
                     },
-                    child: Padding(
-                      padding: const EdgeInsets.all(2),
-                      child: Icon(Icons.copy_outlined,
-                          size: ZTile.iconSize, color: ZInk.faint(context)),
+                    // Transparent touch box: 44 wide, and at least the shared
+                    // chat-tile header floor (48 would grow the header past
+                    // ZTile.headHeight and break reasoning/tool alignment).
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        minWidth: zTouchWidth,
+                        minHeight: ZTile.headHeight,
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(2),
+                        child: Icon(Icons.copy_outlined,
+                            size: ZTile.iconSize, color: ZInk.faint(context)),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 4),
