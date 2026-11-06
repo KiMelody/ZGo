@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   route, and actor-count summary fallback when nobody is running.
 - **APK artifact gate**: `tool/verify_apk.py` self-check for release
   artifacts (fails on an "empty shell" build with no plugin classes) plus
-  plugin-channel error states.
+  device-list load-error states.
 
 ### Fixed
 

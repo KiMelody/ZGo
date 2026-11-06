@@ -75,7 +75,7 @@ Finding it useful? A **Star ⭐** keeps you posted.
 
 | | |
 |---|---|
-| 📱 **Device list** | Cards with device name / host / last used / online status dot / running-task badge; drag-reorder and pin; rename, delete, copy link, open in browser; clipboard offer-to-add; device backup as JSON export / import |
+| 📱 **Device list** | Cards with device name / host / last used / online status dot / running-task badge; drag-reorder and pin; rename, delete, copy link, open in browser; clipboard offer-to-add; device backup as an encrypted `.zgobak` envelope (AES-256-GCM, passphrase via PBKDF2-HMAC-SHA256 / 210000 iterations, never stored — write it down), restorable on a new phone by that passphrase, sign-in credential included |
 | ➕ **Pair by QR / paste / screenshot** | Camera scan (`mobile_scanner`), pure-Dart gallery decode (`zxing2`), pasted links; automatic dedupe; unparseable links are still saved, never lost |
 | 📊 **Native task list** | Workspace cards (local badge, path, updated time, task count) with phase-pill rows (spinner / ✓ / failed), relative times, current-task highlight; persistent connection banner; pinned group; long-press bottom menu (stop / pause / resume); collapse / organize / refresh; ≥768dp dual-pane (264dp rail + embedded chat) |
 | 👉 **Swipe trays** | Swiping a task row reveals quick actions (archive / mark unread / delete) — the same verbs as the long-press menu, no menu needed |
@@ -101,6 +101,11 @@ Finding it useful? A **Star ⭐** keeps you posted.
 | 🎨 **Design tokens** | The neutral-gray + sky-blue token set extracted from the desktop bundle; dark `#161616` by default |
 | 📱 **Android + iOS** | Release builds for both platforms, privacy manifests, bilingual permission strings; no build ships in-app APK download / install code |
 | 🔄 **Landscape** | Chat and bottom sheets adapt to landscape phones and half-open foldables: collapsing tool rows, fixed-height sheets that no longer overflow |
+| 🧾 **Plan & entitlements** | Account-level z.ai coding-plan page (settings → Coding plan), separate from the per-device usage page above: sign in with the zcode JWT or the browser OAuth flow, then remaining / used / total buckets with expiry, pending grants, the data-age marker and pull-to-refresh |
+| 🔐 **Encrypted backup v2** | `.zgobak` envelope (AES-256-GCM; the passphrase is expanded with PBKDF2-HMAC-SHA256, 210000 iterations): set a passphrase to export, restore on a new phone with that same passphrase — the sign-in credential rides along, the passphrase itself is never stored |
+| 🔎 **Task search** | Command-palette page over actions / tasks / files: slash commands and skills pre-fill a new chat, tasks filter the merged directory by title, files ride the probed workspace search (the tab hides when the desktop serves neither method) |
+| 📄 **PDF preview** | Workspace PDFs open in an inlined pdf.js viewer with no file access: files ≤2 MiB pull eagerly in 256 KiB ranges, larger ones stream on demand; password-protected PDFs report instead of prompting |
+| 🧬 **Workflow panel** | Agent workflow runs render as typed tool cards (create / resume / get / list) that drill into a read-only run detail page — status, progress, phases, nodes, actors, questions, artifacts and reports, live from the session mirror with the tool snapshot as fallback |
 
 One terminal per device: the server allows a single remote connection
 per device. The native chat holds that link for its whole lifetime;
