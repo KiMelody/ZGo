@@ -23,6 +23,11 @@ Uri? get storeListingUrl {
       return appStoreId.isEmpty
           ? null
           : Uri.parse('itms-apps://apps.apple.com/app/id$appStoreId');
+    // harmony is intentionally absent: there is no AGC signing key yet, so
+    // the HAP cannot be packaged or listed for AppGallery. It falls through
+    // to `default` (null) and therefore behaves like the github channel
+    // (in-app check against GitHub releases). Add a harmony branch once
+    // signing material and a store target are available.
     default:
       return null;
   }

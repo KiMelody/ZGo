@@ -168,9 +168,24 @@ jobs:
       - name: Build HAP (release)
         run: |
           set -e
+          # APP_CHANNEL=harmony is an intentional state, not an oversight:
+          # without an AGC signing key there is no HAP that can be listed, so
+          # app_channel.dart deliberately falls through to `default` and the
+          # app behaves like the github channel on this build.
           flutter build hap --release \
             --target-platform ohos-arm64 \
             --dart-define=APP_CHANNEL=harmony
+
+      # Static + unit gates, mirroring ci.yml:26-30 (no --no-pub, repo root,
+      # no extra env). Caveat: this job runs on the SIG fork (Dart 3.4) after
+      # the Pub get step deleted pubspec.lock and resolved fresh, so a green
+      # result here describes the fork+fresh-resolve combination only — it is
+      # NOT equivalent to main CI.
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
 
       - name: Locate HAP
         id: hap
@@ -178,6 +193,28 @@ jobs:
           f=$(find ohos -name "*.hap" | head -1)
           echo "path=$f" >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$f")" >> "$GITHUB_OUTPUT"
+
+      # Must stay AFTER the builds and BEFORE the upload below (same
+      # discipline as release.yml:81-93): a failed check has to block
+      # distribution. Scope is deliberately limited to what is verifiable —
+      # the plugin-manifest cross-check (ohos platform key + plugin classes/
+      # resources) is deferred until the first CI run yields a real HAP and
+      # the fork-generated `.flutter-plugins-dependencies`, so no member
+      # layout is assumed here.
+      - name: Verify HAP artifact (empty-shell gate)
+        env:
+          HAP: ${{ steps.hap.outputs.path }}
+        run: |
+          set -e
+          # 1) Pub get really ran: the 2026-11-02 empty-shell incident shipped
+          #    a build with no plugin projects at all.
+          test -f .flutter-plugins-dependencies
+          # 2) The HAP exists and is not empty.
+          test -s "$HAP"
+          # 3) The HAP is a readable zip container — container only, no
+          #    guesses about its members.
+          python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); assert z.namelist(), "HAP zip has no entries"' "$HAP"
+          echo "HAP gate passed: $HAP"
 
       - name: Upload HAP artifact
         uses: actions/upload-artifact@v4
