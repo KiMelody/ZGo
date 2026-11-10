@@ -33,6 +33,7 @@ void main() {
   FakeDeviceSession sessionWith(
     Future<Object?> Function() entitlementAnswer, {
     Object? Function()? resetStatusAnswer,
+    void Function()? onUseReset,
   }) {
     return FakeDeviceSession(
       deviceId: 'd1',
@@ -47,6 +48,7 @@ void main() {
           return answer;
         }
         if (method == 'useCodingPlanReset') {
+          onUseReset?.call();
           return {'ok': true};
         }
         // getAppUsageSnapshot: empty by default.
@@ -384,8 +386,24 @@ void main() {
         ...?extra,
       };
 
-  testWidgets('ok state with provider id renders both pool rows read-only '
-      '(no reset action on the usage page)', (tester) async {
+  /// Reset status before / after one consumed opportunity: the five-hour
+  /// pool drops from two coupons to one and gains a usage history — the
+  /// refresh shape the card must render after a successful use.
+  Map<String, dynamic> statusFixtureWith({required bool consumed}) => {
+        'availableFiveHourResets': [
+          for (var i = consumed ? 1 : 0; i < 2; i++)
+            {
+              'expireAt': DateTime.now()
+                  .add(Duration(hours: 1 + i))
+                  .millisecondsSinceEpoch,
+            },
+        ],
+        'availableWeekResets': <Map<String, dynamic>>[],
+        if (consumed) 'latestFiveHourResetHistory': {'usedAt': 1789500000000},
+      };
+
+  testWidgets('ok state with provider id renders the pool row with the '
+      'header reset action', (tester) async {
     final session = sessionWith(
       () async => okPayloadWithProviderId(),
       resetStatusAnswer: () => resetStatusFixture(
@@ -405,7 +423,100 @@ void main() {
     // The weekly pool is empty → its row hides (no per-row copy anymore).
     expect(find.text('每周池'), findsNothing);
     expect(find.text('暂无可用机会'), findsNothing);
-    // Read-only: no reset action anywhere.
+    // One opportunity pool → the header carries the single reset entry.
+    expect(find.text('重置'), findsOneWidget);
+  });
+
+  testWidgets('reset action opens the shared dialog and a successful use '
+      'refreshes the card', (tester) async {
+    var useCalls = 0;
+    var statusCalls = 0;
+    var consumed = false;
+    final session = sessionWith(
+      () async => okPayloadWithProviderId(),
+      resetStatusAnswer: () {
+        statusCalls++;
+        return statusFixtureWith(consumed: consumed);
+      },
+      onUseReset: () {
+        useCalls++;
+        consumed = true;
+      },
+    );
+    addTearDown(session.dispose);
+    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('2 张'), findsOneWidget);
+    // The pool row's detail carries the earliest expiry: fixture grants
+    // coupons at +1h/+2h, so the earliest reads minutes-before-expiry
+    // before the use. The bucket (minutes vs hours) can only move via
+    // the expiry itself, not the count prefix.
+    expect(find.textContaining('分钟后过期'), findsOneWidget);
+
+    // The reset card sits below the fold of the scroll column.
+    await tester.ensureVisible(find.text('重置'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('重置'));
+    await tester.pumpAndSettle();
+
+    // The shared dialog: pool row + cancel/reset actions.
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(
+      find.descendant(
+          of: find.byType(AlertDialog), matching: find.text('5 小时池')),
+      findsOneWidget,
+    );
+    expect(find.text('取消'), findsOneWidget);
+
+    await tester.tap(
+      find.descendant(of: find.byType(AlertDialog), matching: find.text('重置')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(useCalls, 1);
+    // The dialog's success chain force-confirms the status; the page's
+    // ListenableBuilder then re-renders count / expiry / history from
+    // the refresh.
+    expect(statusCalls, greaterThan(1));
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.textContaining('1 张'), findsOneWidget);
+    expect(find.textContaining('2 张'), findsNothing);
+    // The earliest expiry moved with the refresh: the surviving coupon
+    // expires at +2h, past the minute bucket into the hour bucket.
+    expect(find.textContaining('分钟后过期'), findsNothing);
+    expect(find.textContaining('1 小时后过期'), findsOneWidget);
+    expect(find.textContaining('上次使用重置'), findsOneWidget);
+    // One opportunity left → the entry stays.
+    expect(find.text('重置'), findsOneWidget);
+  });
+
+  testWidgets('reset action hides when the status fetch has no pools',
+      (tester) async {
+    final session = sessionWith(
+      () async => okPayloadWithProviderId(),
+      resetStatusAnswer: () => Exception('rpc down'),
+    );
+    addTearDown(session.dispose);
+    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
+    await tester.pumpAndSettle();
+
+    // pools == null → the degraded copy, no action.
+    expect(find.textContaining('需桌面端套餐数据可用'), findsOneWidget);
+    expect(find.text('重置'), findsNothing);
+  });
+
+  testWidgets('reset action hides when no pool is resettable',
+      (tester) async {
+    final session = sessionWith(
+      () async => okPayloadWithProviderId(),
+      resetStatusAnswer: () => resetStatusFixture(withOpportunity: false),
+    );
+    addTearDown(session.dispose);
+    await tester.pumpWidget(wrap(DeviceUsagePage(session: session)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('暂无可用机会'), findsOneWidget);
     expect(find.text('重置'), findsNothing);
   });
 

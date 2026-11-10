@@ -4,6 +4,7 @@ import '../protocol/usage_stats.dart';
 import '../state/device_session.dart';
 import '../state/entitlement_poller.dart';
 import '../state/quota_reset.dart';
+import 'quota_reset_dialog.dart';
 import 'theme.dart';
 import 'ui_settings.dart';
 import 'usage/coding_plan_usage_card.dart';
@@ -678,14 +679,15 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
       ? '${p.round()}%'
       : '${p.toStringAsFixed(1)}%';
 
-  /// Reset opportunities, read-only (PRD: the sheet is the single reset
-  /// entry): one row per pool the projection credits ([EntitlementView.
-  /// resettablePools] — the visibility composition over the same
-  /// entitlement snapshot the cards above read) — with the count, the
-  /// earliest expiry and a 「上次使用重置」 line when the pool has a usage
-  /// history. The degraded copy replaces the rows while no usable desktop
-  /// data exists, and the 「暂无可用机会」 line replaces them when no pool
-  /// is resettable.
+  /// Reset opportunities: one row per pool the projection credits
+  /// ([EntitlementView.resettablePools] — the visibility composition over
+  /// the same entitlement snapshot the cards above read) — with the count,
+  /// the earliest expiry and a 「上次使用重置」 line when the pool has a
+  /// usage history. The degraded copy replaces the rows while no usable
+  /// desktop data exists, and the 「暂无可用机会」 line replaces them when
+  /// no pool is resettable. The header's reset action is a second entry
+  /// beside the chat sheet's, opening the same [showQuotaResetDialog]; it
+  /// shows only when a pool is resettable (the sheet's own gate).
   Widget _resetCard() {
     return Card(
       child: Padding(
@@ -701,8 +703,37 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(tr(context, 'usage.reset.title'),
-                    style: ZType.bodyStrong),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(tr(context, 'usage.reset.title'),
+                          style: ZType.bodyStrong),
+                    ),
+                    if (fiveHour || week)
+                      // Same recipe as the chat page's reset-credit action
+                      // (chat_page.dart `_usageBanner`): green-tint fill, no
+                      // border — the usage family's affirmative action.
+                      TextButton(
+                        onPressed: () => _showResetDialog({
+                          for (final r in resettable) r.type,
+                        }),
+                        style: TextButton.styleFrom(
+                          backgroundColor:
+                              ZInk.usageGreen(context).withValues(alpha: 0.15),
+                          foregroundColor: ZInk.usageGreen(context),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 5),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          textStyle: ZType.sub,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(ZRadius.field),
+                          ),
+                        ),
+                        child: Text(tr(context, 'usage.reset.action')),
+                      ),
+                  ],
+                ),
                 const SizedBox(height: 8),
                 if (pools == null)
                   Padding(
@@ -735,6 +766,17 @@ class _DeviceUsagePageState extends State<DeviceUsagePage> {
       ),
     );
   }
+
+  /// The card's reset entry: the chat sheet's dialog with this page's
+  /// projected pool set. The dialog renders processing / failure itself;
+  /// a successful use notifies [_reset], so the card's [ListenableBuilder]
+  /// re-reads the refreshed pools without extra work here.
+  Future<void> _showResetDialog(Set<String> resettable) =>
+      showQuotaResetDialog(
+        context,
+        controller: _reset,
+        resettable: resettable,
+      );
 
   Widget _poolRow({
     required String name,
