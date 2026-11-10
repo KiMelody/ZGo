@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.0] - 2026-11-10
+
+### Added
+
+- **Notification tap hand-off**: task notifications now carry workspace
+  attribution (raw-row scope fallback); tapping opens a transition page
+  that waits out transient attribution, classifies failures with retry,
+  and lands on the right conversation. Cold-start taps are delivered via
+  a launch-payload latch (fixes silent drop after process death), and
+  completed-task notifications are re-delivered on foreground return
+  (differential-baseline fix).
+- **Task error details**: task rows preview `lastError` and open an
+  error detail sheet with the concrete error text.
+- **Desktop show-reasoning setting**: third desktop-settings card
+  (`messageStreamShowReasoning`), optimistic merge with failure
+  SnackBar, zh/en copy.
+- **Scan-to-pair shortcut** on the devices empty state: one-hop entry
+  into the full pairing chain.
+- **Usage reset-card entry**: header-row reset button reusing the quota
+  reset dialog; buttons aligned with the chat reset-coupon green style.
+- **Connection state visibility**: hand-off loading/failure no longer
+  navigates into a doomed page; WebView failure returns to native;
+  three-state stage copy across devices/task-list/off-peak pages.
+
+### Changed
+
+- **Preview link resolution hardening**: local-link entry decodes
+  URL-encoded paths; per-file link resolution splits into layered
+  parsing — context-base relative links, bounded filename search, and
+  an absolute-path basename fallback via a candidate sheet.
+- **Actionable failure copy**: subscription failures classified
+  (runtime not running / connection not ready); hot-path logs behind
+  `kDebugMode`; global error hooks log without swallowing.
+- **CI quality gates**: token-discipline and a11y label-guard gates now
+  block in CI; keyboard focus-survival regression net extended to the
+  search and provider-settings pages.
+- **Harmony workflow**: intentional-decision register + HAP artifact
+  gate.
+
+### Fixed
+
+- **Interaction trust series**: zero-feedback actions now give SnackBar
+  feedback, chip touch targets meet size guidance, task-list sync state,
+  notification permission guidance.
+- **Queue command & keep-alive failures**: five queue commands roll back
+  and toast on failure (local inverse op for queue item removal);
+  keep-alive flips back on failure instead of silently staying on.
+- **Cross-workspace orphan session auto-restore**: the previous
+  conversation recovers automatically after a workspace switch.
+- **Thought-level tier chain**: switching models updates tiers instantly,
+  draft validates against the target model's table, and the sheet tier
+  region redraws in place after switching models in draft.
+
 ## [1.15.7] - 2026-11-05
 
 ### Added
