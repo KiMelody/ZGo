@@ -358,6 +358,36 @@ abstract interface class SessionLinkPort implements Listenable {
   Future<void> reconnect();
 }
 
+/// The 「open one existing task」 surface shared by every entry that does not
+/// know the task's workspace up front (task-list rows, notification taps
+/// and the notification transition page): connection readiness plus the
+/// ownership resolution + on-demand workspace warm-up ([prepareTaskOpen]).
+/// [DeviceSession] implements it; tests fake it.
+abstract interface class TaskOpenHost implements SessionLinkPort {
+  /// Whether the relay task overview has landed this connection episode
+  /// (bootstrap ⊕ `listTaskList`). Before it does, the directory cannot
+  /// answer ownership for tasks outside the live index — a null
+  /// [prepareTaskOpen] answer in that window is TRANSIENT, and the caller
+  /// should wait for this flag instead of failing (2026-11-07 acceptance
+  /// AC4: cold start reported scopeUnknown and succeeded on manual retry).
+  bool get taskOverviewLoaded;
+
+  /// Resolves [taskId]'s workspace, opens it when the bridge is not already
+  /// there, and answers the typed outcome. Null means the ownership cannot
+  /// be determined — the caller must not push a chat (the server would
+  /// reject every command under the guessed scope, `proto.sessionNotFound`).
+  /// [WorkspaceOpenAborted] keeps its documented meaning: no copy at all.
+  ///
+  /// [workspaceHint] (`workspacePath` / `workspaceIdentity`) is the
+  /// notification payload's own origin fields; it answers only when the task
+  /// directory has no ownership answer yet (cold start before the overview
+  /// lands) — a directory resolution always wins.
+  Future<WorkspaceOpenResult?> prepareTaskOpen(
+    String taskId, {
+    Map<String, dynamic>? workspaceHint,
+  });
+}
+
 /// Conversation V4 surface a chat surface drives: the command group, the
 /// replayable queue, the draft-workspace guard and the live subscription.
 ///
@@ -613,6 +643,7 @@ class DeviceSession extends ChangeNotifier
         OffPeakHost,
         NotifiableSession,
         ChatPageHost,
+        TaskOpenHost,
         QuotaResetGateway,
         QuotaWatchSource {
   @override
@@ -1716,6 +1747,66 @@ class DeviceSession extends ChangeNotifier
 
   Completer<WorkspaceOpenResult>? _openChain;
 
+  /// The shared 「open an existing task」 entry (design 11-07 D1): resolve
+  /// the task's workspace, open it only when the bridge is not already
+  /// there, and answer the typed outcome. Both the task list and the
+  /// notification transition page call THIS — the branch logic lives here,
+  /// never copied into a caller.
+  ///
+  /// The open decision is the former list-page `_needsWorkspaceOpen` rule:
+  /// a non-active workspace needs the bridge re-pointed, and so does the
+  /// active one after a cold-runtime failure (a successful re-open is what
+  /// clears the banner and rebuilds its live index).
+  ///
+  /// [workspaceHint] is the notification payload's own `workspacePath` /
+  /// `workspaceIdentity` (design 11-07 R1): a cold-start tap arrives before
+  /// the relay overview, so the directory may not know the task yet. The
+  /// hint is used ONLY when the directory has no answer — a directory
+  /// resolution always wins (it carries the anchored home pick), and a hint
+  /// that names no listed workspace still yields its minimal origin scope.
+  @override
+  Future<WorkspaceOpenResult?> prepareTaskOpen(
+    String taskId, {
+    Map<String, dynamic>? workspaceHint,
+  }) async {
+    final active = activeWorkspace;
+    final workspace = _taskHome.workspaceOfTask(
+          taskId,
+          activeKey: active == null ? null : workspaceKeyOf(active),
+        ) ??
+        _hintWorkspace(workspaceHint);
+    if (workspace == null) return null;
+    final needsOpen = workspaceKeyOf(workspace) !=
+            workspaceKeyOf(active ?? const <String, dynamic>{}) ||
+        lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning;
+    if (!needsOpen) return const WorkspaceOpenOpened();
+    return openWorkspace(
+      workspace,
+      taskId: taskId,
+      purpose: WorkspaceOpenPurpose.openTask,
+    );
+  }
+
+  /// The payload hint as a workspace map: a listed entry when the path
+  /// names one (label/identity preserved), else the minimal origin scope.
+  Map<String, dynamic>? _hintWorkspace(Map<String, dynamic>? hint) {
+    if (hint == null) return null;
+    final path = hint['workspacePath'];
+    if (path is! String || path.isEmpty) return null;
+    final identity = hint['workspaceIdentity'];
+    for (final ws in _workspaces) {
+      if (ws['workspacePath'] == path ||
+          (identity is String && ws['workspaceIdentity'] == identity)) {
+        return ws;
+      }
+    }
+    return {
+      'workspacePath': path,
+      if (identity is String && identity.isNotEmpty)
+        'workspaceIdentity': identity,
+    };
+  }
+
   Future<WorkspaceOpenResult> _openWorkspaceNow(
     Map<String, dynamic> workspace, {
     String? taskId,
@@ -2814,6 +2905,7 @@ class DeviceSession extends ChangeNotifier
   /// connection was established. False during the cold-start window between
   /// the bootstrap workspaces and the first successful task pull — a
   /// non-active card is then "not loaded yet", not "no tasks".
+  @override
   bool get taskOverviewLoaded => _taskOverviewLanded;
 
   /// Server-side automations of the connected desktop. Bound to the

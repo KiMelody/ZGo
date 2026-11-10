@@ -80,6 +80,11 @@ class TaskHomeService {
   /// the list itself stays owned by the session).
   int _workspacesIdentity = 0;
 
+  /// The last pushed workspace list, kept by reference for
+  /// [workspaceOfTask]'s list matching only (the list stays owned by the
+  /// session; [setWorkspaces] is the single push point).
+  List<Map<String, dynamic>> _workspaces = const [];
+
   SessionsIndexState? _activeSessions;
   int Function() _generation = () => 0;
   String? Function() _frameKind = () => null;
@@ -124,6 +129,7 @@ class TaskHomeService {
   /// tables together and invalidates the projection.
   void setWorkspaces(List<Map<String, dynamic>> workspaces) {
     _workspacesIdentity = identityHashCode(workspaces);
+    _workspaces = workspaces;
     var groupKey = conversationGroupKey;
     for (final ws in workspaces) {
       if (isConversationWorkspace(ws)) continue;
@@ -394,6 +400,7 @@ class TaskHomeService {
     _relayTasks = const [];
     _keyAliases = const {};
     _groupAliases = const {};
+    _workspaces = const [];
     if (_liveSnapshots.isNotEmpty) {
       log('[session] live snapshots cleared (${_liveSnapshots.length} keys)');
     }
@@ -503,6 +510,57 @@ class TaskHomeService {
         homeKeys: store.homeKeys,
         keyAliases: _keyAliases,
       );
+
+  /// The workspace [taskId] belongs to — the ONE ownership resolution the
+  /// open paths share (task list rows and notification taps). Returns the
+  /// LISTED workspace map (same object the session's `workspaces` carries)
+  /// or a minimal origin scope when the key names no listed workspace;
+  /// null only when ownership is undeterminable (the caller must then not
+  /// open a chat under a guessed scope — design D1).
+  ///
+  /// Two layers, in the directory's own precedence (design D3):
+  /// - a relay row wins — the overview covers EVERY workspace, so its key
+  ///   is the scope. It never falls back to the active workspace: doing so
+  ///   is exactly the 「sessionNotFound dead page」 bug (an overview row of
+  ///   another workspace opened under the active scope);
+  /// - otherwise the row is live-only (no surviving relay anchor): the
+  ///   merged layer's attribution key (index subscription identity /
+  ///   carried origin fields) names the workspace. A live index streams
+  ///   the workspace it was subscribed to, so a key that matches no listed
+  ///   entry still resolves to [activeKey]'s workspace — the row was
+  ///   streamed by the active index by construction.
+  Map<String, dynamic>? workspaceOfTask(String taskId, {String? activeKey}) {
+    final row = relayHomeRowOf(taskId);
+    if (row != null) {
+      // The row's OWN key (design D3): no active-workspace fallback — the
+      // overview covers every workspace, so falling back is exactly the
+      // wrong-scope bug. [workspaceForKey] supplies the origin-field scope
+      // when the key names no listed workspace.
+      return TaskDirectory.workspaceForKey(
+        _workspaces,
+        SessionEntry.fromRelayTask(row),
+        TaskDirectory.relayKeyOf(row),
+      );
+    }
+    final active = activeKey == null ? null : normalizeKey(activeKey);
+    for (final (entry, key, _) in directory.mergedRows().rows) {
+      if (entry.sessionId != taskId) continue;
+      final mergedKey = key == null ? active : normalizeKey(key);
+      return TaskDirectory.workspaceForKey(_workspaces, entry, mergedKey) ??
+          _listedWorkspace(active);
+    }
+    return null;
+  }
+
+  /// The listed workspace carrying [key], or null (workspace-list lookup
+  /// without the origin-field fallback of [TaskDirectory.workspaceForKey]).
+  Map<String, dynamic>? _listedWorkspace(String? key) {
+    if (key == null) return null;
+    for (final w in _workspaces) {
+      if (workspaceKeyOf(w) == key) return w;
+    }
+    return null;
+  }
 
   /// User home adjudication (anchor write source ④): write the canonical
   /// anchor, then optionally delete every OTHER registry copy with its own

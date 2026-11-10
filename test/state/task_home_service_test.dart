@@ -435,6 +435,49 @@ void main() {
   });
 
   group('moved home surface', () {
+    test('workspaceOfTask: a relay row resolves through its own key and '
+        'never falls back to the active workspace', () {
+      h.service.setWorkspaces([
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+        {'workspacePath': '/repo/beta', 'workspaceIdentity': 'beta'},
+      ]);
+      // The row's own key is the path spelling while the listing is
+      // identity-first: [workspaceForKey]'s origin-field fallback answers a
+      // minimal path scope (the same scope the list page's rows carried
+      // before this task — nothing fabricated).
+      h.service.setRelayTasks([relayTask('t1', '/repo/beta')]);
+      expect(h.service.workspaceOfTask('t1', activeKey: 'alpha'),
+          {'workspacePath': '/repo/beta'});
+      // A row whose path matches an identity-first listing still resolves
+      // through its own key: [workspaceKeyOf] prefers the identity, so the
+      // origin-field scope names the path spelling — the same map the list
+      // rows carried before this task.
+      h.service.setRelayTasks([relayTask('t2', '/repo/alpha')]);
+      expect(h.service.workspaceOfTask('t2', activeKey: 'alpha'),
+          {'workspacePath': '/repo/alpha'});
+      // …and nothing at all for an id the directory has never seen.
+      expect(h.service.workspaceOfTask('missing', activeKey: 'alpha'), isNull);
+    });
+
+    test('workspaceOfTask: a live-only row falls back to the active '
+        'workspace for its own streamed membership', () {
+      h.service.setWorkspaces([
+        {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+      ]);
+      final state = liveIndex([liveRow('t-live', 'running')],
+          key: '/repo/alpha');
+      h.service.setActiveSessions(
+        state,
+        generation: () => 0,
+        frameKind: () => null,
+      );
+      h.service.applyLiveFrame(state, generation: 0);
+      expect(h.service.workspaceOfTask('t-live', activeKey: 'alpha'),
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'});
+      // No live index either: the id is unknown, not "belongs to active".
+      expect(h.service.workspaceOfTask('t-gone', activeKey: 'alpha'), isNull);
+    });
+
     test('taskScopeFor: the layered home row wins, else offPeakScope', () {
       h.service.setRelayTasks([
         relayTask('t1', '/repo/a'),

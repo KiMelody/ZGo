@@ -28,6 +28,7 @@ import 'ui/quota_reset_dialog.dart';
 import 'ui/remote_page.dart';
 import 'ui/system_bars.dart';
 import 'ui/task_list_page.dart';
+import 'ui/task_open_page.dart';
 import 'ui/theme.dart';
 import 'ui/ui_settings.dart';
 import 'ui/widgets/device_name.dart';
@@ -200,6 +201,11 @@ class _ZGoAppState extends State<ZGoApp>
   SharedPreferences? _prefs;
   static const _resolverHomePrefsKey = 'resolver_desktop_home';
 
+  /// Completes once `NotificationService.init` ran (or immediately when the
+  /// host has no platform implementation): the cold-start payload read
+  /// needs initialized plugin channels, and main must not race them.
+  late final Future<void> _notificationsReady;
+
   @override
   void initState() {
     super.initState();
@@ -218,7 +224,8 @@ class _ZGoAppState extends State<ZGoApp>
     // protocol/state layers never see lib/plan.
     _plan.addListener(_onPlanChanged);
     unawaited(_plan.loadIdentity());
-    unawaited(_store.load().then((_) {
+    final storeLoaded = _store.load();
+    unawaited(storeLoaded.then((_) {
       HomeWidgetBridge.syncDevices(_store.devices);
     }));
     // Fire due scheduled messages while the app is alive.
@@ -259,7 +266,20 @@ class _ZGoAppState extends State<ZGoApp>
     }).catchError((_) {}));
     // Channel names are fixed the first time the channel is created, so wait
     // for the stored locale before registering them.
-    unawaited(uiLoaded.then((_) => _notifications.init(locale: _ui.locale)));
+    _notificationsReady =
+        uiLoaded.then((_) => _notifications.init(locale: _ui.locale));
+    unawaited(_notificationsReady);
+    // Cold-start tap (R5): a launch caused by tapping a notification carries
+    // its payload only through `getNotificationAppLaunchDetails`, and the
+    // tap handler resolves the device from the loaded list — so wait for
+    // BOTH the device store and the first frame before delivering. One
+    // frame after `_store.load()` completes is the earliest the navigator
+    // and the list are both usable (the pre-fix behavior silently dropped
+    // the tap because `_store.devices` was still empty).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(storeLoaded.then((_) => _deliverLaunchPayload()));
+    });
     // The foreground service dies with the process, so re-arm it on start
     // when the switch was left on — same batch as the channel registration,
     // for the same locale reason.
@@ -426,10 +446,15 @@ class _ZGoAppState extends State<ZGoApp>
     );
   }
 
-  /// Notification tap → the producing conversation: native chat page when
-  /// the protocol link is up (no WebView suspend), WebView deep link as
-  /// fallback for devices without a native session. Quota-watch notices
-  /// deep-link to the monitored device's usage page instead.
+  /// Notification tap → the producing task. A task payload (the `type:task`
+  /// notices, plus any notice that names a session) opens the transition
+  /// page, which waits for the link, resolves the task's workspace and
+  /// warms it before landing on the conversation (design 11-07 — the naive
+  /// direct push subscribed against a not-ready bridge / foreign workspace
+  /// and produced a red 「订阅失败」 banner). Notices without a session (a
+  /// legacy draft notice) keep the direct chat push; quota-watch notices
+  /// deep-link to the monitored device's usage page. Devices without a
+  /// native session keep the WebView fallback.
   Future<void> _handleNotificationTap(Map<String, dynamic> payload) async {
     if (payload['type'] == 'quotaWatch') {
       await _openQuotaUsagePage();
@@ -447,12 +472,39 @@ class _ZGoAppState extends State<ZGoApp>
     final context = _navigatorKey.currentContext;
     if (context == null || !context.mounted) return;
     if (session != null) {
+      final resolvedTitle = title ?? deviceDisplayName(context, device.label);
+      if (sessionId == null) {
+        // No task to prepare (a legacy notice without a session): keep the
+        // pre-existing draft-page push — there is nothing to resolve or
+        // warm, and the transition page would have no target.
+        await Navigator.of(context).push(zRoute(
+          (_) => ChatPage(
+            host: session,
+            sessionId: null,
+            title: resolvedTitle,
+            theme: _theme,
+            offPeakHost: session,
+            onOpenOffPeak: () => _openOffPeak(device),
+          ),
+        ));
+        return;
+      }
       await Navigator.of(context).push(zRoute(
-        (_) => ChatPage(
-          host: session,
+        (_) => TaskOpenPage(
+          openHost: session,
+          chatHost: session,
           sessionId: sessionId,
-          title: title ?? deviceDisplayName(context, device.label),
+          title: resolvedTitle,
           theme: _theme,
+          // The notice's own origin fields (R1): the cold-start path needs
+          // them when the relay overview has not landed yet.
+          workspaceScope: payload['workspacePath'] == null
+              ? null
+              : {
+                  'workspacePath': payload['workspacePath'],
+                  if (payload['workspaceIdentity'] != null)
+                    'workspaceIdentity': payload['workspaceIdentity'],
+                },
           offPeakHost: session,
           onOpenOffPeak: () => _openOffPeak(device),
         ),
@@ -480,6 +532,21 @@ class _ZGoAppState extends State<ZGoApp>
       ),
     ));
     _hub.scheduleResume(device);
+  }
+
+  /// Cold-start tap delivery (design 11-07 D6/R5): a tap that LAUNCHED the
+  /// process has no live `onTap` callback — the payload rides
+  /// `getNotificationAppLaunchDetails` instead. Runs after the device list
+  /// (and thus the first frame) is up, because [_handleNotificationTap]
+  /// resolves the device from that list and would silently drop an early
+  /// payload. The service consumes the payload once, so a resumed app never
+  /// re-delivers it.
+  Future<void> _deliverLaunchPayload() async {
+    await _notificationsReady;
+    if (!mounted) return;
+    final payload = await _notifications.takeLaunchPayload();
+    if (payload == null || !mounted) return;
+    await _handleNotificationTap(payload);
   }
 
   /// Rotation → re-assert the orientation-matched system bars (task

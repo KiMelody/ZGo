@@ -2619,10 +2619,13 @@ class _TaskListPageState extends State<TaskListPage>
 
   /// Opens a task row whatever workspace it lives in: tasks of the active
   /// workspace go straight to chat; others re-point the bridge first
-  /// (workspace-bridge-open rides the taskId). A null
-  /// [workspace] means ownership is undeterminable — refuse to open instead
-  /// of silently subscribing under the active workspace's scope, where the
-  /// server rejects every command (proto.sessionNotFound dead page).
+  /// (workspace-bridge-open rides the taskId). The resolve → open decision
+  /// is the state layer's ONE shared entry ([DeviceSession.prepareTaskOpen],
+  /// also used by notification taps): null there means ownership is
+  /// undeterminable — refuse to open instead of silently subscribing under
+  /// the active workspace's scope, where the server rejects every command
+  /// (proto.sessionNotFound dead page). An aborted open is not a failure and
+  /// shows no copy.
   Future<void> _openWorkspaceTask(
     DeviceSession session,
     Map<String, dynamic>? workspace,
@@ -2636,16 +2639,18 @@ class _TaskListPageState extends State<TaskListPage>
       );
       return;
     }
-    if (_needsWorkspaceOpen(session, workspace)) {
-      final result = await session.openWorkspace(
-        workspace,
-        taskId: entry.sessionId,
-        purpose: WorkspaceOpenPurpose.openTask,
-      );
-      if (result is! WorkspaceOpenOpened) {
-        if (mounted) _showWorkspaceOpenFailure(result);
+    final result = await session.prepareTaskOpen(entry.sessionId);
+    if (result is WorkspaceOpenAborted) return;
+    if (result is! WorkspaceOpenOpened) {
+      if (!mounted) return;
+      if (result == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr(context, 'tasks.scopeUnknown'))),
+        );
         return;
       }
+      _showWorkspaceOpenFailure(result);
+      return;
     }
     if (!mounted) return;
     await _openChat(

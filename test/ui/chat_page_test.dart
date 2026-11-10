@@ -1927,6 +1927,54 @@ void main() {
     expect(find.text('重试'), findsOneWidget);
   });
 
+  testWidgets('a not-connected subscribe failure reads as connection copy '
+      '(R6)', (tester) async {
+    // The reconnect window: the bridge is not attached yet, so subscribe
+    // throws StateError('not connected'). The banner must not print
+    // 「Bad state: not connected」.
+    final gateway = FakeChatGateway()
+      ..failSubscribeWith = (m) => StateError('not connected');
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(find.textContaining('Bad state'), findsNothing);
+    expect(find.textContaining('连接已断开'), findsOneWidget);
+    expect(find.text('重试'), findsOneWidget);
+  });
+
+  testWidgets('a cold-runtime subscribe failure shows the actionable runtime '
+      'copy (R6)', (tester) async {
+    final gateway = FakeChatGateway()
+      ..failSubscribeWith = (m) =>
+          ChannelRpcError('ZCode Agent runtime is not running', null);
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(find.textContaining('该工作区的智能体运行时未启动'), findsOneWidget);
+    expect(find.textContaining('runtime is not running'), findsNothing);
+  });
+
+  testWidgets('an unclassified subscribe failure keeps its raw text (R6)',
+      (tester) async {
+    // Not a StateError: its `Bad state:` prefix is itself a known
+    // transport shape and maps to the connection copy above.
+    final gateway = FakeChatGateway()
+      ..failSubscribeWith = (m) => Exception('provider exploded');
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(find.textContaining('provider exploded'), findsOneWidget);
+  });
+
   testWidgets('reasoning rows collapse into the 思考过程 strip', (tester) async {
     final gateway = FakeChatGateway();
     await tester.pumpWidget(

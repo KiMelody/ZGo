@@ -158,6 +158,11 @@ const _zh = {
   'tasks.noWorkspaces.title': '桌面端没有打开的工作区',
   'tasks.noWorkspaces.body': '请先在桌面 ZCode 中打开一个项目，再回到这里重试',
   'tasks.deepLinking': '正在直达任务…',
+  // 通知点击的过渡页（11-07 notify-tap-prewarm）：等待连接 / 预热工作区 /
+  // 重试耗尽。慢提示复用 chat.load.slowHint。
+  'tasks.open.connecting': '正在连接设备…',
+  'tasks.open.preparing': '正在准备工作区…',
+  'tasks.open.failed': '打开任务失败，请重试',
   'phase.running': '运行中',
   'phase.prewarming': '预热中',
   'phase.completedSuccess': '已完成',
@@ -1630,6 +1635,9 @@ const _en = {
   'tasks.noWorkspaces.body':
       'Open a project in ZCode desktop first, then retry here',
   'tasks.deepLinking': 'Jumping to the task…',
+  'tasks.open.connecting': 'Connecting to the device…',
+  'tasks.open.preparing': 'Preparing the workspace…',
+  'tasks.open.failed': 'Could not open the task. Please retry.',
   'phase.running': 'Running',
   'phase.prewarming': 'Prewarming',
   'phase.completedSuccess': 'Completed',

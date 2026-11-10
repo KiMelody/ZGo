@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 
+import '../../i18n/lexicon.dart';
 import '../../protocol/channel_client.dart';
 import '../../protocol/conversation.dart';
 import '../../state/device_session.dart';
@@ -283,6 +284,11 @@ class _ChatPageState extends State<ChatPage> {
   /// window on mobile is during editing — an OS kill fires no lifecycle
   /// callback, so saves cannot wait for dispose.
   Timer? _draftPersistTimer;
+
+  /// Subscribe failure to render in the pre-list banner — already
+  /// CLASSIFIED at catch time (R6, 11-07): a known shape becomes plain copy,
+  /// an unknown one keeps the raw text. Never recomputed at render time
+  /// (same rule as B-06's queue-failure chain).
   String? _error;
   bool _sending = false;
 
@@ -1010,8 +1016,28 @@ class _ChatPageState extends State<ChatPage> {
       // fires on LATER updates and misses the initial snapshot.
       _scrollToBottom();
     } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+      debugPrint('[chat] subscribe $sessionId failed: $e');
+      if (mounted) setState(() => _error = _subscribeFailureCopy(e));
     }
+  }
+
+  /// The subscribe banner's copy for a failure (R6, 11-07). Same chain as
+  /// the page's queue-failure toast (B-06), with the runtime classification
+  /// in front — a cold per-workspace runtime is the ONE actionable dead end
+  /// here (only a desktop-side open of that workspace resolves it), and the
+  /// desktop's raw English line must not be what the user reads. A
+  /// not-ready link (`StateError('not connected')` / timeouts) maps to the
+  /// connection copy through [commandErrorCopy]; business codes through
+  /// [businessErrorCopy]; anything unknown keeps its raw text (unclassified
+  /// failures must not be re-labeled).
+  String _subscribeFailureCopy(Object error) {
+    final locale = localeOf(context);
+    if (isAgentRuntimeNotRunningError(error)) {
+      return trLocale(locale, 'tasks.agentRuntimeNotRunning');
+    }
+    return commandErrorCopy('$error', locale) ??
+        businessErrorCopy('$error', locale) ??
+        '$error';
   }
 
   void _scrollToBottom() {

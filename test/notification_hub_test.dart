@@ -60,8 +60,13 @@ class FakeNotifiableSession extends ChangeNotifier
   List<Map<String, dynamic>> relayTasks = [];
 
   @override
-  TaskDirectory get taskDirectory =>
+  TaskDirectory get taskDirectory => directoryOverride ??
       TaskDirectory(relayTasks: relayTasks, sessions: sessions);
+
+  /// Test injection point for the payload fallback's window: the merged
+  /// directory lags the raw overview (the default getter is same-frame
+  /// with [relayTasks], so the gap is otherwise untestable here).
+  TaskDirectory? directoryOverride;
 
   @override
   late final AutomationPort automation =
@@ -84,6 +89,13 @@ class FakeNotifiableSession extends ChangeNotifier
   SessionsIndexState? get sessions => sessionsReady ? _state : null;
 
   /// Applies a full snapshot (title/phase per session) and notifies.
+  ///
+  /// This is the LIVE / SIDECAR source: the sessions-index schema carries no
+  /// `workspacePath` (probe3162_p1), so every row made here merges as
+  /// `relayAnchored == false` — the shape whose terminal rows must never
+  /// become catch-up notices (the 2026-11-08 acceptance burst). Give a relay
+  /// row the path instead via [setRelayTasks] when a test needs an anchored
+  /// row.
   void setEntries(List<(String, String, String)> entries) {
     setEntriesWithParent([
       for (final (id, title, phase) in entries) (id, title, phase, parent: null),
@@ -115,6 +127,12 @@ class FakeNotifiableSession extends ChangeNotifier
 
   /// Applies a relay task overview and notifies, like
   /// `DeviceSession._onWorkspaceListUpdated`.
+  ///
+  /// This is the RELAY source. The anchor the catch-up edges require is
+  /// OVERVIEW MEMBERSHIP (the hub checks this session's relayTasks by id),
+  /// not the merged row's raw origin fields — a live overlay of the same id
+  /// drops `workspacePath`/`workspaceIdentity` in the merge, and the anchor
+  /// must survive that overlay (the active workspace always has one).
   void setRelayTasks(List<Map<String, dynamic>> tasks) {
     relayTasks = tasks;
     notifyListeners();
@@ -134,18 +152,21 @@ void main() {
             title: '修复登录',
             phase: 'completedSuccess',
             parentSessionId: null,
+            relayAnchored: true,
           ),
           (
             sessionId: 's2',
             title: '部署',
             phase: 'error',
             parentSessionId: null,
+            relayAnchored: true,
           ),
           (
             sessionId: 's3',
             title: '草稿任务',
             phase: 'completedSuccess',
             parentSessionId: null,
+            relayAnchored: true,
           ),
         ],
       );
@@ -157,7 +178,7 @@ void main() {
     test('re-running fires again; unchanged terminal stays silent', () {
       const sessions = [
         (sessionId: 's1', title: 't', phase: 'completedSuccess',
-         parentSessionId: null)
+         parentSessionId: null, relayAnchored: true)
       ];
       expect(
           taskCompletionEvents(
@@ -173,7 +194,7 @@ void main() {
     test('error → completedSuccess corrects the earlier failed notice', () {
       const sessions = [
         (sessionId: 's1', title: 't', phase: 'completedSuccess',
-            parentSessionId: null)
+            parentSessionId: null, relayAnchored: true)
       ];
       // The real completion follows a (possibly spurious) error without a
       // running gap — the correction edge must still notify it.
@@ -187,7 +208,7 @@ void main() {
               previousPhases: {'s1': 'error'},
               sessions: [
                 (sessionId: 's1', title: 't', phase: 'error',
-                    parentSessionId: null)
+                    parentSessionId: null, relayAnchored: true)
               ]),
           isEmpty);
       expect(
@@ -201,7 +222,8 @@ void main() {
       final events = taskCompletionEvents(
         previousPhases: {'s1': 'prewarming'},
         sessions: [
-          (sessionId: 's1', title: '', phase: 'error', parentSessionId: null)
+          (sessionId: 's1', title: '', phase: 'error', parentSessionId: null,
+              relayAnchored: true)
         ],
       );
       expect(events.single.title, 's1');
@@ -217,16 +239,169 @@ void main() {
             title: '主任务',
             phase: 'running',
             parentSessionId: null,
+            relayAnchored: true,
           ),
           (
             sessionId: 's2',
             title: '子代理',
             phase: 'completedSuccess',
             parentSessionId: 's1',
+            relayAnchored: true,
           ),
         ],
       );
       expect(events, isEmpty);
+    });
+
+    test('unseen terminal rows notify only when the catch-up edge is on', () {
+      const sessions = [
+        (sessionId: 'gone', title: '', phase: 'completedSuccess',
+            parentSessionId: null, relayAnchored: true),
+      ];
+      // Default (cold-start first diff): an unseen terminal row is history.
+      expect(
+          taskCompletionEvents(previousPhases: {}, sessions: sessions),
+          isEmpty);
+
+      final events = taskCompletionEvents(
+          previousPhases: {}, sessions: sessions, catchUpEdges: true);
+      expect(events, hasLength(1));
+      expect(events.single.sessionId, 'gone');
+      expect(events.single.title, 'gone', reason: 'empty title falls back');
+    });
+
+    test('the newcomer edge respects the baseline and the phase vocabulary',
+        () {
+      List<TaskCompletionEvent> diff(
+              Map<String, String> prev,
+              List<
+                      ({
+                        String sessionId,
+                        String title,
+                        String phase,
+                        String? parentSessionId,
+                        bool relayAnchored,
+                      })>
+                  rows) =>
+          taskCompletionEvents(
+              previousPhases: prev, sessions: rows, catchUpEdges: true);
+
+      // A plain terminal newcomer: one event.
+      expect(
+          diff({}, [
+            (sessionId: 'n1', title: 't', phase: 'error',
+                parentSessionId: null, relayAnchored: true)
+          ]),
+          hasLength(1));
+      // A baselined row is never a newcomer, whatever its phase.
+      expect(
+          diff({'n1': 'running'}, [
+            (sessionId: 'n1', title: 't', phase: 'running',
+                parentSessionId: null, relayAnchored: true)
+          ]),
+          isEmpty);
+      // Still-running and idle newcomers are not completion events.
+      expect(
+          diff({}, [
+            (sessionId: 'n1', title: 't', phase: 'running',
+                parentSessionId: null, relayAnchored: true),
+            (sessionId: 'n2', title: 't', phase: 'idle',
+                parentSessionId: null, relayAnchored: true),
+          ]),
+          isEmpty);
+      // A terminal subagent newcomer is still a child, not a task.
+      expect(
+          diff({}, [
+            (sessionId: 'n1', title: 't', phase: 'completedSuccess',
+                parentSessionId: 'p1', relayAnchored: true)
+          ]),
+          isEmpty);
+    });
+
+    test('an unanchored (sidecar/live) terminal newcomer stays silent', () {
+      // The 2026-11-08 acceptance burst: reconnect re-arrives the sidecar
+      // snapshots of every workspace, and their terminal sessions are old
+      // conversations — never fresh completions. Only the relay overview
+      // anchors a row, so an unanchored terminal row must not notify however
+      // long the baseline has been alive.
+      const sessions = [
+        (sessionId: 'side1', title: '旧会话一', phase: 'completedSuccess',
+            parentSessionId: null, relayAnchored: false),
+        (sessionId: 'side2', title: '旧会话二', phase: 'error',
+            parentSessionId: null, relayAnchored: false),
+      ];
+      expect(
+          taskCompletionEvents(
+              previousPhases: {}, sessions: sessions, catchUpEdges: true),
+          isEmpty,
+          reason: 'unanchored terminal rows are history, not newcomers');
+
+      // The same rows ARE anchored once the relay overview covers them — the
+      // gate is the anchor, not the source per se.
+      expect(
+          taskCompletionEvents(
+              previousPhases: {},
+              sessions: [
+                for (final s in sessions)
+                  (
+                    sessionId: s.sessionId,
+                    title: s.title,
+                    phase: s.phase,
+                    parentSessionId: s.parentSessionId,
+                    relayAnchored: true,
+                  ),
+              ],
+              catchUpEdges: true),
+          hasLength(2));
+    });
+
+    test('idle start fires only past the priming diff and only when '
+        'anchored', () {
+      const anchored = [
+        (sessionId: 'tgt', title: '靶子任务', phase: 'completedSuccess',
+            parentSessionId: null, relayAnchored: true),
+      ];
+      const unanchored = [
+        (sessionId: 'tgt', title: '靶子任务', phase: 'completedSuccess',
+            parentSessionId: null, relayAnchored: false),
+      ];
+
+      // The acceptance shape: the app last learned `idle` (the target was
+      // sent, then HOME within 3s), and the turn ran to completion while the
+      // app was backgrounded. Without the idle-start edge the baseline holds
+      // idle forever and the completion never notifies.
+      final events = taskCompletionEvents(
+          previousPhases: {'tgt': 'idle'},
+          sessions: anchored,
+          catchUpEdges: true);
+      expect(events, hasLength(1));
+      expect(events.single.sessionId, 'tgt');
+      expect(events.single.phase, 'completedSuccess');
+
+      // First diff of a device (cold start): an idle→terminal step is
+      // history, exactly like a first-sight terminal row.
+      expect(
+          taskCompletionEvents(
+              previousPhases: {'tgt': 'idle'}, sessions: anchored),
+          isEmpty);
+      // Unanchored rows never take the edge (sidecar replay guard).
+      expect(
+          taskCompletionEvents(
+              previousPhases: {'tgt': 'idle'},
+              sessions: unanchored,
+              catchUpEdges: true),
+          isEmpty);
+      // Only a TERMINAL next sight is a completion: a step to running is the
+      // ordinary running→terminal path's business.
+      expect(
+          taskCompletionEvents(
+              previousPhases: {'tgt': 'idle'},
+              sessions: [
+                (sessionId: 'tgt', title: '靶子任务', phase: 'running',
+                    parentSessionId: null, relayAnchored: true)
+              ],
+              catchUpEdges: true),
+          isEmpty);
     });
   });
 
@@ -380,6 +555,9 @@ void main() {
           regressionHysteresis: Duration.zero);
       session = FakeNotifiableSession('d1');
       hub.syncWith([session]);
+      // The first diff waits for the disk baseline read (design D3): let it
+      // land, as the production frame cadence would.
+      await pumpEventQueue();
     });
 
     test('task running→completed notifies with deep-link payload', () async {
@@ -399,6 +577,84 @@ void main() {
         'sessionId': 's1',
         'title': '修复登录',
       });
+    });
+
+    test('a task of a non-active workspace carries its ownership fields',
+        () async {
+      // The notification covers EVERY workspace; the tap side needs the
+      // row's own origin fields to point the bridge before subscribing
+      // (design 11-07 R1). The live index knows nothing of this row — the
+      // relay overview is its only source.
+      session.setRelayTasks([
+        {
+          'taskId': 'r1',
+          'title': '中继任务',
+          'workspacePath': '/repo/beta',
+          'workspaceIdentity': 'beta',
+          'displayStatus': 'running',
+          'updatedAt': 1,
+        },
+      ]);
+      session.setRelayTasks([
+        {
+          'taskId': 'r1',
+          'title': '中继任务',
+          'workspacePath': '/repo/beta',
+          'workspaceIdentity': 'beta',
+          'displayStatus': 'completed',
+          'updatedAt': 2,
+        },
+      ]);
+      await pumpEventQueue();
+
+      expect(service.shown, hasLength(1));
+      final payload = service.shown.single.$5;
+      expect(payload['sessionId'], 'r1');
+      expect(payload['workspacePath'], '/repo/beta');
+      expect(payload['workspaceIdentity'], 'beta');
+    });
+
+    test('a row without origin fields keeps the payload keys absent',
+        () async {
+      // A live-only row of the active workspace carries no path: writing
+      // an empty string would read as a real (unaddressable) scope.
+      session.setEntries([('s1', '本地任务', 'running')]);
+      session.setEntries([('s1', '本地任务', 'completedSuccess')]);
+      await pumpEventQueue();
+
+      final payload = service.shown.single.$5;
+      expect(payload.containsKey('workspacePath'), isFalse);
+      expect(payload.containsKey('workspaceIdentity'), isFalse);
+    });
+
+    test('a path-less merged row falls back to the raw relay row',
+        () async {
+      // The transient the 2026-11-07 acceptance hit (AC4): the raw
+      // overview row carries the scope fields but the merged directory
+      // still shows the path-less live copy — the payload must ride the
+      // raw row's ownership or a cold-start tap dead-ends in
+      // scopeUnknown.
+      session.setEntries([('s1', '本地任务', 'running')]);
+      // Directory lags: only the live index answers, the relay leg is
+      // empty from the hub's merged view.
+      session.directoryOverride = TaskDirectory(
+        relayTasks: const [],
+        sessions: session.sessions!,
+      );
+      session.relayTasks = [
+        {
+          'taskId': 's1',
+          'title': '本地任务',
+          'workspacePath': '/repo/alpha',
+          'displayStatus': 'completed',
+          'updatedAt': 2,
+        },
+      ];
+      session.setEntries([('s1', '本地任务', 'completedSuccess')]);
+      await pumpEventQueue();
+
+      final payload = service.shown.single.$5;
+      expect(payload['workspacePath'], '/repo/alpha');
     });
 
     test('master switch off silences but keeps tracking', () async {
@@ -629,6 +885,9 @@ void main() {
           deviceLabelOf: (id) => 'my-device',
           taskConfirmWindow: const Duration(milliseconds: 20));
       slowHub.syncWith([other]);
+      // Let the disk-baseline read open the first-diff gate (design D3), as
+      // the production frame cadence does.
+      await pumpEventQueue();
       other.setRelayTasks([relayTask('rb2', '别的任务', 'running')]);
       other.setRelayTasks([relayTask('rb2', '别的任务', 'completed')]);
       expect(service.shown, isEmpty, reason: 'still inside the window');
@@ -684,6 +943,9 @@ void main() {
           regressionHysteresis: Duration.zero);
       session = FakeNotifiableSession('d1');
       hub.syncWith([session]);
+      // The first diff waits for the disk baseline read (design D3): let it
+      // land, as the production frame cadence would.
+      await pumpEventQueue();
     });
 
     tearDown(() => hub.dispose());
@@ -772,6 +1034,9 @@ void main() {
           regressionHysteresis: window);
       session = FakeNotifiableSession('d1');
       hub.syncWith([session]);
+      // The first diff waits for the disk baseline read (design D3): let it
+      // land, as the production frame cadence would.
+      await pumpEventQueue();
     });
 
     tearDown(() => hub.dispose());
@@ -863,14 +1128,26 @@ void main() {
       expect(service.shown, hasLength(1));
 
       // Stale frame, then the task leaves the merged view entirely
-      // (archived/deleted, or a snapshot without it). The baseline drops the
-      // row, so nothing holds a terminal phase for it afterwards.
+      // (archived/deleted, or a snapshot without it). The baseline KEEPS a
+      // tombstone now (union snapshot, 2026-11-08): a flap-back must not
+      // read as an unseen newcomer — the cold-start burst fix. The old
+      // full-drop traded that safety for a cleaner disk copy.
       session.setEntries([('s1', 't', 'running')]);
       session.setEntries(const []);
       await pumpEventQueue();
-      expect(await savedPhases(), isEmpty);
+      expect(await savedPhases(), {'s1': 'completedSuccess'},
+          reason: 'the union baseline keeps the tombstone of a vanished row');
 
-      // Back as running: a first sight again, so it is accepted at once…
+      // Back as running: the tombstone's terminal phase makes the return
+      // pass the regression guard first (a return-running frame is
+      // indistinguishable from a stale one — exactly what the guard is
+      // for), and only past the window is the true rerun accepted…
+      session.setEntries([('s1', 't', 'running')]);
+      await pumpEventQueue();
+      expect(await savedPhases(), {'s1': 'completedSuccess'},
+          reason: 'inside the hysteresis window the tombstone holds');
+
+      await Future<void>.delayed(const Duration(milliseconds: 250));
       session.setEntries([('s1', 't', 'running')]);
       await pumpEventQueue();
       expect(await savedPhases(), {'s1': 'running'});
@@ -879,6 +1156,601 @@ void main() {
       session.setEntries([('s1', 't', 'completedSuccess')]);
       await pumpEventQueue();
       expect(service.shown, hasLength(2));
+    });
+  });
+
+  group('dropped confirm rollback (resume catch-up)', () {
+    late RecordingService service;
+    late UiSettings ui;
+    late NotificationHub hub;
+    late FakeNotifiableSession session;
+
+    /// Both durations real: the drop is produced by a running revert that
+    /// the hysteresis KEEPS OFF the baseline — with a zero hold
+    /// [_snapshotPhases] would revert the baseline on its own and the
+    /// rollback under test would never run.
+    const window = Duration(milliseconds: 50);
+    const hold = Duration(seconds: 5);
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      service = RecordingService();
+      ui = UiSettings();
+      await ui.load();
+      hub = NotificationHub(
+          service: service,
+          ui: ui,
+          deviceLabelOf: (id) => 'my-device',
+          taskConfirmWindow: window,
+          regressionHysteresis: hold);
+      session = FakeNotifiableSession('d1');
+      hub.syncWith([session]);
+      // The first diff waits for the disk baseline read (design D3): let it
+      // land, as the production frame cadence would.
+      await pumpEventQueue();
+    });
+
+    tearDown(() => hub.dispose());
+
+    /// The phases the hub last wrote to disk for d1.
+    Future<Map<String, dynamic>> savedPhases() async {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('notify.taskPhases.d1');
+      return raw == null
+          ? {}
+          : (jsonDecode(raw) as Map)['phases'] as Map<String, dynamic>;
+    }
+
+    /// The production shape of the freeze (layer 3): a terminal edge, then a
+    /// running report inside its confirm window (stale desktop cache, sidecar
+    /// hold, helper-turn blip) that the hysteresis keeps off the baseline.
+    /// The window then expires on the still-running raw view and drops the
+    /// edge.
+    Future<void> dropEdge() async {
+      session.setEntries([('s1', 't', 'running')]);
+      session.setEntries([('s1', 't', 'completedSuccess')]);
+      session.setEntries([('s1', 't', 'running')]);
+      expect(service.shown, isEmpty, reason: 'nothing before the window');
+      await Future<void>.delayed(window * 4);
+      expect(service.shown, isEmpty, reason: 'the edge was dropped');
+    }
+
+    test('T1 a dropped edge rewinds the baseline, so the next terminal frame '
+        'notifies exactly once', () async {
+      await dropEdge();
+      expect(await savedPhases(), {'s1': 'running'},
+          reason: 'the drop must not strand the baseline on the terminal');
+
+      // The real completion lands after the revert: a fresh running→terminal
+      // edge off the rewound baseline, not a silent terminal→terminal.
+      session.setEntries([('s1', 't', 'completedSuccess')]);
+      await Future<void>.delayed(window * 4);
+
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$3, '任务完成');
+    });
+
+    test('T2 a late terminal frame after a background gap notifies once',
+        () async {
+      await dropEdge();
+
+      // No frames while the app sits in the background: the resumed pull is
+      // the next thing the hub sees (the layer-3 catch-up main path).
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      session.setEntries([('s1', 't', 'completedSuccess')]);
+      await Future<void>.delayed(window * 4);
+
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$4, 't');
+    });
+
+    test('T8 the rolled-back phase is the one that lands on disk', () async {
+      await dropEdge();
+      expect(await savedPhases(), {'s1': 'running'},
+          reason: 'drop rewinds the persisted baseline too');
+
+      // A no-op frame afterwards must not re-baseline it anywhere else: the
+      // disk copy keeps saying running, so a process death still resumes the
+      // catch-up from the rewound phase.
+      session.setEntries([('s1', 't', 'running')]);
+      await pumpEventQueue();
+      expect(await savedPhases(), {'s1': 'running'});
+    });
+
+    test('a vanished task (still == null) does not resurrect a baseline row',
+        () async {
+      session.setEntries([('s1', 't', 'running')]);
+      session.setEntries([('s1', 't', 'completedSuccess')]);
+      // The row leaves the merged view before the window expires (deleted,
+      // archived out): there is nothing to notify about and nothing to
+      // rewind either.
+      session.setEntries(const []);
+      await Future<void>.delayed(window * 4);
+
+      expect(service.shown, isEmpty);
+      // The drop itself wrote nothing back (still == null is not a
+      // rewind); the completedSuccess entry that IS here is the edge
+      // frame's own baseline write, kept as a tombstone by the union
+      // snapshot — a vanished row's baseline is no longer wiped (the
+      // 2026-11-08 flap-burst fix).
+      expect(await savedPhases(), {'s1': 'completedSuccess'},
+          reason: 'a dropped edge of a vanished row writes nothing back');
+    });
+  });
+
+  group('runtime newcomer terminal rows (background-created tasks)', () {
+    late RecordingService service;
+    late UiSettings ui;
+    late NotificationHub hub;
+    late FakeNotifiableSession session;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      service = RecordingService();
+      ui = UiSettings();
+      await ui.load();
+      hub = NotificationHub(
+          service: service,
+          ui: ui,
+          deviceLabelOf: (id) => 'my-device',
+          taskConfirmWindow: Duration.zero,
+          regressionHysteresis: Duration.zero);
+      session = FakeNotifiableSession('d1');
+      hub.syncWith([session]);
+      // The first diff waits for the disk baseline read (design D3): let it
+      // land, as the production frame cadence would.
+      await pumpEventQueue();
+    });
+
+    tearDown(() => hub.dispose());
+
+    /// A relay overview row as workspace-list-updated delivers it.
+    Map<String, dynamic> relayTask(String id, String title, String status) => {
+          'taskId': id,
+          'title': title,
+          'workspacePath': '/repo/beta',
+          'workspaceIdentity': 'beta',
+          'displayStatus': status,
+          'updatedAt': 1,
+        };
+
+    test('T3 a table that lands as history stays silent, a row added after '
+        'it notifies', () async {
+      // The resume pull's first whole table: tasks that had finished before
+      // the app came back are history, not newcomers.
+      session.setRelayTasks([
+        relayTask('old', '旧任务一', 'completed'),
+        relayTask('older', '旧任务二', 'error'),
+      ]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty, reason: 'cold-start table stays silent');
+
+      // A task created AND finished while the app was in the background first
+      // shows up past that baseline: runtime-new, so it notifies.
+      session.setRelayTasks([
+        relayTask('old', '旧任务一', 'completed'),
+        relayTask('older', '旧任务二', 'error'),
+        relayTask('fresh', '后台新任务', 'completed'),
+      ]);
+      await pumpEventQueue();
+
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$3, '任务完成');
+      expect(service.shown.single.$4, '后台新任务');
+    });
+
+    test('T4 a cold start over a terminal-only table still replays nothing',
+        () async {
+      // AC6 hard gate: no disk snapshot, the whole table terminal — the
+      // first diff must not read a single row as a newcomer.
+      session.setRelayTasks([
+        relayTask('a', '甲', 'completed'),
+        relayTask('b', '乙', 'completed'),
+        relayTask('c', '丙', 'error'),
+      ]);
+      await pumpEventQueue();
+
+      expect(service.shown, isEmpty);
+    });
+
+    test('a live-index frame beating the overview does not prime, so the '
+        'overview history is not replayed', () async {
+      // Cold-start ordering (3.16.2): the workspace subscription answers
+      // before the channel task pull, so the first diff sees only the live
+      // rows. Priming there would make every historical overview row look
+      // runtime-new when the whole table lands (AC6 hard gate).
+      session.setEntries([('live1', '活跃区旧任务', 'completedSuccess')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty);
+
+      session.setRelayTasks([
+        relayTask('h1', '历史一', 'completed'),
+        relayTask('h2', '历史二', 'error'),
+      ]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty,
+          reason: 'a partial first diff must not prime the device');
+    });
+
+    test('a relabelled historical row does not become a newcomer', () async {
+      session.setRelayTasks([relayTask('s1', '旧任务', 'completed')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty);
+
+      // The baseline's de-dupe still owns known rows: only their phase
+      // matters, not the title arriving late.
+      session.setRelayTasks([relayTask('s1', '迟到标题', 'completed')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty);
+    });
+
+    test('a re-tracked device needs a fresh priming diff', () async {
+      session.setRelayTasks([relayTask('old', '旧任务', 'completed')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty);
+
+      // A handover untracks the device; the re-track starts a new baseline
+      // generation, so the same historical table must stay silent again…
+      hub.syncWith([]);
+      hub.syncWith([session]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty);
+
+      // …and this sub-tick is the new priming diff: the unchanged table is
+      // silent but the device is primed again.
+      session.setRelayTasks([relayTask('old', '旧任务', 'completed')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty);
+
+      // A genuinely new terminal row after that primed diff notifies.
+      session.setRelayTasks([
+        relayTask('old', '旧任务', 'completed'),
+        relayTask('new', '交接后完成', 'completed'),
+      ]);
+      await pumpEventQueue();
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$4, '交接后完成');
+    });
+  });
+
+  group('catch-up edges vs the sidecar re-arrival burst', () {
+    late RecordingService service;
+    late UiSettings ui;
+    late NotificationHub hub;
+    late FakeNotifiableSession session;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      service = RecordingService();
+      ui = UiSettings();
+      await ui.load();
+      hub = NotificationHub(
+          service: service,
+          ui: ui,
+          deviceLabelOf: (id) => 'my-device',
+          taskConfirmWindow: Duration.zero,
+          regressionHysteresis: Duration.zero);
+      session = FakeNotifiableSession('d1');
+      hub.syncWith([session]);
+      await pumpEventQueue();
+    });
+
+    tearDown(() => hub.dispose());
+
+    /// A relay overview row as workspace-list-updated delivers it.
+    Map<String, dynamic> relayTask(String id, String title, String status) => {
+          'taskId': id,
+          'title': title,
+          'workspacePath': '/repo/beta',
+          'workspaceIdentity': 'beta',
+          'displayStatus': status,
+          'updatedAt': 1,
+        };
+
+    /// Primes the device over one historical relay row, which is what the
+    /// catch-up edges need (see `_newcomerPrimed`).
+    Future<void> prime() async {
+      session.setRelayTasks([relayTask('hist', '历史任务', 'completed')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty);
+    }
+
+    test('a live overlay of an overview task keeps the anchor', () async {
+      // The anchor is overview MEMBERSHIP, not the merged row's raw:
+      // TaskDirectory's live overlay strips the relay origin fields
+      // (_withRelayMeta inherits only pinned/unreadAt/lastError), so the
+      // active workspace — where the live index always covers the task —
+      // would lose catch-up edges exactly there (the 2026-11-08 acceptance
+      // probe F: idle-start shown=0 on a live-covered row).
+      await prime();
+
+      // Sent, turn not yet running; the overview anchors it.
+      session.setRelayTasks([
+        relayTask('hist', '历史任务', 'completed'),
+        relayTask('tgt', '靶子任务', 'idle'),
+      ]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty, reason: 'idle is not an event');
+
+      // The live sessions-index starts covering the same id — the merge
+      // drops the relay origin fields off the row, the anchor must not
+      // follow them off.
+      session.setEntries(const [('tgt', '靶子任务', 'idle')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty);
+
+      // The turn finished off-screen; the live row (still relay-anchored)
+      // reports the terminal phase — the idle-start edge fires through the
+      // overlay.
+      session.setEntries(const [('tgt', '靶子任务', 'completedSuccess')]);
+      await pumpEventQueue();
+
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$3, '任务完成');
+      expect(service.shown.single.$4, '靶子任务');
+    });
+
+    test('a row flapping out of the view and back never replays its '
+        'terminal', () async {
+      // The 2026-11-08 cold-start burst: a partial frame (subscription
+      // swap / bridge rebuild) leaves the merged table momentarily missing
+      // rows; the full table's return must not read them as newcomers.
+      // The first diff carries the whole table, so it baselines silently
+      // (unprimed) and primes the device.
+      session.setRelayTasks([
+        relayTask('hist', '历史任务', 'completed'),
+        relayTask('flap', '抖动任务', 'completed'),
+      ]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty, reason: 'the first diff is unprimed');
+
+      // The partial frame: 'flap' is gone from the table.
+      session.setRelayTasks([relayTask('hist', '历史任务', 'completed')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty);
+
+      // The full table returns — 'flap' comes back still terminal.
+      session.setRelayTasks([
+        relayTask('hist', '历史任务', 'completed'),
+        relayTask('flap', '抖动任务', 'completed'),
+      ]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty,
+          reason: 'the tombstone phase is terminal, terminal→terminal is '
+              'not an edge');
+    });
+
+    test('a row that left running and returns terminal notifies', () async {
+      // The resume-recovery shape under a view flap: the task was running,
+      // a partial frame dropped it, and it returns finished — the running
+      // tombstone makes the return the completion edge it really is.
+      await prime();
+
+      session.setRelayTasks([relayTask('tgt', '靶子任务', 'running')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty, reason: 'running is not an event');
+
+      session.setRelayTasks([relayTask('hist', '历史任务', 'completed')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty);
+
+      session.setRelayTasks([
+        relayTask('hist', '历史任务', 'completed'),
+        relayTask('tgt', '靶子任务', 'completed'),
+      ]);
+      await pumpEventQueue();
+
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$4, '靶子任务');
+    });
+
+    test('sidecar terminal rows that re-arrive after priming notify nothing',
+        () async {
+      await prime();
+
+      // The 2026-11-08 acceptance burst: a reconnect re-arrives the sidecar
+      // snapshots of the other workspaces, whose old terminal conversations
+      // carry no relay row (they are not in the overview baseline) and thus
+      // no `workspacePath`. 37 notices on one resume came from exactly this.
+      session.setEntries([
+        for (var i = 0; i < 12; i++) ('side$i', '旧会话 $i', 'completedSuccess'),
+        ('sideErr', '旧失败会话', 'error'),
+      ]);
+      await pumpEventQueue();
+
+      expect(service.shown, isEmpty,
+          reason: 'unanchored terminal rows are history, not newcomers');
+    });
+
+    test('an idle-start completion notifies once after priming, and stays '
+        'silent on a cold start', () async {
+      await prime();
+
+      // The target was sent and the app went to the background within the
+      // 3s window, so `idle` is the last phase the baseline learned; the
+      // turn then ran to completion off-screen.
+      session.setRelayTasks([
+        relayTask('hist', '历史任务', 'completed'),
+        relayTask('tgt', '靶子任务', 'idle'),
+      ]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty, reason: 'idle is not an event');
+
+      // Back to the foreground: the resume pull reports the terminal phase.
+      session.setRelayTasks([
+        relayTask('hist', '历史任务', 'completed'),
+        relayTask('tgt', '靶子任务', 'completed'),
+      ]);
+      await pumpEventQueue();
+
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$3, '任务完成');
+      expect(service.shown.single.$4, '靶子任务');
+
+      // Still terminal on the next frame: the baseline already moved, so no
+      // second notice (the idle-start edge de-dupes like every other edge).
+      session.setRelayTasks([
+        relayTask('hist', '历史任务', 'completed'),
+        relayTask('tgt', '靶子任务', 'completed'),
+      ]);
+      await pumpEventQueue();
+      expect(service.shown, hasLength(1));
+    });
+
+    test('the same idle→terminal step is silent when the device was never '
+        'primed', () async {
+      // A cold start whose disk baseline already knew the task as `idle`
+      // (killed right after sending the target). The restore supplies the
+      // phase, and the FIRST diff is still unprimed — the idle-start edge must
+      // not fire on it, or every restart would replay a stale completion.
+      SharedPreferences.setMockInitialValues({
+        'notify.taskPhases.d1': jsonEncode({
+          'ts': DateTime.now().millisecondsSinceEpoch,
+          'phases': {'tgt': 'idle'},
+        }),
+      });
+      final coldHub = NotificationHub(
+          service: service,
+          ui: ui,
+          deviceLabelOf: (id) => 'my-device',
+          taskConfirmWindow: Duration.zero,
+          regressionHysteresis: Duration.zero);
+      final cold = FakeNotifiableSession('d1');
+      coldHub.syncWith([cold]);
+      await pumpEventQueue();
+
+      // The overview's first frame reports the terminal phase. The row IS
+      // relay-anchored, so only the unprimed diff keeps it silent.
+      cold.setRelayTasks([relayTask('tgt', '靶子任务', 'completed')]);
+      await pumpEventQueue();
+      expect(service.shown, isEmpty,
+          reason: 'the catch-up edges need a primed baseline');
+
+      // That frame primed the device: a new terminal row after it notifies,
+      // proving the silence came from the unprimed diff and not from a
+      // device that can never prime.
+      cold.setRelayTasks([
+        relayTask('tgt', '靶子任务', 'completed'),
+        relayTask('late', '后来的任务', 'completed'),
+      ]);
+      await pumpEventQueue();
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$4, '后来的任务');
+      coldHub.dispose();
+    });
+  });
+
+  group('restore gate (first diff waits for the disk baseline)', () {
+    late RecordingService service;
+    late UiSettings ui;
+
+    setUp(() {
+      service = RecordingService();
+      ui = UiSettings();
+    });
+
+    int nowMs() => DateTime.now().millisecondsSinceEpoch;
+
+    /// Raw payload exactly as [PhaseSnapshotStore.save] writes it.
+    String snapshot(int ts, Map<String, String> phases) =>
+        jsonEncode({'ts': ts, 'phases': phases});
+
+    test('T5 a snapshot running baseline survives the first-frame race and '
+        'reports the completion once', () async {
+      // The production race: a list frame lands while the prefs read is
+      // still in flight. Before the gate that frame pre-baselined the table
+      // and the restore self-discarded — one lost notice.
+      SharedPreferences.setMockInitialValues({
+        'notify.taskPhases.d3': snapshot(nowMs(), {'s3': 'running'}),
+      });
+      final hub = NotificationHub(
+          service: service,
+          ui: ui,
+          deviceLabelOf: (id) => 'my-device',
+          taskConfirmWindow: Duration.zero);
+      final session = FakeNotifiableSession('d3');
+      hub.syncWith([session]);
+
+      // The frame arrives ahead of the restore: gated, not baselined.
+      session.setEntries([('s3', '重启前在跑', 'completedSuccess')]);
+      expect(service.shown, isEmpty);
+
+      // The read lands and adopts the snapshot, opening the gate; the next
+      // frame (the session re-notifies at high frequency) diffs against the
+      // restored running baseline.
+      await pumpEventQueue();
+      session.setEntries([('s3', '重启前在跑', 'completedSuccess')]);
+      await pumpEventQueue();
+
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$4, '重启前在跑');
+      hub.dispose();
+    });
+
+    test('T5 an absent snapshot still opens the gate and cold-starts silently',
+        () async {
+      SharedPreferences.setMockInitialValues({});
+      final hub = NotificationHub(
+          service: service,
+          ui: ui,
+          deviceLabelOf: (id) => 'my-device',
+          taskConfirmWindow: Duration.zero);
+      final session = FakeNotifiableSession('d3');
+      hub.syncWith([session]);
+
+      // Nothing to restore: the dropped frame must not become a notice, and
+      // the replayed frame is a first sight, so it is history.
+      session.setEntries([('s3', '旧任务', 'completedSuccess')]);
+      await pumpEventQueue();
+      session.setEntries([('s3', '旧任务', 'completedSuccess')]);
+      await pumpEventQueue();
+
+      expect(service.shown, isEmpty, reason: 'a cold start replays nothing');
+      hub.dispose();
+    });
+
+    test('T6 a handover re-track adopts the snapshot, so a completion in the '
+        'gap is caught up', () async {
+      SharedPreferences.setMockInitialValues({});
+      final hub = NotificationHub(
+          service: service,
+          ui: ui,
+          deviceLabelOf: (id) => 'my-device',
+          taskConfirmWindow: Duration.zero);
+      final session = FakeNotifiableSession('d3');
+      hub.syncWith([session]);
+      await pumpEventQueue();
+
+      // The task is running when the WebView handover untracks the device;
+      // the baseline reaches the disk and the untrack keeps the key.
+      session.setEntries([('s3', '交接中完成', 'running')]);
+      await pumpEventQueue();
+      hub.syncWith(const []);
+      await pumpEventQueue();
+
+      // Suspended like the production link: the index is down, so nothing
+      // touches the baseline while the task finishes in the gap.
+      session.sessionsReady = false;
+      session.setEntries([('s3', '交接中完成', 'completedSuccess')]);
+      await pumpEventQueue();
+
+      // The link comes back up before the hub re-tracks: the table already
+      // reads terminal while the disk still says running. The pre-baseline
+      // used to write that terminal on track and the restore then discarded
+      // itself — the catch-up was lost right here.
+      session.sessionsReady = true;
+      hub.syncWith([session]);
+      // The re-track frame is gated until the disk read lands.
+      session.setEntries([('s3', '交接中完成', 'completedSuccess')]);
+      expect(service.shown, isEmpty, reason: 'gated until the read lands');
+      await pumpEventQueue();
+
+      // Next frame against the adopted running baseline: a fresh edge.
+      session.setEntries([('s3', '交接中完成', 'completedSuccess')]);
+      await pumpEventQueue();
+      expect(service.shown, hasLength(1));
+      expect(service.shown.single.$4, '交接中完成');
+      hub.dispose();
     });
   });
 

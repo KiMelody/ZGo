@@ -1134,6 +1134,132 @@ void main() {
     });
   });
 
+  group('prepareTaskOpen (the shared task-open entry, 11-07)', () {
+    test('a task already in the active workspace answers opened with no RPC',
+        () async {
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..bootstrapWorkspaces = [
+          {'workspacePath': '/repo/beta'},
+        ]
+        ..bootstrapTasks = [
+          {
+            'taskId': 't1',
+            'title': 'x',
+            'workspacePath': '/repo/beta',
+            'displayStatus': 'idle',
+            'updatedAt': 1,
+          },
+        ]
+        ..handler = (_) async => _FakeBridge();
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+      // Bootstrap auto-opened the preferred (first) workspace.
+      expect(session.activeWorkspace?['workspacePath'], '/repo/beta');
+      final opensBefore = client.opens.length;
+
+      final result = await session.prepareTaskOpen('t1');
+
+      expect(result, isA<WorkspaceOpenOpened>());
+      expect(client.opens, hasLength(opensBefore),
+          reason: 'already active: no bridge churn');
+    });
+
+    test('a task of another workspace opens that workspace with the task id',
+        () async {
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..bootstrapWorkspaces = [
+          {'workspacePath': '/repo/alpha'},
+          {'workspacePath': '/repo/beta'},
+        ]
+        ..bootstrapTasks = [
+          {
+            'taskId': 't2',
+            'title': 'foreign',
+            'workspacePath': '/repo/beta',
+            'displayStatus': 'idle',
+            'updatedAt': 1,
+          },
+        ]
+        ..handler = (_) async => _FakeBridge();
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+      expect(session.activeWorkspace?['workspacePath'], '/repo/alpha');
+
+      final result = await session.prepareTaskOpen('t2');
+
+      expect(result, isA<WorkspaceOpenOpened>());
+      final last = client.opens.last;
+      expect(last.key, '/repo/beta');
+      expect(last.taskId, 't2',
+          reason: 'the open rides the taskId (bridge-open addressing)');
+      expect(session.activeWorkspace?['workspacePath'], '/repo/beta');
+    });
+
+    test('a task the directory has never seen answers null', () async {
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..bootstrapWorkspaces = [
+          {'workspacePath': '/repo/alpha'},
+        ]
+        ..handler = (_) async => _FakeBridge();
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      expect(await session.prepareTaskOpen('ghost'), isNull,
+          reason: 'undeterminable ownership must not guess a scope');
+    });
+
+    test('the payload hint answers only when the directory cannot', () async {
+      // Cold start: the notification knows the workspace, the overview has
+      // not landed yet.
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..bootstrapWorkspaces = [
+          {'workspacePath': '/repo/alpha'},
+          {'workspacePath': '/repo/beta'},
+        ]
+        ..handler = (_) async => _FakeBridge();
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+      expect(session.activeWorkspace?['workspacePath'], '/repo/alpha');
+
+      final result = await session.prepareTaskOpen(
+        't-cold',
+        workspaceHint: {'workspacePath': '/repo/beta'},
+      );
+
+      expect(result, isA<WorkspaceOpenOpened>());
+      expect(client.opens.last.key, '/repo/beta');
+      expect(client.opens.last.taskId, 't-cold');
+    });
+
+    test('a directory answer beats a contradictory hint', () async {
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..bootstrapWorkspaces = [
+          {'workspacePath': '/repo/alpha'},
+          {'workspacePath': '/repo/beta'},
+        ]
+        ..bootstrapTasks = [
+          {
+            'taskId': 't3',
+            'title': 'known',
+            'workspacePath': '/repo/beta',
+            'displayStatus': 'idle',
+            'updatedAt': 1,
+          },
+        ]
+        ..handler = (_) async => _FakeBridge();
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      await session.prepareTaskOpen(
+        't3',
+        workspaceHint: {'workspacePath': '/repo/alpha'},
+      );
+
+      expect(client.opens.last.key, '/repo/beta',
+          reason: 'the anchored/directory home owns the task');
+    });
+  });
+
   group('bridge recovery addressing', () {
     test('an addressed bridge replays taskId/taskHostId on reopen', () async {
       final relay = _CapturingRelay();

@@ -13,6 +13,16 @@ enum NotifyChannel { tasks, offPeak, automations, quota }
 /// Thin wrapper over flutter_local_notifications. Not initialized on
 /// test hosts — every method then no-ops, so callers never gate.
 class NotificationService {
+  NotificationService({
+    @visibleForTesting this.launchDetailsOf,
+  });
+
+  /// Test seam: answers the cold-start launch details without the plugin's
+  /// platform channel (unavailable on a test host). Production leaves it
+  /// null and reads [FlutterLocalNotificationsPlugin].
+  @visibleForTesting
+  final Future<NotificationAppLaunchDetails?> Function()? launchDetailsOf;
+
   final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
   bool _initialized = false;
@@ -30,6 +40,11 @@ class NotificationService {
   /// payload rides along with the action id declared on
   /// [AndroidNotificationAction].
   void Function(Map<String, dynamic> payload, String actionId)? onAction;
+
+  /// One-shot latch for the cold-start delivery ([takeLaunchPayload]):
+  /// `didNotificationLaunchApp` stays true for the whole process lifetime,
+  /// so the payload must be consumed exactly once (design 11-07 D6).
+  bool _launchConsumed = false;
 
   /// Android channel ids — stable across releases (a changed id would create
   /// a duplicate channel and orphan the user's per-channel silencing).
@@ -55,6 +70,11 @@ class NotificationService {
       trLocale(_locale, '${_channelKeys[channel]}.desc');
 
   bool get isReady => _initialized;
+
+  /// Test seam: flips the initialized latch without touching the plugin
+  /// channels (a test host has none — [init] would fail and stay unready).
+  @visibleForTesting
+  void debugMarkInitialized() => _initialized = true;
 
   /// Android 13+ / iOS runtime permission (asked once, lazily before the
   /// first notification).
@@ -177,6 +197,43 @@ class NotificationService {
       final decoded = jsonDecode(raw);
       return decoded is Map ? decoded.cast<String, dynamic>() : null;
     } catch (_) {
+      return null;
+    }
+  }
+
+  /// Cold-start tap delivery (design 11-07 D6/R5): the payload of the
+  /// notification that launched the process, or null.
+  ///
+  /// Null whenever nothing should be delivered: the service never
+  /// initialized on this host (tests / unsupported platforms — the same
+  /// no-op contract as [show]), the launch was not caused by a
+  /// notification, the payload does not decode, or it was already taken.
+  /// `didNotificationLaunchApp` is constant for the process lifetime, so
+  /// the payload is consumed at most ONCE per process — callers may poll
+  /// this freely.
+  ///
+  /// Navigation stays with the caller (this layer holds no route stack,
+  /// matching the [onTap] injection pattern) — main decides when the
+  /// navigator and the device list are ready.
+  Future<Map<String, dynamic>?> takeLaunchPayload() async {
+    if (!_initialized || _launchConsumed) return null;
+    try {
+      final details = await (launchDetailsOf?.call() ??
+          _plugin.getNotificationAppLaunchDetails());
+      if (!_launchConsumed &&
+          details != null &&
+          details.didNotificationLaunchApp) {
+        final raw = details.notificationResponse?.payload;
+        if (raw == null || raw.isEmpty) return null;
+        final decoded = tryDecodePayload(raw);
+        if (decoded == null) return null;
+        _launchConsumed = true;
+        return decoded;
+      }
+      return null;
+    } catch (e) {
+      // Cold-start delivery is an enhancement — never a crash path.
+      debugPrint('[notify] launch details failed: $e');
       return null;
     }
   }
