@@ -681,6 +681,13 @@ class TaskDirectoryView extends TaskDirectory {
   @override
   Set<String> get sessionOnlyIds => _merged.sessionOnlyIds;
 
+  /// Serves the materialized record itself — hot on the per-host-notify
+  /// path (`DeviceSession.taskLastError`), where a base-class call would
+  /// re-run the full `_merge()` on every notification.
+  @override
+  ({List<(SessionEntry, String?, bool)> rows, Set<String> sessionOnlyIds})
+      mergedRows() => _merged;
+
   @override
   List<(SessionEntry, String?)> pinnedEntries() => _pinned ??= super.pinnedEntries();
 

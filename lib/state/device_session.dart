@@ -330,11 +330,37 @@ abstract interface class NotifiableSession
 
 /// A live conversation subscription handed to the chat UI: [state] is the
 /// live rows/snapshot notifier, [close] unsubscribes.
+///
+/// [isRevoked] is the orphan token (11-08 session restore): the host revokes
+/// a reader's subscription when it re-points the bridge at another workspace
+/// (one bridge at a time) — the page keeps its State alive across the pop,
+/// so nothing would tell it its subscription died. A revocation generation
+/// carried by the handle distinguishes that host-side teardown from the
+/// page's own [close] (normal page death needs no recovery, so it never
+/// advances the generation).
 class ChatHandle {
+  ChatHandle({
+    required this.state,
+    required this.close,
+    this.generation = 0,
+    bool Function()? revoked,
+  }) : _revoked = revoked ?? _neverRevoked;
+
   final ConversationState state;
   final Future<void> Function() close;
 
-  const ChatHandle({required this.state, required this.close});
+  /// The revoke generation this handle was issued at. Compare with
+  /// [isRevoked], never with the host's counter directly.
+  final int generation;
+
+  final bool Function() _revoked;
+
+  /// True once the host tore this subscription down behind the reader's back
+  /// (workspace switch / link teardown). The page reads this on return
+  /// (`didPopNext`) and resumes through [ConversationPort.resumeSessionOnReturn].
+  bool get isRevoked => _revoked();
+
+  static bool _neverRevoked() => false;
 }
 
 /// Connection/link surface of the chat link (ADR-0008 revision): the live
@@ -415,6 +441,58 @@ abstract interface class ConversationPort implements Listenable {
 
   /// Live conversation subscription; per-sessionId handles are reused.
   Future<ChatHandle> subscribe(String sessionId);
+
+  /// Orphan recovery (11-08 session restore): the page was showing
+  /// [sessionId] when the host revoked its subscription behind its back (a
+  /// workspace switch keeps ONE bridge). Re-points the bridge at the
+  /// session's own workspace through the same ownership resolution
+  /// [prepareTaskOpen] uses, re-subscribes and answers the fresh handle.
+  ///
+  /// - same workspace and the subscription is still live → no-op, answers
+  ///   the live handle (zero RPC);
+  /// - concurrent calls for one id share one in-flight future;
+  /// - a superseded open ([WorkspaceOpenAborted] — `_openChain` is last-wins)
+  ///   is re-run ONCE in place; a second abort throws;
+  /// - every failure throws [SessionResumeException] so the page renders
+  ///   classified copy (never a raw desktop line).
+  Future<ChatHandle> resumeSessionOnReturn(String sessionId);
+}
+
+/// Why [ConversationPort.resumeSessionOnReturn] could not bring a session
+/// back. The page maps each to voice-table copy; the raw cause rides
+/// [SessionResumeException.cause] for logs.
+enum SessionResumeFailure {
+  /// The task directory cannot say which workspace owns the session — the
+  /// same dead end [TaskOpenHost.prepareTaskOpen] answers null for.
+  scopeUnknown,
+
+  /// Ownership names another workspace and re-pointing the bridge there
+  /// failed (window gate / cold runtime / transport).
+  foreignWorkspace,
+
+  /// The workspace open was superseded twice (`_openChain` last-wins).
+  openAborted,
+
+  /// The subscribe itself failed after the bridge was pointed home.
+  subscribe,
+
+  /// The bridge was home and the desktop still answered
+  /// `fault.subscribe.sessionNotFound` — the session really is gone (the
+  /// sticky missing set already carries it).
+  sessionMissing,
+}
+
+/// Classified orphan-recovery failure ([ConversationPort.resumeSessionOnReturn]).
+class SessionResumeException implements Exception {
+  const SessionResumeException(this.failure, {this.cause});
+
+  final SessionResumeFailure failure;
+
+  /// The underlying typed open result / subscribe error, for logs.
+  final Object? cause;
+
+  @override
+  String toString() => 'SessionResumeException($failure): $cause';
 }
 
 /// Task-metadata commands and reads the chat page owns (row actions, the
@@ -439,6 +517,18 @@ abstract interface class TaskMetaPort {
   /// Relay-overview display status (`idle|running|completed|error`) of one
   /// task; null when the relay view doesn't hold the session.
   String? taskDisplayStatus(String sessionId);
+
+  /// The task row's `lastError` meta as the merged directory holds it —
+  /// `{message, code?, traceId?, attribution?}`, null when the row carries
+  /// none (or the directory doesn't know the id).
+  ///
+  /// This is the ONLY carrier of the error detail the chat surfaces show:
+  /// the task row keeps the LAST error of the task (not of one turn), and
+  /// the V4 conversation snapshot has no `status.lastError` member at all
+  /// (2026-11-08 wire probe + official 3.17.2 bundle; the `detail`/`type`
+  /// schema belongs to the unimplemented `getTaskSnapshot` RPC). Callers
+  /// present it as 「最近一次错误」.
+  Map<String, dynamic>? taskLastError(String sessionId);
 
   /// Anchor write source ① of the task registry (spec
   /// task-registry-semantics §3.8): the phone created this session, so the
@@ -772,6 +862,26 @@ class DeviceSession extends ChangeNotifier
   ConversationTransport? _conversation;
   SessionsIndexSubscription? _sessionsSub;
   final Map<String, ConversationSubscription> _chatSubs = {};
+
+  /// Terminal-failure listeners of [_chatSubs], one per live subscription
+  /// (a second reader shares it — see [subscribe]). Cancelled when the
+  /// subscription dies: page close, host revoke, or terminal refusal.
+  final Map<String, StreamSubscription<Object?>> _chatTerminalSubs = {};
+
+  /// Per-session revoke generation (11-08 session restore). The ONLY writer
+  /// is [_openWorkspaceNow]'s teardown (the host revokes readers behind
+  /// their back); a page's own [ChatHandle.close] never touches it, so
+  /// "page closed" and "host revoked" stay distinguishable. A handle issued
+  /// at generation N is orphaned once the counter moved past N.
+  final Map<String, int> _chatGenerations = {};
+
+  /// In-flight [resumeSessionOnReturn] futures by session id (AC4 debounce:
+  /// a burst of `didPopNext` callbacks shares ONE open/subscribe chain).
+  final Map<String, Future<ChatHandle>> _resumeInFlight = {};
+
+  /// Session ids whose resume currently owns the open/subscribe chain —
+  /// guards the subscribe→reroute→subscribe recursion in [subscribe].
+  final Set<String> _resumingSessions = <String>{};
 
   /// Managed channel-event listeners registered via [listenChannel]: their
   /// wire attaches die with every bridge and are re-hung from this registry
@@ -1770,11 +1880,7 @@ class DeviceSession extends ChangeNotifier
     Map<String, dynamic>? workspaceHint,
   }) async {
     final active = activeWorkspace;
-    final workspace = _taskHome.workspaceOfTask(
-          taskId,
-          activeKey: active == null ? null : workspaceKeyOf(active),
-        ) ??
-        _hintWorkspace(workspaceHint);
+    final workspace = _resolveOwnership(taskId, workspaceHint: workspaceHint);
     if (workspace == null) return null;
     final needsOpen = workspaceKeyOf(workspace) !=
             workspaceKeyOf(active ?? const <String, dynamic>{}) ||
@@ -1784,6 +1890,158 @@ class DeviceSession extends ChangeNotifier
       workspace,
       taskId: taskId,
       purpose: WorkspaceOpenPurpose.openTask,
+    );
+  }
+
+  /// The revoke generation [sessionId] currently sits at (0 = never revoked).
+  int _chatGenerationOf(String sessionId) => _chatGenerations[sessionId] ?? 0;
+
+  /// Ownership resolution shared by [prepareTaskOpen] and
+  /// [resumeSessionOnReturn]: the directory's answer wins, [workspaceHint]
+  /// only fills in when the directory is silent (design 11-07 D3). Null
+  /// means ownership is undeterminable.
+  Map<String, dynamic>? _resolveOwnership(
+    String sessionId, {
+    Map<String, dynamic>? workspaceHint,
+  }) {
+    final active = activeWorkspace;
+    return _taskHome.workspaceOfTask(
+          sessionId,
+          activeKey: active == null ? null : workspaceKeyOf(active),
+        ) ??
+        _hintWorkspace(workspaceHint);
+  }
+
+  /// Orphan recovery (11-08 session restore, AC1/AC4/AC5).
+  ///
+  /// [sessionId] was the visible page's session when the host revoked its
+  /// subscription (a workspace switch keeps one bridge — see
+  /// [_openWorkspaceNow]'s teardown). This re-points the bridge at the
+  /// SESSION'S OWN workspace and re-subscribes, answering the fresh handle.
+  ///
+  /// Same-workspace + live subscription is a no-op answering the live
+  /// handle (zero RPC). Concurrent calls for one id share one future. The
+  /// `_openChain` is last-wins and re-entry answers [WorkspaceOpenAborted]:
+  /// that is re-run ONCE in place (the TaskOpenPage rule), a second abort
+  /// throws. All failures throw [SessionResumeException], never raw wire
+  /// text.
+  @override
+  Future<ChatHandle> resumeSessionOnReturn(String sessionId) {
+    final existing = _resumeInFlight[sessionId];
+    // In-flight merge (AC4 debounce): a burst of didPopNext callbacks must
+    // not chain two open/subscribe rounds for one session.
+    if (existing != null) return existing;
+    final future = _resumeSessionNow(sessionId);
+    _resumeInFlight[sessionId] = future;
+    return future.whenComplete(() {
+      if (identical(_resumeInFlight[sessionId], future)) {
+        _resumeInFlight.remove(sessionId);
+      }
+    });
+  }
+
+  Future<ChatHandle> _resumeSessionNow(String sessionId) async {
+    final workspace = _resolveOwnership(sessionId);
+    if (workspace == null) {
+      // Same dead end as prepareTaskOpen's null: ownership is undeterminable,
+      // a guessed scope would produce the exact dead page this task fixes.
+      throw const SessionResumeException(SessionResumeFailure.scopeUnknown);
+    }
+    final live = _chatSubs[sessionId];
+    if (live != null) {
+      // Already home and subscribed — zero RPC. A revoke clears the map
+      // entry for the same id, so a live entry can only mean "still alive"
+      // (the page's handle may merely be an older view of it).
+      return _handleFor(sessionId, live);
+    }
+    if (_disposed) {
+      throw const SessionResumeException(
+        SessionResumeFailure.subscribe,
+        cause: 'disposed',
+      );
+    }
+    _resumingSessions.add(sessionId);
+    try {
+      // Reuse prepareTaskOpen's decision rule: a bridge already home needs no
+      // open; a cold-runtime failure on the active workspace still needs the
+      // re-open that clears the banner. workspaceHint is unused here — the
+      // directory (or a live-only row) is the only ownership source a visible
+      // page has.
+      final ownerKey = _taskHome.normalizeKey(workspaceKeyOf(workspace) ?? '');
+      final needsOpen = ownerKey != _sidecarActiveKey() ||
+          lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning;
+      if (needsOpen) {
+        // Aborted = superseded by a concurrent open (last-wins chain). Re-run
+        // ONCE in place, exactly like TaskOpenPage; a second abort is the
+        // classified dead end.
+        var result = await openWorkspace(
+          workspace,
+          purpose: WorkspaceOpenPurpose.openTask,
+        );
+        if (result is WorkspaceOpenAborted) {
+          result = await openWorkspace(
+            workspace,
+            purpose: WorkspaceOpenPurpose.openTask,
+          );
+        }
+        switch (result) {
+          case WorkspaceOpenOpened():
+            break;
+          case WorkspaceOpenAborted():
+            throw const SessionResumeException(
+              SessionResumeFailure.openAborted,
+            );
+          case WorkspaceOpenRuntimeNotRunning() ||
+                WorkspaceOpenUnreachable() ||
+                WorkspaceOpenTransportFailure():
+            // `foreignWorkspace` covers "the workspace home could not be
+            // prepared"; the page maps it through the same open-failure copy
+            // chain TaskOpenPage uses (runtime-not-running vs unreachable).
+            throw SessionResumeException(
+              SessionResumeFailure.foreignWorkspace,
+              cause: result,
+            );
+        }
+      }
+      try {
+        return await subscribe(sessionId);
+      } catch (e) {
+        if (isSessionNotFoundError(e)) {
+          // The bridge is home and the desktop STILL refuses the session:
+          // this one is a genuine missing session (subscribe recorded it in
+          // [_sessionMissingIds] — correct here). Classified, not raw.
+          throw SessionResumeException(
+            SessionResumeFailure.sessionMissing,
+            cause: e,
+          );
+        }
+        throw SessionResumeException(
+          SessionResumeFailure.subscribe,
+          cause: e,
+        );
+      }
+    } finally {
+      _resumingSessions.remove(sessionId);
+    }
+  }
+
+  /// One reader's view of a live subscription.
+  ChatHandle _handleFor(String sessionId, ConversationSubscription sub) {
+    final generation = _chatGenerationOf(sessionId);
+    return ChatHandle(
+      generation: generation,
+      revoked: () => _chatGenerationOf(sessionId) != generation,
+      state: sub.state,
+      close: () async {
+        // Guarded by identity: an older handle closing AFTER a resume
+        // installed a fresh subscription must not tear down the new one (or
+        // its terminal listener).
+        if (_chatSubs[sessionId] != sub) return;
+        _chatSubs.remove(sessionId);
+        final terminal = _chatTerminalSubs.remove(sessionId);
+        await terminal?.cancel();
+        await sub.dispose();
+      },
     );
   }
 
@@ -1849,7 +2107,8 @@ class DeviceSession extends ChangeNotifier
       // manager map key.
       final oldActiveKey = _sidecarActiveKey();
       final oldBridge = _bridge;
-      final oldChats = List.of(_chatSubs.values);
+      final oldChats = Map.of(_chatSubs);
+      final oldTerminalSubs = Map.of(_chatTerminalSubs);
       _sessionsSub = null;
       // Detach the old index listener now (the old subscription may still
       // deliver during its async dispose — the service must not diff the
@@ -1866,6 +2125,15 @@ class DeviceSession extends ChangeNotifier
       _taskHome.onWorkspaceOpened();
       _conversation = null;
       _chatSubs.clear();
+      _chatTerminalSubs.clear();
+      // Host revoke (11-08 session restore): the readers behind these
+      // subscriptions keep their page State across the switch and get no
+      // signal anywhere else — bump their generation so a later
+      // `didPopNext` can tell "my subscription was torn down by the host"
+      // from "I closed it myself". Only THIS path advances the counter.
+      for (final sessionId in oldChats.keys) {
+        _chatGenerations[sessionId] = _chatGenerationOf(sessionId) + 1;
+      }
       // Sidecar subscriptions live on the same bridge as the active one
       // (per-scope EventListens + subscribes): drop them BEFORE the old
       // bridge dies, or their recovery hooks and timers outlive it.
@@ -1890,7 +2158,14 @@ class DeviceSession extends ChangeNotifier
       // Fresh bridge = fresh channel client: re-hang the managed listeners.
       _reattachChannelListeners();
       unawaited(oldSub?.dispose());
-      for (final s in oldChats) {
+      // The dedicated terminal listener dies with the subscription it
+      // guards: a subscription disposed by the HOST path also gets a fresh
+      // refused-state read on resume, so a stale listener would double-add
+      // a missing id.
+      for (final t in oldTerminalSubs.values) {
+        unawaited(t.cancel());
+      }
+      for (final s in oldChats.values) {
         unawaited(s.dispose());
       }
       oldBridge?.dispose();
@@ -3356,15 +3631,7 @@ class DeviceSession extends ChangeNotifier
       // The first handle's terminal-failure listener is still live on this
       // shared subscription (it cancels only when its own handle closes,
       // which also disposes the subscription) — a second reader needs none.
-      return ChatHandle(
-        state: existing.state,
-        close: () async {
-          if (_chatSubs[sessionId] == existing) {
-            _chatSubs.remove(sessionId);
-            await existing.dispose();
-          }
-        },
-      );
+      return _handleFor(sessionId, existing);
     }
     late final StreamSubscription<Object?> terminalSub;
     final ConversationSubscription sub;
@@ -3373,9 +3640,18 @@ class DeviceSession extends ChangeNotifier
     } catch (e) {
       if (isSessionNotFoundError(e)) {
         // Initial open of a dead session (10-11): the authoritative
-        // refusal arrives straight from the first subscribe — record it
-        // so the page renders the「会话不存在」terminal state instead of
-        // the retryable error banner, and rethrow as before.
+        // refusal arrives straight from the first subscribe. WRITE ENTRY ①
+        // (design 11-08 P1-5): before it sticks, check whether the session
+        // simply belongs to another workspace — that refusal is about the
+        // scope, so it must reroute instead of marking the session missing.
+        // Guarded by [_resumingSessions]: inside a resume the bridge is
+        // already home, and joining the in-flight future would deadlock.
+        if (!_resumingSessions.contains(sessionId) &&
+            _foreignOwnership(sessionId) != null) {
+          return _rerouteToForeignWorkspace(sessionId);
+        }
+        // Recorded so the page renders the「会话不存在」terminal state
+        // instead of the retryable error banner, and rethrow as before.
         _sessionMissingIds.add(sessionId);
         notifyListeners();
       }
@@ -3384,21 +3660,71 @@ class DeviceSession extends ChangeNotifier
     _chatSubs[sessionId] = sub;
     // Resubscribe-path refusals surface through the terminal broadcast
     // (the subscription has already stopped its own retry queue); the
-    // gateway notify re-runs the open page's banner builder.
-    terminalSub = sub.terminalFailures.listen((_) {
+    // gateway notify re-runs the open page's banner builder. WRITE ENTRY ②
+    // (design 11-08 P1-5): same ownership reverse-lookup — a terminal
+    // refusal under a foreign scope is not a dead session.
+    terminalSub = sub.terminalFailures.listen((_) async {
+      if (_foreignOwnership(sessionId) != null) {
+        await _rerouteAfterTerminalRefusal(sessionId, sub);
+        return;
+      }
       _sessionMissingIds.add(sessionId);
       notifyListeners();
     });
-    return ChatHandle(
-      state: sub.state,
-      close: () async {
-        await terminalSub.cancel();
-        if (_chatSubs[sessionId] == sub) {
-          _chatSubs.remove(sessionId);
-          await sub.dispose();
-        }
-      },
-    );
+    _chatTerminalSubs[sessionId] = terminalSub;
+    return _handleFor(sessionId, sub);
+  }
+
+  /// The session's owning workspace when it is NOT the active one; null when
+  /// the directory cannot tell (or says the active workspace is home — then
+  /// a sessionNotFound refusal is about the session itself).
+  Map<String, dynamic>? _foreignOwnership(String sessionId) {
+    final owner = _resolveOwnership(sessionId);
+    if (owner == null) return null;
+    final ownerKey = _taskHome.normalizeKey(workspaceKeyOf(owner) ?? '');
+    final activeKey = _sidecarActiveKey();
+    if (ownerKey.isEmpty) return null;
+    return ownerKey == activeKey ? null : owner;
+  }
+
+  /// Reroutes a subscribe refused under a foreign scope (both write entries
+  /// converge here): resume through [resumeSessionOnReturn] and answer the
+  /// fresh handle, or throw [SessionResumeException]. The page's terminal
+  /// contract (design 11-08 P1-1) is "handle or classified error", never a
+  /// silent null.
+  Future<ChatHandle> _rerouteToForeignWorkspace(String sessionId) async {
+    _log('[session] subscribe $sessionId landed under a foreign scope; '
+        'rerouting to its workspace');
+    return resumeSessionOnReturn(sessionId);
+  }
+
+  /// The terminal-broadcast flavour of the reroute (write entry ②): the live
+  /// subscription is terminal-failed and must die before the resume installs
+  /// a fresh one — otherwise the shared-handle branch of [subscribe] would
+  /// hand the dead state back. The generation advances here (this IS a
+  /// host-side revoke of the reader) so a visible page detects the orphan on
+  /// the host notify and re-binds to the resumed handle.
+  Future<void> _rerouteAfterTerminalRefusal(
+    String sessionId,
+    ConversationSubscription dead,
+  ) async {
+    if (_chatSubs[sessionId] != dead) return; // a newer subscription owns it
+    _chatSubs.remove(sessionId);
+    final terminal = _chatTerminalSubs.remove(sessionId);
+    await terminal?.cancel();
+    await dead.dispose();
+    _chatGenerations[sessionId] = _chatGenerationOf(sessionId) + 1;
+    notifyListeners();
+    try {
+      await resumeSessionOnReturn(sessionId);
+    } catch (e) {
+      // No caller to throw to (the broadcast is fire-and-forget). The page's
+      // orphan check sees the advanced generation and runs the resume
+      // itself, surfacing the classified failure banner there — no sticky
+      //「会话不存在」marker, which would be the wrong verdict for a scope
+      // problem.
+      _log('[session] terminal-refusal reroute failed for $sessionId: $e');
+    }
   }
 
   @override
@@ -3569,6 +3895,31 @@ class DeviceSession extends ChangeNotifier
     // （终态优先 → 同类取 updatedAt 大 → workspacePath 字典序 → 状态串
     // 兜底；未识别值按运行态类）。
     return TaskDirectory.displayStatusWinner(relayTasks, sessionId);
+  }
+
+  @override
+  Map<String, dynamic>? taskLastError(String sessionId) {
+    // 读合并目录的合成行，不是 relayTasks：live sessions-index 覆盖会重建 raw
+    // 并剥掉 relay 源字段，lastError 由 TaskDirectory._withRelayMeta 从 relay
+    // 行补齐（task_directory.dart）—— relay 直读会让「live 覆盖中的任务」
+    // 永远拿不到错误详情。合并结果是列表行呈现的同一行，两处不会漂移。
+    for (final (entry, _, _) in taskDirectory.mergedRows().rows) {
+      if (entry.sessionId != sessionId) continue;
+      // 缺省/空白字段不进 map（AC5 的单一归一化点：UI 只判 key 在不在）；
+      // 空白串同样算缺省（wire 漂移的垃圾值不得渲染成空行），一个可用字段
+      // 都没有 = 与「该行没有错误」同义，回 null。
+      final error = <String, dynamic>{};
+      void put(String key, String? value) {
+        if (value != null && value.trim().isNotEmpty) error[key] = value;
+      }
+
+      put('message', entry.lastErrorMessage);
+      put('code', entry.lastErrorCode);
+      put('traceId', entry.lastErrorTraceId);
+      put('attribution', entry.lastErrorAttribution);
+      return error.isEmpty ? null : error;
+    }
+    return null;
   }
 
   @override
@@ -4023,7 +4374,8 @@ class DeviceSession extends ChangeNotifier
     final client = _client;
     final bridge = _bridge;
     final sub = _sessionsSub;
-    final chats = List.of(_chatSubs.values);
+    final chats = Map.of(_chatSubs);
+    final chatTerminals = Map.of(_chatTerminalSubs);
     _client = null;
     _bridge = null;
     _conversation = null;
@@ -4034,6 +4386,14 @@ class DeviceSession extends ChangeNotifier
     }
     _sessionsSub = null;
     _chatSubs.clear();
+    _chatTerminalSubs.clear();
+    // Host teardown of every chat reader (same rationale as the workspace
+    // switch: suspend is the handover/rebuild path, never a page's own
+    // close) — a chat page left in the stack must still be able to tell its
+    // subscription died behind its back.
+    for (final sessionId in chats.keys) {
+      _chatGenerations[sessionId] = _chatGenerationOf(sessionId) + 1;
+    }
     _activeWorkspace = null;
     _bootstrapWorkspaces = [];
     _workspaces = [];
@@ -4071,7 +4431,10 @@ class DeviceSession extends ChangeNotifier
     await _appErrSub?.cancel();
     _appErrSub = null;
     unawaited(sub?.dispose());
-    for (final s in chats) {
+    for (final t in chatTerminals.values) {
+      unawaited(t.cancel());
+    }
+    for (final s in chats.values) {
       unawaited(s.dispose());
     }
     bridge?.dispose();

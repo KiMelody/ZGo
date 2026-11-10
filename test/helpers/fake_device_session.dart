@@ -309,6 +309,7 @@ class FakeDeviceSession extends DeviceSession {
 
   @override
   Future<ChatHandle> subscribe(String sessionId) async {
+    chatSubscribes.add(sessionId);
     final state = ConversationState();
     if (chatRows.isNotEmpty) {
       state.applyFrame({
@@ -325,8 +326,19 @@ class FakeDeviceSession extends DeviceSession {
         },
       }, onGap: () {});
     }
-    return ChatHandle(state: state, close: () async {});
+    return ChatHandle(
+      state: state,
+      close: () async {},
+      revoked: () => revokedChatSessions.contains(sessionId),
+    );
   }
+
+  /// Every sessionId a subscribe was issued for, in order (orphan-resume
+  /// assertions: exactly one re-subscribe per resume).
+  final List<String> chatSubscribes = [];
+
+  /// Session ids whose handles read `isRevoked` — the host-revoke simulation.
+  final Set<String> revokedChatSessions = {};
 
   @override
   Future<WorkspacePrep> prepareWorkspace() async => WorkspacePrep.fromMap({

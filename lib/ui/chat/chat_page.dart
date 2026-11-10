@@ -4,7 +4,7 @@ import 'dart:math' as math;
 import 'package:clock/clock.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart'
-    show ValueListenable, kDebugMode, listEquals;
+    show ValueListenable, kDebugMode, listEquals, mapEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
@@ -22,6 +22,7 @@ import '../theme.dart';
 import '../ui_settings.dart';
 import 'confirm_gate.dart';
 import 'copy_mappings.dart';
+import 'error_detail_sheet.dart';
 import 'git_panel.dart';
 import 'interaction_answer.dart';
 import 'goal_panel.dart';
@@ -39,6 +40,30 @@ import 'workflow_run_page.dart';
 /// the page-construction boundary [ChatPageHost] (ADR-0008 rule ii).
 /// Draft mode (no [sessionId]): the first message issues `createSession`
 /// with the draft model/mode/thought config.
+///
+/// [ChatRouteObserverScope] carries the app-level [RouteObserver] this page
+/// registers with (task 11-08 session restore). Absent (e.g. a bare test
+/// harness) the page simply skips RouteAware registration — everything else
+/// behaves exactly as before.
+class ChatRouteObserverScope extends InheritedWidget {
+  const ChatRouteObserverScope({
+    super.key,
+    required this.observer,
+    required super.child,
+  });
+
+  final RouteObserver<PageRoute<dynamic>> observer;
+
+  static RouteObserver<PageRoute<dynamic>>? maybeOf(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<ChatRouteObserverScope>()
+          ?.observer;
+
+  @override
+  bool updateShouldNotify(ChatRouteObserverScope oldWidget) =>
+      observer != oldWidget.observer;
+}
+
 class ChatPage extends StatefulWidget {
   final ChatPageHost host;
   final String? sessionId;
@@ -198,7 +223,7 @@ class _LastSwitch {
   bool retried = false;
 }
 
-class _ChatPageState extends State<ChatPage> {
+class _ChatPageState extends State<ChatPage> with RouteAware {
   ChatHandle? _handle;
   final _inputController = TextEditingController();
   final _scrollController = ScrollController();
@@ -292,6 +317,16 @@ class _ChatPageState extends State<ChatPage> {
   String? _error;
   bool _sending = false;
 
+  /// The task row's `lastError` meta of [_sessionId] (task 11-08-error-
+  /// detail): the errored-turn preview line and the start-failed card's
+  /// real message, both backed by the same sheet.
+  ///
+  /// Cached rather than read in the list build because the value rides the
+  /// task directory (host notifications), while the list listens to the
+  /// conversation state — [_syncLastError] bridges the two and rebuilds
+  /// only on an actual change (the overview / index tail notify often).
+  Map<String, dynamic>? _lastError;
+
   /// Observed turn phase of the active handle: the turn-terminal overview
   /// refresh (design 11-01 §2) fires on the running→terminal edge, seeded
   /// from the first snapshot so a page opened mid-turn still sees it.
@@ -303,6 +338,22 @@ class _ChatPageState extends State<ChatPage> {
   /// per page open (OQ2: enter-time pull, no polling).
   int? _offPeakQueuePosition;
   String? _offPeakTaskTitle;
+
+  /// Orphan recovery (task 11-08 session restore): true while
+  /// `resumeSessionOnReturn` is in flight — drives the light
+  /// 「正在恢复会话…」banner AND blocks sends (zero RPC; the user re-taps
+  /// once the banner clears — queueing was explicitly rejected).
+  bool _restoring = false;
+
+  /// The classified recovery failure (already localized) — rendered in the
+  /// same pre-list slot as [_error]; cleared when a resume starts.
+  String? _resumeError;
+
+  /// The route this page lives on, captured in [didChangeDependencies] so
+  /// the app-level [ChatRouteObserverScope] can (un)subscribe this State as
+  /// RouteAware.
+  ModalRoute<dynamic>? _route;
+  RouteObserver<PageRoute<dynamic>>? _routeObserver;
 
   /// The latest optimistic model/thought switch the config sheet issued
   /// (design 10-01) — the raw material for the one-shot bridge-lost retry
@@ -547,10 +598,22 @@ class _ChatPageState extends State<ChatPage> {
       listKey: _listKey,
       freezeKey: _freezeKey,
     );
+    // Orphan detection (11-08): a revoke bumps the generation and notifies
+    // the host — nothing else tells a preserved page its subscription died.
+    widget.host.addListener(_onHostChanged);
     if (_sessionId != null) {
       _subscribe();
       unawaited(_loadOffPeakQueue());
+      // Seed WITHOUT setState: the first build has not run yet, so the value
+      // is simply present for it (task 11-08-error-detail).
+      _lastError = widget.host.taskLastError(_sessionId!);
     }
+    // The lastError meta rides the task directory (relay overview / live
+    // index refreshes notify the host), not the conversation state — the
+    // chat list listens to the latter. One host listener keeps the cached
+    // preview/detail current; [_syncLastError] no-ops unless the value
+    // actually changed, so the frequent index tail costs nothing.
+    widget.host.addListener(_syncLastError);
     _loadPrep();
     _loadEntitlement();
     _inputController.addListener(() {
@@ -564,6 +627,23 @@ class _ChatPageState extends State<ChatPage> {
       _maybeOpenMentionPicker(text);
       _scheduleDraftPersist();
     });
+  }
+
+  /// Re-reads the task row's `lastError` meta into [_lastError] and rebuilds
+  /// only when it changed.
+  ///
+  /// Seeded at initState / after createSession, refreshed on every host
+  /// notification (relay overview landing, live index frame). The equality
+  /// guard matters: the overview cadence and the live index tail notify the
+  /// host continuously, and an unconditional setState would repaint the
+  /// transcript for frames that carry no error change at all.
+  void _syncLastError() {
+    if (!mounted) return;
+    final sessionId = _sessionId;
+    final next =
+        sessionId == null ? null : widget.host.taskLastError(sessionId);
+    if (mapEquals(next, _lastError)) return;
+    setState(() => _lastError = next);
   }
 
   /// Reads the stored draft into the composer. Guards against clobbering
@@ -888,6 +968,12 @@ class _ChatPageState extends State<ChatPage> {
       widget.host.forgetMissingSession(sessionId);
     }
     _handle?.close();
+    // Unsubscribe while the State is still alive: RouteObserver.unsubscribe
+    // only removes this State from its set, but keeping it above the other
+    // teardown lines documents that it must precede super.dispose().
+    _routeObserver?.unsubscribe(this);
+    widget.host.removeListener(_syncLastError);
+    widget.host.removeListener(_onHostChanged);
     _feed.dispose();
     _git.dispose();
     _editingRowId.dispose();
@@ -980,45 +1066,203 @@ class _ChatPageState extends State<ChatPage> {
         await handle.close();
         return;
       }
-      setState(() {
-        _handle = handle;
-        _error = null;
-      });
-      // mobile-view-state: the desktop shows 「手机正在操作此任务」 from it.
-      widget.host.sendViewState(taskId: sessionId);
-      handle.state.addListener(_scrollToBottom);
-      handle.state.addListener(_onConfigMaybeReverted);
-      handle.state.addListener(_refreshQueryDirectory);
-      // Turn-terminal trigger (design 11-01 §2): seed the observed phase
-      // from the first snapshot so a page opened mid-turn still sees the
-      // running→terminal edge.
-      handle.state.addListener(_onTurnPhaseChanged);
-      _turnWasRunning = handle.state.isRunning;
-      // The snapshot may already be applied when the handle resolves —
-      // seed the directory now (the memo key makes a redundant call free).
-      _refreshQueryDirectory();
-      // Start-plan auto switch (design 10-24 §4): the handle's first
-      // snapshot may not carry `config` yet — re-check once when it does.
-      if (handle.state.config == null) {
-        handle.state.addListener(_autoSwitchWhenConfigReady);
-      }
-      _maybeAutoSwitchStartPlan();
-      // Terminal-hysteresis memory rides the parent conversation (subagent
-      // rows + backgroundWorks).
-      _feed.observe(handle.state);
-      // The server snapshot is a tail window (can be as few as 3 rows).
-      // The client shows the full history immediately, so
-      // auto-load the missing older rows once on open.
-      if (handle.state.canLoadOlder) {
-        await _viewport.loadOlder();
-      }
-      // Explicitly position at the newest message: the state listener only
-      // fires on LATER updates and misses the initial snapshot.
-      _scrollToBottom();
+      await _bindHandle(handle, sessionId: sessionId);
     } catch (e) {
       debugPrint('[chat] subscribe $sessionId failed: $e');
       if (mounted) setState(() => _error = _subscribeFailureCopy(e));
     }
+  }
+
+  /// Adopts [handle] as the page's live subscription: state listeners,
+  /// directory seed, auto-switch and the initial scroll. Shared by the first
+  /// subscribe and the orphan resume (they must not drift — a resumed handle
+  /// needs every listener the original had).
+  Future<void> _bindHandle(ChatHandle handle, {required String sessionId}) async {
+    final previous = _handle;
+    if (previous != null && !identical(previous.state, handle.state)) {
+      // Drop the dead subscription's listeners before adopting the fresh
+      // state (a resumed handle is a DIFFERENT state object; keeping the old
+      // wiring would double-scroll on every later frame). The close is
+      // identity-guarded host-side, so it cannot tear down the new one.
+      previous.state.removeListener(_scrollToBottom);
+      previous.state.removeListener(_onConfigMaybeReverted);
+      previous.state.removeListener(_refreshQueryDirectory);
+      previous.state.removeListener(_onTurnPhaseChanged);
+      previous.state.removeListener(_autoSwitchWhenConfigReady);
+      unawaited(previous.close());
+    }
+    setState(() {
+      _handle = handle;
+      _error = null;
+      _resumeError = null;
+    });
+    // mobile-view-state: the desktop shows 「手机正在操作此任务」 from it.
+    widget.host.sendViewState(taskId: sessionId);
+    handle.state.addListener(_scrollToBottom);
+    handle.state.addListener(_onConfigMaybeReverted);
+    handle.state.addListener(_refreshQueryDirectory);
+    // Turn-terminal trigger (design 11-01 §2): seed the observed phase
+    // from the first snapshot so a page opened mid-turn still sees the
+    // running→terminal edge.
+    handle.state.addListener(_onTurnPhaseChanged);
+    _turnWasRunning = handle.state.isRunning;
+    // The snapshot may already be applied when the handle resolves —
+    // seed the directory now (the memo key makes a redundant call free).
+    _refreshQueryDirectory();
+    // Start-plan auto switch (design 10-24 §4): the handle's first
+    // snapshot may not carry `config` yet — re-check once when it does.
+    if (handle.state.config == null) {
+      handle.state.addListener(_autoSwitchWhenConfigReady);
+    }
+    _maybeAutoSwitchStartPlan();
+    // Terminal-hysteresis memory rides the parent conversation (subagent
+    // rows + backgroundWorks).
+    _feed.observe(handle.state);
+    // The server snapshot is a tail window (can be as few as 3 rows).
+    // The client shows the full history immediately, so
+    // auto-load the missing older rows once on open.
+    if (handle.state.canLoadOlder) {
+      await _viewport.loadOlder();
+    }
+    // Explicitly position at the newest message: the state listener only
+    // fires on LATER updates and misses the initial snapshot.
+    _scrollToBottom();
+  }
+
+  // ------------------------------------------------- orphan recovery (11-08)
+
+  /// RouteAware registration: [ChatRouteObserverScope] is published by the
+  /// composition root (main.dart). Without it (bare test harness) the page
+  /// behaves exactly as before — no didPopNext, no resume.
+  ///
+  /// Embedded (dual-pane) pages never register: they live INSIDE the task
+  /// list's route, have no pop of their own, and the list page already owns
+  /// the bridge-switching decision there (PRD non-goal: recorded for a
+  /// follow-up via a host revoke Listenable).
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final observer = widget.embedded ? null : ChatRouteObserverScope.maybeOf(context);
+    final route = widget.embedded ? null : ModalRoute.of(context);
+    if (route is PageRoute<dynamic>) {
+      if (observer != _routeObserver || route != _route) {
+        _routeObserver?.unsubscribe(this);
+        _routeObserver = observer;
+        _route = route;
+        observer?.subscribe(this, route);
+      }
+    } else if (_routeObserver != null) {
+      _routeObserver?.unsubscribe(this);
+      _routeObserver = null;
+      _route = null;
+    }
+  }
+
+  /// The visible page's subscription was revoked by a workspace switch while
+  /// this page sat in the stack (returning from B to A). Detect it and resume
+  /// through the host — the light banner covers the window, sends are
+  /// absorbed (no queueing), and a failure lands as classified copy.
+  @override
+  void didPopNext() {
+    if (_handleRevoked()) {
+      unawaited(_resumeOrphan());
+    }
+  }
+
+  /// Host notify: a revoke (workspace switch teardown, terminal-refusal
+  /// reroute) only advances a generation — no state change the page listens
+  /// to otherwise. Recover only while this page is the VISIBLE route: a hidden
+  /// page must not steal the single bridge from the page the user is on
+  /// (returning to it fires [didPopNext], which then recovers).
+  void _onHostChanged() {
+    if (!mounted || _restoring) return;
+    // Draft pages hold no handle; the embedded pane defers to the list page.
+    if (widget.embedded || widget.sessionId == null) return;
+    if (_route?.isCurrent != true) return;
+    // A classified failure already on screen means the user's retry is the
+    // next move: auto-retrying on every host notify (the directory tail is a
+    // frequent notifier) would hammer the open chain.
+    if (_resumeError != null) return;
+    final sessionId = _sessionId;
+    if (sessionId == null || !_handleRevoked()) return;
+    // A dead/handed-over link (WebView suspend, kicked, reconnecting) has no
+    // bridge to re-point: stay silent until the link is usable again — the
+    // reconnect lands as another host notify and this re-runs.
+    if (widget.host.status != DeviceStatus.connected ||
+        widget.host.kicked) {
+      return;
+    }
+    unawaited(_resumeOrphan());
+  }
+
+  /// True when the page holds a handle the host revoked behind its back.
+  /// The handle compares its own generation with the host's counter — a
+  /// page-initiated close and a fresh subscription both read false.
+  bool _handleRevoked() {
+    final handle = _handle;
+    final sessionId = _sessionId;
+    return handle != null && sessionId != null && handle.isRevoked;
+  }
+
+  /// Re-points the bridge at this session's workspace and rebinds the page to
+  /// the fresh handle. Guarded against concurrent runs (`_restoring`):
+  /// the host also merges same-id resumes, this only keeps the UI state
+  /// single-owner.
+  Future<void> _resumeOrphan() async {
+    final sessionId = _sessionId;
+    if (sessionId == null || _restoring) return;
+    setState(() {
+      _restoring = true;
+      _resumeError = null;
+      _error = null;
+    });
+    try {
+      final handle = await widget.host.resumeSessionOnReturn(sessionId);
+      if (!mounted) {
+        await handle.close();
+        return;
+      }
+      await _bindHandle(handle, sessionId: sessionId);
+    } on SessionResumeException catch (e) {
+      debugPrint('[chat] resume $sessionId failed: $e');
+      if (!mounted) return;
+      setState(() => _resumeError = _resumeFailureCopy(e));
+    } catch (e) {
+      // Contract violation (the host classifies its own failures) — keep the
+      // page out of a silent half-state with the generic retry copy.
+      debugPrint('[chat] resume $sessionId failed unexpectedly: $e');
+      if (!mounted) return;
+      setState(() => _resumeError = tr(context, 'chat.resume.failed.subscribe'));
+    } finally {
+      if (mounted) setState(() => _restoring = false);
+    }
+  }
+
+  /// The retry behind the classified failure banner. Connection-level
+  /// failures reuse the documented manual recovery (AC5): a kicked or
+  /// non-connecting link goes through [SessionLinkPort.reconnect] first — the
+  /// only way out of `kicked` — and a connecting link is merely waited on
+  /// again (same split as TaskOpenPage's retry).
+  void _retryResume() {
+    final link = widget.host;
+    if (link.kicked ||
+        (link.status != DeviceStatus.connected &&
+            link.status != DeviceStatus.connecting)) {
+      unawaited(link.reconnect());
+    }
+    unawaited(_resumeOrphan());
+  }
+
+  /// Classified copy for a resume failure (never the desktop's raw line).
+  String _resumeFailureCopy(SessionResumeException e) {
+    final key = switch (e.failure) {
+      SessionResumeFailure.scopeUnknown => 'chat.resume.failed.scopeUnknown',
+      SessionResumeFailure.foreignWorkspace => 'chat.resume.failed.foreignWorkspace',
+      SessionResumeFailure.openAborted => 'chat.resume.failed.aborted',
+      SessionResumeFailure.subscribe => 'chat.resume.failed.subscribe',
+      SessionResumeFailure.sessionMissing => 'chat.resume.failed.sessionMissing',
+    };
+    return tr(context, key);
   }
 
   /// The subscribe banner's copy for a failure (R6, 11-07). Same chain as
@@ -1031,6 +1275,9 @@ class _ChatPageState extends State<ChatPage> {
   /// [businessErrorCopy]; anything unknown keeps its raw text (unclassified
   /// failures must not be re-labeled).
   String _subscribeFailureCopy(Object error) {
+    // The scoped reroute (11-08) classifies its own failures: they must land
+    // as the categorized copy, not as a raw exception string.
+    if (error is SessionResumeException) return _resumeFailureCopy(error);
     final locale = localeOf(context);
     if (isAgentRuntimeNotRunningError(error)) {
       return trLocale(locale, 'tasks.agentRuntimeNotRunning');
@@ -1506,6 +1753,11 @@ class _ChatPageState extends State<ChatPage> {
     // slash-bar shortcuts below route here directly, past the greyed
     // button.
     if (_tombstoned || _sessionMissing) return;
+    // Orphan-resume window (11-08, AC2): the bridge is being re-pointed at
+    // this session's workspace; any RPC now would travel the WRONG scope and
+    // come back as `session not found`. Absorb the tap (zero RPC, no queue —
+    // the user re-taps once the banner clears).
+    if (_restoring) return;
     HapticFeedback.lightImpact();
 
     // Slash commands (as in the web composer).
@@ -1626,6 +1878,7 @@ class _ChatPageState extends State<ChatPage> {
         // new-task page (design 10-20).
         unawaited(widget.host.chatDraftStore.remove('draft.$workspaceId'));
         _sessionId = sessionId;
+        _syncLastError();
         // 2) subscribe in the background — must NOT block sending
         setState(() => _progress = null);
         if (canUseFirstInput) {
@@ -2560,6 +2813,7 @@ class _ChatPageState extends State<ChatPage> {
                               editingRowId: _editingRowId,
                               onEditSend: _sendUserEdit,
                               gitController: _git,
+                              lastError: _lastError,
                             ),
                             // D9: interactions anchored to a row of this
                             // group render directly after it (in-stream),
@@ -2593,6 +2847,12 @@ class _ChatPageState extends State<ChatPage> {
   /// view miss (null) renders nothing — prefer no card over a wrong
   /// card. A session that gains rows mid-error drops back to the normal
   /// list (the existing task-failure presentation's domain).
+  ///
+  /// Two card states (task 11-08-error-detail, PRD AC3): with a real
+  /// `lastError.message` the body becomes that line (ellipsized) and the
+  /// whole card opens the error sheet; without one the generic advice copy
+  /// stays and the card is inert — tapping a card that can show no more than
+  /// it already does is a dead end.
   Widget _emptyOrStartFailed(BuildContext context, ConversationState state) {
     final sessionId = _sessionId;
     final startFailed = sessionId != null &&
@@ -2606,35 +2866,54 @@ class _ChatPageState extends State<ChatPage> {
         ),
       );
     }
+    final lastError = _lastError;
+    final errorMessage = errorMessageOf(lastError);
+    final card = Container(
+      constraints: const BoxConstraints(maxWidth: 320),
+      padding: const EdgeInsets.all(ZSpacing.card),
+      decoration: BoxDecoration(
+        color: ZColors.danger.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(ZRadius.tile),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.error_outline, size: 20, color: ZInk.dangerTone(context)),
+          const SizedBox(height: 8),
+          Text(
+            tr(context, 'chat.session.startFailedTitle'),
+            textAlign: TextAlign.center,
+            style: ZType.heading.copyWith(color: ZInk.dangerTone(context)),
+          ),
+          const SizedBox(height: 4),
+          if (errorMessage != null)
+            Text(
+              errorMessage,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: ZType.sub.copyWith(color: ZInk.soft(context)),
+            )
+          else
+            Text(
+              tr(context, 'chat.session.startFailedBody'),
+              textAlign: TextAlign.center,
+              style: ZType.sub.copyWith(color: ZInk.muted(context)),
+            ),
+        ],
+      ),
+    );
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(ZSpacing.card),
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 320),
-          padding: const EdgeInsets.all(ZSpacing.card),
-          decoration: BoxDecoration(
-            color: ZColors.danger.withValues(alpha: 0.15),
-            borderRadius: BorderRadius.circular(ZRadius.tile),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.error_outline, size: 20, color: ZInk.dangerTone(context)),
-              const SizedBox(height: 8),
-              Text(
-                tr(context, 'chat.session.startFailedTitle'),
-                textAlign: TextAlign.center,
-                style: ZType.heading.copyWith(color: ZInk.dangerTone(context)),
+        child: errorMessage == null
+            ? card
+            : InkWell(
+                onTap: () =>
+                    showErrorDetailSheet(context, error: lastError!),
+                borderRadius: BorderRadius.circular(ZRadius.tile),
+                child: card,
               ),
-              const SizedBox(height: 4),
-              Text(
-                tr(context, 'chat.session.startFailedBody'),
-                textAlign: TextAlign.center,
-                style: ZType.sub.copyWith(color: ZInk.muted(context)),
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }
@@ -2782,6 +3061,40 @@ class _ChatPageState extends State<ChatPage> {
     final run = Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        // Orphan restore (11-08): a light, neutral banner — the session is
+        // coming back, nothing is broken. Sends are absorbed while it shows
+        // (see [_send]).
+        if (_restoring)
+          Material(
+            color: ZInk.card(context).withValues(alpha: 0.70),
+            child: ListTile(
+              dense: true,
+              leading: const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 1.5),
+              ),
+              title: Text(
+                tr(context, 'chat.banner.restoring'),
+                style: ZType.sub,
+              ),
+            ),
+          ),
+        // The classified terminal state of a failed resume: retry goes
+        // through the same resume entry (connection-level failures reuse the
+        // existing reconnect semantics inside it).
+        if (_resumeError != null && !_restoring)
+          Material(
+            color: ZColors.danger.withValues(alpha: 0.15),
+            child: ListTile(
+              dense: true,
+              title: Text('$_resumeError', style: ZType.sub),
+              trailing: TextButton(
+                onPressed: _retryResume,
+                child: Text(tr(context, 'tasks.retry')),
+              ),
+            ),
+          ),
         if (_error != null && !_sessionMissing)
           Material(
             color: ZColors.danger.withValues(alpha: 0.15),

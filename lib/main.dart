@@ -110,6 +110,15 @@ class _ZGoAppState extends State<ZGoApp>
   final NotificationService _notifications = NotificationService();
   final KeepAliveController _keepAlive = KeepAliveController();
   final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+
+  /// Page-visibility notifications for routes (task 11-08 session restore):
+  /// ChatPage subscribes as a RouteAware so `didPopNext` — the only moment a
+  /// preserved page State learns it is visible again — can detect that a
+  /// workspace switch revoked its subscription. Held by the App State (the
+  /// composition root) per the state-lifecycle discipline: the observer and
+  /// the navigator live and die together, never per page.
+  final RouteObserver<PageRoute<dynamic>> routeObserver =
+      RouteObserver<PageRoute<dynamic>>();
   late final DeviceSessionHub _hub = DeviceSessionHub(
     nativeListEnabled: () => _ui.nativeListEnabled,
     // Relay V2 terminal auth (desktop 3.16.2+) reads the ZCode account JWT
@@ -603,6 +612,10 @@ class _ZGoAppState extends State<ZGoApp>
       builder: (context, _) {
         return MaterialApp(
           navigatorKey: _navigatorKey,
+          // ChatPage listens as RouteAware (11-08 session restore): the
+          // observer MUST be installed here — without it RouteAware callbacks
+          // never fire and a preserved orphan page stays silent.
+          navigatorObservers: [routeObserver],
           title: 'ZGo',
           debugShowCheckedModeBanner: false,
           // B3: framework-level zh copy (paste/copy/select-all menus, date
@@ -633,7 +646,12 @@ class _ZGoAppState extends State<ZGoApp>
                 data: zCardTheme(Theme.of(context).brightness),
                 child: DialogTheme(
                   data: zDialogTheme(Theme.of(context).brightness),
-                  child: UiSettingsProvider(settings: _ui, child: child!),
+                  // The observer itself reaches pages through this scope
+                  // (ChatPage registers as RouteAware from it).
+                  child: ChatRouteObserverScope(
+                    observer: routeObserver,
+                    child: UiSettingsProvider(settings: _ui, child: child!),
+                  ),
                 ),
               ),
           home: DevicesPage(

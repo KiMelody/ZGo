@@ -263,6 +263,16 @@ const _zh = {
   'chat.kicked.reconnect': '重新连接',
   'chat.banner.sessionDeleted': '会话已在其他位置删除',
   'chat.banner.sessionMissing': '会话不存在',
+  // Orphan restore (task 11-08 session-restore-on-return): the visible page's
+  // subscription was revoked by a workspace switch; the page resumes it
+  // behind a light banner. The failure keys are the page's TERMINAL copy
+  // (classified, never the desktop's raw English line).
+  'chat.banner.restoring': '正在恢复会话…',
+  'chat.resume.failed.foreignWorkspace': '会话属于其他工作区，恢复失败，可重试',
+  'chat.resume.failed.scopeUnknown': '无法确定会话所属的工作区，恢复失败',
+  'chat.resume.failed.aborted': '工作区切换被中断，恢复失败，可重试',
+  'chat.resume.failed.subscribe': '会话恢复失败，可重试',
+  'chat.resume.failed.sessionMissing': '会话不存在',
   'chat.creating': '正在创建会话（首次可能需要预热）…',
   'chat.send.failed': '发送失败: \$0',
   'chat.op.failed': '操作失败: \$0',
@@ -284,6 +294,13 @@ const _zh = {
   'chat.bizErr.upstreamUnavailable': '上游服务暂不可用，请稍后重试。',
   'chat.error.notConnected': '连接已断开，请返回重连后再试',
   'chat.error.timeout': '连接超时，请检查网络或桌面端后重试',
+  // Error-detail sheet (task 11-08): the task row keeps the LAST error of the
+  // task, so the sheet's hint manages the expectation that an older turn's
+  // error can be the one on screen. The message / code / traceId values stay
+  // untranslated wire text (AC7).
+  'chat.error.recent': '最近一次错误',
+  'chat.error.recentHint': '会话级错误 · 显示最近一次，可能来自其他轮次',
+  'chat.error.copyAll': '复制完整报错',
   'chat.held.title': '有排队中的消息',
   'chat.held.body': '立即发送将清空排队消息并插队执行',
   'chat.held.keep': '排队发送',
@@ -1752,6 +1769,15 @@ const _en = {
   'chat.kicked.reconnect': 'Reconnect',
   'chat.banner.sessionDeleted': 'Session deleted elsewhere',
   'chat.banner.sessionMissing': 'Session not found',
+  'chat.banner.restoring': 'Restoring the session…',
+  'chat.resume.failed.foreignWorkspace':
+      'This session belongs to another workspace and could not be restored. Retry when ready.',
+  'chat.resume.failed.scopeUnknown':
+      'Could not determine which workspace owns this session, so it was not restored.',
+  'chat.resume.failed.aborted':
+      'The workspace switch was interrupted — restore failed. Retry when ready.',
+  'chat.resume.failed.subscribe': 'Could not restore the session. Retry when ready.',
+  'chat.resume.failed.sessionMissing': 'Session not found',
   'chat.creating': 'Creating the session (first run may warm up)…',
   'chat.send.failed': 'Send failed: \$0',
   'chat.op.failed': 'Operation failed: \$0',
@@ -1782,6 +1808,11 @@ const _en = {
       'The connection is down. Go back and reconnect before retrying.',
   'chat.error.timeout':
       'Connection timed out. Check the network or the desktop app and retry.',
+  'chat.error.recent': 'Most recent error',
+  'chat.error.recentHint':
+      'Session-level error — shows the most recent one, which may come from '
+      'another turn',
+  'chat.error.copyAll': 'Copy full error',
   'chat.held.title': 'Queued messages pending',
   'chat.held.body':
       'Sending now clears the queued messages and jumps the queue',

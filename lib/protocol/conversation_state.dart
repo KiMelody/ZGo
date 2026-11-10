@@ -202,6 +202,33 @@ class SessionEntry {
     if (traceId is! String || traceId.isEmpty) return null;
     return traceId;
   }
+
+  /// Human-readable error message of the row's `lastError` meta, null when
+  /// absent/blank. Same defensive read as [lastErrorTraceId] — the task
+  /// row keeps only the LAST error (the conversation snapshot has no
+  /// `status` member at all, 2026-11-08 wire probe), so callers must
+  /// present it as "most recent error", never as this turn's error.
+  String? get lastErrorMessage {
+    final message = _lastErrorField('message');
+    if (message == null || message.trim().isEmpty) return null;
+    return message;
+  }
+
+  /// Machine error code of the row's `lastError` meta, null when absent.
+  String? get lastErrorCode => _lastErrorField('code');
+
+  /// Error attribution (`provider` / `relay` / …) of the row's `lastError`
+  /// meta, null when absent.
+  String? get lastErrorAttribution => _lastErrorField('attribution');
+
+  /// Non-blank string field [key] of the raw `lastError` meta object.
+  String? _lastErrorField(String key) {
+    final err = raw['lastError'];
+    if (err is! Map) return null;
+    final value = err[key];
+    if (value is! String || value.isEmpty) return null;
+    return value;
+  }
 }
 
 class SessionsIndexState extends ChangeNotifier {

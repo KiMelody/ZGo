@@ -6306,6 +6306,115 @@ void main() {
         findsOneWidget);
   });
 
+  group('start-failed card two states (11-08-error-detail AC3)', () {
+    testWidgets('with a task lastError the body is the real message and the '
+        'card opens the sheet', (tester) async {
+      final gateway = FakeChatGateway()
+        ..taskDisplayStatuses['s1'] = 'error'
+        ..taskLastErrors['s1'] = const {
+          'message': 'createSession rejected: no available model',
+          'code': 'no_model',
+          'traceId': 'tr-9',
+          'attribution': 'relay',
+        };
+      await tester.pumpWidget(
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('会话未能启动'), findsOneWidget);
+      expect(find.text('createSession rejected: no available model'),
+          findsOneWidget);
+      // The generic advice is REPLACED, not stacked under the real error.
+      expect(find.text('会话未能启动，请重试或检查模型/思考档配置。'),
+          findsNothing);
+
+      await tester.tap(find.text('createSession rejected: no available '
+          'model'));
+      await tester.pumpAndSettle();
+      expect(find.text('最近一次错误'), findsOneWidget);
+      expect(find.text('tr-9'), findsOneWidget);
+      expect(find.text('复制完整报错'), findsOneWidget);
+    });
+
+    testWidgets('without a lastError the generic advice stays and the card is '
+        'inert', (tester) async {
+      final gateway = FakeChatGateway()
+        ..taskDisplayStatuses['s1'] = 'error';
+      await tester.pumpWidget(
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('会话未能启动，请重试或检查模型/思考档配置。'),
+          findsOneWidget);
+      // Tapping the advice must NOT raise a sheet (a dead end otherwise).
+      await tester.tap(find.text('会话未能启动'));
+      await tester.pumpAndSettle();
+      expect(find.text('最近一次错误'), findsNothing);
+    });
+
+    testWidgets('the error meta is re-read when the task list notifies '
+        '(host listener, not the conversation state)', (tester) async {
+      final gateway = FakeChatGateway()
+        ..taskDisplayStatuses['s1'] = 'error';
+      await tester.pumpWidget(
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([]);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('会话未能启动，请重试或检查模型/思考档配置。'),
+          findsOneWidget);
+
+      // The relay overview lands later: the row now carries the error, and
+      // the only notification is the HOST's (the state never changes).
+      gateway.taskLastErrors['s1'] = const {'message': 'late relay error'};
+      gateway.notifyListeners();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('late relay error'), findsOneWidget);
+    });
+
+    testWidgets('a failed turn renders the preview line and keeps the empty '
+        'card out of the way', (tester) async {
+      final gateway = FakeChatGateway()
+        ..taskLastErrors['s1'] = const {
+          'message': '429 Rate limit exceeded',
+          'traceId': 'trc_1',
+        };
+      await tester.pumpWidget(
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
+        {'rowId': 2, 'kind': 'turnHeader', 'state': 'error'},
+      ]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('出错'), findsOneWidget);
+      expect(find.text('429 Rate limit exceeded'), findsOneWidget);
+      expect(find.text('会话未能启动'), findsNothing);
+    });
+
+    testWidgets('the draft page (no session id) never shows the preview — '
+        'there is no task row to read', (tester) async {
+      final gateway = FakeChatGateway()
+        ..taskLastErrors['s1'] = const {'message': 'ghost error'};
+      await tester.pumpWidget(
+        wrap(ChatPage(host: gateway, title: 'new task')),
+      );
+      await tester.pump();
+      expect(find.text('ghost error'), findsNothing);
+    });
+  });
+
   testWidgets('shell session: error displayStatus with rows keeps the normal '
       'list — no card', (tester) async {
     final gateway = FakeChatGateway()..taskDisplayStatuses['s1'] = 'error';

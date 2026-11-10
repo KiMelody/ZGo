@@ -28,6 +28,7 @@ import 'chat_preview.dart';
 import 'confirm_gate.dart';
 import 'copy_mappings.dart';
 import 'diff_view.dart';
+import 'error_detail_sheet.dart';
 import 'git_panel.dart';
 import 'image_viewer_page.dart';
 import 'markdown_view.dart';
@@ -592,6 +593,13 @@ class ChatTurnGroup extends StatefulWidget {
   /// drill-in, previews, diff/collapse) stays.
   final bool readOnly;
 
+  /// The task row's `lastError` meta (`TaskMetaPort.taskLastError`) — shown
+  /// as the one-line preview under an errored turn's pill, and as the
+  /// detail sheet behind it (task 11-08-error-detail). Null on surfaces
+  /// without a task-row data source (subagent detail page, tests): the
+  /// preview line simply never renders.
+  final Map<String, dynamic>? lastError;
+
   const ChatTurnGroup({
     super.key,
     required this.rows,
@@ -607,6 +615,7 @@ class ChatTurnGroup extends StatefulWidget {
     this.onEditSend,
     this.gitController,
     this.readOnly = false,
+    this.lastError,
   });
 
   @override
@@ -760,6 +769,26 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
           terminalConfirmed: _terminalConfirmed,
         ),
       );
+      // The task row's one-line error preview (task 11-08 变体 A): directly
+      // under the errored turn's pill, danger plain text, no frame. Gated by
+      // the SAME confirm window as the pill — a bridge-replay terminal frame
+      // flashing a stale error preview into a running conversation is the
+      // exact flash the window exists to prevent, and an error line without
+      // its pill would read as a different turn's error.
+      //
+      // It renders at the header layer, NOT as a stream row: injecting a row
+      // would perturb the SliverList's row count / height estimates that the
+      // prepend anchor chain measures against (chat-conventions §9).
+      final lastError = widget.lastError;
+      final errorPreview = errorMessageOf(lastError);
+      final phase = header['state'];
+      if (errorPreview != null &&
+          (phase == 'failed' || phase == 'error') &&
+          _terminalConfirmed) {
+        children.add(
+          _TurnErrorLine(message: errorPreview, error: lastError!),
+        );
+      }
     }
 
     // assistant parts in original order (reasoning → text → tool → text …);
@@ -2941,6 +2970,56 @@ class _TurnHeaderState extends State<_TurnHeader> {
     final s = (ms / 1000).round();
     if (s < 60) return trP(context, 'chat.time.secOnly', ['$s']);
     return trP(context, 'chat.time.minSec', ['${s ~/ 60}', '${s % 60}']);
+  }
+}
+
+/// One-line error preview under an errored turn's pill (task 11-08 变体 A,
+/// mock 定稿): danger text + a danger error glyph, no frame, no fill.
+///
+/// The visual is one 12px line, the HIT AREA is a full touch target — a
+/// 12px text line alone would sit far below the ≥44×48 floor (spec
+/// interaction-patterns §2). The box grows around the line; only the glyph
+/// and the text paint, so the preview still reads as a plain line inside the
+/// turn's flow.
+class _TurnErrorLine extends StatelessWidget {
+  /// The preview text (already known non-blank by the caller).
+  final String message;
+
+  /// Full detail behind the line — the sheet renders all present fields.
+  final Map<String, dynamic> error;
+
+  const _TurnErrorLine({required this.message, required this.error});
+
+  @override
+  Widget build(BuildContext context) {
+    final danger = ZInk.dangerTone(context);
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: zTouchHeight),
+        child: InkWell(
+          onTap: () => showErrorDetailSheet(context, error: error),
+          borderRadius: BorderRadius.circular(ZRadius.mini),
+          child: Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Row(
+              children: [
+                Icon(Icons.error_outline, size: 12, color: danger),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    message,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: ZType.sub.copyWith(color: danger),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

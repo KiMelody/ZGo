@@ -83,8 +83,9 @@ void main() {
       expect(first.allEntries(), hasLength(1));
     });
 
-    test('entriesFor / allEntries / notificationRows / sessionOnlyIds all '
-        'filter the one merged record (no extra merge per read)', () {
+    test('entriesFor / allEntries / notificationRows / sessionOnlyIds / '
+        'mergedRows all filter the one merged record (no extra merge per '
+        'read)', () {
       final active = liveIndex([
         {'sessionId': 't-live', 'title': 'live', 'phase': 'running'},
       ], key: '/repo/alpha');
@@ -101,6 +102,9 @@ void main() {
       expect(dir.entriesFor('/repo/alpha'), hasLength(2));
       expect(dir.notificationRows(), hasLength(2));
       expect(dir.sessionOnlyIds, {'t-live'});
+      // mergedRows is the per-host-notify path of taskLastError (11-08):
+      // it must serve the SAME record, not re-run _merge per call.
+      expect(identical(dir.mergedRows(), dir.mergedRows()), isTrue);
       expect(h.service.materializations, 1,
           reason: 'read methods must not re-merge');
     });

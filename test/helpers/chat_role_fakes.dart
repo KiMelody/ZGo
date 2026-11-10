@@ -383,8 +383,21 @@ class FakeConversation extends ChangeNotifier implements ConversationPort {
     if (fail != null) throw fail('subscribe');
     return ChatHandle(
       state: childStates[sessionId] ?? state,
+      // Orphan simulation (11-08 session restore): [revoke] marks this
+      // session as host-revoked, exactly what a workspace switch does to a
+      // preserved page's handle.
+      revoked: () => revokedSessions.contains(sessionId),
       close: () async => closedSessions.add(sessionId),
     );
+  }
+
+  /// Session ids whose live handle reads `isRevoked` (the page's orphan
+  /// check). [revoke] is the host-side workspace-switch simulation.
+  final Set<String> revokedSessions = {};
+
+  void revoke(String sessionId) {
+    revokedSessions.add(sessionId);
+    notifyListeners();
   }
 
   @override
@@ -394,6 +407,36 @@ class FakeConversation extends ChangeNotifier implements ConversationPort {
     final gate = ensureDraftWorkspaceGate;
     if (gate != null) await gate.future;
     return ensureDraftWorkspaceResult;
+  }
+
+  /// Orphan-resume recording (11-08 session restore). Every call is
+  /// recorded in [resumedSessions]; the answer comes from
+  /// [resumeSessionResults] (dequeued front-first) or, when empty, a fresh
+  /// handle over [resumeState] (created lazily per call so a test can hold
+  /// the old and the new one apart).
+  final List<String> resumedSessions = [];
+  final List<FutureOr<ChatHandle> Function()> resumeSessionResults = [];
+
+  /// Gate the resume parks on — models the open/subscribe window the send
+  /// guard must absorb.
+  Completer<void>? resumeSessionGate;
+
+  /// The state handed out by the default resume answer (fresh per call when
+  /// a test wants a distinct one they should programme [resumeSessionResults]).
+  final ConversationState resumeState = ConversationState();
+
+  @override
+  Future<ChatHandle> resumeSessionOnReturn(String sessionId) async {
+    resumedSessions.add(sessionId);
+    final gate = resumeSessionGate;
+    if (gate != null) await gate.future;
+    if (resumeSessionResults.isNotEmpty) {
+      return await resumeSessionResults.removeAt(0)();
+    }
+    return ChatHandle(
+      state: resumeState,
+      close: () async => closedSessions.add(sessionId),
+    );
   }
 }
 
@@ -412,6 +455,12 @@ class FakeTaskMeta implements TaskMetaPort {
   /// Programmed [taskDisplayStatus] answers keyed by sessionId
   /// (shell-session error card tests); unlisted ids = lookup miss → null.
   final Map<String, String> taskDisplayStatuses = {};
+
+  /// Programmed [taskLastError] answers keyed by sessionId (chat error
+  /// preview / detail sheet tests); unlisted ids = row carries no error.
+  /// Values keep the wire shape (`{message, code?, traceId?,
+  /// attribution?}`) — the page reads keys, never a normalized object.
+  final Map<String, Map<String, dynamic>> taskLastErrors = {};
 
   /// Every [anchorCreatedTask] call as (sessionId, workspacePathOrKey) —
   /// the create-time home anchor (design 11-01 §1).
@@ -472,6 +521,10 @@ class FakeTaskMeta implements TaskMetaPort {
   @override
   String? taskDisplayStatus(String sessionId) =>
       taskDisplayStatuses[sessionId];
+
+  @override
+  Map<String, dynamic>? taskLastError(String sessionId) =>
+      taskLastErrors[sessionId];
 }
 
 /// [WorkspaceContextPort] fake: ids/paths, the draft store, workspace prep,
@@ -847,6 +900,29 @@ class ChatGatewayBundle extends ChangeNotifier
   Future<WorkspaceOpenResult> ensureDraftWorkspace(String? workspacePath) =>
       conversation.ensureDraftWorkspace(workspacePath);
 
+  @override
+  Future<ChatHandle> resumeSessionOnReturn(String sessionId) =>
+      conversation.resumeSessionOnReturn(sessionId);
+
+  List<String> get resumedSessions => conversation.resumedSessions;
+  List<FutureOr<ChatHandle> Function()> get resumeSessionResults =>
+      conversation.resumeSessionResults;
+  ConversationState get resumeState => conversation.resumeState;
+
+  Completer<void>? get resumeSessionGate => conversation.resumeSessionGate;
+  set resumeSessionGate(Completer<void>? value) =>
+      conversation.resumeSessionGate = value;
+
+  Set<String> get revokedSessions => conversation.revokedSessions;
+
+  /// The host-side revoke simulation: marks the session's live handle as
+  /// orphaned AND notifies the bundle (production revokes notify the host,
+  /// which is what wakes a visible page's orphan check).
+  void revoke(String sessionId) {
+    conversation.revokedSessions.add(sessionId);
+    notifyListeners();
+  }
+
   ConversationState get state => conversation.state;
 
   Map<String, dynamic> get snapshotExtra => conversation.snapshotExtra;
@@ -924,6 +1000,10 @@ class ChatGatewayBundle extends ChangeNotifier
       taskMeta.taskDisplayStatus(sessionId);
 
   @override
+  Map<String, dynamic>? taskLastError(String sessionId) =>
+      taskMeta.taskLastError(sessionId);
+
+  @override
   void anchorCreatedTask(String sessionId, String? workspacePathOrKey) =>
       taskMeta.anchorCreatedTask(sessionId, workspacePathOrKey);
 
@@ -933,6 +1013,8 @@ class ChatGatewayBundle extends ChangeNotifier
 
   List<Object?> get deleteTaskResults => taskMeta.deleteTaskResults;
   Map<String, String> get taskDisplayStatuses => taskMeta.taskDisplayStatuses;
+  Map<String, Map<String, dynamic>> get taskLastErrors =>
+      taskMeta.taskLastErrors;
 
   // ------------------------------------------------ workspace-context surface
 
