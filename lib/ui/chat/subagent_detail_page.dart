@@ -167,7 +167,13 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
 
   /// Workspace file-preview plumbing for the shared renderer (tappable
   /// file names in tool cards). One instance per page, like the chat page.
-  late final ChatPreview _preview = ChatPreview(widget.host);
+  /// The rows callback is the CHILD session's (design 11-09 L2): links in a
+  /// subagent transcript resolve against the files that subagent read.
+  late final ChatPreview _preview = ChatPreview(
+    widget.host,
+    contextRows: () =>
+        widget.feed.childState(widget.childSessionId)?.rows ?? const [],
+  );
 
   @override
   void initState() {

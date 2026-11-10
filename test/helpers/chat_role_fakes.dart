@@ -215,6 +215,16 @@ class RecordingFileServicePort extends FileServicePort {
   TextChunk fileReadTextResult = const TextChunk(text: '');
   FileRange fileReadRangeResult = FileRange(bytes: Uint8List(0));
 
+  /// Programmed directory listings (`dir → entries`); a directory absent
+  /// from the map answers empty. Recorded under `fileReaddir`.
+  Map<String, List<DirEntry>> fileReaddirResult = const {};
+
+  @override
+  Future<List<DirEntry>> readdir(String workspacePath, String dir) async {
+    recording.accept('fileReaddir', [workspacePath, dir]);
+    return fileReaddirResult[dir] ?? const [];
+  }
+
   @override
   Future<FileStat> stat(String workspacePath, String path) async {
     recording.accept('fileStat', [workspacePath, path]);

@@ -65,6 +65,16 @@ class FileRange {
   const FileRange({required this.bytes});
 }
 
+/// One directory entry of `fileService.readdir` (asar-certified shape,
+/// 2026-11-09: `{name, path, type: 'file'|'directory'|…, isSymbolicLink}`,
+/// entries sorted directories-first then by name — see
+/// [FileServicePort.readdir]).
+class DirEntry {
+  final String name;
+  final bool isDir;
+  const DirEntry({required this.name, required this.isDir});
+}
+
 /// One workspace file row of the search panel's file tab
 /// (`{name, path, relativePath, type: file|directory}`, renderer `Vv`
 /// parse @313271506).
@@ -126,6 +136,13 @@ class FileServicePort {
   // with no legacy variants (`readFileRange: e('fileService.readFileRange')`,
   // main bundle @4781210 — research/official-pdf-integration.md §2.2).
   static const _rangeCandidates = ['readFileRange'];
+  // Directory listing. `readdir` is certified twice over on the desktop
+  // asar (2026-11-09): the renderer's DirectoryBrowser calls
+  // `e.fileService.readdir(Dvt(t, n))` (@361085898, args `{path}` /
+  // `{path, includeHidden: true}`), and the main-process fileService
+  // implements `async readdir(l)` over the same member name (@312542546).
+  // The trailing variants are legacy guesses only — they never lead.
+  static const _readdirCandidates = ['readdir', 'readDir', 'listDir'];
   // Workspace file listing (the ⌘K file tab). Names are renderer-side
   // evidence (createFileService @270609580-@270610091) — the runtime
   // zcode.cjs does NOT carry them, so a runtime miss proves nothing.
@@ -283,6 +300,50 @@ class FileServicePort {
     }
     throw StateError(
         'fileService.readFileRange: unexpected answer ${res.runtimeType}');
+  }
+
+  /// One directory listing: the entries of [dir] (an ABSOLUTE path, same
+  /// resolution rule as every other method here), directories and files
+  /// with their names only — callers join the parent themselves.
+  ///
+  /// Wire shape certified from the desktop asar (2026-11-09, implementation
+  /// `createFileService` @312535xxx): `readdir({path, includeHidden?})`
+  /// answers `{name, path, type: 'file'|'directory', isSymbolicLink}[]`,
+  /// sorted directories-first then by name. `includeHidden` is optional —
+  /// the desktop filters dot-entries unless it is `true`; ZGo passes
+  /// nothing (a missing file is not hidden-dir material, and the search
+  /// budget is cheaper without them).
+  ///
+  /// Defensive parsing per the port's discipline: a non-list answer, an
+  /// element that is not a map, or an element without a non-empty `name`
+  /// throws a [StateError] naming the port and the answer shape. `type` is
+  /// the directory discriminator — the official renderer filters on
+  /// `type === 'directory'`; a missing/odd value reads as "not a
+  /// directory", which only affects search coverage, never a wrong hit.
+  Future<List<DirEntry>> readdir(String workspacePath, String dir) async {
+    final res = await _probe.run(
+      'readdir',
+      _readdirCandidates,
+      argsOf: (_) => <Object?>[_scope(workspacePath, dir)],
+    );
+    if (res is! List) {
+      throw StateError(
+          'fileService.readdir: unexpected answer ${res.runtimeType}');
+    }
+    final entries = <DirEntry>[];
+    for (final item in res) {
+      if (item is! Map) {
+        throw StateError('fileService.readdir: entry is not a map '
+            '(${item.runtimeType})');
+      }
+      final name = item['name'];
+      if (name is! String || name.isEmpty) {
+        throw StateError('fileService.readdir: entry without name '
+            'keys=${item.keys.take(8).toList()}');
+      }
+      entries.add(DirEntry(name: name, isDir: item['type'] == 'directory'));
+    }
+    return entries;
   }
 
   // ------------------------------------------------ workspace file listing

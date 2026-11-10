@@ -229,8 +229,11 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   final _scrollController = ScrollController();
 
   /// Workspace file-preview plumbing (markdown images, entry dispatch) —
-  /// one per page so the image cache spans the whole session view.
-  late final _preview = ChatPreview(widget.host);
+  /// one per page so the image cache spans the whole session view. The rows
+  /// callback feeds the L2 relative-link bases (design 11-09); it reads the
+  /// LIVE state, so a preview opened later sees the rows the link came from.
+  late final _preview =
+      ChatPreview(widget.host, contextRows: () => _state?.rows ?? const []);
 
   /// Workspace Git view shared by the status group (D2), the message change
   /// capsule (D3), the review panel (D4) and the write flows (D5) — one read

@@ -1,3 +1,5 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -7,6 +9,8 @@ import '../ui_settings.dart';
 import 'file_read_result.dart';
 import 'html_assembly.dart';
 import 'markdown_view.dart';
+import 'preview_candidate_sheet.dart';
+import 'relative_link_resolver.dart';
 import 'source_highlight.dart';
 
 /// Source-view grading thresholds, grouped the way the read side groups its
@@ -139,6 +143,21 @@ class FilePreviewPage extends StatefulWidget {
   /// Both document render kinds (html/svg) surface through it.
   final Widget Function(BuildContext context, String html)? webViewBuilder;
 
+  /// Link fallback (design 11-09 §回退链): asked ONLY when the main read
+  /// fails with [FileReadFailure.notFound]. Null (the default) keeps the
+  /// pre-fallback behavior — the error view renders directly. The callback
+  /// owns the ORIGINAL link path (the host bound it at push time): [path]
+  /// here is already the resolved path, which is exactly the string that
+  /// just missed. A hit replaces [path] and re-runs the load; several hits
+  /// open the candidate sheet. The host decides which layers run (relative
+  /// links probe the context bases first; absolute links only search the
+  /// workspace by basename), the page only knows "ask once, then retarget".
+  final Future<PreviewResolution> Function()? resolveLinkFallback;
+
+  /// Workspace root for the "actual path" subtitle and the candidate
+  /// labels. Null shows the previewed path's own absolute form instead.
+  final String? workspacePath;
+
   const FilePreviewPage({
     super.key,
     required this.path,
@@ -148,6 +167,8 @@ class FilePreviewPage extends StatefulWidget {
     this.resolveImage,
     this.openLink,
     this.webViewBuilder,
+    this.resolveLinkFallback,
+    this.workspacePath,
   });
 
   @override
@@ -166,6 +187,16 @@ enum _View { render, source }
 class _FilePreviewPageState extends State<FilePreviewPage> {
   _Phase _phase = _Phase.loading;
   _View _view = _View.render;
+
+  /// The path currently being previewed. Starts as [FilePreviewPage.path];
+  /// a relative-link fallback hit (design 11-09) replaces it, so the appbar
+  /// subtitle and every later read show WHAT was opened.
+  late String _path = widget.path;
+
+  /// True while the L2/L3 fallback runs — the loading view then says
+  /// "looking for …" instead of the plain spinner line, so a slow bounded
+  /// search reads as work rather than a hang.
+  bool _searching = false;
 
   /// The successful main-file read: the source view renders its `text`,
   /// and its `totalBytes`/`truncated` feed the truncation banner.
@@ -222,6 +253,14 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
   @visibleForTesting
   bool get renderDisabled => _renderDisabled;
 
+  /// True once the L3 workspace walk actually ran for the last miss — the
+  /// not-found copy then appends "searched the workspace" (design 11-09
+  /// §歧义与可见性).
+  bool _searchedWorkspace = false;
+
+  /// One fallback per page: set before the first L2/L3 attempt.
+  bool _fallbackTried = false;
+
   /// Page-lifetime memo over [widget.readText]: the assembler and the
   /// source view share one fetch of the main file and of css resources.
   /// Failures stay uncached: retry must re-fetch.
@@ -240,21 +279,91 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
   Future<String?> _readTextForAssembly(String path) async =>
       (await _readTextMemo(path)).text;
 
+  /// Runs the L2/L3 fallback for the CURRENT path (design 11-09 §回退链)
+  /// and reports whether the page was retargeted.
+  ///
+  /// One hit: [_path] is replaced and the load re-runs (the retry's own
+  /// notFound falls through to the error view — one retry, no loop).
+  /// Several hits: the candidate sheet asks which one; picking retargets,
+  /// dismissing leaves the not-found error. Zero hits (or a dismissed
+  /// sheet / a failed search): false, and the caller renders the classified
+  /// error — with the "searched the workspace" appendix when the L3 walk
+  /// actually ran ([_searchedWorkspace]).
+  Future<bool> _resolveFallback() async {
+    setState(() => _searching = true);
+    PreviewResolution resolution;
+    try {
+      // The callback closes over the original link path — the joined
+      // absolute string already missed, so re-deriving a base from it would
+      // search the wrong text.
+      resolution = await widget.resolveLinkFallback!();
+    } catch (_) {
+      // A failed search is not worse than the pre-fallback behavior.
+      resolution = const PreviewResolution();
+    }
+    if (!mounted) return false;
+    setState(() {
+      _searching = false;
+      // The appendix copy says "no file with that name" — that is only true
+      // for a zero-hit search. When candidates WERE found (sheet shown, then
+      // dismissed), claiming nothing was found would contradict the sheet
+      // the user just saw.
+      _searchedWorkspace = resolution.searched && resolution.candidates.isEmpty;
+    });
+    final candidates = resolution.candidates;
+    if (candidates.isEmpty) return false;
+    String target;
+    if (candidates.length == 1) {
+      target = candidates.first.path;
+    } else {
+      final picked = await showPreviewCandidateSheet(
+        context,
+        candidates: candidates,
+      );
+      if (!mounted || picked == null) return false;
+      target = picked;
+    }
+    // An L2 hit was found by a REAL read (the resolver probed with the same
+    // step the page would): seed the memo so the retarget costs no second
+    // RPC.
+    for (final candidate in candidates) {
+      final read = candidate.read;
+      if (read != null) _textMemo[candidate.path] = read;
+    }
+    setState(() => _path = target);
+    unawaited(_load());
+    return true;
+  }
+
   Future<void> _load() async {
     setState(() {
       _phase = _Phase.loading;
       _failure = null;
-      _error = null;
-      _progress = null;
+      _searching = false;
     });
     // Main file first: it doubles as the source view's text, and its
     // failure is the page-level error (resource failures degrade to
     // placeholder comments inside the assembly instead).
-    final result = await _readTextMemo(widget.path);
+    final result = await _readTextMemo(_path);
     if (!mounted) return;
     if (result.text == null) {
+      final failure = result.failure ?? FileReadFailure.readFailed;
+      // Only a MISSING file can be a base-mismatch (design 11-09 §回退链):
+      // binary / empty / tooLarge / readFailed all mean the file was found,
+      // so the path was right and searching would only burn budget.
+      if (failure == FileReadFailure.notFound &&
+          widget.resolveLinkFallback != null &&
+          !_fallbackTried) {
+        // One fallback per page: a retargeted path that ALSO misses must
+        // land on the error view, not search again (design 11-09: the
+        // fallback replaces the base guess; a second search would repeat
+        // the same walk over the same workspace).
+        _fallbackTried = true;
+        if (await _resolveFallback()) return;
+        if (!mounted) return;
+      }
       setState(() {
-        _failure = result.failure ?? FileReadFailure.readFailed;
+        _failure = failure;
         _phase = _Phase.error;
       });
       return;
@@ -284,7 +393,7 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
           if (mounted) setState(() => _progress = (done, total));
         },
       );
-      final assembled = await assembler.assemble(widget.path);
+      final assembled = await assembler.assemble(_path);
       if (!mounted) return;
       setState(() {
         _html = assembled.html;
@@ -310,10 +419,27 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          widget.path.split(RegExp(r'[\\/]')).last,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              _path.split(RegExp(r'[\\/]')).last,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            // The actual path — a fallback hit changed WHICH file opened, so
+            // the page must show it (design 11-09 §歧义与可见性). Relative to
+            // the workspace when inside it, absolute otherwise; omitted when
+            // it adds nothing beyond the title (file at the workspace root).
+            if (relativeLinkDisplay(widget.workspacePath, _path) != null)
+              Text(
+                relativeLinkDisplay(widget.workspacePath, _path)!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: ZType.caption.copyWith(color: ZInk.faint(context)),
+              ),
+          ],
         ),
         actions: [
           // The source-only kind has nothing to switch to; the markdown
@@ -354,8 +480,14 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
                   child: CircularProgressIndicator(strokeWidth: 1.5),
                 ),
                 const SizedBox(height: 12),
+                // During the L2/L3 fallback the plain "loading" line would
+                // read as a hang: the bounded search is NOT instant on a big
+                // workspace, so the page says what it is doing.
                 Text(
-                  tr(context, 'chat.preview.loading'),
+                  tr(
+                    context,
+                    _searching ? 'chat.preview.searching' : 'chat.preview.loading',
+                  ),
                   style: ZType.sub.copyWith(color: ZInk.soft(context)),
                 ),
               ],
@@ -492,7 +624,7 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
     return _spanMemoSpan = highlightSpan(
       context,
       text: text,
-      language: highlightLanguageForPath(widget.path),
+      language: highlightLanguageForPath(_path),
       base: _sourceTextStyle(context),
     );
   }
@@ -563,6 +695,14 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
               _errorTitle(context),
               style: ZType.heading.copyWith(color: ZInk.solid(context)),
             ),
+            if (_failure == FileReadFailure.notFound && _searchedWorkspace) ...[
+              const SizedBox(height: 6),
+              Text(
+                tr(context, 'chat.preview.notFoundSearched'),
+                textAlign: TextAlign.center,
+                style: ZType.caption.copyWith(color: ZInk.faint(context)),
+              ),
+            ],
             if (_error != null) ...[
               const SizedBox(height: 8),
               Text(

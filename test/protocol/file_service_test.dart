@@ -319,6 +319,121 @@ void main() {
     });
   });
 
+  group('readdir (directory listing, design 11-09 §L3)', () {
+    test('answers typed entries; wire is the certified {path} shape', () async {
+      final calls = <(String, Map<String, Object?>)>[];
+      final port = FileServicePort((method, args) async {
+        calls.add((method, (args.single as Map).cast<String, Object?>()));
+        return [
+          {'name': 'src', 'path': 'F:/ws/src', 'type': 'directory',
+            'isSymbolicLink': false},
+          {'name': 'README.md', 'path': 'F:/ws/README.md', 'type': 'file',
+            'isSymbolicLink': false},
+        ];
+      });
+
+      final entries = await port.readdir('F:/ws', 'F:/ws');
+
+      expect(calls.single.$1, 'readdir');
+      expect(calls.single.$2, {'path': 'F:/ws'},
+          reason: 'workspacePath stays off the wire (spec §3 铁律 1)');
+      expect(entries.map((e) => (e.name, e.isDir)), [
+        ('src', true),
+        ('README.md', false),
+      ]);
+    });
+
+    test('a missingMethod answer advances through the candidate table', () async {
+      final tried = <String>[];
+      final port = FileServicePort((method, args) async {
+        tried.add(method);
+        if (method == 'readdir') {
+          throw ChannelRpcError('no such method: readdir', null);
+        }
+        return <dynamic>[];
+      });
+
+      await port.readdir('/repo', '/repo');
+
+      expect(tried, ['readdir', 'readDir']);
+    });
+
+    test('the winning candidate is remembered across calls', () async {
+      final tried = <String>[];
+      final port = FileServicePort((method, args) async {
+        tried.add(method);
+        if (method != 'readDir') {
+          throw ChannelRpcError('no such method: $method', null);
+        }
+        return <dynamic>[];
+      });
+
+      await port.readdir('/repo', '/repo');
+      tried.clear();
+      await port.readdir('/repo', '/repo/sub');
+
+      expect(tried, ['readDir'],
+          reason: 'the probe skips the method the desktop rejected');
+    });
+
+    test('non-missingMethod errors rethrow without advancing', () async {
+      final tried = <String>[];
+      final port = FileServicePort((method, args) async {
+        tried.add(method);
+        throw ChannelRpcError('validation failed: bad path', null);
+      });
+
+      await expectLater(
+        port.readdir('/repo', '/repo'),
+        throwsA(isA<ChannelRpcError>()),
+      );
+      expect(tried, ['readdir']);
+    });
+
+    test('defensive parsing: a non-list answer is a StateError', () async {
+      final port = FileServicePort((_, __) async => {'entries': []});
+      await expectLater(
+        port.readdir('/repo', '/repo'),
+        throwsA(isA<StateError>()),
+      );
+    });
+
+    test('defensive parsing: an entry without a name is a StateError naming '
+        'the keys', () async {
+      final port = FileServicePort((_, __) async => [
+            {'path': 'F:/ws/x', 'type': 'file'},
+          ]);
+      await expectLater(
+        port.readdir('/repo', '/repo'),
+        throwsA(isA<StateError>().having(
+          (e) => e.toString(),
+          'message',
+          allOf(contains('readdir'), contains('keys')),
+        )),
+      );
+    });
+
+    test('defensive parsing: a non-map entry is a StateError', () async {
+      final port = FileServicePort((_, __) async => ['src']);
+      await expectLater(
+        port.readdir('/repo', '/repo'),
+        throwsA(isA<StateError>()),
+      );
+    });
+
+    test('a missing/odd type reads as "not a directory"', () async {
+      final port = FileServicePort((_, __) async => [
+            {'name': 'x.md'},
+            {'name': 'weird', 'type': 42},
+            {'name': 'dir', 'type': 'directory'},
+          ]);
+
+      final entries = await port.readdir('/repo', '/repo');
+
+      expect(entries.map((e) => e.isDir), [false, false, true]);
+    });
+  });
+
   group('workspace file listing (search panel file tab, design D7)', () {
     test('searchWorkspaceFiles answers typed rows; payload is the exact '
         '{rootPath, query, limit} shape', () async {

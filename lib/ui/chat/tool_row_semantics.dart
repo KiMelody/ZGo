@@ -286,6 +286,17 @@ ToolRowSemantics toolRowSemantics(
   );
 }
 
+/// Input-map keys that name the file a tool row touched, in probe order —
+/// the one list every reader uses (the tile's tappable name and the
+/// preview's L2 context bases both consult it, design 11-09 §L2).
+const List<String> toolFilePathKeys = [
+  'filePath',
+  'file_path',
+  'path',
+  'file',
+  'notebookPath',
+];
+
 /// The row's workspace file path from the input JSON (`filePath`/`file_path`
 /// /`path`/`file`/`notebookPath`), or a regex fallback for streaming input.
 /// Shared with the chat tile's tappable file names (design
@@ -294,13 +305,7 @@ String? toolFilePath(String inputText) {
   try {
     final decoded = jsonDecode(inputText);
     if (decoded is Map) {
-      for (final key in const [
-        'filePath',
-        'file_path',
-        'path',
-        'file',
-        'notebookPath',
-      ]) {
+      for (final key in toolFilePathKeys) {
         final v = decoded[key];
         if (v is String && v.isNotEmpty) return v;
       }
