@@ -4669,12 +4669,24 @@ class _QueueBar extends StatelessWidget {
               ),
               const Spacer(),
               InkWell(
-                onTap: () {
-                  final next = !state.autoDrain;
+                onTap: () async {
+                  final previous = state.autoDrain;
+                  final next = !previous;
                   state.optimisticPatch({
                     'queue': {...?state.queue, 'autoDrain': next},
                   });
-                  conversation.conversationCommands.setAutoDrain(sessionId, next);
+                  try {
+                    await conversation.conversationCommands
+                        .setAutoDrain(sessionId, next);
+                  } catch (e) {
+                    // B-06: a rejected switch must not stay flipped — the
+                    // optimistic value rolls back to the pre-tap one.
+                    state.optimisticPatch({
+                      'queue': {...?state.queue, 'autoDrain': previous},
+                    });
+                    if (!context.mounted) return;
+                    _toastQueueFailure(context, 'setAutoDrain', e);
+                  }
                 },
                 child: Text(
                   state.autoDrain
@@ -4734,11 +4746,8 @@ class _QueueBar extends StatelessWidget {
                       _QueueAction(
                         icon: Icons.play_arrow,
                         tooltip: tr(context, 'chat.queue.sendNow'),
-                        onTap: () {
-                          final id = '${items[i]['queueItemId']}';
-                          state.optimisticRemoveQueueItem(id);
-                          conversation.conversationCommands.sendQueuedNow(sessionId, id);
-                        },
+                        onTap: () => _sendQueuedNow(
+                            context, sessionId, items[i], i),
                       ),
                       _QueueAction(
                         icon: Icons.edit_outlined,
@@ -4778,8 +4787,17 @@ class _QueueBar extends StatelessWidget {
                             ),
                           );
                           if (confirmed != true) return;
+                          // B-06: the row is hidden optimistically; a failed
+                          // command re-inserts it where it was.
                           state.optimisticRemoveQueueItem(id);
-                          conversation.conversationCommands.deleteQueueItem(sessionId, id);
+                          try {
+                            await conversation.conversationCommands
+                                .deleteQueueItem(sessionId, id);
+                          } catch (e) {
+                            state.restoreQueueItem(items[i], index: i);
+                            if (!context.mounted) return;
+                            _toastQueueFailure(context, 'deleteQueueItem', e);
+                          }
                         },
                       ),
                     ],
@@ -4793,11 +4811,53 @@ class _QueueBar extends StatelessWidget {
     );
   }
 
+  /// send-now: hide the row optimistically, then re-insert it at
+  /// [index] when the command is rejected (B-06).
+  Future<void> _sendQueuedNow(
+    BuildContext context,
+    String sessionId,
+    Map<String, dynamic> item,
+    int index,
+  ) async {
+    state.optimisticRemoveQueueItem('${item['queueItemId']}');
+    try {
+      await conversation.conversationCommands
+          .sendQueuedNow(sessionId, '${item['queueItemId']}');
+    } catch (e) {
+      state.restoreQueueItem(item, index: index);
+      if (!context.mounted) return;
+      _toastQueueFailure(context, 'sendQueuedNow', e);
+    }
+  }
+
+  /// Failure toast for the held-queue commands: the same copy chain as the
+  /// page's `_run` catch (known transport shapes get plain language,
+  /// everything else reads 「操作失败: …」).
+  void _toastQueueFailure(BuildContext context, String command, Object error) {
+    debugPrint('[chat] $command: $error');
+    final locale = localeOf(context);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          trP(context, 'chat.op.failed', [
+            commandErrorCopy('$error', locale) ??
+                businessErrorCopy('$error', locale) ??
+                '$error',
+          ]),
+        ),
+      ),
+    );
+  }
+
   /// Drag-to-reorder: the same `reorderQueueItem
   /// {queueItemId, beforeQueueItemId|null}` command, driven by the
   /// drag handle on each queued row.
   /// [targetIndex] is the index the item should occupy after the move;
   /// `null` moves it to the end.
+  ///
+  /// No optimistic projection here (the list order comes from the
+  /// snapshot), so a rejection has nothing to roll back — it only needs
+  /// the failure toast (B-06).
   void _reorder(
     BuildContext context,
     String sessionId,
@@ -4817,7 +4877,22 @@ class _QueueBar extends StatelessWidget {
     } else {
       beforeId = '${items[targetIndex]['queueItemId']}';
     }
-    conversation.conversationCommands.reorderQueueItem(sessionId, id, beforeId);
+    _runReorder(context, sessionId, id, beforeId);
+  }
+
+  Future<void> _runReorder(
+    BuildContext context,
+    String sessionId,
+    String id,
+    String? beforeId,
+  ) async {
+    try {
+      await conversation.conversationCommands
+          .reorderQueueItem(sessionId, id, beforeId);
+    } catch (e) {
+      if (!context.mounted) return;
+      _toastQueueFailure(context, 'reorderQueueItem', e);
+    }
   }
 
   Future<void> _edit(
@@ -4849,21 +4924,35 @@ class _QueueBar extends StatelessWidget {
     );
     controller.dispose();
     if (text == null || text.isEmpty) return;
-    // Optimistic text update; server queue patch confirms.
-    final q = state.queue;
-    if (q != null && q['items'] is List) {
-      final items = [
-        for (final i in q['items'] as List)
-          if (i is Map && '${i['queueItemId']}' == '${item['queueItemId']}')
-            {...i, 'text': text}
-          else
-            i,
-      ];
-      state.optimisticPatch({
-        'queue': {...q, 'items': items},
-      });
+    final previousText = '${item['text'] ?? ''}';
+    // Optimistic text update; server queue patch confirms. A rejection
+    // restores the pre-edit text (B-06).
+    _patchQueueItemText('${item['queueItemId']}', text);
+    try {
+      await conversation.conversationCommands
+          .editQueueItem(sessionId, '${item['queueItemId']}', text);
+    } catch (e) {
+      _patchQueueItemText('${item['queueItemId']}', previousText);
+      if (!context.mounted) return;
+      _toastQueueFailure(context, 'editQueueItem', e);
     }
-    await conversation.conversationCommands.editQueueItem(sessionId, '${item['queueItemId']}', text);
+  }
+
+  /// Rewrites one held-queue row's text through the snapshot (optimistic
+  /// write and its rollback share this shape).
+  void _patchQueueItemText(String queueItemId, String text) {
+    final q = state.queue;
+    if (q == null || q['items'] is! List) return;
+    final items = [
+      for (final i in q['items'] as List)
+        if (i is Map && '${i['queueItemId']}' == queueItemId)
+          {...i, 'text': text}
+        else
+          i,
+    ];
+    state.optimisticPatch({
+      'queue': {...q, 'items': items},
+    });
   }
 }
 

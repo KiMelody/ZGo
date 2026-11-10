@@ -1032,6 +1032,8 @@ const _zh = {
   'deskSet.autoArchive': '自动归档旧任务',
   'deskSet.autoArchiveHint': '符合条件的已完成任务在保留期后自动归档',
   'deskSet.autoArchiveDays': '\$0 天',
+  'deskSet.showReasoning': '显示思考过程',
+  'deskSet.showReasoningHint': '在消息流中显示模型的推理过程',
   'providers.title': '模型设置',
   'providers.suggest': '获取端点建议并拉取模型列表',
   'providers.subtitle': '管理自定义模型供应商，配置后可在聊天时选择使用。',
@@ -2557,6 +2559,8 @@ const _en = {
   'deskSet.autoArchive': 'Auto-archive old tasks',
   'deskSet.autoArchiveHint': 'Archive eligible completed tasks after the retention window',
   'deskSet.autoArchiveDays': '\$0 days',
+  'deskSet.showReasoning': 'Show reasoning',
+  'deskSet.showReasoningHint': 'Show the model\'s reasoning in the message stream',
   'providers.title': 'Model settings',
   'providers.suggest': 'Suggest endpoints and fetch models',
   'providers.subtitle':

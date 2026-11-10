@@ -69,13 +69,33 @@ class _SettingsPageState extends State<SettingsPage> {
 
   /// The switch owns the service lifecycle: the persisted setting is the
   /// source of truth for "should it run", the controller reports "does it".
-  void _setKeepAlive(bool value) {
-    unawaited(widget.ui.setKeepAliveEnabled(value));
-    if (value) {
-      unawaited(widget.keepalive.start(widget.ui.locale));
-    } else {
-      unawaited(widget.keepalive.stop());
+  /// A service failure flips the persisted switch back to its old value and
+  /// says so (B-06) — the setting must never keep claiming a service that
+  /// did not start (or stop).
+  Future<void> _setKeepAlive(bool value) async {
+    final previous = widget.ui.keepAliveEnabled;
+    try {
+      await widget.ui.setKeepAliveEnabled(value);
+      if (value) {
+        await widget.keepalive.start(widget.ui.locale);
+      } else {
+        await widget.keepalive.stop();
+      }
+    } catch (e) {
+      debugPrint('[settings] keepalive: $e');
+      try {
+        await widget.ui.setKeepAliveEnabled(previous);
+      } catch (rollbackError) {
+        // The same persisted write failed twice; the in-memory switch was
+        // already restored by the call above, so only the disk flag lags.
+        debugPrint('[settings] keepalive rollback: $rollbackError');
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(trP(context, 'tasks.opFailed', ['$e']))),
+      );
     }
+    if (!mounted) return;
     setState(() {
       _keepAliveRunning = widget.keepalive.isRunning();
     });

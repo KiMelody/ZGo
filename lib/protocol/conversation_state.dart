@@ -1388,6 +1388,28 @@ class ConversationState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Undo of [optimisticRemoveQueueItem] when the command was REJECTED:
+  /// re-inserts [item] at [index] (clamped; appends when the queue moved
+  /// underneath), so a failed send-now / delete no longer leaves the row
+  /// hidden until the next snapshot (B-06). A row already back (a snapshot
+  /// raced the rejection) is left alone.
+  void restoreQueueItem(Map<String, dynamic> item, {required int index}) {
+    final q = queue;
+    if (q == null) return;
+    final id = '${item['queueItemId']}';
+    // Explicitly widened: the snapshot's list runtime type can be narrower
+    // (e.g. List<Map<String, String>> after a typed decode) than the row
+    // being restored.
+    final items = <dynamic>[...?(q['items'] as List?)];
+    if (items.any((i) => i is Map && '${i['queueItemId']}' == id)) return;
+    items.insert(index.clamp(0, items.length), item);
+    snapshot = {
+      ...snapshot!,
+      'queue': {...q, 'items': items},
+    };
+    notifyListeners();
+  }
+
   /// Appends streamed text to a row field. Returns [row] itself for an
   /// unknown path or a kind mismatch — identity is the "no-op" signal
   /// `row.delta` uses to skip [contentChangeSeq], and the word is recorded

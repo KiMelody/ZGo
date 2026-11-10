@@ -1242,6 +1242,15 @@ class _DevicesPageState extends State<DevicesPage>
                           style:
                               ZType.body.copyWith(color: ZInk.faint(context)),
                         ),
+                        const SizedBox(height: 20),
+                        // First run: one hop straight to the scanner. The
+                        // non-empty list keeps FAB → add sheet (two hops),
+                        // which is fine once the user already knows the flow.
+                        FilledButton.icon(
+                          onPressed: _addByScan,
+                          icon: const Icon(Icons.qr_code_scanner),
+                          label: Text(tr(context, 'devices.add.scan')),
+                        ),
                       ],
                     ),
                   ),

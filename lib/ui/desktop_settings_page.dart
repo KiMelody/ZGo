@@ -8,8 +8,9 @@ import 'ui_settings.dart';
 /// Desktop settings reachable over the remote bridge
 /// (setting channel `get` / `update`). Only keys confirmed in the web
 /// client source are rendered — mobile-meaningful subset:
-/// 交互行为 (zcodeInteractionBehavior) and 任务自动归档
-/// (taskAutoArchiveEnabled / taskAutoArchiveOlderThanDays).
+/// 交互行为 (zcodeInteractionBehavior)、任务自动归档
+/// (taskAutoArchiveEnabled / taskAutoArchiveOlderThanDays) and
+/// 显示思考过程 (messageStreamShowReasoning, desktop schema default true).
 class DesktopSettingsPage extends StatefulWidget {
   final DeviceSession session;
   const DesktopSettingsPage({super.key, required this.session});
@@ -111,6 +112,8 @@ class _DesktopSettingsPageState extends State<DesktopSettingsPage> {
                         _interactionCard(context),
                         const SizedBox(height: ZSpacing.cardGap),
                         _autoArchiveCard(context),
+                        const SizedBox(height: ZSpacing.cardGap),
+                        _showReasoningCard(context),
                       ],
                     ),
                   ),
@@ -209,6 +212,28 @@ class _DesktopSettingsPageState extends State<DesktopSettingsPage> {
                 ],
               ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// messageStreamShowReasoning: desktop schema `boolean().default(true)`,
+  /// so a missing key renders as on. The sibling migration marker
+  /// (`messageStreamShowReasoningMigrationInitialized`) is desktop-owned and
+  /// never written from here.
+  Widget _showReasoningCard(BuildContext context) {
+    final showReasoning = _data?['messageStreamShowReasoning'] != false;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+        child: SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          value: showReasoning,
+          onChanged: (v) => _update({'messageStreamShowReasoning': v}),
+          title: Text(tr(context, 'deskSet.showReasoning'),
+              style: ZType.bodyStrong),
+          subtitle: Text(tr(context, 'deskSet.showReasoningHint'),
+              style: ZType.caption.copyWith(color: ZInk.faint(context))),
         ),
       ),
     );

@@ -327,6 +327,47 @@ void main() {
       expect(items[0]['queueItemId'], 'q2');
     });
 
+    test('restoreQueueItem re-inserts the rejected row at its old index',
+        () {
+      _injectSnapshot(state, snapshot: {
+        'revision': 1,
+        'rows': {'window': [], 'totalCount': 0},
+        'queue': {
+          'items': [
+            {'queueItemId': 'q1', 'text': 'a'},
+            {'queueItemId': 'q2', 'text': 'b'},
+            {'queueItemId': 'q3', 'text': 'c'},
+          ],
+        },
+      });
+
+      state.optimisticRemoveQueueItem('q2');
+      state.restoreQueueItem({'queueItemId': 'q2', 'text': 'b'}, index: 1);
+
+      final ids = state.queueItems.map((i) => '${i['queueItemId']}').toList();
+      expect(ids, ['q1', 'q2', 'q3']);
+    });
+
+    test('restoreQueueItem is a no-op when a snapshot already brought the row '
+        'back, and clamps an out-of-range index', () {
+      _injectSnapshot(state, snapshot: {
+        'revision': 1,
+        'rows': {'window': [], 'totalCount': 0},
+        'queue': {
+          'items': [
+            {'queueItemId': 'q1', 'text': 'a'},
+          ],
+        },
+      });
+
+      state.restoreQueueItem({'queueItemId': 'q1', 'text': 'a'}, index: 0);
+      expect(state.queueItems, hasLength(1));
+
+      state.restoreQueueItem({'queueItemId': 'q9', 'text': 'z'}, index: 42);
+      final ids = state.queueItems.map((i) => '${i['queueItemId']}').toList();
+      expect(ids, ['q1', 'q9']);
+    });
+
     test('canLoadOlder is true when more rows exist', () {
       _injectSnapshot(state, rows: [
         {'rowId': 10, 'kind': 'user', 'text': 'latest'},
