@@ -1697,12 +1697,14 @@ class _AssistantBubble extends StatelessWidget {
                   _CopyFeedbackButton(text: text),
                   _FeedbackButton(
                     icon: Icons.thumb_up_alt_outlined,
+                    tooltip: tr(context, 'chat.feedback.like'),
                     active: feedback == 'like',
                     onTap: () =>
                         _setFeedback(feedback == 'like' ? null : 'like'),
                   ),
                   _FeedbackButton(
                     icon: Icons.thumb_down_alt_outlined,
+                    tooltip: tr(context, 'chat.feedback.dislike'),
                     active: feedback == 'dislike',
                     onTap: () =>
                         _setFeedback(feedback == 'dislike' ? null : 'dislike'),
@@ -1710,6 +1712,7 @@ class _AssistantBubble extends StatelessWidget {
                   if (actions?.fork != null)
                     _FeedbackButton(
                       icon: Icons.fork_right,
+                      tooltip: tr(context, 'chat.feedback.fork'),
                       active: false,
                       onTap: () => actions!.fork!(context, sessionId, {
                         'rowId': row['rowId'],
@@ -1720,6 +1723,7 @@ class _AssistantBubble extends StatelessWidget {
                   if (hookRows.isNotEmpty)
                     _FeedbackButton(
                       icon: Icons.webhook,
+                      tooltip: tr(context, 'chat.feedback.hooks'),
                       active: false,
                       onTap: () => _showHookRuns(context),
                     ),
@@ -1752,10 +1756,16 @@ class _FeedbackButton extends StatelessWidget {
   final bool active;
   final VoidCallback onTap;
 
+  /// TalkBack name for the glyph. IconButton hangs the tooltip off the
+  /// button node's semantics data, so one string covers both the long-press
+  /// bubble and the screen reader.
+  final String tooltip;
+
   const _FeedbackButton({
     required this.icon,
     required this.active,
     required this.onTap,
+    required this.tooltip,
   });
 
   @override
@@ -1766,6 +1776,7 @@ class _FeedbackButton extends StatelessWidget {
         size: 15,
         color: active ? ZColors.sky500 : ZInk.ghost(context),
       ),
+      tooltip: tooltip,
       onPressed: onTap,
       visualDensity: VisualDensity.compact,
     );
@@ -1813,6 +1824,7 @@ class _CopyFeedbackButtonState extends State<_CopyFeedbackButton> {
         size: 15,
         color: ZInk.ghost(context),
       ),
+      tooltip: tr(context, 'chat.copyCode'),
       onPressed: _copy,
       visualDensity: VisualDensity.compact,
     );

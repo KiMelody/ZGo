@@ -335,6 +335,11 @@ class _TaskListPageState extends State<TaskListPage>
   /// round-trip (no stale-row taps mid-reshuffle; page-level, not per row).
   bool _reloading = false;
 
+  /// True while the native link is being suspended for the WebView handover
+  /// (B-01): all four entry points funnel through [_openRemote], which shows
+  /// the wait and refuses a second tap.
+  bool _handoverBusy = false;
+
   /// When the last silent overview pull finished (B-02): the header shows it
   /// as 「最后同步 hh:mm」 so an unchanged list still proves the cadence is
   /// alive. `refreshTaskOverview` absorbs RPC errors internally, so this is
@@ -1253,12 +1258,21 @@ class _TaskListPageState extends State<TaskListPage>
   }
 
   Widget _listBody(BuildContext context) {
+    // Stage copy (B-03) is consumed the project way: a merge of the hub (the
+    // page's session conduit) with the live session itself, so a stage change
+    // repaints even between hub forwarders. No state library.
+    final session = _session;
+    final animation = Listenable.merge([
+      widget.hub,
+      if (session != null) session,
+    ]);
     return AnimatedBuilder(
-      animation: widget.hub,
+      animation: animation,
       builder: (context, _) {
         final session = _session;
         final banner = _ConnectionBanner(
           session: session,
+          handoverBusy: _handoverBusy,
           onRetry: () async {
             final s = _session;
             if (s != null) await _reloadTasks(s);
@@ -3281,13 +3295,31 @@ class _TaskListPageState extends State<TaskListPage>
 
   /// WebView fallback (overflow menu): suspend the native connection, open
   /// the remote page deep-linked to a session, resume ~1s after it pops.
+  ///
+  /// B-01: the suspend wait is visible ([_handoverBusy] drives the banner
+  /// progress and swallows re-entry) and a failed suspend only toasts — the
+  /// push is skipped so a WebView that cannot pair never opens.
   Future<void> _openRemote({
     String? targetSessionId,
     String? targetTitle,
   }) async {
-    await widget.store.touch(widget.device.id);
-    await widget.hub.suspend(widget.device.id);
-    if (!mounted) return;
+    if (_handoverBusy) return;
+    var ready = false;
+    setState(() => _handoverBusy = true);
+    try {
+      await widget.store.touch(widget.device.id);
+      await widget.hub.suspend(widget.device.id);
+      ready = true;
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr(context, 'remote.handoverFailed'))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _handoverBusy = false);
+    }
+    if (!ready || !mounted) return;
     await Navigator.of(context).push(
       zRoute(
         (_) => RemotePage(
@@ -3518,6 +3550,10 @@ class _ReloadBar extends StatelessWidget {
 class _ConnectionBanner extends StatelessWidget {
   final DeviceSession? session;
 
+  /// WebView handover in flight (B-01): the fallback button reports the wait
+  /// instead of accepting a second tap.
+  final bool handoverBusy;
+
   /// Retry rides the page's unified reload entry (token-cache drop +
   /// replace window), not a bare `session.reloadTasks()`.
   final Future<void> Function() onRetry;
@@ -3525,6 +3561,7 @@ class _ConnectionBanner extends StatelessWidget {
 
   const _ConnectionBanner({
     required this.session,
+    required this.handoverBusy,
     required this.onRetry,
     required this.onWeb,
   });
@@ -3539,6 +3576,10 @@ class _ConnectionBanner extends StatelessWidget {
       session != null &&
       session!.status == DeviceStatus.connected &&
       !session!.kicked &&
+      // A live stage outranks the healthy-looking status: a post-drop redial
+      // keeps `connected` on purpose (the link is not torn down), and showing
+      // the green "all good" card through it would hide the reconnect.
+      session!.connectionStage == null &&
       (session!.error?.isEmpty ?? true) &&
       session!.lastWorkspaceOpenFailure == null;
 
@@ -3578,6 +3619,17 @@ class _ConnectionBanner extends StatelessWidget {
       body = tr(context, 'tasks.banner.kicked');
       icon = Icons.phonelink_erase_outlined;
       color = ZInk.dangerTone(context);
+    } else if (s.connectionStage != null) {
+      // B-03/V4: the stage wins over the coarse status — the production shapes
+      // of the three stages do NOT sit on `status == connecting` (a drop
+      // redial keeps `connected`, a forced rebuild suspends to `disconnected`),
+      // so gating on that status hid every one of them. `kicked` above stays
+      // first: the terminal state must never be papered over by a stage.
+      final stage = s.connectionStage;
+      title = tr(context, 'status.stage.$stage');
+      body = tr(context, 'status.stage.$stage.body');
+      icon = Icons.sync;
+      color = ZColors.sky400;
     } else if (s.status == DeviceStatus.connecting) {
       title = tr(context, 'status.connecting');
       body = tr(context, 'tasks.banner.connecting');
@@ -3630,11 +3682,20 @@ class _ConnectionBanner extends StatelessWidget {
                       const SizedBox(width: 8),
                       Flexible(
                         child: TextButton(
-                          onPressed: onWeb,
-                          child: Text(
-                            tr(context, 'tasks.openWeb'),
-                            style: ZType.sub,
-                          ),
+                          // B-01: the handover suspends the link first; the
+                          // button reports that wait and refuses re-entry.
+                          onPressed: handoverBusy ? null : onWeb,
+                          child: handoverBusy
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2),
+                                )
+                              : Text(
+                                  tr(context, 'tasks.openWeb'),
+                                  style: ZType.sub,
+                                ),
                         ),
                       ),
                     ],

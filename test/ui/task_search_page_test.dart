@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -413,5 +415,115 @@ void main() {
       expect(find.byType(FilePreviewPage), findsOneWidget);
       expect(find.text('二进制文件，无文本预览'), findsOneWidget);
     });
+  });
+
+  // ---------------------------------------------------- keyboard / focus
+
+  /// Keyboard regression net beyond the chat page (task 11-06 IM-D-03):
+  /// the search field must keep focus while the IME shrinks the viewport
+  /// and the conditional tab subtree grows (the 文件 tab's `if (filesTab)`
+  /// children appear only on a positive probe verdict — 3 → 4 tabs, the
+  /// TabBar and TabBarView remount behind `ValueKey(_tabs.length)`) — the
+  /// same remount-on-reorder shape that made the chat composer drop focus
+  /// (chat-conventions §8 契约一).
+  ///
+  /// The recipe is the repo's settled one: explicit `physicalSize` +
+  /// `devicePixelRatio` so the layout has a real height, `viewInsets` for
+  /// the IME (`FakeViewPadding`, the real view — a tree-injected MediaQuery
+  /// would not resize the Scaffold), then a SIZE PROBE proving the keyboard
+  /// branch actually ran before any focus assertion is trusted
+  /// (green-means-tested: an inset that never reached the tree passes
+  /// silently).
+  testWidgets(
+      'keyboard shrink keeps the search field focused across conditional '
+      'tab growth', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    // The reachability probe is held until the keyboard is up, so the
+    // conditional growth lands mid-keyboard — after the field took focus.
+    final probeGate = Completer<void>();
+    final session = FakeDeviceSession(
+      deviceId: 'd1',
+      params: RemoteConnectionParams.parse(
+          'https://zcode.z.ai/remote/v4?sid=a&hash=b&t=1&mid=m&name=n&app_version=3')!,
+      entries: const [],
+      workspaces: [
+        {'workspacePath': '/repo/app', 'workspaceIdentity': 'app-id'},
+      ],
+      channelHandler: (channel, method, args) async {
+        if (channel != Channels.file) return null;
+        if (method != 'searchWorkspaceFiles') return null;
+        final arg = args.isEmpty ? null : args.first;
+        final q = arg is Map ? '${arg['query'] ?? ''}' : '';
+        if (q.isEmpty) {
+          // The limit-1 empty-query reachability probe.
+          await probeGate.future;
+          return <dynamic>[];
+        }
+        return <dynamic>[if (q.contains('report')) fileRow('docs/report.md')];
+      },
+    );
+    addTearDown(() => session.dispose());
+
+    await tester.pumpWidget(wrap(host(
+      (_) => TaskSearchPage(
+        session: session,
+        onOpenTask: (_, __) {},
+        onOpenCommand: (_) {},
+      ),
+    )));
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    // Probe still in flight: the 文件 tab has not grown in yet.
+    expect(find.byType(Tab), findsNWidgets(3));
+
+    // `autofocus: true` took the field on open — the focus this test then
+    // pins across the keyboard dance. The page owns no FocusNode, so the
+    // live node is the field's inner EditableText one.
+    final field = find.byType(TextField).first;
+    FocusNode nodeOf() => tester
+        .widget<EditableText>(
+          find.descendant(of: field, matching: find.byType(EditableText)),
+        )
+        .focusNode;
+    expect(tester.widget<TextField>(field).autofocus, isTrue);
+    final focusedBefore = FocusManager.instance.primaryFocus;
+    expect(nodeOf().hasFocus, isTrue);
+    expect(focusedBefore, isNotNull);
+
+    // Resting geometry of the results viewport — the TabBarView fills the
+    // body's Expanded, so its height tracks the Scaffold's resize (the
+    // search row itself is pinned to the top and never moves).
+    Size resultsProbe() => tester.getSize(find.byType(TabBarView));
+    final restingResults = resultsProbe();
+
+    // Raise the IME the way the real view does: the viewport shrinks and
+    // the Scaffold resizes its body.
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // SIZE PROBE: the keyboard branch is provably live — the body lost
+    // most of the inset, so the focus assertion below is meaningful.
+    expect(restingResults.height - resultsProbe().height, greaterThan(100));
+
+    // The verdict lands mid-keyboard: the 文件 tab grows in, remounting
+    // both the TabBar and the TabBarView (the keyed controller swap).
+    probeGate.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byType(Tab), findsNWidgets(4));
+
+    // Typing then reshapes the results subtree again: the debounced file
+    // search replaces the empty note with the matching row.
+    await tester.enterText(field, 'report');
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pumpAndSettle();
+
+    expect(FocusManager.instance.primaryFocus, same(focusedBefore));
+    expect(nodeOf().hasFocus, isTrue);
+    expect(tester.takeException(), isNull);
   });
 }

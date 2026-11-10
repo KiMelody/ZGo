@@ -784,6 +784,17 @@ class DeviceSession extends ChangeNotifier
   DateTime _lastStallRebuildAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _rebuilding = false;
 
+  /// Read-only display projection of the long "not fully usable yet" phases:
+  /// `pairing` / `reconnecting` / `rebuilding`. Deliberately independent of
+  /// [status]: a drop redial keeps `connected` and a forced rebuild runs on
+  /// `disconnected`, so the UI must read this instead of gating on a status.
+  /// `kicked` stays on [kicked] — never duplicated here.
+  ///
+  /// Written only at three low-frequency points ([_setStatus],
+  /// [_onRelayState], [_forceRebuildAfterStall]) and de-duplicated in
+  /// [_setConnectionStage], so the per-frame notify path never flips it.
+  String? _connectionStage;
+
   /// Test seam overriding the live bridge gate in [callChannel].
   WorkspaceGate? _testGate;
 
@@ -905,6 +916,13 @@ class DeviceSession extends ChangeNotifier
   /// link/app error writes never touch it.
   WorkspaceOpenResult? get lastWorkspaceOpenFailure =>
       _lastWorkspaceOpenFailure;
+
+  /// Display-only projection of the long "not fully usable yet" phases:
+  /// `pairing`, `reconnecting` or `rebuilding`; null whenever none applies.
+  /// It outranks [status] for copy because the three production windows do
+  /// not line up with any single status. `kicked` is deliberately NOT a
+  /// stage — read [kicked] for that (and for the terminal copy).
+  String? get connectionStage => _connectionStage;
 
   /// Reason code (`session-not-found`, `session-conflict`,
   /// `unsupported-action`, ...) of the current failure, if any.
@@ -1564,6 +1582,23 @@ class DeviceSession extends ChangeNotifier
       case RelayState.idle:
         break;
     }
+    _setConnectionStage(_deriveConnectionStage());
+  }
+
+  /// Derives the display-only [connectionStage] purely from authoritative
+  /// state (V10): [_rebuilding] first — the forced rebuild suspends the link,
+  /// so a status-only read would flash "disconnected" mid-window — then the
+  /// relay's own state, which is the only place `pairing` and `reconnecting`
+  /// are distinguishable (the session flattens both into `connecting`).
+  /// Every other combination derives null.
+  String? _deriveConnectionStage() {
+    if (_disposed) return null;
+    if (_rebuilding) return 'rebuilding';
+    return switch (_client?.relay.state) {
+      RelayState.waiting => 'pairing',
+      RelayState.reconnecting => 'reconnecting',
+      _ => null,
+    };
   }
 
   /// mobile-diagnostic emitter (D3): the session state machine's reporting
@@ -1595,10 +1630,29 @@ class DeviceSession extends ChangeNotifier
     if (_status == s) return;
     final previous = _status;
     _status = s;
+    // Stage rides the state machine: re-derived at this single status write
+    // entry, assigned directly (never through [_setConnectionStage]) so the
+    // notify below — one per status change, as before — is the only repaint
+    // this path emits. [_rebuilding] wins inside the derivation, so the
+    // forced rebuild's `suspend()` frame (which flips the status to
+    // disconnected) keeps "rebuilding" on screen instead of blanking it.
+    _connectionStage = _deriveConnectionStage();
     _diag('state-transition', {
       'state': s.name,
       'previousState': previous.name,
     });
+    notifyListeners();
+  }
+
+  /// Writes the display-only [_connectionStage] projection: a value-identical
+  /// write is a no-op (dedupe), a real change repaints once. Only the two
+  /// low-frequency writers outside [_setStatus] call it — [_onRelayState] and
+  /// [_forceRebuildAfterStall] — never [_onActiveFrameApplied] (per-frame
+  /// notify). [_setStatus] assigns the field directly instead, so its own
+  /// single notify is not doubled.
+  void _setConnectionStage(String? next) {
+    if (_connectionStage == next) return;
+    _connectionStage = next;
     notifyListeners();
   }
 
@@ -2159,11 +2213,13 @@ class DeviceSession extends ChangeNotifier
     }
     _lastStallRebuildAt = now;
     _rebuilding = true;
+    _setConnectionStage(_deriveConnectionStage());
     _log('[session] link stalled ($reason); rebuilding connection');
     _diag('recover-start', {'failureMessage': reason});
     unawaited(() async {
       await suspend();
       _rebuilding = false;
+      _setConnectionStage(_deriveConnectionStage());
       if (!_disposed && !_kicked) {
         await connect();
       }
@@ -3943,7 +3999,12 @@ class DeviceSession extends ChangeNotifier
     super.dispose();
   }
 
-  void _log(String line) => debugPrint('[$deviceId] $line');
+  /// Single funnel for the protocol log chain (ipc per-RPC lines, rpc
+  /// transport, bridge) — guarded here so hot-path logging costs nothing in
+  /// release/profile while the text stays intact for debug runs.
+  void _log(String line) {
+    if (kDebugMode) debugPrint('[$deviceId] $line');
+  }
 }
 
 /// Owns one [DeviceSession] per device and mediates the

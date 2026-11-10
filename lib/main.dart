@@ -35,6 +35,21 @@ import 'widgets/home_widget_bridge.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // Observability only: record framework + async errors with a short stack
+  // before handing them on. Neither hook changes the reporting semantics —
+  // the previous FlutterError handler still runs, and the platform handler
+  // returns false so the engine keeps its default (non-silent) behavior.
+  final previousFlutterError = FlutterError.onError;
+  FlutterError.onError = (details) {
+    debugPrint('[flutter-error] ${details.library ?? ''} '
+        '${details.exception}\n'
+        '${details.stack.toString().split('\n').take(5).join('\n')}');
+    previousFlutterError?.call(details);
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    debugPrint('[uncaught] $error\n${stack.toString().split('\n').take(5).join('\n')}');
+    return false; // false: keep the default (non-silent) semantics.
+  };
   _registerBundledFontLicenses();
   runApp(const ZGoApp());
 }
@@ -298,7 +313,18 @@ class _ZGoAppState extends State<ZGoApp>
       ));
       return;
     }
-    await _hub.suspend(device.id);
+    // B-01 (V7a): this entry has no page state to spin, so the handover only
+    // fails loudly — a failed suspend never pushes a WebView that cannot pair.
+    try {
+      await _hub.suspend(device.id);
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr(context, 'remote.handoverFailed'))),
+        );
+      }
+      return;
+    }
     if (!context.mounted) return;
     await Navigator.of(context).push(zRoute(
       (_) => RemotePage(device: device),
@@ -433,7 +459,18 @@ class _ZGoAppState extends State<ZGoApp>
       ));
       return;
     }
-    await _hub.suspend(device.id);
+    // B-01 (V7a): no page state to spin on this entry either — the handover
+    // only surfaces its failure, never pushes a WebView that cannot pair.
+    try {
+      await _hub.suspend(device.id);
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr(context, 'remote.handoverFailed'))),
+        );
+      }
+      return;
+    }
     if (!context.mounted) return;
     await Navigator.of(context).push(zRoute(
       (_) => RemotePage(

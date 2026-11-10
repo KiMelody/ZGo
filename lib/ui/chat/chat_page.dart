@@ -4,7 +4,7 @@ import 'dart:math' as math;
 import 'package:clock/clock.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart'
-    show ValueListenable, listEquals;
+    show ValueListenable, kDebugMode, listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
@@ -761,8 +761,10 @@ class _ChatPageState extends State<ChatPage> {
     // reaching the end — still lands, so the jump-to-bottom glide keeps
     // restoring the pin.
     if (!stick && _viewport.isPositioning) return;
-    debugPrint('[anchor] stick=$stick pixels='
-        '${_scrollController.position.pixels.toStringAsFixed(1)} max=$max');
+    if (kDebugMode) {
+      debugPrint('[anchor] stick=$stick pixels='
+          '${_scrollController.position.pixels.toStringAsFixed(1)} max=$max');
+    }
     if (mounted) setState(() => _stickToBottom = stick);
   }
 
@@ -1028,12 +1030,16 @@ class _ChatPageState extends State<ChatPage> {
       // (09-22 round 13 test: expected the true bottom, landed 160px
       // past it after the extent estimate shrank).
       if (!grew || !_stickToBottom || _viewport.compensationInFlight) {
-        debugPrint('[anchor] follow-skip grew=$grew stick=$_stickToBottom '
-            'px=${_scrollController.position.pixels.toStringAsFixed(1)}');
+        if (kDebugMode) {
+          debugPrint('[anchor] follow-skip grew=$grew stick=$_stickToBottom '
+              'px=${_scrollController.position.pixels.toStringAsFixed(1)}');
+        }
         return;
       }
-      debugPrint('[anchor] follow-fire px='
-          '${_scrollController.position.pixels.toStringAsFixed(1)}');
+      if (kDebugMode) {
+        debugPrint('[anchor] follow-fire px='
+            '${_scrollController.position.pixels.toStringAsFixed(1)}');
+      }
       _animateToBottom();
     });
   }
@@ -1042,10 +1048,12 @@ class _ChatPageState extends State<ChatPage> {
   /// follow-on-new-content pass above and the jump-to-bottom button's tap.
   void _animateToBottom() {
     if (!_scrollController.hasClients) return;
-    debugPrint('[anchor] anim-bottom px='
-        '${_scrollController.position.pixels.toStringAsFixed(1)} '
-        'stick=$_stickToBottom from='
-        '${StackTrace.current.toString().split('\n').take(5).join(' / ')}');
+    if (kDebugMode) {
+      debugPrint('[anchor] anim-bottom px='
+          '${_scrollController.position.pixels.toStringAsFixed(1)} '
+          'stick=$_stickToBottom from='
+          '${StackTrace.current.toString().split('\n').take(5).join(' / ')}');
+    }
     _scrollController.animateTo(
       _scrollController.position.maxScrollExtent,
       duration: const Duration(milliseconds: 200),
@@ -7911,17 +7919,27 @@ class _ControlChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!showLabel) {
-      return InkWell(
-        borderRadius: BorderRadius.circular(ZRadius.tile),
-        onTap: onTap,
-        // Transparent touch box at the 44×48 floor; the painted icon stays
-        // ZTile.iconSize (only the hit area grows).
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(
-            minWidth: zTouchWidth,
-            minHeight: zTouchHeight,
+      // Icon-only state paints just the glyph, so TalkBack would read an
+      // unnamed button. `label` is already the caller's user-visible copy
+      // (label mode renders it as Text), so reuse it as the semantics label —
+      // zero new keys, zero translation surface. The wrapper stays outside
+      // InkWell so the hit test keeps one owner.
+      return Semantics(
+        button: true,
+        label: label,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(ZRadius.tile),
+          onTap: onTap,
+          // Transparent touch box at the 44×48 floor; the painted icon stays
+          // ZTile.iconSize (only the hit area grows).
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              minWidth: zTouchWidth,
+              minHeight: zTouchHeight,
+            ),
+            child:
+                Icon(icon, size: ZTile.iconSize, color: ZInk.muted(context)),
           ),
-          child: Icon(icon, size: ZTile.iconSize, color: ZInk.muted(context)),
         ),
       );
     }

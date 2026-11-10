@@ -119,6 +119,14 @@ const _zh = {
   'status.error': '原生列表不可用，请用网页版',
   'status.kicked': '已被其他终端接管',
   'status.tasksRunning': '\$0 个任务运行中',
+  // 连接阶段的细则文案（V9：沿用 status.* 家族）。短 key 给设备卡片副标题
+  // （1 行 ellipsis），`.body` 长 key 给任务列表横幅（3 行 body）。
+  'status.stage.pairing': '等待桌面端配对…',
+  'status.stage.reconnecting': '正在重连…',
+  'status.stage.rebuilding': '正在重建连接…',
+  'status.stage.pairing.body': 'relay 已连上，正在等桌面端接受本次配对。',
+  'status.stage.reconnecting.body': '连接已断开，正在自动重连；网络恢复后会自行恢复。',
+  'status.stage.rebuilding.body': '链路失去响应，正在重建连接，期间任务列表会短暂不可用。',
   'time.justNow': '刚刚',
   'time.minutesAgo': '\$0 分钟前',
   'time.hoursAgo': '\$0 小时前',
@@ -210,10 +218,22 @@ const _zh = {
   'remote.failure.unexpected-error': '无法启动移动端远程控制，请回到桌面端重试。',
   'remote.failure.auth-required': '这个设备的远控需要 ZCode 账号。请先在「设置 → 套餐」登录，然后重试连接。',
   'status.authRequired': '需要登录 ZCode 账号',
+  // WebView 兜底页的「返回原生」动作（只 pop；恢复由调用点承担）。
+  'remote.backToNative': '返回原生界面',
+  // 让位给网页版失败（suspend 抛错 → 不导航）。
+  'remote.handoverFailed': '无法让位给网页版，请稍后重试。',
   // ---- chat (native conversation) ----
   'chat.appBar': '任务会话',
   'chat.copy': '复制',
   'chat.copied': '已复制',
+  // Icon-only copy affordances (fenced-code header + assistant copy button):
+  // their TalkBack name, since the glyph carries no text.
+  'chat.copyCode': '复制',
+  // Assistant feedback row glyph names (like / dislike / fork / hook runs).
+  'chat.feedback.like': '赞',
+  'chat.feedback.dislike': '踩',
+  'chat.feedback.fork': '分叉会话',
+  'chat.feedback.hooks': '查看钩子运行记录',
   'chat.expand': '展开',
   'chat.collapse': '收起',
   'chat.empty': '暂无消息',
@@ -1557,6 +1577,18 @@ const _en = {
   'status.error': 'Native list unavailable — use the web version',
   'status.kicked': 'Taken over by another terminal',
   'status.tasksRunning': '\$0 task(s) running',
+  // Connection-stage detail copy (V9: stays inside the status.* family).
+  // The short keys feed the device card's one-line subtitle (ellipsised);
+  // the `.body` keys feed the task-list banner's three-line body.
+  'status.stage.pairing': 'Waiting for the desktop to pair…',
+  'status.stage.reconnecting': 'Reconnecting…',
+  'status.stage.rebuilding': 'Rebuilding the connection…',
+  'status.stage.pairing.body':
+      'The relay is up; waiting for the desktop to accept this pairing.',
+  'status.stage.reconnecting.body':
+      'The connection dropped and is reconnecting automatically; it recovers once the network does.',
+  'status.stage.rebuilding.body':
+      'The link stopped responding and is being rebuilt; the task list is briefly unavailable.',
   'time.justNow': 'just now',
   'time.minutesAgo': '\$0 min ago',
   'time.hoursAgo': '\$0 h ago',
@@ -1669,10 +1701,24 @@ const _en = {
   'remote.failure.auth-required':
       'This device requires a ZCode account. Sign in under Settings → Coding plan, then retry the connection.',
   'status.authRequired': 'Sign in required',
+  // The WebView fallback's "back to native" action (pop only; the caller
+  // arms the resume).
+  'remote.backToNative': 'Back to native app',
+  // Handover to the web version failed (suspend threw → no navigation).
+  'remote.handoverFailed':
+      'Could not hand over to the web version. Please try again.',
   // ---- chat (native conversation) ----
   'chat.appBar': 'Task session',
   'chat.copy': 'Copy',
   'chat.copied': 'Copied',
+  // Icon-only copy affordances (fenced-code header + assistant copy button):
+  // their TalkBack name, since the glyph carries no text.
+  'chat.copyCode': 'Copy',
+  // Assistant feedback row glyph names (like / dislike / fork / hook runs).
+  'chat.feedback.like': 'Like',
+  'chat.feedback.dislike': 'Dislike',
+  'chat.feedback.fork': 'Fork',
+  'chat.feedback.hooks': 'View hook runs',
   'chat.expand': 'Expand',
   'chat.collapse': 'Collapse',
   'chat.empty': 'No messages yet',

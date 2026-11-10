@@ -206,6 +206,14 @@ class _RemotePageState extends State<RemotePage> {
         ),
         actions: [
           IconButton(
+            tooltip: tr(context, 'remote.backToNative'),
+            icon: const Icon(Icons.arrow_back),
+            // Pop only: the caller's `await push(...)` resolves and its
+            // existing `scheduleResume` re-arms the native link (idempotent),
+            // so this page stays free of any session/hub dependency (V1).
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+          IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: () => _controller?.reload(),
           ),

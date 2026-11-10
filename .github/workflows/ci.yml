@@ -23,6 +23,36 @@ jobs:
       - name: UI color guard
         run: python tool/ui_color_guard.py
 
+      - name: A11y label guard
+        run: python tool/a11y_label_guard.py
+
+      - name: Token discipline gates
+        # Each gate must block on its own: a bare `! grep` sequence under
+        # `bash -e` only surfaces the LAST command's status, so a hit in the
+        # Radius/withOpacity greps would pass silently. Explicit `if` blocks
+        # make every gate fail the step.
+        run: |
+          count=$(grep -rhoE "fontSize: [0-9]+" lib/ui/ | wc -l)
+          if [ "$count" -gt 8 ]; then
+            echo "::error::fontSize literal count $count > 8 (theme 7 + 1 recorded exception)"
+            exit 1
+          fi
+          if grep -rq "Radius\.circular([0-9]" lib/ui/; then
+            echo "::error::hardcoded Radius.circular literal in lib/ui (use ZRadius)"
+            grep -rn "Radius\.circular([0-9]" lib/ui/
+            exit 1
+          fi
+          if grep -rq "withOpacity" lib/ui/; then
+            echo "::error::withOpacity in lib/ui (use withValues(alpha:))"
+            grep -rn "withOpacity" lib/ui/
+            exit 1
+          fi
+          if grep -rq "protocol/" lib/ui/remote_page.dart; then
+            echo "::error::remote_page.dart imports protocol/ (zero-protocol-dependency contract)"
+            grep -rn "protocol/" lib/ui/remote_page.dart
+            exit 1
+          fi
+
       - name: Analyze
         run: flutter analyze
 

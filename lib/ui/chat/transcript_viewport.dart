@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart' show ValueListenable, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 
@@ -702,9 +702,11 @@ class TranscriptViewport extends ChangeNotifier {
     }
     final useIdx = stableIdx >= 0 ? stableIdx : anchorIdx;
     final group = groups[useIdx];
-    debugPrint('[anchor] measure stick=$stick key=${group.key} '
-        'rowIds=${group.rows.map((r) => r['rowId']).toList()} '
-        'retreated=${useIdx != anchorIdx}');
+    if (kDebugMode) {
+      debugPrint('[anchor] measure stick=$stick key=${group.key} '
+          'rowIds=${group.rows.map((r) => r['rowId']).toList()} '
+          'retreated=${useIdx != anchorIdx}');
+    }
     // Row-level anchor (exact landing when the group's key orphans to a
     // page-boundary merge): measure the first row's own box now so the
     // compensation can land on IT instead of the merged group's top.

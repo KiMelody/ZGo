@@ -93,6 +93,11 @@ class _DevicesPageState extends State<DevicesPage>
   List<RemoteDeviceEntry>? _cloudDevices;
   String? _cloudToken;
 
+  /// Device whose native link is being suspended for the WebView handover
+  /// (B-01). The suspend can take seconds; its card shows the spinner and
+  /// ignores taps meanwhile so a second tap cannot re-enter the handover.
+  String? _handoverBusyId;
+
   @override
   void initState() {
     super.initState();
@@ -305,10 +310,28 @@ class _DevicesPageState extends State<DevicesPage>
   /// Opens the in-app WebView remote page. The native connection is
   /// suspended first (one terminal per device) and resumes ~1s after the
   /// page pops. Injects `theme=` from the URL when present.
+  ///
+  /// B-01: the wait is visible (the card spins while [_handoverBusyId] names
+  /// this device) and a failed suspend shows a SnackBar instead of pushing a
+  /// WebView that cannot pair — the push only happens after a clean suspend.
   Future<void> _openRemote(Device device) async {
-    await widget.store.touch(device.id);
-    await widget.hub.suspend(device.id);
-    if (!mounted) return;
+    if (_handoverBusyId != null) return;
+    setState(() => _handoverBusyId = device.id);
+    var ready = false;
+    try {
+      await widget.store.touch(device.id);
+      await widget.hub.suspend(device.id);
+      ready = true;
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr(context, 'remote.handoverFailed'))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _handoverBusyId = null);
+    }
+    if (!ready || !mounted) return;
     await Navigator.of(context).push(zRoute(
       (_) => _deviceThemeWrap(
         device,
@@ -1376,10 +1399,13 @@ class _DevicesPageState extends State<DevicesPage>
 
   Widget _deviceCard(Device device) {
     final session = widget.hub.sessionOf(device.id);
+    // B-01: the handover to the WebView suspends the native link; while that
+    // runs the card is not tappable and shows its progress.
+    final busy = _handoverBusyId == device.id;
     return Card(
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: () => _open(device),
+        onTap: busy ? null : () => _open(device),
         child: Padding(
           padding: ZListRow.padding,
           child: ConstrainedBox(
@@ -1401,7 +1427,13 @@ class _DevicesPageState extends State<DevicesPage>
                         overflow: TextOverflow.ellipsis,
                       ),
                       const SizedBox(height: 2),
-                      _deviceMeta(context, session, device),
+                      // While the handover runs the meta line would still
+                      // read a live status the suspend is tearing down; a
+                      // 2dp spinner in its slot says "working" instead.
+                      if (busy)
+                        const LinearProgressIndicator(minHeight: 2)
+                      else
+                        _deviceMeta(context, session, device),
                     ],
                   ),
                 ),
@@ -1409,7 +1441,7 @@ class _DevicesPageState extends State<DevicesPage>
                   tooltip: tr(context, 'chat.more'),
                   icon: Icon(Icons.more_vert,
                       size: ZListRow.leadingIcon, color: ZInk.muted(context)),
-                  onPressed: () => _deviceActions(device),
+                  onPressed: busy ? null : () => _deviceActions(device),
                 ),
               ],
             ),
@@ -1576,27 +1608,39 @@ class _DevicesPageState extends State<DevicesPage>
   /// One meta line: `状态 · 上次使用…` (the host moved to the detail sheet).
   Widget _deviceMeta(
       BuildContext context, DeviceSession? session, Device device) {
-    final (status, color) = switch (session?.status) {
-      DeviceStatus.connected => session != null && session.runningTaskCount > 0
-          ? (trP(context, 'status.tasksRunning',
-                ['${session.runningTaskCount}']),
-              ZInk.successTone(context))
-          : (tr(context, 'status.online'), ZInk.successTone(context)),
-      DeviceStatus.connecting =>
-        (tr(context, 'status.connecting'), ZColors.sky500),
-      DeviceStatus.error => session?.failureReason == 'auth-required'
-          ? (tr(context, 'status.authRequired'), ZInk.dangerTone(context))
-          : session?.kicked == true
-              ? (tr(context, 'status.kicked'), ZInk.dangerTone(context))
-              : (tr(context, 'status.error'), ZInk.dangerTone(context)),
-      _ => (tr(context, 'status.offline'), ZInk.ghost(context)),
-    };
+    final stage = session?.connectionStage;
+    // B-03/V4: the stage wins over the coarse status — the production shapes
+    // of the three stages do NOT sit on `status == connecting` (a drop redial
+    // keeps `connected`, a forced rebuild suspends to `disconnected`), so
+    // gating on that status hid every one of them. `kicked` still wins: it is
+    // the terminal state and must never be papered over by a stage.
+    final showStage = stage != null && session?.kicked != true;
+    final (status, color) = showStage
+        ? (tr(context, 'status.stage.$stage'), ZColors.sky500)
+        : switch (session?.status) {
+            DeviceStatus.connected =>
+              session != null && session.runningTaskCount > 0
+                  ? (trP(context, 'status.tasksRunning',
+                        ['${session.runningTaskCount}']),
+                      ZInk.successTone(context))
+                  : (tr(context, 'status.online'), ZInk.successTone(context)),
+            DeviceStatus.connecting =>
+              (tr(context, 'status.connecting'), ZColors.sky500),
+            DeviceStatus.error => session?.failureReason == 'auth-required'
+                ? (tr(context, 'status.authRequired'), ZInk.dangerTone(context))
+                : session?.kicked == true
+                    ? (tr(context, 'status.kicked'), ZInk.dangerTone(context))
+                    : (tr(context, 'status.error'), ZInk.dangerTone(context)),
+            _ => (tr(context, 'status.offline'), ZInk.ghost(context)),
+          };
     // B14: while connected, the live status segment (在线 / 任务进行中 N)
     // already answers "is it alive" — '上次使用' is the moment the app last
     // OPENED the device (local stat, not session activity), so showing it
-    // mid-session reads as stale. It rides only the disconnected states.
+    // mid-session reads as stale. It rides only the disconnected states, and
+    // it is dropped while a stage is on screen: the one-line subtitle has no
+    // room for both (V4).
     final connected = session?.status == DeviceStatus.connected;
-    final lastUsed = connected
+    final lastUsed = connected || showStage
         ? null
         : (device.lastUsedAt != null
             ? trP(context, 'devices.lastUsed',

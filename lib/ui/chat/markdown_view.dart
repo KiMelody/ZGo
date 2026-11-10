@@ -330,28 +330,36 @@ class _CodeBlockState extends State<_CodeBlock> {
                     style: ZType.sub.copyWith(color: ZInk.faint(context)),
                   ),
                   const Spacer(),
-                  InkWell(
-                    onTap: () {
-                      Clipboard.setData(ClipboardData(text: code));
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(tr(context, 'chat.copied')),
-                          duration: const Duration(seconds: 1),
+                  // The header shows only a glyph for copy; the wrapper gives
+                  // TalkBack the action name without touching the hit box.
+                  Semantics(
+                    button: true,
+                    label: tr(context, 'chat.copyCode'),
+                    child: InkWell(
+                      onTap: () {
+                        Clipboard.setData(ClipboardData(text: code));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(tr(context, 'chat.copied')),
+                            duration: const Duration(seconds: 1),
+                          ),
+                        );
+                      },
+                      // Transparent touch box: 44 wide, and at least the
+                      // shared chat-tile header floor (48 would grow the
+                      // header past ZTile.headHeight and break
+                      // reasoning/tool alignment).
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(
+                          minWidth: zTouchWidth,
+                          minHeight: ZTile.headHeight,
                         ),
-                      );
-                    },
-                    // Transparent touch box: 44 wide, and at least the shared
-                    // chat-tile header floor (48 would grow the header past
-                    // ZTile.headHeight and break reasoning/tool alignment).
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(
-                        minWidth: zTouchWidth,
-                        minHeight: ZTile.headHeight,
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.all(2),
-                        child: Icon(Icons.copy_outlined,
-                            size: ZTile.iconSize, color: ZInk.faint(context)),
+                        child: Padding(
+                          padding: const EdgeInsets.all(2),
+                          child: Icon(Icons.copy_outlined,
+                              size: ZTile.iconSize,
+                              color: ZInk.faint(context)),
+                        ),
                       ),
                     ),
                   ),

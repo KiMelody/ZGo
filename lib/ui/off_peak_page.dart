@@ -45,6 +45,10 @@ class _OffPeakPageState extends State<OffPeakPage>
   bool _loading = true;
   String? _error;
   bool _busy = false;
+
+  /// WebView handover in flight (B-01): the native link is being suspended
+  /// for the remote page, so the result button shows its progress.
+  bool _handoverBusy = false;
   Timer? _refresh;
   late final TabController _tabs =
       TabController(length: 2, vsync: this, initialIndex: 0);
@@ -173,6 +177,11 @@ class _OffPeakPageState extends State<OffPeakPage>
 
   /// Result tap: native chat page deep-linked to the produced session (the
   /// protocol link stays live); WebView fallback when no link exists.
+  ///
+  /// B-01: the WebView leg suspends the native link first. That wait is
+  /// visible through [_handoverBusy] (the result button spins, taps are
+  /// swallowed) and a failed suspend only toasts — the push is skipped so a
+  /// WebView that cannot pair is never opened.
   Future<void> _openResult(OffPeakTask task) async {
     final sessionId = task.sessionId ?? task.conversationId;
     if (sessionId == null) return;
@@ -195,8 +204,18 @@ class _OffPeakPageState extends State<OffPeakPage>
       ));
       return;
     }
-    await widget.hub.suspend(widget.device.id);
-    if (!mounted) return;
+    if (_handoverBusy) return;
+    var ready = false;
+    setState(() => _handoverBusy = true);
+    try {
+      await widget.hub.suspend(widget.device.id);
+      ready = true;
+    } catch (_) {
+      if (mounted) _toast(tr(context, 'remote.handoverFailed'));
+    } finally {
+      if (mounted) setState(() => _handoverBusy = false);
+    }
+    if (!ready || !mounted) return;
     await Navigator.of(context).push(zRoute(
       (_) => RemotePage(
         device: widget.device,
@@ -634,8 +653,19 @@ class _OffPeakPageState extends State<OffPeakPage>
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
                       child: FilledButton.tonalIcon(
-                        onPressed: () => _openResult(task),
-                        icon: const Icon(Icons.open_in_new, size: 16),
+                        // B-01: the fallback leg suspends the native link
+                        // first; while that runs the button shows the wait
+                        // and refuses a second tap.
+                        onPressed:
+                            _handoverBusy ? null : () => _openResult(task),
+                        icon: _handoverBusy
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.open_in_new, size: 16),
                         label: Text(tr(context, 'op.viewResult')),
                         style: FilledButton.styleFrom(
                             visualDensity: VisualDensity.compact),
