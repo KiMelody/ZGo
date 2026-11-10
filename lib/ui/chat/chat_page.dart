@@ -929,14 +929,16 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     return false;
   }
 
-  Future<void> _loadPrep() async {
+  Future<void> _loadPrep({bool mayAutoSwitch = true}) async {
     try {
       final prep = await widget.host.prepareWorkspace();
       if (mounted) {
         setState(() => _prep = prep);
         // Model options are the auto switch's target pool (design 10-24 §4);
-        // they usually land after the entitlement snapshot.
-        _maybeAutoSwitchStartPlan();
+        // they usually land after the entitlement snapshot. The post-switch
+        // re-fetch gates it off (design 11-09 §3): after a manual pick a
+        // re-run would rewrite the user's own choice.
+        if (mayAutoSwitch) _maybeAutoSwitchStartPlan();
       }
     } catch (_) {}
     if (mounted) setState(() => _skillsLoading = true);
@@ -1586,15 +1588,30 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     if (sid == null || sid.isEmpty || state == null) return false;
     final (provider, model) = _splitModelValue(option.value);
     // thought must be valid for the target model: keep current if
-    // supported, else fall back to the thought option's currentValue.
+    // supported, else fall back to a level the target actually has
+    // (design 11-09 §3) — the target option carries the per-model table.
+    // Models without a table (null/empty) keep the pre-11-09 chain verbatim.
     final currentThought = state.currentThought;
     final thoughtOption = _prep?.option('thought_level');
-    final thought =
-        currentThought.isNotEmpty &&
-            (thoughtOption?.options.any((o) => o.value == currentThought) ??
-                false)
-        ? currentThought
-        : '${thoughtOption?.currentValue ?? (currentThought.isNotEmpty ? currentThought : 'enabled')}';
+    final targetLevels = option.modelThoughtLevels;
+    final String thought;
+    if (targetLevels != null && targetLevels.isNotEmpty) {
+      final targetDefault = option.modelDefaultThoughtLevel;
+      thought =
+          currentThought.isNotEmpty && targetLevels.contains(currentThought)
+          ? currentThought
+          : targetDefault != null && targetLevels.contains(targetDefault)
+          ? targetDefault
+          // Desktop default semantics: the last level (values.at(-1)).
+          : targetLevels.last;
+    } else {
+      thought =
+          currentThought.isNotEmpty &&
+              (thoughtOption?.options.any((o) => o.value == currentThought) ??
+                  false)
+          ? currentThought
+          : '${thoughtOption?.currentValue ?? (currentThought.isNotEmpty ? currentThought : 'enabled')}';
+    }
     // Config exactly as the switch leaves it — the optimistic patch lands
     // it, the lost-ack path arms the revert trace with the same value.
     Map<String, dynamic> switchedConfig() => {
@@ -1619,6 +1636,13 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       onAccepted: () {
         state.clearConfigRevertTrace();
         patch();
+        // B re-fetch (design 11-09 §3): the prep snapshot that fed the
+        // thought picker predates this switch. Fire-and-forget; auto switch
+        // stays gated off — this is a manual pick. A lost ack does not
+        // re-fetch: the command may be swallowed, so the old prep is no
+        // worse than a possibly-unchanged new one, and the revert trace must
+        // stay the only signal.
+        unawaited(_loadPrep(mayAutoSwitch: false));
       },
       // PRD 09-19: a lost ack (bridge reconnect window) is not a rejection
       // — land the patch anyway and ARM the revert trace: an authoritative
@@ -2218,23 +2242,32 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (context) => _ModelModeSheet(
-        conversation: widget.host,
-        state: _state,
-        prep: _prep,
-        sessionId: _sessionId,
-        providerCatalog: catalog,
-        draftConfig: _draftConfig,
-        entitledIds: entitledIds,
-        currentProviderId: _sheetCurrentProviderId,
-        onDraftChange: (key, value) {
-          setState(() {
-            _draftConfig[key] = value;
-            _draftExplicit.add(key);
-          });
-        },
-        onSwitchIssued: (record) => _lastSwitch = record,
-        onSwitchModel: switchModel,
+      // The sheet is a Stateless snapshot of the page's draft config;
+      // without this wrapper a draft model pick updates `_draftConfig` but
+      // the open sheet keeps rendering the pre-pick thought table until
+      // closed and reopened.
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => _ModelModeSheet(
+          conversation: widget.host,
+          state: _state,
+          prep: _prep,
+          sessionId: _sessionId,
+          providerCatalog: catalog,
+          draftConfig: _draftConfig,
+          entitledIds: entitledIds,
+          currentProviderId: _sheetCurrentProviderId,
+          onDraftChange: (key, value) {
+            setState(() {
+              _draftConfig[key] = value;
+              _draftExplicit.add(key);
+            });
+            // Rebuild the open sheet in place so the thought/mode sections
+            // follow the fresh draft pick (no close-reopen needed).
+            setSheetState(() {});
+          },
+          onSwitchIssued: (record) => _lastSwitch = record,
+          onSwitchModel: switchModel,
+        ),
       ),
     );
   }
@@ -6449,6 +6482,63 @@ class _QuestionItem extends StatelessWidget {
   return (value.substring(0, idx), value.substring(idx + 1));
 }
 
+/// The `provider/model` composite of the model the composer and the config
+/// sheet treat as current (design 11-09 §2) — both consumers need it and
+/// neither State reaches the other, so it lives at top level.
+///
+/// The three original conditions are preserved verbatim: a live session with
+/// a non-empty `config['model']` answers the composite; a draft (or a live
+/// session whose config has not landed) answers the draft pick, else the
+/// prep's model currentValue. [isDraft] is the caller's notion — the composer
+/// keys off `sessionId == null`, the sheet off null OR empty.
+String currentModelValueOf({
+  required bool isDraft,
+  required Map<String, dynamic>? config,
+  required Map<String, String>? draftConfig,
+  required WorkspacePrep? prep,
+}) {
+  final liveModel = config?['model'];
+  if (!isDraft && liveModel != null && '$liveModel'.isNotEmpty) {
+    return '${config?['provider'] ?? ''}/$liveModel';
+  }
+  return draftConfig?['model'] ?? '${prep?.option('model')?.currentValue ?? ''}';
+}
+
+/// Thought-level chain for [currentModelValue] (design 11-09 §2):
+///
+/// 1. the model option's own `modelThoughtLevels` — per-model, correct right
+///    after a switch without re-fetching prep;
+/// 2. the prep `thought_level` options — the current model's levels at fetch
+///    time, and the sheet's pre-11-09 source;
+/// 3. the session config snapshot's `thoughtLevels` — the pre-existing last
+///    resort.
+///
+/// Level 1 and 2 agree until a switch (same prep response), so 1 > 2 is safe.
+List<String> thoughtChoicesOf({
+  required WorkspacePrep? prep,
+  required String currentModelValue,
+  required List<String> configLevels,
+}) {
+  final levels = modelOptionOf(prep, currentModelValue)?.modelThoughtLevels;
+  if (levels != null && levels.isNotEmpty) return levels;
+  final fromPrep =
+      prep?.option('thought_level')?.options.map((o) => o.value).toList() ??
+      const <String>[];
+  return fromPrep.isNotEmpty ? fromPrep : configLevels;
+}
+
+/// Display name for a thought level (design 11-09 §4): the desktop's option
+/// name when the prep still knows the value, else the raw value — the same
+/// fallback `_pickThought`'s raw list already shows.
+String thoughtLevelLabel(WorkspacePrep? prep, String value) {
+  for (final o
+      in prep?.option('thought_level')?.options ??
+          const <ConfigOptionValue>[]) {
+    if (o.value == value) return o.name;
+  }
+  return value;
+}
+
 /// Hides model choices whose `account:*` provider group the account is not
 /// entitled to (design 10-24 §3). [entitledIds] null = the provider-settings
 /// view could not be read (old desktop / bridge failure) → no filtering,
@@ -6663,14 +6753,28 @@ class _ModelModeSheet extends StatelessWidget {
     // draft branch walks the same chain the payload ships
     // ([effectiveNewTaskThought]) so the sheet never shows "unselected"
     // while createSession carries a defaulted level.
-    final liveModelValue =
-        '${config['provider'] ?? ''}/${config['model'] ?? ''}';
-    final currentModelValue =
-        _isDraft || config['model'] == null || '${config['model']}'.isEmpty
-        ? (draftConfig?['model'] ?? '${modelOption?.currentValue ?? ''}')
-        : liveModelValue;
+    final currentModelValue = currentModelValueOf(
+      isDraft: _isDraft,
+      config: config,
+      draftConfig: draftConfig,
+      prep: prep,
+    );
+    // The selected model's own thought table (design 11-09 §4/§5) — the
+    // draft branch and the chip list both read it so the displayed pick and
+    // the createSession default never disagree with the rendered list.
+    final targetOption = modelOptionOf(prep, currentModelValue);
+    final thoughtChoices = thoughtChoicesOf(
+      prep: prep,
+      currentModelValue: currentModelValue,
+      configLevels: state?.thoughtLevels ?? const [],
+    );
     final currentThoughtValue = _isDraft
-        ? effectiveNewTaskThought(draftConfig, prep)
+        ? effectiveNewTaskThought(
+            draftConfig,
+            prep,
+            targetLevels: targetOption?.modelThoughtLevels,
+            targetDefault: targetOption?.modelDefaultThoughtLevel,
+          )
         : (state?.currentThought.isNotEmpty == true
               ? state!.currentThought
               : '${thoughtOption?.currentValue ?? ''}');
@@ -6769,7 +6873,7 @@ class _ModelModeSheet extends StatelessWidget {
                 ]),
                 style: ZType.sub.copyWith(color: ZInk.muted(context)),
               ),
-            if (thoughtOption != null && thoughtOption.options.isNotEmpty) ...[
+            if (thoughtChoices.isNotEmpty) ...[
               // Same wire discipline as the model header above: desktop
               // config-option names are English ("Thought level"), the
               // section title always rides the local lexicon (the chip
@@ -6782,15 +6886,15 @@ class _ModelModeSheet extends StatelessWidget {
               Wrap(
                 spacing: 8,
                 children: [
-                  for (final v in thoughtOption.options)
+                  for (final value in thoughtChoices)
                     ChoiceChip(
-                      label: Text(v.name),
+                      label: Text(thoughtLevelLabel(prep, value)),
                       selected:
-                          currentThoughtValue == v.value ||
-                          state?.currentThought == v.value,
+                          currentThoughtValue == value ||
+                          state?.currentThought == value,
                       onSelected: (_) {
                         if (_isDraft) {
-                          onDraftChange?.call('thought', v.value);
+                          onDraftChange?.call('thought', value);
                         } else {
                           final modelValue = currentModelValue;
                           final (provider, model) = modelValue.isNotEmpty
@@ -6801,13 +6905,13 @@ class _ModelModeSheet extends StatelessWidget {
                                 );
                           Map<String, dynamic> switchedConfig() => {
                             ...?state!.config,
-                            'thought': v.value,
+                            'thought': value,
                           };
                           void patch() => state?.optimisticPatch({
                             'config': switchedConfig(),
                           });
                           onSwitchIssued?.call(
-                            _LastSwitch(sid, provider, model, v.value, patch),
+                            _LastSwitch(sid, provider, model, value, patch),
                           );
                           _apply(
                             context,
@@ -6815,7 +6919,7 @@ class _ModelModeSheet extends StatelessWidget {
                               sid,
                               provider: provider,
                               model: model,
-                              thought: v.value,
+                              thought: value,
                             ),
                             // Same trace discipline as the model switch
                             // (design 10-02 Step 3): accepted clears, lost
@@ -7986,21 +8090,24 @@ class _InputBarState extends State<_InputBar> {
 
   bool get _thoughtPickerVisible {
     if (isDraft) return _thoughtLabel.isNotEmpty;
-    final option = prep?.option('thought_level');
-    // thoughtLevels is the server's own copy of the thought choices inside
-    // the config snapshot — keep the chip when prep missed the option but
-    // the config carries levels, so a normal session never loses it
-    // (visual-zero-change constraint).
-    return (option != null && option.options.isNotEmpty) ||
-        (state?.thoughtLevels.isNotEmpty ?? false);
+    // Judged on the chain result, not its two inputs (design 11-09 §2): a
+    // model with its own levels must show the picker even when the stale
+    // prep thought_level options and the config snapshot both say none —
+    // the chain is a strict superset of the pre-11-09 condition, so a
+    // consistent session renders exactly as before.
+    return _thoughtChoices.isNotEmpty;
   }
 
-  List<String> get _thoughtChoices {
-    final fromPrep =
-        prep?.option('thought_level')?.options.map((o) => o.value).toList() ??
-        const <String>[];
-    return fromPrep.isNotEmpty ? fromPrep : (state?.thoughtLevels ?? const []);
-  }
+  List<String> get _thoughtChoices => thoughtChoicesOf(
+    prep: prep,
+    currentModelValue: currentModelValueOf(
+      isDraft: isDraft,
+      config: state?.config,
+      draftConfig: draftConfig,
+      prep: prep,
+    ),
+    configLevels: state?.thoughtLevels ?? const [],
+  );
 
   @override
   Widget build(BuildContext context) {

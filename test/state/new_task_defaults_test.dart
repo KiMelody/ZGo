@@ -315,4 +315,145 @@ void main() {
       expect(effectiveNewTaskThought(null, null), 'max');
     });
   });
+
+  // The target model's own table governs (design 11-09 §5): a direct send
+  // must never carry a thought outside it (createSession then fails).
+  group('effectiveNewTaskThought target table (design 11-09 §5)', () {
+    test('an explicit pick inside the target table survives', () {
+      expect(
+        effectiveNewTaskThought(
+          {'thought': 'low'},
+          null,
+          targetLevels: ['low', 'high', 'max'],
+          targetDefault: 'max',
+        ),
+        'low',
+      );
+    });
+
+    test('a pick outside the target table falls to the wire default', () {
+      expect(
+        effectiveNewTaskThought(
+          {'thought': 'ultra'},
+          null,
+          targetLevels: ['low', 'high', 'max'],
+          targetDefault: 'max',
+        ),
+        'max',
+      );
+    });
+
+    test('no default → the last level (the desktop values.at(-1) rule)', () {
+      expect(
+        effectiveNewTaskThought(
+          {'thought': 'ultra'},
+          null,
+          targetLevels: ['low', 'high'],
+        ),
+        'high',
+      );
+    });
+
+    test('a default outside the table is re-validated away', () {
+      expect(
+        effectiveNewTaskThought(
+          null,
+          null,
+          targetLevels: ['low', 'high'],
+          targetDefault: 'max',
+        ),
+        'high',
+      );
+    });
+
+    test('no target table keeps the original chain verbatim', () {
+      final p = prep(thoughts: ['low', 'high'], thoughtCurrent: 'high');
+      expect(effectiveNewTaskThought({'thought': 'low'}, p), 'low');
+      expect(
+        effectiveNewTaskThought(null, p, targetLevels: const []),
+        'high',
+        reason: 'an empty table is "no table", not an empty domain',
+      );
+    });
+  });
+
+  group('sanitizeNewTaskConfig target table (design 11-09 §5)', () {
+    test('the shipped thought lands inside the selected model table', () {
+      final p = WorkspacePrep.fromMap(const {
+        'configOptions': [
+          {
+            'id': 'model',
+            'options': [
+              {
+                'value': 'builtin/high-only',
+                'name': 'High Only',
+                'modelThoughtLevels': ['low', 'high'],
+              },
+              {
+                'value': 'builtin/wide',
+                'name': 'Wide',
+                'modelThoughtLevels': ['low', 'high', 'max'],
+                'modelDefaultThoughtLevel': 'max',
+              },
+            ],
+          },
+          {
+            'id': 'thought_level',
+            'currentValue': 'high',
+            'options': [
+              {'value': 'low', 'name': 'low'},
+              {'value': 'high', 'name': 'high'},
+            ],
+          },
+        ],
+      });
+
+      expect(
+        sanitizeNewTaskConfig(const {'model': 'builtin/wide'}, p),
+        {'provider': 'builtin', 'model': 'wide', 'thought': 'max'},
+      );
+      // A stale explicit pick outside the table does not ship.
+      expect(
+        sanitizeNewTaskConfig(
+          const {'model': 'builtin/high-only', 'thought': 'ultra'},
+          p,
+          explicitKeys: const {'model'},
+        )['thought'],
+        'high',
+      );
+    });
+
+    test('a dropped model (follow-the-desktop seed) keeps the old chain', () {
+      final p = WorkspacePrep.fromMap(const {
+        'configOptions': [
+          {
+            'id': 'model',
+            'options': [
+              {
+                'value': 'builtin/wide',
+                'name': 'Wide',
+                'modelThoughtLevels': ['low', 'high', 'max'],
+                'modelDefaultThoughtLevel': 'max',
+              },
+            ],
+          },
+          {
+            'id': 'thought_level',
+            'currentValue': 'high',
+            'options': [
+              {'value': 'low', 'name': 'low'},
+              {'value': 'high', 'name': 'high'},
+            ],
+          },
+        ],
+      });
+
+      // The seeded model is not in the options → dropped → no model table is
+      // the session's; the original chain answers 'high'.
+      expect(
+        sanitizeNewTaskConfig(const {'model': 'builtin/gone'}, p),
+        {'thought': 'high'},
+      );
+    });
+  });
 }

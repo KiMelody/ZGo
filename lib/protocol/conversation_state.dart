@@ -94,6 +94,18 @@ class ConfigOptionValue {
   final String? modelProviderId;
   final String? modelProviderName;
 
+  /// Thought levels the option's own model supports (wire-optional,
+  /// design 11-09 §1). The desktop builder only emits the key when the
+  /// model's `reasoning.levels` is non-empty, so a missing key and an empty
+  /// array both mean "no per-model table" — both degrade to null, and
+  /// malformed values degrade to null the same way (drift policy of
+  /// [modelProviderId]).
+  final List<String>? modelThoughtLevels;
+
+  /// The model's default thought level (wire-optional, only carried when it
+  /// is one of [modelThoughtLevels]); consumers re-check membership.
+  final String? modelDefaultThoughtLevel;
+
   ConfigOptionValue._(Map raw)
     : value = '${raw['value'] ?? ''}',
       name = '${raw['name'] ?? raw['value'] ?? ''}',
@@ -102,7 +114,24 @@ class ConfigOptionValue {
       modelProviderId = raw['modelProviderId'] is String
           ? raw['modelProviderId'] as String
           : null,
-      modelProviderName = raw['modelProviderName'] as String?;
+      modelProviderName = raw['modelProviderName'] as String?,
+      modelThoughtLevels = _thoughtLevels(raw['modelThoughtLevels']),
+      modelDefaultThoughtLevel = raw['modelDefaultThoughtLevel'] is String &&
+              (raw['modelDefaultThoughtLevel'] as String).isNotEmpty
+          ? raw['modelDefaultThoughtLevel'] as String
+          : null;
+
+  /// Wire `modelThoughtLevels` → non-empty `String[]` or null: an absent
+  /// key, an empty array and malformed values all read as "no per-model
+  /// table" (the builder's conditional spread yields both absent forms).
+  static List<String>? _thoughtLevels(Object? raw) {
+    if (raw is! List) return null;
+    final levels = [
+      for (final l in raw)
+        if (l is String && l.isNotEmpty) l,
+    ];
+    return levels.isEmpty ? null : levels;
+  }
 
   /// Public constructor: synthesizes sheet-side entries from other
   /// catalogs (the chat config sheet's model-provider fallback, PRD
@@ -113,6 +142,8 @@ class ConfigOptionValue {
     this.description,
     this.modelProviderId,
     this.modelProviderName,
+    this.modelThoughtLevels,
+    this.modelDefaultThoughtLevel,
   });
 }
 

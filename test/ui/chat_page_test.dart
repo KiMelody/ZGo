@@ -130,12 +130,24 @@ class _SwitchGateway extends FakeChatGateway {
   final _SwitchTransport transport;
   final WorkspacePrep? _prep;
 
+  /// prepareWorkspace answers served in order; the last one repeats. Lets a
+  /// test hand the page a stale prep first and a fresh one after the switch
+  /// (design 11-09 §3: the B re-fetch).
+  final List<WorkspacePrep> prepAnswers = [];
+  int prepareWorkspaceCalls = 0;
+
   @override
   ConversationTransport get conversationCommands => transport;
 
   @override
-  Future<WorkspacePrep> prepareWorkspace() async =>
-      _prep ?? await super.prepareWorkspace();
+  Future<WorkspacePrep> prepareWorkspace() async {
+    prepareWorkspaceCalls++;
+    if (prepAnswers.isNotEmpty) {
+      final index = (prepareWorkspaceCalls - 1).clamp(0, prepAnswers.length - 1);
+      return prepAnswers[index];
+    }
+    return _prep ?? await super.prepareWorkspace();
+  }
 }
 
 /// prepareWorkspace that ships no config options — the sheet-fallback
@@ -219,6 +231,118 @@ WorkspacePrep prepWithoutThoughtCurrent() => WorkspacePrep.fromMap(const {
   ],
   'slashCommands': <Map<String, dynamic>>[],
 });
+
+/// prepareWorkspace carrying the desktop's per-model thought tables (design
+/// 11-09 §1): `high-only` has [low, high], `wide` has [low, high, max] with
+/// max as the wire default, `plain` has no table (the whole key absent, the
+/// conditional-spread form). The global `thought_level` option deliberately
+/// describes `high-only` only — the stale-levels situation a switch creates.
+WorkspacePrep perModelThoughtPrep() => WorkspacePrep.fromMap(const {
+  'configOptions': [
+    {
+      'id': 'model',
+      'name': 'Model',
+      'currentValue': 'builtin/$kHighOnlyModel',
+      'options': [
+        {
+          'value': 'builtin/$kHighOnlyModel',
+          'name': 'High Only',
+          'modelProviderId': 'builtin',
+          'modelProviderName': 'Builtin',
+          'modelThoughtLevels': ['low', 'high'],
+        },
+        {
+          'value': 'builtin/$kWideModel',
+          'name': 'Wide',
+          'modelProviderId': 'builtin',
+          'modelProviderName': 'Builtin',
+          'modelThoughtLevels': ['low', 'high', 'max'],
+          'modelDefaultThoughtLevel': 'max',
+        },
+        {
+          'value': 'builtin/$kPlainModel',
+          'name': 'Plain',
+          'modelProviderId': 'builtin',
+          'modelProviderName': 'Builtin',
+        },
+      ],
+    },
+    {
+      'id': 'thought_level',
+      'name': 'Thought level',
+      'currentValue': 'high',
+      'options': [
+        {'value': 'low', 'name': '低'},
+        {'value': 'high', 'name': '高'},
+      ],
+    },
+  ],
+  'slashCommands': <Map<String, dynamic>>[],
+});
+
+const kHighOnlyModel = 'high-only';
+const kWideModel = 'wide';
+const kPlainModel = 'plain';
+
+/// prepareWorkspace for the re-fetch gate test (design 11-09 §3): a
+/// personal current model plus Start-plan and coding-plan options. Opening
+/// the page judges nothing (the personal provider never matches the Start
+/// plan regex), so the auto switch's one-shot guard stays unset — manually
+/// switching INTO the Start plan is then exactly the new trigger surface an
+/// ungated re-fetch would fire on (terminal snapshot + entitled target).
+WorkspacePrep startPlanSwitchPrep() => WorkspacePrep.fromMap(const {
+  'configOptions': [
+    {
+      'id': 'model',
+      'name': 'Model',
+      'currentValue': 'personal-huancheng/deepseek-v4-flash',
+      'options': [
+        {
+          'value': 'personal-huancheng/deepseek-v4-flash',
+          'name': 'Deepseek',
+          'modelProviderId': 'personal-huancheng',
+          'modelProviderName': '幻城',
+        },
+        {
+          'value': 'account:zai-start-plan/glm-flash',
+          'name': 'Start Flash',
+          'modelProviderId': 'account:zai-start-plan',
+          'modelProviderName': 'Start Plan',
+        },
+        {
+          'value': 'account:zai-individual-coding-plan/glm-pro',
+          'name': 'Coding Pro',
+          'modelProviderId': 'account:zai-individual-coding-plan',
+          'modelProviderName': 'Z.AI Individual Coding Plan',
+        },
+      ],
+    },
+  ],
+  'slashCommands': <Map<String, dynamic>>[],
+});
+
+/// Snapshot `config` for a live session on the personal model above — the
+/// re-fetch gate test's starting point (a provider the auto switch ignores).
+Map<String, dynamic> personalModelConfig() => {
+  'config': {
+    'provider': 'personal-huancheng',
+    'model': 'deepseek-v4-flash',
+    'thought': 'enabled',
+    'mode': 'build',
+  },
+};
+
+/// Snapshot `config` for a live session pinned to [model] of the fixture
+/// above — the starting point for switch tests.
+Map<String, dynamic> thoughtModelConfig(String model, {String thought = 'high'}) => {
+  'config': {
+    'provider': 'builtin',
+    'model': model,
+    'thought': thought,
+    'mode': 'build',
+    'thoughtLevels': ['low', 'high'],
+  },
+};
 
 /// FakeChatGateway with an injected prepareWorkspace answer (the shared
 /// default keeps recording createSession — the payload assertions below
@@ -5111,6 +5235,155 @@ void main() {
     );
   });
 
+  // ------------------- per-model thought levels (11-09)
+
+  testWidgets('thought levels follow the current model: the chain prefers the '
+      'model option own table over the stale prep thought option', (tester) async {
+    // Design 11-09 test plan 1: the fixture's global thought_level lists
+    // [low, high] (high-only's table), while `wide` carries [low, high,
+    // max]. Opening the picker on `wide` must show max even though the prep
+    // thought option never mentions it.
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport, prep: perModelThoughtPrep())
+      ..snapshotExtra = thoughtModelConfig(kWideModel, thought: 'max');
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('max')); // composer thought chip
+    await tester.pumpAndSettle();
+    expect(find.text('low'), findsOneWidget); // wide's full table renders
+    expect(find.text('high'), findsOneWidget);
+    // The level-1 marker: `max` is in wide's own table but never in the
+    // prep thought option — without the lookup the picker would drop it.
+    expect(
+      find.descendant(
+        of: find.byType(RadioListTile<String>),
+        matching: find.text('max'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('thought levels fall back to the prep option when the model '
+      'option carries no table', (tester) async {
+    // Design 11-09 test plan 2 (level 2): `plain` has no modelThoughtLevels
+    // key → the prep thought option answers. The picker lists raw values
+    // (official behavior), so the assertions use them, not the prep names.
+    final gateway = _SwitchGateway(
+      _SwitchTransport(),
+      prep: perModelThoughtPrep(),
+    )..snapshotExtra = thoughtModelConfig(kPlainModel);
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('高'));
+    await tester.pumpAndSettle();
+    expect(find.text('low'), findsOneWidget);
+    expect(find.text('max'), findsNothing);
+  });
+
+  testWidgets('thought levels fall back to the config snapshot when even the '
+      'prep thought option is absent', (tester) async {
+    // Design 11-09 test plan 2 (level 3): prep ships no thought option, so
+    // the session config's thoughtLevels is the last resort.
+    final gateway = _SwitchGateway(_SwitchTransport(), prep: barePrep())
+      ..snapshotExtra = thoughtModelConfig(kPlainModel);
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('high')); // raw live label (no prep names)
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byType(RadioListTile<String>),
+        matching: find.text('low'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(RadioListTile<String>),
+        matching: find.text('high'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('draft model switch re-renders the sheet thought list against '
+      'the new model table (close and reopen the sheet)', (tester) async {
+    // Design 11-09 test plan 6 (P2-5): the sheet is a separate route, so a
+    // page setState does not rebuild it — assert after closing and reopening.
+    // (The default recording transport answers createSession; the switch
+    // recording one is only needed for live-session cases.)
+    final gateway = _PrepGateway(perModelThoughtPrep());
+    await tester.pumpWidget(wrap(ChatPage(host: gateway, title: '新任务')));
+    await tester.pumpAndSettle();
+
+    // Draft starts on the prep currentValue model: high-only's [low, high].
+    // (The composer chip renders the same "高" label, so scope to the sheet.)
+    await tester.tap(find.text('high-only')); // composer model chip
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(ChoiceChip, '高'), findsOneWidget);
+    expect(find.widgetWithText(ChoiceChip, 'max'), findsNothing);
+
+    // Pick `wide` in the draft sheet. The sheet re-renders in place
+    // (StatefulBuilder wrapper): wide's table — and its default `max`
+    // selection — appear without closing.
+    await tester.tap(find.text('Wide'));
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(ChoiceChip, 'max'), findsOneWidget);
+    expect(
+      tester.widget<ChoiceChip>(find.widgetWithText(ChoiceChip, 'max')).selected,
+      isTrue,
+      reason: 'the open sheet follows the pick in place',
+    );
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('wide')); // composer chip follows the pick
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(ChoiceChip, 'max'), findsOneWidget);
+    expect(find.widgetWithText(ChoiceChip, '高'), findsOneWidget);
+    expect(
+      tester
+          .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, 'max'))
+          .selected,
+      isTrue,
+      reason: 'the selection falls to the target table default (max)',
+    );
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), '开始分析');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    final call = gateway.calls
+        .where((c) => c.$1 == 'createSession')
+        .toList()
+        .single;
+    expect(call.$2[2], {
+      'provider': 'builtin',
+      'model': kWideModel,
+      'thought': 'max',
+    }, reason: 'the direct-send default lands inside the target table');
+  });
+
   testWidgets('config-sheet fallback: no prep options renders the '
       'model-provider catalog', (tester) async {
     final gateway = _SwitchGateway(_SwitchTransport(), prep: barePrep())
@@ -5491,6 +5764,316 @@ void main() {
     // No optimistic patch (chip stays placeholder) and no sheet close.
     expect(find.text('GLM-5.2 Air'), findsOneWidget); // sheet list
     expect(find.text('模型'), findsNWidgets(2)); // chip + sheet section head
+  });
+
+  testWidgets('model switch falls back to the target table default when the '
+      'current thought is not in it', (tester) async {
+    // Design 11-09 test plan 3: switching high-only → wide with a thought
+    // (`ultra`) that neither table can name. The stale prep option carries
+    // 'high' as its currentValue, which the pre-11-09 chain would ship; the
+    // target table's default must win.
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport, prep: perModelThoughtPrep())
+      ..snapshotExtra = thoughtModelConfig(kHighOnlyModel, thought: 'ultra');
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('high-only')); // composer model chip
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Wide'));
+    await tester.pumpAndSettle();
+
+    expect(transport.switches.single.model, kWideModel);
+    expect(
+      transport.switches.single.thought,
+      'max',
+      reason: 'the target table default outranks the stale prep currentValue',
+    );
+  });
+
+  testWidgets('model switch keeps the current thought when the target table '
+      'contains it', (tester) async {
+    // Design 11-09 test plan 3 (keep branch).
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport, prep: perModelThoughtPrep())
+      ..snapshotExtra = thoughtModelConfig(kHighOnlyModel);
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('high-only'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Wide'));
+    await tester.pumpAndSettle();
+
+    expect(transport.switches.single.thought, 'high');
+  });
+
+  testWidgets('model switch with no target table keeps the pre-11-09 chain '
+      'verbatim: a listed current thought is kept (regression lock)',
+      (tester) async {
+    // Design 11-09 test plan 4 (P2-6): a model whose option carries no
+    // modelThoughtLevels must walk the original branch unchanged.
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport, prep: perModelThoughtPrep())
+      ..snapshotExtra = thoughtModelConfig(kHighOnlyModel);
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('high-only'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Plain'));
+    await tester.pumpAndSettle();
+
+    // currentThought 'high' IS in the stale prep options → kept as-is.
+    expect(transport.switches.single.model, kPlainModel);
+    expect(transport.switches.single.thought, 'high');
+  });
+
+  testWidgets('model switch with no target table falls back to the prep '
+      'currentValue when the current thought is unlisted (regression lock)',
+      (tester) async {
+    // Design 11-09 test plan 4, second half of the verbatim branch.
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport, prep: perModelThoughtPrep())
+      ..snapshotExtra = thoughtModelConfig(kPlainModel, thought: 'ultra');
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('plain'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('High Only'));
+    await tester.pumpAndSettle();
+
+    expect(transport.switches.single.thought, 'high');
+  });
+
+  testWidgets('accepted model switch re-fetches prep exactly once and never '
+      'runs the Start-plan auto switch', (tester) async {
+    // Design 11-09 test plan 5 (P2-4): the re-fetch fires on accepted only,
+    // and it must not hand _maybeAutoSwitchStartPlan a new trigger surface.
+    // The fixture makes that surface real: the session sits on a personal
+    // model (opening judges nothing — the provider never matches, so the
+    // one-shot guard stays unset), then the user manually picks a Start-plan
+    // model with the entitlement snapshot terminal and an entitled
+    // coding-plan target in the pool. An ungated re-fetch would fire the
+    // auto switch and rewrite the pick; the gate is locked by the absence
+    // of a second command.
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport, prep: startPlanSwitchPrep())
+      ..snapshotExtra = personalModelConfig()
+      ..entitlementResult = startPlanExhausted()
+      ..entitledProviderIdsResult = {
+        'account:zai-individual-coding-plan',
+        'account:zai-start-plan',
+      };
+    await pumpWithQuota(tester, gateway);
+    expect(transport.switches, isEmpty); // no opening-page auto switch
+    final callsBeforeSwitch = gateway.prepareWorkspaceCalls;
+    expect(callsBeforeSwitch, greaterThanOrEqualTo(1));
+
+    await tester.tap(find.text('personal-huancheng/deepseek-v4-flash'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Start Flash'));
+    await tester.pumpAndSettle();
+
+    expect(transport.switches.single.model, 'glm-flash');
+    expect(
+      gateway.prepareWorkspaceCalls,
+      callsBeforeSwitch + 1,
+      reason: 'one re-fetch per accepted switch',
+    );
+    expect(
+      transport.switches,
+      hasLength(1),
+      reason: 'the gated re-fetch triggered no auto switch — the manual '
+          'Start-plan pick stands',
+    );
+    expect(find.textContaining('Start 套餐已不可用'), findsNothing);
+  });
+
+  testWidgets('a lost-ack model switch does not re-fetch prep', (tester) async {
+    // Design 11-09 §3: the command may be swallowed; a re-fetch would read
+    // an unchanged prep and pollute the revert trace.
+    final transport = _SwitchTransport(results: [
+      TimeoutException('switchModelConfig'),
+    ]);
+    final gateway = _SwitchGateway(transport, prep: perModelThoughtPrep())
+      ..snapshotExtra = thoughtModelConfig(kHighOnlyModel);
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+    final callsBeforeSwitch = gateway.prepareWorkspaceCalls;
+
+    await tester.tap(find.text('high-only'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Wide'));
+    await tester.pumpAndSettle();
+
+    expect(transport.switches, hasLength(1));
+    expect(gateway.prepareWorkspaceCalls, callsBeforeSwitch);
+  });
+
+  testWidgets('reverse switch (max model → high-only) backtracks the list and '
+      'never leaves an out-of-table selection', (tester) async {
+    // Design 11-09 test plan 7: the picker drops `max` again and the chip
+    // falls back inside [low, high].
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport, prep: perModelThoughtPrep())
+      ..snapshotExtra = thoughtModelConfig(kWideModel, thought: 'max');
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('max'));
+    await tester.pumpAndSettle();
+    expect(find.text('low'), findsOneWidget); // wide's table
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('wide'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('High Only'));
+    await tester.pumpAndSettle();
+
+    // The switch itself lands inside the target table (max is absent).
+    expect(transport.switches.single.model, kHighOnlyModel);
+    expect(transport.switches.single.thought, 'high');
+
+    // The picker follows: no `max` left once the config carries high-only.
+    // (The switch snackbar covers the composer, so let it expire first.)
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    gateway.snapshotExtra = thoughtModelConfig(kHighOnlyModel, thought: 'high');
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('高'));
+    await tester.pumpAndSettle();
+    expect(find.text('low'), findsOneWidget);
+    expect(find.text('max'), findsNothing);
+  });
+
+  testWidgets('AC1: high-only → max model makes max appear in the picker '
+      'without reopening the page', (tester) async {
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(transport, prep: perModelThoughtPrep())
+      ..snapshotExtra = thoughtModelConfig(kHighOnlyModel);
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('高'));
+    await tester.pumpAndSettle();
+    expect(find.text('max'), findsNothing);
+    tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('high-only'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Wide'));
+    await tester.pumpAndSettle();
+
+    // Same page, no re-open: the picker now lists `wide`'s table, max
+    // included (high stayed selected — it is inside both tables). The
+    // switch snackbar sits over the composer, so let it expire first.
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('高'));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byType(RadioListTile<String>),
+        matching: find.text('max'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('AC1: entering a model with a table from a table-less one keeps '
+      'the thought entry visible', (tester) async {
+    // Design 11-09 test plan 8 (P1-1 visibility): prep has no thought_level
+    // option and the config snapshot has no thoughtLevels, so the old
+    // two-condition gate hid the entry; the chain's level 1 restores it.
+    final transport = _SwitchTransport();
+    final gateway = _SwitchGateway(
+      transport,
+      prep: WorkspacePrep.fromMap(const {
+        'configOptions': [
+          {
+            'id': 'model',
+            'currentValue': 'builtin/$kPlainModel',
+            'options': [
+              {'value': 'builtin/$kPlainModel', 'name': 'Plain'},
+              {
+                'value': 'builtin/$kWideModel',
+                'name': 'Wide',
+                'modelThoughtLevels': ['low', 'high', 'max'],
+                'modelDefaultThoughtLevel': 'max',
+              },
+            ],
+          },
+        ],
+        'slashCommands': <Map<String, dynamic>>[],
+      }),
+    )..snapshotExtra = {
+        'config': {
+          'provider': 'builtin',
+          'model': kPlainModel,
+          'thought': 'high',
+          'mode': 'build',
+        },
+      };
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+    ]);
+    await tester.pumpAndSettle();
+
+    // No table anywhere yet → no thought chip (unchanged behavior).
+    expect(find.byIcon(Icons.psychology_alt_outlined), findsNothing);
+
+    await tester.tap(find.text('plain'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Wide'));
+    await tester.pumpAndSettle();
+
+    // The chain's level 1 makes the entry render (the old gate stayed false).
+    expect(find.byIcon(Icons.psychology_alt_outlined), findsOneWidget);
   });
 
   testWidgets('loading placeholder: degraded bridge line + slow hint after 5s', (

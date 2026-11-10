@@ -95,11 +95,42 @@ Map<String, dynamic> sanitizeNewTaskConfig(
   }
 
   final thought = merged['thought'] ?? '';
+  final target = _thoughtTargetOf(prep, config);
   config['thought'] =
       explicitKeys.contains('thought') && thought.isNotEmpty
       ? thought
-      : effectiveNewTaskThought(merged, prep);
+      : effectiveNewTaskThought(
+          merged,
+          prep,
+          targetLevels: target?.modelThoughtLevels,
+          targetDefault: target?.modelDefaultThoughtLevel,
+        );
   return config;
+}
+
+/// The model option [composite] (`provider/model`, the wire option value)
+/// addresses — the carrier of that model's per-model thought table
+/// (design 11-09 §2/§5).
+ConfigOptionValue? modelOptionOf(WorkspacePrep? prep, String composite) {
+  if (prep == null || composite.isEmpty) return null;
+  for (final option
+      in prep.option('model')?.options ?? const <ConfigOptionValue>[]) {
+    if (option.value == composite) return option;
+  }
+  return null;
+}
+
+/// The target model's table for a config the assembly already resolved:
+/// nothing when the model was dropped (follow-the-desktop seeds) — the
+/// session then runs the desktop's own model and the original chain applies.
+ConfigOptionValue? _thoughtTargetOf(
+  WorkspacePrep? prep,
+  Map<String, dynamic> config,
+) {
+  final provider = config['provider'];
+  final model = config['model'];
+  if (provider is! String || model is! String) return null;
+  return modelOptionOf(prep, '$provider/$model');
 }
 
 /// Effective thought level for a new-task config — the value createSession's
@@ -111,11 +142,28 @@ Map<String, dynamic> sanitizeNewTaskConfig(
 /// a cold runtime fails model creation ("Reasoning level is required",
 /// 09-25 diagnosis) — the web facade always carries thought.
 /// Migrated from chat_page's `_effectiveDraftThought`.
+///
+/// [targetLevels] is the selected model's own table (design 11-09 §5): when
+/// present it governs outright — the explicit pick only counts inside it,
+/// then its default (re-validated), then its last level, mirroring the
+/// desktop's `values.at(-1)` default. A model without a table (null/empty)
+/// keeps the original chain verbatim.
 String effectiveNewTaskThought(
   Map<String, String>? config,
-  WorkspacePrep? prep,
-) {
+  WorkspacePrep? prep, {
+  List<String>? targetLevels,
+  String? targetDefault,
+}) {
   final explicit = config?['thought'];
+  if (targetLevels != null && targetLevels.isNotEmpty) {
+    if (explicit != null && explicit.isNotEmpty) {
+      if (targetLevels.contains(explicit)) return explicit;
+    }
+    if (targetDefault != null && targetLevels.contains(targetDefault)) {
+      return targetDefault;
+    }
+    return targetLevels.last;
+  }
   final thoughtOption = prep?.option('thought_level');
   if (explicit != null &&
       explicit.isNotEmpty &&

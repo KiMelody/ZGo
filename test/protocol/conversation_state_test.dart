@@ -64,6 +64,77 @@ void main() {
     });
   });
 
+  /// Per-model thought table (design 11-09 §1): the desktop builder emits
+  /// `modelThoughtLevels` / `modelDefaultThoughtLevel` only when the model
+  /// has reasoning levels, so every shape other than a non-empty string
+  /// array must read as "no table" (null) — the callers keep their fallback
+  /// chains for those models.
+  group('ConfigOptionValue modelThoughtLevels (wire fixture, design 11-09)',
+      () {
+    WorkspacePrep prepWith(Map<String, dynamic> option) =>
+        WorkspacePrep.fromMap({
+          'configOptions': [
+            {
+              'id': 'model',
+              'name': 'Model',
+              'currentValue': 'builtin/glm-5.2',
+              'options': [
+                {'value': 'builtin/glm-5.2', 'name': 'GLM-5.2', ...option},
+              ],
+            },
+          ],
+          'slashCommands': <Map<String, dynamic>>[],
+        });
+
+    test('parses both fields off the wire when present', () {
+      final value = prepWith({
+        'modelThoughtLevels': ['low', 'high', 'max'],
+        'modelDefaultThoughtLevel': 'max',
+      }).option('model')!.options.single;
+
+      expect(value.modelThoughtLevels, ['low', 'high', 'max']);
+      expect(value.modelDefaultThoughtLevel, 'max');
+    });
+
+    test('an absent key degrades to null (the conditional-spread form)', () {
+      final value = prepWith(const {}).option('model')!.options.single;
+
+      expect(value.modelThoughtLevels, isNull);
+      expect(value.modelDefaultThoughtLevel, isNull);
+    });
+
+    test('an empty array is the same "no table" answer as an absent key', () {
+      final value = prepWith(const {
+        'modelThoughtLevels': <String>[],
+      }).option('model')!.options.single;
+
+      expect(value.modelThoughtLevels, isNull);
+    });
+
+    test('a wrong-typed value degrades to null instead of throwing', () {
+      final value = prepWith(const {
+        'modelThoughtLevels': 'low,high',
+        'modelDefaultThoughtLevel': 42,
+      }).option('model')!.options.single;
+
+      expect(value.modelThoughtLevels, isNull);
+      expect(value.modelDefaultThoughtLevel, isNull);
+    });
+
+    test('the public constructor carries synthesized levels (spec rather '
+        'than wire drift)', () {
+      final value = ConfigOptionValue(
+        value: 'builtin/glm-5.2',
+        name: 'GLM-5.2',
+        modelThoughtLevels: const ['low', 'max'],
+        modelDefaultThoughtLevel: 'low',
+      );
+
+      expect(value.modelThoughtLevels, ['low', 'max']);
+      expect(value.modelDefaultThoughtLevel, 'low');
+    });
+  });
+
   /// Task-row `lastError` getters (task 11-08-error-detail): the chat error
   /// preview / detail sheet read message / code / traceId / attribution off
   /// the same raw meta the Copy-TraceID surface already used. Every getter
