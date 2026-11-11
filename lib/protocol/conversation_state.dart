@@ -983,6 +983,15 @@ class ConversationState extends ChangeNotifier {
   int totalCount = 0;
   bool ready = false;
 
+  /// Whether this conversation ever carried row-level `actions` (the
+  /// desktop's per-row command-availability patch). Sticky: once seen it
+  /// never resets — the desktop's capability does not change mid-session,
+  /// and a snapshot refresh or resync must not retract it. Timeline
+  /// consumers read it as the capability gate: an absent `actions` member
+  /// means the desktop said unavailable, not "no data", ONLY in sessions
+  /// that have shown the surface (research/row-actions-push.md).
+  bool sawRowActions = false;
+
   /// Set by [deactivateState]; the notification path below checks it.
   bool _deactivated = false;
 
@@ -1179,6 +1188,7 @@ class ConversationState extends ChangeNotifier {
     } else {
       rows = snapRows;
     }
+    sawRowActions |= snapRows.any((r) => r['actions'] is Map);
     // The paging-cursor authority is the oldest signal we hold: the oldest
     // HELD row when history pages were prepended, else the snapshot's
     // declared firstRowId (which can sit OUTSIDE the window — the
@@ -1207,6 +1217,7 @@ class ConversationState extends ChangeNotifier {
         break;
       case 'row.upserted':
         final row = (delta['row'] as Map).cast<String, dynamic>();
+        if (row['actions'] is Map) sawRowActions = true;
         final id = (row['rowId'] as num?)?.toInt();
         final index = rows.indexWhere(
           (r) => (r['rowId'] as num?)?.toInt() == id,

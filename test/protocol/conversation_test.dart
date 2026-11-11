@@ -500,6 +500,93 @@ void main() {
       expect(state.isRunning, isFalse);
       expect(state.canStop, isFalse);
     });
+
+    // Row-level command availability (task 11-11-command-availability-pilot,
+    // design §2): `sawRowActions` is the session-wide capability gate the
+    // timeline's three-state `rowActionAllowed` reads. Sticky by contract —
+    // the desktop's capability does not change mid-session, so neither a
+    // later actionless snapshot nor an actionless upsert may retract it.
+    group('sawRowActions capability gate', () {
+      test('stays false for rows without actions (old desktop)', () {
+        _injectSnapshot(state, rows: [
+          {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+          {'rowId': 2, 'kind': 'turnHeader', 'state': 'completedSuccess'},
+        ]);
+
+        expect(state.sawRowActions, isFalse);
+      });
+
+      test('a snapshot row carrying actions arms the gate', () {
+        _injectSnapshot(state, rows: [
+          {'rowId': 1, 'kind': 'userInput', 'text': 'hi', 'actions': {
+            'canEdit': true,
+          }},
+          {'rowId': 2, 'kind': 'assistantText', 'text': 'done'},
+        ]);
+
+        expect(state.sawRowActions, isTrue);
+      });
+
+      test('a row.upserted patch carrying actions arms the gate', () {
+        _injectSnapshot(state, seq: 1, rows: [
+          {'rowId': 1, 'kind': 'assistantText', 'text': 'done'},
+        ]);
+        expect(state.sawRowActions, isFalse);
+
+        state.applyFrame({
+          'payload': {
+            'kind': 'deltas',
+            'deltas': [
+              {
+                'op': 'row.upserted',
+                'row': {
+                  'rowId': 1,
+                  'kind': 'assistantText',
+                  'text': 'done',
+                  'actions': {'canFork': true},
+                },
+              },
+            ],
+          },
+          'fromSeq': 1,
+          'toSeq': 2,
+        }, onGap: () => fail('unexpected gap'));
+
+        expect(state.sawRowActions, isTrue);
+      });
+
+      test('sticky: later actionless snapshots and upserts keep the gate', () {
+        _injectSnapshot(state, seq: 1, rows: [
+          {'rowId': 1, 'kind': 'assistantText', 'text': 'done', 'actions': {
+            'canFork': true,
+          }},
+        ]);
+        expect(state.sawRowActions, isTrue);
+
+        // The desktop removed the actions member from the row (its
+        // unavailable shape) — an upsert must not clear the gate.
+        state.applyFrame({
+          'payload': {
+            'kind': 'deltas',
+            'deltas': [
+              {
+                'op': 'row.upserted',
+                'row': {'rowId': 1, 'kind': 'assistantText', 'text': 'done'},
+              },
+            ],
+          },
+          'fromSeq': 1,
+          'toSeq': 2,
+        }, onGap: () => fail('unexpected gap'));
+        expect(state.sawRowActions, isTrue);
+
+        // A wholesale resync with no actions anywhere does not either.
+        _injectSnapshot(state, seq: 3, rows: [
+          {'rowId': 1, 'kind': 'assistantText', 'text': 'done'},
+        ]);
+        expect(state.sawRowActions, isTrue);
+      });
+    });
   });
 
   group('optimistic config trace & revert detection (design 09-25 D3; '

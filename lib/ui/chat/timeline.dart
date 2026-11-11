@@ -895,6 +895,10 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
           row: header!,
           onAction: onAction,
           readOnly: widget.readOnly,
+          // Resolved against the turnHeader row itself (the wire hangs
+          // canRewindFiles on it); the bar stays dumb.
+          rewindAllowed:
+              rowActionAllowed(widget.state, header, 'canRewindFiles'),
         ),
       );
     }
@@ -904,6 +908,32 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
       children: children,
     );
   }
+}
+
+/// Three-state row-level command availability, read off the desktop's
+/// per-row `actions` patch (research/row-actions-push.md is the wire
+/// authority):
+///
+/// - `true`  — the row's `actions` map carries `key: true`: allow, render
+///   as today;
+/// - `false` — the row has an `actions` map without that key (the desktop
+///   only ever writes `literal(true)`, and an empty map normalizes away),
+///   OR the row has no `actions` member at all in a conversation that has
+///   shown the surface ([ConversationState.sawRowActions]): the desktop
+///   said unavailable — tighten (hide the entry);
+/// - `null`  — no `actions` member and the conversation never showed the
+///   surface (older desktop, capability gate never armed): fall back to the
+///   pre-existing rendering, so old desktops keep every entry.
+///
+/// Callers tighten only on `== false`; `null` and `true` render as before.
+bool? rowActionAllowed(
+  ConversationState state,
+  Map<String, dynamic> row,
+  String key,
+) {
+  final actions = row['actions'];
+  if (actions is Map) return actions[key] == true;
+  return state.sawRowActions ? false : null;
 }
 
 class ChatRow extends StatelessWidget {
@@ -985,7 +1015,8 @@ class ChatRow extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (kind == 'userInput')
+            if (kind == 'userInput' &&
+                rowActionAllowed(state, row, 'canEdit') != false)
               ListTile(
                 leading: const Icon(Icons.edit_outlined, size: 20),
                 title: Text(tr(context, 'chat.action.editResend')),
@@ -1007,7 +1038,8 @@ class ChatRow extends StatelessWidget {
                 );
               },
             ),
-            if (actions?.fork != null)
+            if (actions?.fork != null &&
+                rowActionAllowed(state, row, 'canFork') != false)
               ListTile(
                 leading: const Icon(Icons.fork_right, size: 20),
                 title: Text(tr(context, 'chat.action.fork')),
@@ -1025,14 +1057,22 @@ class ChatRow extends StatelessWidget {
                   actions!.askInSideChat!(rowContext, sessionId);
                 },
               ),
-            ListTile(
-              leading: const Icon(Icons.history, size: 20),
-              title: Text(tr(context, 'chat.action.rewind')),
-              onTap: () {
-                Navigator.pop(context);
-                _confirmRewind(context);
-              },
-            ),
+            // Dead entry on desktops that push row actions: this sheet only
+            // opens for user/assistant rows, but applyFileRewind addresses a
+            // turnHeader target — the host rejects the click outright
+            // (research/row-actions-push.md, target shape). The live entry
+            // is the file-changes card's undo. Hide it once the row-actions
+            // surface is established; a desktop that never showed it keeps
+            // the pre-existing rendering.
+            if (!state.sawRowActions)
+              ListTile(
+                leading: const Icon(Icons.history, size: 20),
+                title: Text(tr(context, 'chat.action.rewind')),
+                onTap: () {
+                  Navigator.pop(context);
+                  _confirmRewind(context);
+                },
+              ),
             ListTile(
               leading: const Icon(Icons.difference_outlined, size: 20),
               title: Text(tr(context, 'chat.action.fileChanges')),
@@ -1128,6 +1168,10 @@ class ChatRow extends StatelessWidget {
         onEditSend: readOnly || onEditSend == null
             ? null
             : (newText, rewind) => onEditSend!(_target, newText, rewind),
+        // Row-level availability, resolved here so the bubble stays dumb
+        // (no ConversationState). `false` hides the mini edit affordance;
+        // `null` / `true` keep it.
+        editAllowed: rowActionAllowed(state, row, 'canEdit'),
         rewindRunning: state.isRunning,
       ),
       'assistantText' => _AssistantBubble(
@@ -1198,6 +1242,11 @@ class _UserBubble extends StatefulWidget {
   /// state (official 09: 「对话 + 文件重置」运行中置灰).
   final bool rewindRunning;
 
+  /// Row-level `canEdit` verdict, resolved by [ChatRow] so this bubble
+  /// stays free of [ConversationState]: `false` hides the mini edit
+  /// affordance, `null` / `true` keep the existing gating.
+  final bool? editAllowed;
+
   const _UserBubble({
     required this.row,
     required this.conversation,
@@ -1205,6 +1254,7 @@ class _UserBubble extends StatefulWidget {
     this.editingRowId,
     this.onEditSend,
     this.rewindRunning = false,
+    this.editAllowed,
   });
 
   @override
@@ -1341,7 +1391,9 @@ class _UserBubbleState extends State<_UserBubble> {
                 );
               },
             ),
-            if (widget.editingRowId != null && widget.onEditSend != null)
+            if (widget.editingRowId != null &&
+                widget.onEditSend != null &&
+                widget.editAllowed != false)
               _MiniAction(
                 icon: Icons.edit_outlined,
                 tooltip: tr(context, 'chat.action.editResend'),
@@ -1738,7 +1790,8 @@ class _AssistantBubble extends StatelessWidget {
                     onTap: () =>
                         _setFeedback(feedback == 'dislike' ? null : 'dislike'),
                   ),
-                  if (actions?.fork != null)
+                  if (actions?.fork != null &&
+                      rowActionAllowed(state, row, 'canFork') != false)
                     _FeedbackButton(
                       icon: Icons.fork_right,
                       tooltip: tr(context, 'chat.feedback.fork'),
@@ -3036,6 +3089,13 @@ class _FileChangesBar extends StatelessWidget {
   /// stays.
   final bool readOnly;
 
+  /// Row-level `canRewindFiles` verdict for this turn's header row,
+  /// resolved by the caller so the bar stays dumb: `false` hides the 撤销
+  /// button, `null` / `true` keep the existing gating. A running turn's
+  /// header carries no `actions` member, which lands in the tighten branch
+  /// only once the conversation has shown the surface.
+  final bool? rewindAllowed;
+
   const _FileChangesBar({
     required this.changes,
     required this.conversation,
@@ -3043,6 +3103,7 @@ class _FileChangesBar extends StatelessWidget {
     required this.row,
     required this.onAction,
     this.readOnly = false,
+    this.rewindAllowed,
   });
 
   @override
@@ -3080,7 +3141,7 @@ class _FileChangesBar extends StatelessWidget {
               ),
             ),
           ),
-          if (!readOnly)
+          if (!readOnly && rewindAllowed != false)
             TextButton(
               onPressed: () => _rewindWithPreview(context),
               child: Text(
