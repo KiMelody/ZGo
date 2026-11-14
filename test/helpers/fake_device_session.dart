@@ -262,6 +262,12 @@ class FakeDeviceSession extends DeviceSession {
   @override
   ConversationTransport get conversationCommands => _conversationCommands;
 
+  /// Programmed [ConversationTransport.createSelectionSideSession] answers,
+  /// dequeued front-per-call (empty → `sess_side`); sessionId strings, or an
+  /// Exception/Error entry to throw. The side-chat create path programs this.
+  List<Object?> get createSelectionSideSessionResults =>
+      _conversationCommands.createSelectionSideSessionResults;
+
   /// Recorded [openWorkspace] calls `(workspace, taskId)` for assertions on
   /// the open path's workspace scope; [openWorkspacePurposes] keeps the
   /// purpose of each call in the same order.

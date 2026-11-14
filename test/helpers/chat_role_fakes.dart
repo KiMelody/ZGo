@@ -10,6 +10,7 @@ import 'package:zgo/state/chat_draft_store.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/state/entitlement_poller.dart';
 import 'package:zgo/state/quota_reset.dart';
+import 'package:zgo/state/side_chat_registry.dart';
 
 /// `Symbol("name")` → `name`. noSuchMethod hands out symbols and Flutter
 /// has no reflection; the toString shape is the stable SDK contract.
@@ -1226,6 +1227,113 @@ class ChatGatewayBundle extends ChangeNotifier
   set useQuotaError(Object? value) => quota.useQuotaError = value;
 
   List<(String, String?, String)> get useQuotaCalls => quota.useQuotaCalls;
+
+  // ------------------------------------------------------------ side chat
+  //
+  // [SideChatPort] stand-in for the tab tests (design 11-11-btw-side-chat
+  // §12). The production orchestration lives in DeviceSession (covered by
+  // test/state/side_chat_host_test.dart); this fake only answers what a page
+  // can observe: the registry view, the recorded orchestration calls and the
+  // programmed create/close/destroy outcomes.
+
+  /// Tabs per parent — the read view [sideChatTabs] answers.
+  final Map<String, List<SideChatTab>> sideChatTabsByParent = {};
+
+  /// Every `(parent, sessionId)` a close was issued for, in order.
+  final List<(String, String)> closedSideChatTabs = [];
+
+  /// Every `(parent, sessionId)` a destroy was issued for, in order.
+  final List<(String, String)> destroyedSideChatTabs = [];
+
+  /// Every `(parent, firstInput)` a create was issued for, in order.
+  final List<(String, String?)> createdSideChatRequests = [];
+
+  /// Every parent a restore was issued for, in order.
+  final List<String> restoredSideChatParents = [];
+
+  /// Programmed create outcomes, dequeued front-per-call: a [SideChatTab]
+  /// answers it, a String becomes a fresh tab, an Exception/Error is thrown
+  /// (empty → a `sess_side` tab). Mirrors the transport's
+  /// [FakeConversation.createSelectionSideSessionResults] pattern.
+  final List<Object?> createSideChatTabResults = [];
+
+  /// Programmed destroy faults, dequeued front-per-call: null (default)
+  /// succeeds. An Exception/Error models the delete failure that rethrows and
+  /// leaves the tab in place (the retry path).
+  final List<Object?> destroySideChatTabResults = [];
+
+  @override
+  List<SideChatTab> sideChatTabs(String parent) =>
+      List.unmodifiable(sideChatTabsByParent[parent] ?? const <SideChatTab>[]);
+
+  @override
+  Future<void> restoreSideChatTabs(String parent) async {
+    restoredSideChatParents.add(parent);
+  }
+
+  @override
+  Future<void> closeSideChatTab(String parent, String sessionId) async {
+    closedSideChatTabs.add((parent, sessionId));
+    // Production contract: close never throws — any bridge answer degrades
+    // to the completed local teardown (design §6). The channel-level fault
+    // matrix lives in the state tests (DeviceSession + channelHandler).
+    sideChatTabsByParent[parent]?.removeWhere((t) => t.sessionId == sessionId);
+    notifyListeners();
+  }
+
+  @override
+  Future<void> destroySideChatTab(String parent, String sessionId) async {
+    destroyedSideChatTabs.add((parent, sessionId));
+    // Production order: a non-idempotent delete fault rethrows with the tab
+    // untouched (the user may retry); only a settled delete removes it.
+    if (destroySideChatTabResults.isNotEmpty) {
+      final next = destroySideChatTabResults.removeAt(0);
+      if (next is Exception) throw next;
+      if (next is Error) throw next;
+    }
+    sideChatTabsByParent[parent]?.removeWhere((t) => t.sessionId == sessionId);
+    notifyListeners();
+  }
+
+  @override
+  Future<SideChatTab> createSideChatTab(
+    String parent, {
+    String? firstInput,
+  }) async {
+    createdSideChatRequests.add((parent, firstInput));
+    Object? answer;
+    if (createSideChatTabResults.isNotEmpty) {
+      answer = createSideChatTabResults.removeAt(0);
+    }
+    if (answer is Exception) throw answer;
+    if (answer is Error) throw answer;
+    final SideChatTab tab;
+    if (answer is SideChatTab) {
+      tab = answer;
+    } else if (answer is String && answer.isNotEmpty) {
+      tab = SideChatTab(sessionId: answer, ordinal: _nextSideChatOrdinal(parent));
+    } else {
+      tab = SideChatTab(
+        sessionId: 'sess_side',
+        ordinal: _nextSideChatOrdinal(parent),
+      );
+    }
+    (sideChatTabsByParent[parent] ??= []).add(tab);
+    notifyListeners();
+    return tab;
+  }
+
+  int _nextSideChatOrdinal(String parent) {
+    final used = {
+      for (final tab in sideChatTabsByParent[parent] ?? const <SideChatTab>[])
+        tab.ordinal,
+    };
+    var ordinal = 1;
+    while (used.contains(ordinal)) {
+      ordinal++;
+    }
+    return ordinal;
+  }
 }
 
 /// Historical name kept for the page-test fixtures (`FakeChatGateway`),

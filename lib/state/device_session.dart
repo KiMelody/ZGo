@@ -13,7 +13,8 @@ import '../protocol/channel_client.dart'
         isBridgeGateTimeoutError,
         isChannelLevelError,
         isChannelMissingError,
-        isSessionNotFoundError;
+        isSessionNotFoundError,
+        isSessionNotFoundText;
 import '../protocol/connection_params.dart';
 import '../protocol/conversation.dart';
 import '../protocol/desktop_capabilities.dart';
@@ -38,6 +39,8 @@ import 'entitlement_poller.dart';
 import 'link_supervisor.dart';
 import 'quota_reset.dart';
 import 'quota_watch.dart' show QuotaWatchSource;
+import 'side_chat_registry.dart';
+import 'side_chat_tab_store.dart';
 import 'sidecar_index_manager.dart';
 import 'task_directory.dart';
 import 'task_home_service.dart';
@@ -691,6 +694,43 @@ abstract interface class QuotaAccessPort {
   QuotaResetController get quotaResetController;
 }
 
+/// Side-chat (`selection_side_chat`) tab surface the chat page drives
+/// (design 11-11-btw-side-chat §12; R4/R6/R8/R9). Every piece of
+/// orchestration lives in the state layer — the page never touches
+/// [SideChatRegistry], [SideChatTabStore], [SessionsIndexState] or the task
+/// directory directly.
+///
+/// Two lifecycle tiers (R8): [closeSideChatTab] is a restorable collapse
+/// (runtime stopped, record removed, manifest entry kept — the next page
+/// entry rebuilds the tab) while [destroySideChatTab] is permanent (soft
+/// delete + manifest prune, never restored).
+abstract interface class SideChatPort {
+  /// Tabs of [parent] in ordinal order (the tab bar's order). Read-only view.
+  List<SideChatTab> sideChatTabs(String parent);
+
+  /// Rebuilds [parent]'s tabs from the persisted manifest (R8/AC9). The page
+  /// awaits this before building its tab children, so a subscription that
+  /// fails afterwards can read the restored ids and self-heal.
+  Future<void> restoreSideChatTabs(String parent);
+
+  /// Closes the tab's desktop runtime (`zcode-session.closeSession`, R4/AC5)
+  /// and removes the record; the manifest entry survives (restorable
+  /// collapse). Fault-tolerant: an unavailable bridge or any RPC fault still
+  /// completes the local teardown — losing the tab beats a stuck one.
+  Future<void> closeSideChatTab(String parent, String sessionId);
+
+  /// Destroys the tab permanently (R9/AC10): soft-deletes the session
+  /// (`deleteSession`, tombstoned through the task-home store) and prunes the
+  /// manifest entry. Idempotent when the session is already gone;
+  /// non-idempotent faults rethrow with the tab untouched.
+  Future<void> destroySideChatTab(String parent, String sessionId);
+
+  /// Creates a side chat attached to [parent] (R6/R2) and registers its tab;
+  /// answers the new tab so the page can switch to it at once. [firstInput]
+  /// becomes the side chat's first message when non-blank.
+  Future<SideChatTab> createSideChatTab(String parent, {String? firstInput});
+}
+
 /// Page-construction boundary of the chat UI (ADR-0008 rule ii): the union
 /// of every role a chat page may need, held only by the page classes
 /// ([ChatPage] / [SubagentDetailPage]) and the composition root
@@ -705,6 +745,7 @@ abstract interface class ChatPageHost
         TaskMetaPort,
         WorkspaceContextPort,
         SessionTruthPort,
+        SideChatPort,
         GitAccessPort,
         QuotaAccessPort {}
 
@@ -844,6 +885,10 @@ class DeviceSession extends ChangeNotifier
     // home store; page ops await the load themselves, so this only
     // front-runs the first restore. No notify — nothing listens.
     unawaited(_chatDraftStore.load());
+    // Side-chat tab manifest (design 11-11-btw-side-chat §3): fire-and-forget
+    // warm-up; [restoreSideChatTabs] awaits the load itself. No notify —
+    // tabs only materialize on an explicit page entry.
+    unawaited(_sideChatTabStore.load());
   }
 
   /// Composer-draft attachment root resolver (hub-injected so lib/state
@@ -880,6 +925,19 @@ class DeviceSession extends ChangeNotifier
   /// In-flight [resumeSessionOnReturn] futures by session id (AC4 debounce:
   /// a burst of `didPopNext` callbacks shares ONE open/subscribe chain).
   final Map<String, Future<ChatHandle>> _resumeInFlight = {};
+
+  // --- Side-chat tabs (design 11-11-btw-side-chat §2/§3) ---
+
+  /// Parent session id → side-chat tabs for the life of this process. The
+  /// persisted manifest [SideChatTabStore] is the recovery source
+  /// ([restoreSideChatTabs]); every mutation here keeps it in sync.
+  final SideChatRegistry _sideChats = SideChatRegistry();
+
+  /// Persisted tab manifest (device + workspace keyed): registers and
+  /// destroys write through, a restart restores from it (design §3). The
+  /// sessions-index is NOT a source — `selection_side_chat` never enters it.
+  late final SideChatTabStore _sideChatTabStore =
+      SideChatTabStore(deviceId: deviceId);
 
   /// Session ids whose resume currently owns the open/subscribe chain —
   /// guards the subscribe→reroute→subscribe recursion in [subscribe].
@@ -3656,6 +3714,314 @@ class DeviceSession extends ChangeNotifier
     _taskHome.rememberLocalDelete(sessionId);
     notifyListeners();
     return res;
+  }
+
+  /// Side-chat tabs of [parent] in ordinal order (the tab bar's order).
+  /// Read-only view; the page renders it and never mutates the registry
+  /// directly.
+  @override
+  List<SideChatTab> sideChatTabs(String parent) => _sideChats.tabsOf(parent);
+
+  /// The persisted tab manifest (device + workspace keyed). Test seam.
+  @visibleForTesting
+  SideChatTabStore get sideChatTabStore => _sideChatTabStore;
+
+  /// Registers a freshly created side chat under [parent] and persists it
+  /// (creation path, R8). Returns the tab (ordinal assigned here); an id
+  /// that is already known answers the existing tab and touches nothing.
+  SideChatTab registerSideChatTab(String parent, String sessionId) {
+    final tab = _sideChats.register(parent, sessionId);
+    final scope = _sideChatScope(parent);
+    if (scope != null) _sideChatTabStore.put(scope.key, parent, tab);
+    return tab;
+  }
+
+  /// Drops the record of [sessionId] (close path, R4): page-level removal
+  /// only. The desktop runtime is stopped by the caller and the manifest
+  /// entry deliberately survives — close means restorable collapse, so the
+  /// next page entry rebuilds the tab (R8).
+  void closeSideChatTabRecord(String parent, String sessionId) {
+    _sideChats.close(parent, sessionId);
+  }
+
+  /// Drops the record of [sessionId] (destroy path, R9) AND its manifest
+  /// entry — the session is soft-deleted, so no restore may ever rebuild it.
+  void destroySideChatTabRecord(String parent, String sessionId) {
+    _sideChats.destroy(parent, sessionId);
+    final scope = _sideChatScope(parent);
+    if (scope != null) {
+      _sideChatTabStore.remove(scope.key, parent, sessionId);
+    }
+  }
+
+  /// Closes the tab (R4/AC5, [SideChatPort.closeSideChatTab]): stops the
+  /// desktop runtime through the channel, tears the local subscription down
+  /// and removes the record. The manifest entry survives — close is a
+  /// restorable collapse (R8).
+  ///
+  /// Fault tolerance (design §6): `-32004` / sessionNotFound answer success
+  /// (nothing left to close, exactly the official web remote's reading); any
+  /// other failure still completes the local teardown — losing the tab beats
+  /// a stuck one — and only logs.
+  @override
+  Future<void> closeSideChatTab(String parent, String sessionId) async {
+    if (_disposed) return;
+    final scope = _sideChatScope(parent);
+    if (scope != null) {
+      try {
+        await _closeSideChatRuntime(scope.owner, sessionId);
+      } catch (e) {
+        if (!_isSideChatSessionGone(e)) {
+          _log('[side-chat] closeSession $sessionId degraded to local '
+              'teardown: $e');
+        }
+      }
+    }
+    if (_disposed) return;
+    await _releaseSideChatSubscription(sessionId);
+    closeSideChatTabRecord(parent, sessionId);
+    if (!_disposed) notifyListeners();
+  }
+
+  /// Destroys the tab (R9/AC10, [SideChatPort.destroySideChatTab]): soft
+  /// deletes the session through [deleteSession] (keeping its local
+  /// tombstone), tears the subscription down and prunes the manifest entry —
+  /// no restore can ever rebuild it.
+  ///
+  /// Idempotent by wire shape, not by exception (verified 2026-11-13,
+  /// research/wire-recheck.md C): the host answers a delete of an already
+  /// soft-deleted or missing id with a *failed ack*
+  /// (`reasonCode: fault.command.queryUnavailable`), not a throw, so
+  /// [deleteSession] records the tombstone and this teardown proceeds
+  /// exactly like a first-time delete. The catch below therefore only sees
+  /// transport/encode faults (a non-gone failure rethrows with the tab
+  /// untouched so the user may retry); its gone-marker branch is defensive
+  /// and not reachable on today's wire.
+  @override
+  Future<void> destroySideChatTab(String parent, String sessionId) async {
+    if (_disposed) return;
+    try {
+      await deleteSession(sessionId);
+    } catch (e) {
+      if (!_isSideChatSessionGone(e)) rethrow;
+      // deleteSession threw before its own tombstone step; the row must not
+      // resurrect on the next directory rebuild.
+      _taskHome.rememberLocalDelete(sessionId);
+    }
+    if (_disposed) return;
+    await _releaseSideChatSubscription(sessionId);
+    destroySideChatTabRecord(parent, sessionId);
+    if (!_disposed) notifyListeners();
+  }
+
+  /// Creates a side chat attached to [parent] (R6/R2,
+  /// [SideChatPort.createSideChatTab]): the V4 ack names the new session, its
+  /// tab is registered (and persisted) here, and the tab answers so the page
+  /// can switch to it immediately. [firstInput] is sent as the side chat's
+  /// first message when non-blank (the transport trims and omits a blank
+  /// one); a rejected create throws with nothing registered.
+  @override
+  Future<SideChatTab> createSideChatTab(
+    String parent, {
+    String? firstInput,
+  }) async {
+    if (_disposed) throw StateError('disposed');
+    final sessionId = await conversationCommands.createSelectionSideSession(
+      parent,
+      firstText: firstInput,
+    );
+    final tab = registerSideChatTab(parent, sessionId);
+    if (!_disposed) notifyListeners();
+    return tab;
+  }
+
+  /// Thin `zcode-session.closeSession` wrapper (design §6 / D3, M0-d):
+  /// [workspacePath] is mandatory — the host routes the agent process by
+  /// `workspaceIdentity?.trim() || workspacePath`; with both absent the call
+  /// dies before any session RPC at the sqlite bind (`TypeError
+  /// [ERR_INVALID_ARG_TYPE]`, verified 2026-11-13 research/wire-recheck.md
+  /// A), and a non-empty identity alone can short-circuit onto a wrong/left-
+  /// over process. [workspaceIdentity] joins only when non-empty (the same
+  /// shape A1's listSessions check uses).
+  /// `expectedPersistence` is NEVER sent: a value that differs from the
+  /// runtime's mode answers `closed:false` without closing, while omitting
+  /// it always closes. The host wrapper swallows the answer ("then(()=>{})"),
+  /// so `closed` is unobservable here — callers read success/throw only.
+  Future<void> _closeSideChatRuntime(
+    Map<String, dynamic> owner,
+    String sessionId,
+  ) async {
+    final path = owner['workspacePath'];
+    if (path is! String || path.isEmpty) {
+      throw StateError('closeSession: no workspacePath for $sessionId');
+    }
+    final identity = owner['workspaceIdentity'];
+    await callChannel(Channels.zcodeSession, 'closeSession', [
+      {
+        'workspacePath': path,
+        if (identity is String && identity.isNotEmpty)
+          'workspaceIdentity': identity,
+        'sessionId': sessionId,
+      },
+    ]);
+  }
+
+  /// Drops [sessionId]'s live subscription from this session (close/destroy).
+  /// The tab is the side chat's only reader, so whatever subscription is
+  /// currently registered is the one to drop; a page handle closing later
+  /// sees its subscription gone and stops there (its own close is
+  /// identity-guarded in [_handleFor]). The viewer's handle keeps
+  /// `isRevoked` false on purpose — this is not the host revoke (workspace
+  /// switch / suspend), it is the tab's own teardown.
+  Future<void> _releaseSideChatSubscription(String sessionId) async {
+    final sub = _chatSubs.remove(sessionId);
+    final terminal = _chatTerminalSubs.remove(sessionId);
+    if (sub == null && terminal == null) return;
+    await terminal?.cancel();
+    await sub?.dispose();
+  }
+
+  /// The desktop's "nothing there" answers of the side-chat close/destroy
+  /// paths, treated as idempotent success (research close-delete-wire.md):
+  /// the channel `-32004` code (number, always — its `Session is not active`
+  /// / `Session runtime is not ready` wordings both carry it, verified
+  /// 2026-11-13 research/wire-recheck.md B) and the sessionNotFound family.
+  /// Deliberately strict on the bare phrase: unlike the subscribe path, a
+  /// wording without the code is NOT proof of "already gone" here (the
+  /// subscribe-side bare phrase itself ships a ` (fault.subscribe.
+  /// sessionNotFound)` suffix), and the destroy path must never prune the
+  /// manifest on an unverified answer.
+  bool _isSideChatSessionGone(Object error) {
+    if (isSessionNotFoundError(error)) return true;
+    if (isSessionNotFoundText('$error')) return true;
+    if (error is ChannelRpcError) {
+      final data = error.data;
+      if (data is Map) {
+        final code = data['code'];
+        if (code == -32004 || code == '-32004') return true;
+      }
+      if (error.message.contains('-32004')) return true;
+    }
+    return false;
+  }
+
+  /// Manifest scope of [parent]: the owning workspace map (the same one the
+  /// open paths resolve — directory ownership, falling back to the ACTIVE
+  /// workspace, which is the page's own scope; a conversation-workspace
+  /// parent has no directory row and must not lose its manifest) plus the
+  /// normalized bucket key. Null only when neither source names a workspace.
+  ({Map<String, dynamic> owner, String key})? _sideChatScope(String parent) {
+    final owner = _resolveOwnership(parent) ?? activeWorkspace;
+    if (owner == null) return null;
+    final raw = workspaceKeyOf(owner);
+    if (raw == null || raw.isEmpty) return null;
+    return (owner: owner, key: _taskHome.normalizeKey(raw));
+  }
+
+  /// Rebuilds [parent]'s side-chat tabs from the persisted manifest
+  /// (R8/AC9; design §3). Call on every entry into the parent chat page.
+  ///
+  /// Data source: the local manifest per device+workspace — NOT the
+  /// sessions-index, which never carries `selection_side_chat` (host
+  /// whitelist `[interactive, fork, workflow_parent]`, research Q1), and not
+  /// `listSessions` enumeration, which is hard-wired to the same whitelist
+  /// (research Q2). The official web remote keeps tabs in memory only and
+  /// loses them on reload, hence the local manifest.
+  ///
+  /// Verification: when the bridge answers, every manifest id is checked in
+  /// batches of ≤64 through `zcode-session.listSessions({workspacePath,
+  /// sessionIds})`. A live side-chat row keeps its tab; a missing id or a
+  /// row of another kind is dropped from the manifest — that id no longer
+  /// names a side chat. When the check itself is unavailable (no bridge, RPC
+  /// failure, malformed answer) the manifest is restored as-is:
+  /// over-restoring is the safe direction, and a tab whose subscription then
+  /// fails self-heals in B1 (the subscription-failure contract this stage
+  /// only documents). A destroyed tab was already pruned from the manifest,
+  /// so it never comes back.
+  ///
+  /// Restored tabs keep their persisted ordinals; ids already live are
+  /// skipped, making repeated page entries idempotent. Notifies only on an
+  /// actual change (the page listens through [addListener]).
+  @override
+  Future<void> restoreSideChatTabs(String parent) async {
+    if (_disposed) return;
+    await _sideChatTabStore.load();
+    if (_disposed) return;
+    final scope = _sideChatScope(parent);
+    if (scope == null) return;
+    final entries = _sideChatTabStore.entriesOf(scope.key, parent);
+    if (entries.isEmpty) return;
+    final validated = await _validateSideChatTabs(scope.owner, entries);
+    if (_disposed) return;
+    final restore = validated ?? entries;
+    if (validated != null && validated.length != entries.length) {
+      _sideChatTabStore.retain(scope.key, parent, {
+        for (final tab in validated) tab.sessionId,
+      });
+    }
+    if (_sideChats.restoreFromEntries(parent, restore)) notifyListeners();
+  }
+
+  /// `zcode-session.listSessions` batch cap (V4 schema `Yln`: sessionIds
+  /// 1..64). One batch per call; an app-level parent rarely exceeds it.
+  static const int sideChatValidationBatch = 64;
+
+  /// Existence check of manifest [entries] against
+  /// `zcode-session.listSessions` (research Q2). Answers the confirmed live
+  /// side-chat entries in manifest order, or null when the check itself is
+  /// unavailable (degrade: restore the manifest untouched).
+  ///
+  /// The channel layer answers a BARE array of session rows (the host's
+  /// `agentService.listSessions` returns `Z.sessions`), each carrying
+  /// `sessionId`, `sessionKind`. Soft-deleted rows are filtered server-side. A
+  /// row counts as live only when its kind is
+  /// [SideChatRegistry.sessionKind] — the exact kind check R8 asks for; the
+  /// manifest already owns the parent relation, so a row of another kind (or
+  /// an absent one) is refuted. `workspacePath` is mandatory (it is the
+  /// agent process routing key, not a V4 param); `workspaceIdentity` joins it
+  /// when the workspace has one.
+  Future<List<SideChatTab>?> _validateSideChatTabs(
+    Map<String, dynamic> owner,
+    List<SideChatTab> entries,
+  ) async {
+    final alive = <SideChatTab>[];
+    for (var start = 0;
+        start < entries.length;
+        start += sideChatValidationBatch) {
+      final end = start + sideChatValidationBatch > entries.length
+          ? entries.length
+          : start + sideChatValidationBatch;
+      final batch = entries.sublist(start, end);
+      final List<dynamic> rows;
+      try {
+        final answer =
+            await callChannel(Channels.zcodeSession, 'listSessions', [
+          {
+            'workspacePath': owner['workspacePath'],
+            if (owner['workspaceIdentity'] is String &&
+                (owner['workspaceIdentity'] as String).isNotEmpty)
+              'workspaceIdentity': owner['workspaceIdentity'],
+            'sessionIds': [for (final tab in batch) tab.sessionId],
+          },
+        ]);
+        if (answer is! List) return null;
+        rows = answer;
+      } catch (e) {
+        _log('[side-chat] restore validation unavailable: $e');
+        return null;
+      }
+      final live = <String>{
+        for (final row in rows)
+          if (row is Map &&
+              row['sessionKind'] == SideChatRegistry.sessionKind &&
+              row['sessionId'] is String)
+            row['sessionId'] as String,
+      };
+      for (final tab in batch) {
+        if (live.contains(tab.sessionId)) alive.add(tab);
+      }
+    }
+    return alive;
   }
 
   /// Grouped task view of every known workspace, read directly from the
