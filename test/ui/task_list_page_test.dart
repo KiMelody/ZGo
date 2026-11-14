@@ -2826,6 +2826,11 @@ void main() {
             case 'listPinnedTaskIds':
             case 'listArchivedTasks':
               return const <dynamic>[];
+            case 'previewArchivedTaskDeletion':
+            case 'permanentlyDeleteArchivedTask':
+              // 3.17.1 desktop: the controller methods do not exist — the
+              // tightened unknown-method wording is what degrades.
+              throw ChannelRpcError('Method not found: $method', null);
           }
           return null;
         },
@@ -2881,6 +2886,10 @@ void main() {
                 case 'listPinnedTaskIds':
                 case 'listArchivedTasks':
                   return const <dynamic>[];
+                case 'previewArchivedTaskDeletion':
+                case 'permanentlyDeleteArchivedTask':
+                  // 3.17.1 desktop: controller methods absent.
+                  throw ChannelRpcError('Method not found: $method', null);
               }
               return null;
             };

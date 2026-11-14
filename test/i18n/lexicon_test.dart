@@ -117,4 +117,55 @@ void main() {
       expect(enTable['op.status.completed'], 'Succeeded');
     });
   });
+  group('archive permanent-delete copy (11-11, official asar surface)', () {
+    test('the checking / deleteItem / incomplete keys carry the official values verbatim', () {
+      expect(zhTable['tasks.archive.checking'], '正在检查 \$0/\$1 个会话…');
+      expect(enTable['tasks.archive.checking'], 'Checking sessions: \$0/\$1…');
+      expect(
+        zhTable['tasks.archive.deleteItem'],
+        '“\$0”：对话、\$1 个所属子会话、输入历史与索引、\$2 个私有附件或执行记录文件',
+      );
+      expect(
+        enTable['tasks.archive.deleteItem'],
+        '“\$0”: conversation, \$1 owned child sessions, input history and '
+        'indexes, \$2 private attachment or execution record files',
+      );
+      expect(
+        zhTable['tasks.archive.incomplete'],
+        '删除尚未确认完成，请重试；已删除的内容无法恢复。',
+      );
+      expect(
+        enTable['tasks.archive.incomplete'],
+        'Deletion has not been confirmed complete. Retry; removed content '
+        'cannot be restored.',
+      );
+    });
+
+    // The dynamic reason family is built as 'tasks.archive.reason.$key' in
+    // the UI (i18n_key_guard skips interpolated keys) — lock all six here.
+    test('the six reason values are bilingual and non-empty', () {
+      for (final r in const [
+        'running',
+        'in-use',
+        'not-found',
+        'not-archived',
+        'changed',
+        'unavailable',
+      ]) {
+        final key = 'tasks.archive.reason.$r';
+        expect(zhTable[key]?.trim(), isNotEmpty, reason: 'zh $key');
+        expect(enTable[key]?.trim(), isNotEmpty, reason: 'en $key');
+      }
+      // Facet spot checks against the official asar copy.
+      expect(
+        zhTable['tasks.archive.reason.running'],
+        '任务仍在运行或有待处理输入，请先停止任务并处理队列。',
+      );
+      expect(
+        enTable['tasks.archive.reason.unavailable'],
+        'Cannot safely inspect or delete: the host is unavailable, its '
+        'version is unsupported, or reading failed. Resolve the issue and retry.',
+      );
+    });
+  });
 }

@@ -309,4 +309,10 @@ class Channels {
   /// management replacement for the removed `model-provider` channel —
   /// templates, personal provider CRUD, model management and live refresh.
   static const providerSettings = 'provider-settings';
+
+  /// Desktop ≥3.18 archived-task permanent deletion
+  /// (`previewArchivedTaskDeletion` / `permanentlyDeleteArchivedTask`).
+  /// Present in the web-remote whitelist since 3.17.1, but the deletion
+  /// methods landed in 3.18.0 — see `WindowControllerPort`.
+  static const windowController = 'window-controller';
 }

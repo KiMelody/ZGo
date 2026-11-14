@@ -10,6 +10,7 @@ import '../protocol/channel_client.dart';
 import '../protocol/conversation.dart';
 import '../protocol/project_resolver.dart';
 import '../protocol/task_groups.dart';
+import '../protocol/window_controller.dart';
 import '../state/device_session.dart';
 import '../state/device_store.dart';
 import '../state/task_directory.dart';
@@ -2046,12 +2047,94 @@ class _TaskListPageState extends State<TaskListPage>
     return groups;
   }
 
-  /// 「全部删除」confirmation for the archive view (`deleteArchivedTasks`,
-  /// desktop 3.17.1). One wire batch PER WORKSPACE group — the method
-  /// addresses a single workspace scope (the official web splits by source
-  /// the same way). The result toast follows the official archives.result
-  /// copy: succeeded / failed / skipped-after-change.
+  /// 「全部删除」entry of the archive view.
+  ///
+  /// ≥3.18.0 takes the three-phase path (design 11-11 §4): one dialog that
+  /// previews every taskId in place (progress, cancellable), flips to the
+  /// confirmation state (deletable count + per-task deleteItem lines), then
+  /// executes one by one with the same counter. Aggregation is per-task
+  /// status — deleted → succeeded, blocked → skipped, incomplete / throw →
+  /// failed — reusing the official `archives.result` three-placeholder copy.
+  ///
+  /// Preview-phase degrade (unknown method) falls back to the pre-3.18.0
+  /// per-workspace batch delete below; execute-phase failures NEVER fall
+  /// back (already-deleted ids would be re-counted as skipped).
   Future<void> _clearArchiveDialog(
+    DeviceSession session,
+    List<(Map<String, dynamic>, List<SessionEntry>)> groups,
+  ) async {
+    final total = groups.fold<int>(0, (n, g) => n + g.$2.length);
+    if (total == 0) return;
+    if (!session.windowControllerAvailable) {
+      await _clearArchiveAllLegacy(session, groups);
+      return;
+    }
+
+    final titles = {
+      for (final (_, entries) in groups)
+        for (final e in entries)
+          e.sessionId: e.title.trim().isEmpty
+              ? tr(context, 'tasks.untitled')
+              : e.title,
+    };
+    final outcome = await showDialog<_ArchiveClearOutcome>(
+      context: context,
+      useRootNavigator: false,
+      builder: (_) => _ArchiveClearDialog(
+        session: session,
+        taskIds: [
+          for (final (_, entries) in groups)
+            for (final e in entries) e.sessionId,
+        ],
+        titles: titles,
+      ),
+    );
+    if (!mounted || outcome == null) return;
+
+    switch (outcome) {
+      case _ArchiveClearDegraded():
+        await _clearArchiveAllLegacy(session, groups);
+      case _ArchiveClearUnavailable():
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_archiveFailureCopy(context, 'blocked', null)),
+          ),
+        );
+      case _ArchiveClearDone(
+          :final ok,
+          :final failed,
+          :final skipped,
+          :final deletedIds,
+        ):
+        await _runOp(() async {
+          await _reloadTasks(session);
+          if (!mounted) return;
+          if (deletedIds.contains(_paneSessionId)) {
+            setState(() {
+              _paneSessionId = null;
+              _paneTitle = null;
+            });
+          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                trP(context, 'tasks.archive.result', [
+                  '$ok',
+                  '$failed',
+                  '$skipped',
+                ]),
+              ),
+            ),
+          );
+        });
+    }
+  }
+
+  /// Pre-3.18.0 batch delete (`deleteArchivedTasks`, desktop 3.17.1). One
+  /// wire batch PER WORKSPACE group — the method addresses a single
+  /// workspace scope (the official web splits by source the same way). The
+  /// result toast follows the official archives.result copy.
+  Future<void> _clearArchiveAllLegacy(
     DeviceSession session,
     List<(Map<String, dynamic>, List<SessionEntry>)> groups,
   ) async {
@@ -3177,6 +3260,10 @@ class _TaskListPageState extends State<TaskListPage>
   /// resolve comes back empty at delete time (the draft-materialize edge,
   /// design D4). The draft verdict is re-read at delete time, not carried
   /// over from the sheet — the directory can change while the dialog is up.
+  ///
+  /// Archived rows (≥3.17.1) take the three-phase permanent delete
+  /// (design 11-11): preview → confirmed execute. Below 3.17.1 the archived
+  /// bit still routes to deleteTask, exactly as before.
   Future<void> _deleteTaskDialog(
     DeviceSession session,
     SessionEntry entry,
@@ -3184,6 +3271,12 @@ class _TaskListPageState extends State<TaskListPage>
     final title = entry.title.trim().isEmpty
         ? tr(context, 'tasks.untitled')
         : entry.title;
+    final viaArchivedDelete =
+        entry.raw['archived'] == true && session.capabilities.archivedDelete;
+    if (viaArchivedDelete) {
+      await _archivedDeleteDialog(session, entry, title);
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       useRootNavigator: false,
@@ -3211,26 +3304,9 @@ class _TaskListPageState extends State<TaskListPage>
     // Archived rows route through the restricted 3.17.1 delete (the official
     // web's archive view does the same — delete-archived kind); the desktop
     // refuses live rows there, so only the archived bit decides.
-    final viaArchivedDelete =
-        entry.raw['archived'] == true && session.capabilities.archivedDelete;
     await _runOp(() async {
       if (isDraft) {
         await session.deleteSession(entry.sessionId);
-      } else if (viaArchivedDelete) {
-        final res = await session.deleteArchived(entry.sessionId);
-        if (res == null) {
-          // The row changed underneath (unarchived / deleted elsewhere):
-          // nothing was deleted — surface the skip and refresh so the row's
-          // true state replaces the stale archived bit.
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(tr(context, 'tasks.archive.deleteSkipped')),
-            ),
-          );
-          await _reloadTasks(session);
-          return;
-        }
       } else {
         try {
           await session.deleteTask(entry.sessionId);
@@ -3238,6 +3314,141 @@ class _TaskListPageState extends State<TaskListPage>
           if (!isTaskResolveFailure(e)) rethrow;
           await session.deleteSession(entry.sessionId);
         }
+      }
+      await _reloadTasks(session);
+      if (_paneSessionId == entry.sessionId) {
+        setState(() {
+          _paneSessionId = null;
+          _paneTitle = null;
+        });
+      }
+    });
+  }
+
+  /// Three-phase permanent delete of one archived row (design 11-11 §4).
+  ///
+  /// ONE dialog, two states (official shape: prepare/update in place, no
+  /// second window): it opens in the checking state (confirmation disabled,
+  /// `archives.checking`), the preview runs behind it, then it flips to the
+  /// confirmation state. A blocked preview closes the dialog into the
+  /// official `archives.reason.*` toast instead of ever letting the user
+  /// confirm a doomed delete. An unknown-method reply degrades to the
+  /// pre-3.18.0 [deleteArchived] path — same dialog and copy as before.
+  Future<void> _archivedDeleteDialog(
+    DeviceSession session,
+    SessionEntry entry,
+    String title,
+  ) async {
+    final outcome = await showDialog<_ArchivedDeleteOutcome>(
+      context: context,
+      useRootNavigator: false,
+      builder: (_) => _ArchivedDeleteDialog(
+        session: session,
+        taskId: entry.sessionId,
+        title: title,
+      ),
+    );
+    if (!mounted || outcome == null) return;
+    switch (outcome) {
+      case _ArchivedDeleteDegraded():
+        await _deleteArchivedLegacy(session, entry, title);
+      case _ArchivedDeleteBlocked(:final reason):
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_archiveFailureCopy(context, 'blocked', reason)),
+          ),
+        );
+      case _ArchivedDeleteConfirmed(:final preview):
+        await _executeArchivedDelete(session, entry, preview);
+    }
+  }
+
+  /// Execute step of the three-phase delete: only `status == "deleted"`
+  /// counts as success; blocked/incomplete surface the reason toast. The
+  /// right pane clears when a DELETED id (cascade included) is what it shows.
+  Future<void> _executeArchivedDelete(
+    DeviceSession session,
+    SessionEntry entry,
+    ArchivalDeletionPreview preview,
+  ) {
+    final deletedIds = <String>{};
+    return _runOp(() async {
+      final ArchivalDeletionResult res;
+      try {
+        res = await session.executeArchiveDeletion(preview, entry.sessionId);
+      } on ArchivalPreviewUnavailable {
+        // Both methods ship together on 3.18.0; a degrade here is a
+        // cross-version race at worst. Count it as this task's failure and
+        // stop — never re-fall-back to the batch/legacy delete.
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr(context, 'tasks.archive.incomplete'))),
+        );
+        return;
+      }
+      if (res.status == 'deleted') {
+        deletedIds.addAll(res.sessionIds);
+      } else {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_archiveFailureCopy(context, res.status, res.reason)),
+          ),
+        );
+      }
+      await _reloadTasks(session);
+      if (deletedIds.contains(_paneSessionId)) {
+        setState(() {
+          _paneSessionId = null;
+          _paneTitle = null;
+        });
+      }
+    });
+  }
+
+  /// Pre-3.18.0 archived-row delete: confirmation dialog + `deleteArchived`
+  /// (unchanged behavior — the degrade path).
+  Future<void> _deleteArchivedLegacy(
+    DeviceSession session,
+    SessionEntry entry,
+    String title,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      useRootNavigator: false,
+      builder: (dialogCtx) => AlertDialog(
+        title: Text(tr(dialogCtx, 'tasks.action.deleteTitle')),
+        content: Text(trP(dialogCtx, 'tasks.action.deleteDesc', [title])),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(false),
+            child: Text(tr(dialogCtx, 'common.cancel')),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialogCtx).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(dialogCtx).pop(true),
+            child: Text(tr(dialogCtx, 'tasks.action.delete')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await _runOp(() async {
+      final res = await session.deleteArchived(entry.sessionId);
+      if (res == null) {
+        // The row changed underneath (unarchived / deleted elsewhere):
+        // nothing was deleted — surface the skip and refresh so the row's
+        // true state replaces the stale archived bit.
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(tr(context, 'tasks.archive.deleteSkipped')),
+          ),
+        );
+        await _reloadTasks(session);
+        return;
       }
       await _reloadTasks(session);
       if (_paneSessionId == entry.sessionId) {
@@ -3711,6 +3922,437 @@ class _ConnectionBanner extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Copy for a non-deleted outcome — ONE fallback function shared by the
+/// preview `blockedReason` (six-value enum) and the execute `reason` (free
+/// string). Unknown or null values fall back to `unavailable` for blocked
+/// outcomes; incomplete outcomes take the official `archives.incomplete`
+/// retry copy regardless of the free-form reason (design 11-11 §4).
+String _archiveFailureCopy(
+  BuildContext context,
+  String status,
+  String? reason,
+) {
+  if (status == 'incomplete') {
+    return tr(context, 'tasks.archive.incomplete');
+  }
+  const known = {
+    'running',
+    'in-use',
+    'not-found',
+    'not-archived',
+    'changed',
+    'unavailable',
+  };
+  final key = known.contains(reason) ? reason! : 'unavailable';
+  return tr(context, 'tasks.archive.reason.$key');
+}
+
+/// Outcome of [_ArchivedDeleteDialog.show]: the dialog either confirmed with
+/// a preview, found the delete blocked, or discovered the desktop lacks the
+/// controller methods (degrade).
+sealed class _ArchivedDeleteOutcome {
+  const _ArchivedDeleteOutcome();
+}
+
+class _ArchivedDeleteConfirmed extends _ArchivedDeleteOutcome {
+  const _ArchivedDeleteConfirmed(this.preview);
+  final ArchivalDeletionPreview preview;
+}
+
+class _ArchivedDeleteBlocked extends _ArchivedDeleteOutcome {
+  const _ArchivedDeleteBlocked(this.reason);
+
+  /// `blockedReason`, already trimmed to the six-value enum by the desktop.
+  final String? reason;
+}
+
+class _ArchivedDeleteDegraded extends _ArchivedDeleteOutcome {
+  const _ArchivedDeleteDegraded();
+}
+
+/// One archived-row permanent-delete dialog that evolves in place (design
+/// 11-11 §4): the checking state is the dialog itself, preview runs while it
+/// is up, and the content flips to the confirmation state when the answer
+/// lands. Popping the dialog while checking abandons the operation — the
+/// preview result is discarded and no execute runs.
+class _ArchivedDeleteDialog extends StatefulWidget {
+  const _ArchivedDeleteDialog({
+    required this.session,
+    required this.taskId,
+    required this.title,
+  });
+
+  final DeviceSession session;
+  final String taskId;
+  final String title;
+
+  @override
+  State<_ArchivedDeleteDialog> createState() => _ArchivedDeleteDialogState();
+}
+
+class _ArchivedDeleteDialogState extends State<_ArchivedDeleteDialog> {
+  ArchivalDeletionPreview? _preview;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_runPreview());
+  }
+
+  Future<void> _runPreview() async {
+    try {
+      final preview =
+          await widget.session.previewArchiveDeletion(widget.taskId);
+      if (!mounted) return;
+      if (preview.blockedReason != null) {
+        Navigator.of(context)
+            .pop(_ArchivedDeleteBlocked(preview.blockedReason));
+        return;
+      }
+      setState(() => _preview = preview);
+    } on ArchivalPreviewUnavailable {
+      if (!mounted) return;
+      Navigator.of(context).pop(const _ArchivedDeleteDegraded());
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      messenger?.showSnackBar(
+        SnackBar(
+          // The controller's session-data.unavailable refusal maps to the
+          // official archives.reason.unavailable copy (design 11-11 §2 —
+          // the legacy soft-delete path must NOT take over); every other
+          // failure keeps the generic degraded-link chain.
+          content: Text(
+            isArchiveDeletionUnavailableError(e)
+                ? _archiveFailureCopy(context, 'blocked', null)
+                : _errorCopy(context, widget.session),
+          ),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final preview = _preview;
+    if (preview == null) {
+      // Checking state: the dialog is already up, the confirmation cannot be
+      // pressed yet (official archives.checking).
+      return AlertDialog(
+        title: Text(tr(context, 'tasks.action.deleteTitle')),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(trP(context, 'tasks.archive.checking', ['1', '1'])),
+              const SizedBox(height: 12),
+              const LinearProgressIndicator(),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text(tr(context, 'common.cancel')),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            onPressed: null,
+            child: Text(tr(context, 'tasks.action.delete')),
+          ),
+        ],
+      );
+    }
+    final children = preview.sessionIds.length - 1;
+    return AlertDialog(
+      title: Text(tr(context, 'tasks.action.deleteTitle')),
+      content: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(trP(
+              context,
+              'tasks.archive.deleteItem',
+              // $0/$1/$2 = title / children / files (official order).
+              [widget.title, '$children', '${preview.deletedFiles}'],
+            )),
+            if (preview.incomplete) ...[
+              const SizedBox(height: 8),
+              Text(tr(context, 'tasks.archive.incomplete')),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(tr(context, 'common.cancel')),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+          onPressed: () =>
+              Navigator.of(context).pop(_ArchivedDeleteConfirmed(preview)),
+          child: Text(tr(context, 'tasks.action.delete')),
+        ),
+      ],
+    );
+  }
+}
+
+/// Outcome of [_ArchiveClearDialog]: preview-degraded (unknown method → the
+/// legacy batch path), controller unavailable for another reason
+/// (`session-data.unavailable` → official unavailable toast), or a completed
+/// run with the three per-status counters plus the deleted id set.
+sealed class _ArchiveClearOutcome {
+  const _ArchiveClearOutcome();
+}
+
+class _ArchiveClearDegraded extends _ArchiveClearOutcome {
+  const _ArchiveClearDegraded();
+}
+
+class _ArchiveClearUnavailable extends _ArchiveClearOutcome {
+  const _ArchiveClearUnavailable();
+}
+
+class _ArchiveClearDone extends _ArchiveClearOutcome {
+  const _ArchiveClearDone({
+    required this.ok,
+    required this.failed,
+    required this.skipped,
+    required this.deletedIds,
+  });
+
+  final int ok;
+  final int failed;
+  final int skipped;
+  final Set<String> deletedIds;
+}
+
+/// One dialog for「全部删除」that previews every taskId in place, then flips
+/// to confirmation, then executes one by one updating the same counter
+/// (design 11-11 §4; the official flow does the same per task, only the
+/// shell is one dialog instead of N).
+///
+/// - Popping while previewing abandons the operation (no execute runs).
+/// - All-blocked preview (nothing deletable) skips confirmation entirely and
+///   reports the all-skipped aggregate straight into the existing
+///   `archives.result` toast.
+/// - An execute that throws counts as that task's FAILED and stops the loop
+///   — never falls back to the legacy batch (already-deleted ids would be
+///   double-counted).
+class _ArchiveClearDialog extends StatefulWidget {
+  const _ArchiveClearDialog({
+    required this.session,
+    required this.taskIds,
+    required this.titles,
+  });
+
+  final DeviceSession session;
+  final List<String> taskIds;
+  final Map<String, String> titles;
+
+  @override
+  State<_ArchiveClearDialog> createState() => _ArchiveClearDialogState();
+}
+
+class _ArchiveClearDialogState extends State<_ArchiveClearDialog> {
+  /// taskId → preview for the tasks that passed the precheck.
+  final Map<String, ArchivalDeletionPreview> _previews = {};
+  final Set<String> _skippedIds = {};
+  final Set<String> _deletedIds = {};
+  int _checked = 0;
+  bool _confirming = false;
+  bool _running = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_runPreview());
+  }
+
+  Future<void> _runPreview() async {
+    for (final id in widget.taskIds) {
+      if (!mounted) return;
+      try {
+        final preview = await widget.session.previewArchiveDeletion(id);
+        if (!mounted) return;
+        if (preview.blockedReason != null) {
+          _skippedIds.add(id);
+        } else {
+          _previews[id] = preview;
+        }
+      } on ArchivalPreviewUnavailable {
+        if (!mounted) return;
+        Navigator.of(context).pop(const _ArchiveClearDegraded());
+        return;
+      } catch (_) {
+        if (!mounted) return;
+        Navigator.of(context).pop(const _ArchiveClearUnavailable());
+        return;
+      }
+      _checked++;
+      setState(() {});
+    }
+    if (!mounted) return;
+    if (_previews.isEmpty) {
+      // Nothing deletable: no confirmation, report the all-skipped aggregate
+      // straight away (the official shape counts blocked rows as skipped).
+      Navigator.of(context).pop(_ArchiveClearDone(
+        ok: 0,
+        failed: 0,
+        skipped: widget.taskIds.length,
+        deletedIds: const {},
+      ));
+      return;
+    }
+    setState(() => _confirming = true);
+  }
+
+  Future<void> _runExecute() async {
+    setState(() => _running = true);
+    var ok = 0;
+    var failed = 0;
+    for (final id in _previews.keys.toList()) {
+      if (!mounted) return;
+      try {
+        final res =
+            await widget.session.executeArchiveDeletion(_previews[id]!, id);
+        if (!mounted) return;
+        switch (res.status) {
+          case 'deleted':
+            ok++;
+            _deletedIds.addAll(res.sessionIds);
+          case 'blocked':
+            // Preview said deletable but the desktop refused: a skip.
+            _skippedIds.add(id);
+          default:
+            failed++;
+        }
+      } on ArchivalPreviewUnavailable {
+        // Cross-version race at worst: count this task as failed and STOP.
+        failed++;
+        break;
+      } catch (_) {
+        failed++;
+        break;
+      }
+      setState(() {});
+    }
+    if (!mounted) return;
+    Navigator.of(context).pop(_ArchiveClearDone(
+      ok: ok,
+      failed: failed,
+      skipped: _skippedIds.length,
+      deletedIds: _deletedIds,
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_confirming) {
+      // Preview state: EVERY taskId gets checked before the user can
+      // confirm; popping abandons the whole operation.
+      return AlertDialog(
+        title: Text(trP(
+          context,
+          'tasks.archive.deleteTitle',
+          ['${widget.taskIds.length}'],
+        )),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(trP(
+                context,
+                'tasks.archive.checking',
+                ['$_checked', '${widget.taskIds.length}'],
+              )),
+              const SizedBox(height: 12),
+              LinearProgressIndicator(
+                value: widget.taskIds.isEmpty
+                    ? 0
+                    : _checked / widget.taskIds.length,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text(tr(context, 'common.cancel')),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            onPressed: null,
+            child: Text(tr(context, 'tasks.archive.deleteAll')),
+          ),
+        ],
+      );
+    }
+
+    // Confirmation state: deletable count + one deleteItem line per task
+    // ($0/$1/$2 = title / children / files in the official order).
+    final lines = _previews.entries.toList();
+    return AlertDialog(
+      title: Text(trP(
+        context,
+        'tasks.archive.deleteTitle',
+        ['${_previews.length}'],
+      )),
+      content: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < lines.length; i++)
+              Padding(
+                padding: EdgeInsets.only(top: i == 0 ? 0 : 6),
+                child: Text(trP(
+                  context,
+                  'tasks.archive.deleteItem',
+                  [
+                    widget.titles[lines[i].key] ?? '',
+                    '${lines[i].value.sessionIds.length - 1}',
+                    '${lines[i].value.deletedFiles}',
+                  ],
+                )),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _running ? null : () => Navigator.of(context).pop(),
+          child: Text(tr(context, 'common.cancel')),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+          onPressed: _running ? null : _runExecute,
+          child: Text(
+            _running
+                ? trP(context, 'tasks.archive.checking',
+                    ['$_checked', '${widget.taskIds.length}'])
+                : tr(context, 'tasks.archive.deleteAll'),
+          ),
+        ),
+      ],
     );
   }
 }

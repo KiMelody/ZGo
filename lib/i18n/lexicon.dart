@@ -199,6 +199,19 @@ const _zh = {
   'tasks.archive.deleteDesc': '只删除当前确认范围内的会话。删除后无法在应用中恢复。',
   'tasks.archive.result': '成功 \$0 项，失败 \$1 项，已变化跳过 \$2 项',
   'tasks.archive.deleteSkipped': '任务已变化，跳过删除',
+  // Three-phase permanent delete (desktop 3.18.0 archives.* surface, quoted
+  // verbatim from the desktop asar bundle).
+  'tasks.archive.checking': '正在检查 \$0/\$1 个会话…',
+  'tasks.archive.deleteItem':
+      '“\$0”：对话、\$1 个所属子会话、输入历史与索引、\$2 个私有附件或执行记录文件',
+  'tasks.archive.incomplete': '删除尚未确认完成，请重试；已删除的内容无法恢复。',
+  'tasks.archive.reason.running': '任务仍在运行或有待处理输入，请先停止任务并处理队列。',
+  'tasks.archive.reason.in-use': '另一进程正在使用此会话，请先关闭该会话后重试。',
+  'tasks.archive.reason.not-found': '找不到原会话数据，未执行删除。',
+  'tasks.archive.reason.not-archived': '会话已取消归档，未执行删除。',
+  'tasks.archive.reason.changed': '删除范围已变化，请重新检查并确认。',
+  'tasks.archive.reason.unavailable':
+      '无法安全检查或删除：所属设备不可用、版本不支持或读取失败，请恢复后重试。',
   'tasks.workspaceKind.local': '本地',
   'tasks.workspaceKind.conversation': '对话',
   'tasks.workspaceKind.remote': '远程',
@@ -1695,6 +1708,25 @@ const _en = {
       'Only the sessions in this confirmed selection will be deleted. You cannot restore them in the app.',
   'tasks.archive.result': 'Succeeded: \$0; failed: \$1; skipped after changes: \$2',
   'tasks.archive.deleteSkipped': 'Task changed; delete skipped',
+  // Three-phase permanent delete (desktop 3.18.0 archives.* surface, quoted
+  // verbatim from the desktop asar bundle).
+  'tasks.archive.checking': 'Checking sessions: \$0/\$1…',
+  'tasks.archive.deleteItem':
+      '“\$0”: conversation, \$1 owned child sessions, input history and indexes, \$2 private attachment or execution record files',
+  'tasks.archive.incomplete':
+      'Deletion has not been confirmed complete. Retry; removed content cannot be restored.',
+  'tasks.archive.reason.running':
+      'Work or queued input is pending. Stop the task and resolve its queue first.',
+  'tasks.archive.reason.in-use':
+      'Another process is using this session. Close it there and retry.',
+  'tasks.archive.reason.not-found':
+      'Original session data was not found. Nothing was deleted.',
+  'tasks.archive.reason.not-archived':
+      'The session is no longer archived. Nothing was deleted.',
+  'tasks.archive.reason.changed':
+      'The deletion scope changed. Review and confirm again.',
+  'tasks.archive.reason.unavailable':
+      'Cannot safely inspect or delete: the host is unavailable, its version is unsupported, or reading failed. Resolve the issue and retry.',
   'tasks.workspaceKind.local': 'Local',
   'tasks.workspaceKind.conversation': 'Conversation',
   'tasks.workspaceKind.remote': 'Remote',

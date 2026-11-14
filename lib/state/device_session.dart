@@ -19,6 +19,7 @@ import '../protocol/conversation.dart';
 import '../protocol/desktop_capabilities.dart';
 import '../protocol/file_service.dart';
 import '../protocol/git_service.dart';
+import '../protocol/id.dart' show generateUuid;
 import '../protocol/method_probe.dart';
 import '../protocol/model_selection.dart' show parseModelSelectionCatalog;
 import '../protocol/off_peak.dart';
@@ -30,6 +31,7 @@ import '../protocol/remote_client.dart';
 import '../protocol/task_commands.dart';
 import '../protocol/task_group_resolver.dart';
 import '../protocol/task_groups.dart';
+import '../protocol/window_controller.dart';
 import 'chat_draft_store.dart';
 import 'device_store.dart';
 import 'entitlement_poller.dart';
@@ -3355,6 +3357,74 @@ class DeviceSession extends ChangeNotifier
     (method, args) => callChannel('zcode-task', method, args),
     scope: _taskHome.taskScopeFor,
   );
+
+  /// Archived-task permanent deletion on the window-controller channel
+  /// (desktop ≥3.18.0 — see [WindowControllerPort]).
+  late final WindowControllerPort windowController = WindowControllerPort(
+    (channel, method, args) => callChannel(channel, method, args),
+    scope: _taskHome.taskScopeFor,
+  );
+
+  /// Whether the desktop serves the archived-deletion pair. Positive
+  /// boolean: true until an unknown-method reply pins it false for the rest
+  /// of the session (a desktop never changes version mid-session). Only the
+  /// exact `Method not found:` + method-name wording flips it — see
+  /// [isArchivalDeletionMethodMissing].
+  bool _windowControllerAvailable = true;
+
+  /// Session-lifetime degrade verdict for the archived-deletion pair (for
+  /// tests / diagnostics).
+  bool get windowControllerAvailable => _windowControllerAvailable;
+
+  /// One preview for ONE task. Deliberately NOT deduplicated in flight: the
+  /// answer carries the task's own revision, so a shared future would feed
+  /// task A's revision to task B's execute — deleting the wrong session
+  /// (design §2 P1-1). Concurrent callers each issue their own RPC.
+  Future<ArchivalDeletionPreview> previewArchiveDeletion(String taskId) async {
+    if (!_windowControllerAvailable) {
+      throw const ArchivalPreviewUnavailable();
+    }
+    try {
+      return await windowController.previewArchivedDeletion(taskId);
+    } on ArchivalPreviewUnavailable catch (e) {
+      _windowControllerAvailable = false;
+      throw ArchivalPreviewUnavailable(e.message);
+    }
+  }
+
+  /// Executes the permanent delete with [preview]'s revision; the
+  /// operationId is generated here (the desktop only uses it for its own
+  /// idempotent retries — ZGo never retries automatically).
+  ///
+  /// Tombstones every id the desktop reports as deleted (`status ==
+  /// "deleted"` only; blocked/incomplete remove nothing) so the 30 s
+  /// overview poll cannot resurrect the rows, then notifies once.
+  Future<ArchivalDeletionResult> executeArchiveDeletion(
+    ArchivalDeletionPreview preview,
+    String taskId,
+  ) async {
+    if (!_windowControllerAvailable) {
+      throw const ArchivalPreviewUnavailable();
+    }
+    final ArchivalDeletionResult res;
+    try {
+      res = await windowController.permanentlyDeleteArchived(
+        taskId,
+        revision: preview.revision,
+        operationId: generateUuid(),
+      );
+    } on ArchivalPreviewUnavailable catch (e) {
+      _windowControllerAvailable = false;
+      throw ArchivalPreviewUnavailable(e.message);
+    }
+    if (res.status == 'deleted') {
+      for (final id in res.sessionIds) {
+        _taskHome.rememberLocalDelete(id);
+      }
+      notifyListeners();
+    }
+    return res;
+  }
 
   /// The relay home row of [taskId] as the merged directory shows it —
   /// [TaskHomeService.relayHomeRowOf] (design 10-16 multi-copy-home-
