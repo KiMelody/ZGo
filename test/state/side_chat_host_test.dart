@@ -120,6 +120,9 @@ void main() {
 
       expect(ids(session), isEmpty);
       expect(notified, greaterThan(0));
+      expect(session.taskHomeStore.locallyDeletedTaskIds, isEmpty,
+          reason: 'close is a restorable collapse — no delete tombstone (R4 '
+              'vs R9)');
       await session.sideChatTabStore.pendingSave;
       expect(
         session.sideChatTabStore
@@ -189,8 +192,27 @@ void main() {
 
       expect(ids(session), ['s2'],
           reason: 'the failed close must not strand the dead tab');
+      expect(session.channelCalls, hasLength(1),
+          reason: 'a fault is logged and swallowed — no retry loop');
       expect(session.sideChatTabStore.entriesOf(workspacePath, 'p1'),
           hasLength(2), reason: 'the manifest still lists both');
+    });
+
+    test('a disposed session answers quietly: no RPC, no record churn',
+        () async {
+      final session = newSession(
+        channel: (c, m, a) async => fail('disposed → no closeSession'),
+      );
+      session.registerSideChatTab('p1', 's1');
+      await session.dispose();
+
+      await session.closeSideChatTab('p1', 's1');
+      await session.destroySideChatTab('p1', 's1');
+
+      expect(session.channelCalls, isEmpty);
+      expect(session.conversationCalls, isEmpty);
+      expect(ids(session), ['s1'],
+          reason: 'the disposed guard returns before any teardown step');
     });
 
     test('no workspace can be resolved: the local teardown proceeds without '

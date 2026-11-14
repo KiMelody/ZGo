@@ -828,6 +828,20 @@ const _zh = {
   'git.actionMenu.pushDialog.toast.pushed': '已推送到 \$0',
   'sidePane.review': '审查',
   'sidePane.selectionChat': '辅助对话',
+  // Side-chat tab labels (task 11-11-btw-side-chat R3): the ordinal comes
+  // from the registry, spliced in verbatim.
+  'sideChat.tab.title': '辅助对话 \$0',
+  // Tab strip (step B2, mock 11-12): the main tab carries no close button;
+  // the long-press menu offers the two lifecycle tiers (close = restorable
+  // collapse, destroy = permanent).
+  'sideChat.tabs.main': '主会话',
+  'sideChat.menu.close': '关闭旁支',
+  'sideChat.menu.destroy': '销毁旁支会话',
+  'sideChat.close.aria': '关闭辅助对话 \$0',
+  // Close is a restorable collapse (design §6): the toast carries the way
+  // back so the recovery entry stays discoverable.
+  'sideChat.closed': '辅助对话 \$0 已关闭，重新进入会话可恢复',
+  'sideChat.destroyed': '辅助对话 \$0 已销毁',
   // ---- task list (mobile layout) ----
   'tasks.sectionTitle': '当前设备上的工作区和任务',
   'tasks.stats': '\$0 个工作区 · \$1 个任务',
@@ -2384,6 +2398,15 @@ const _en = {
   'git.actionMenu.pushDialog.toast.pushed': 'Pushed to \$0',
   'sidePane.review': 'Review',
   'sidePane.selectionChat': 'Side conversation',
+  // Side-chat tab labels (task 11-11-btw-side-chat R3).
+  'sideChat.tab.title': 'Side conversation \$0',
+  'sideChat.tabs.main': 'Main conversation',
+  'sideChat.menu.close': 'Close side chat',
+  'sideChat.menu.destroy': 'Delete side conversation',
+  'sideChat.close.aria': 'Close side conversation \$0',
+  'sideChat.closed':
+      'Side conversation \$0 closed. Reopen the session to restore it',
+  'sideChat.destroyed': 'Side conversation \$0 deleted',
   // ---- task list (mobile layout) ----
   'tasks.sectionTitle': 'Workspaces & tasks on this device',
   'tasks.stats': '\$0 workspaces · \$1 tasks',

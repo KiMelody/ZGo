@@ -16,6 +16,7 @@ import '../../state/device_session.dart';
 import '../../state/entitlement_poller.dart';
 import '../../state/new_task_defaults.dart';
 import '../../state/quota_reset.dart';
+import '../../state/side_chat_registry.dart';
 import '../quota_reset_dialog.dart';
 import '../slash_items.dart';
 import '../theme.dart';
@@ -28,6 +29,7 @@ import 'interaction_answer.dart';
 import 'goal_panel.dart';
 import 'jump_to_bottom_button.dart';
 import 'mention_sheet.dart';
+import 'side_chat_tab_bar.dart';
 import 'subagent_feed.dart';
 import 'timeline.dart';
 import 'top_bounce_physics.dart';
@@ -64,6 +66,32 @@ class ChatRouteObserverScope extends InheritedWidget {
       observer != oldWidget.observer;
 }
 
+/// Tab-switch seam of the side-chat container (task 11-11-btw-side-chat).
+/// Holds just the active tab; the visual strip (step B2) drives it, and the
+/// tab LIST is never owned here: the state layer's registry answers it
+/// through [ChatPageHost.sideChatTabs].
+///
+/// Switching is one assignment plus a notify: the host page rebuilds and
+/// hands every child its new `isActive`; the deactivated slot turns offstage
+/// and its ExcludeFocus drops the composer focus (M0-b G1).
+///
+/// Production pages pass no controller — the host page owns one and the
+/// in-page strip is its only driver. Tests inject one to switch directly.
+class ChatTabsController extends ChangeNotifier {
+  String? _activeId;
+
+  /// Session id of the tab on screen; null = the main (parent) tab.
+  String? get activeId => _activeId;
+
+  /// Switches to the tab [sessionId] (the parent session id selects the
+  /// main tab). No-op when it is already active.
+  void activate(String sessionId) {
+    if (_activeId == sessionId) return;
+    _activeId = sessionId;
+    notifyListeners();
+  }
+}
+
 class ChatPage extends StatefulWidget {
   final ChatPageHost host;
   final String? sessionId;
@@ -73,6 +101,35 @@ class ChatPage extends StatefulWidget {
   /// Dual-pane desktop layout: embedded in the right pane, so no back
   /// button in the app bar (there is no route to pop inside the pane).
   final bool embedded;
+
+  /// Tab-child mode (design 11-11-btw-side-chat §4): this page is one child
+  /// of a host ChatPage's tab container, not a route of its own.
+  ///
+  /// NOT a synonym for [embedded] — the M0-b spike proved the differences:
+  /// - the app bar (theme cycle / 更多 menu) is gone entirely;
+  /// - the page must never pop the route itself (the host owns the tab);
+  /// - RouteAware registration is skipped (the host route already has an
+  ///   owner; a second subscriber would steal `didPopNext`);
+  /// - re-pointing the single bridge on a host notify is gated by
+  ///   [isActive] (every child shares the host route, so `isCurrent` is
+  ///   true for hidden tabs too — a hidden tab used to steal the bridge);
+  /// - `sendViewState` rides the active tab only (D10).
+  final bool chromeless;
+
+  /// Whether this tab is the one on screen. Meaningful for [chromeless]
+  /// pages only — a standalone page is always active. The host container
+  /// flips it as the user switches tabs.
+  final bool isActive;
+
+  /// Step-B1 switch seam (the visual strip is B2): the same switch the strip
+  /// will drive, plus the tab list the container renders from.
+  final ChatTabsController? tabsController;
+
+  /// Fired by a chromeless tab when its session is authoritatively gone
+  /// (subscribe refused with `sessionNotFound`). The host container answers
+  /// by tearing the tab down and pruning the manifest — design §3's
+  /// subscription-failure self-heal. Null for every other page shape.
+  final VoidCallback? onSideChatUnavailable;
 
   /// Pre-fill the composer (e.g. a slash command picked on the list page).
   final String? initialComposerText;
@@ -125,6 +182,10 @@ class ChatPage extends StatefulWidget {
     required this.title,
     this.theme,
     this.embedded = false,
+    this.chromeless = false,
+    this.isActive = true,
+    this.tabsController,
+    this.onSideChatUnavailable,
     this.initialComposerText,
     this.workspaceLabel,
     this.draftWorkspacePath,
@@ -541,6 +602,28 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
 
   ConversationState? get _state => _handle?.state;
 
+  /// Side-chat tabs of this page's session, mirrored from the host
+  /// registry on relevant notifies (step B1's container renders from it).
+  /// Empty for chromeless tabs and drafts — only the host page owns tabs.
+  List<SideChatTab> _sideTabs = const [];
+
+  /// Tab switch state. Production pages pass no controller (the strip is
+  /// in-page chrome), so the host page owns one; tests inject a controller
+  /// to drive switches directly. Created lazily in [initState] (only the
+  /// non-chromeless host page ever needs it) and disposed with the page
+  /// when owned.
+  ChatTabsController? _ownTabs;
+
+  ChatTabsController get _tabs =>
+      widget.tabsController ?? (_ownTabs ??= ChatTabsController());
+
+  /// Whether this page speaks for the desk's mobile-view badge (D10). A
+  /// standalone page always does; a chromeless tab only while it is the tab
+  /// on screen — a background tab must neither claim the badge nor clear it.
+  /// Claim-only: the clear on teardown belongs to the host page ([dispose]),
+  /// never to a chromeless tab.
+  bool get _ownsViewState => !widget.chromeless || widget.isActive;
+
   /// Cross-terminal deletion tombstone (task 10-06 chat tombstone): the
   /// desktop's sessions-index dropped this session id — another terminal
   /// deleted the session. The page stays READ-ONLY (the user may still
@@ -607,6 +690,16 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     if (_sessionId != null) {
       _subscribe();
       unawaited(_loadOffPeakQueue());
+      // Tab recovery (R8/AC9, step B1): only the host page restores — a
+      // chromeless tab is itself a restored child. Fire-and-forget; the
+      // page re-reads the registry when the contract answers.
+      unawaited(_restoreSideChats());
+      // Seed the mirror before the first build so a warm registry (a
+      // second page entry in the same run) renders without a frame of
+      // main-tab-only chrome.
+      if (!widget.chromeless) {
+        _sideTabs = widget.host.sideChatTabs(_sessionId!);
+      }
       // Seed WITHOUT setState: the first build has not run yet, so the value
       // is simply present for it (task 11-08-error-detail).
       _lastError = widget.host.taskLastError(_sessionId!);
@@ -617,6 +710,15 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     // preview/detail current; [_syncLastError] no-ops unless the value
     // actually changed, so the frequent index tail costs nothing.
     widget.host.addListener(_syncLastError);
+    // Side-chat tab mirror: the registry notifies on register / close /
+    // destroy / restore — exactly the moments the container re-renders.
+    if (!widget.chromeless) widget.host.addListener(_syncSideTabs);
+    // The tabs controller is the switch seam (the strip drives it): an
+    // activation must re-run the build that chooses the visible slot.
+    if (!widget.chromeless) {
+      if (widget.tabsController == null) _ownTabs = ChatTabsController();
+      _tabs.addListener(_onTabsControllerChanged);
+    }
     _loadPrep();
     _loadEntitlement();
     _inputController.addListener(() {
@@ -959,12 +1061,40 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   }
 
   @override
+  void didUpdateWidget(ChatPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.chromeless || oldWidget.isActive == widget.isActive) {
+      return;
+    }
+    if (!widget.isActive) return;
+    // A tab just came back on screen: it owns the desk badge again (D10),
+    // and a handle revoked while it was hidden gets the resume it had to
+    // defer (`_onHostChanged` is gated by `isActive` — M0-b spike E1).
+    final sessionId = _sessionId;
+    if (sessionId == null) return;
+    if (_handle != null) {
+      try {
+        widget.host.sendViewState(taskId: sessionId);
+      } catch (_) {}
+    }
+    if (_handleRevoked()) unawaited(_resumeOrphan());
+  }
+
+  @override
   void dispose() {
-    // mobile-view-state back to workspace-only (the phone left this task).
-    try {
-      widget.host.sendViewState();
-    } catch (_) {}
-    // Absence memory recovery (10-06 tombstone + 10-11 missing): the page
+    // D10: only the owning page clears the desk badge on its way out. A
+    // chromeless tab always lives inside such a host page, which sends the
+    // clear itself; and a tab removed from the strip can be disposed in the
+    // same async turn that deactivated it, before any rebuild delivers
+    // `isActive: false` — gating the clear on that last-built config leaked
+    // a bare clear when the ACTIVE tab was closed (D1 regression). Hidden
+    // tabs therefore never clear: a hidden tab's teardown must not strip the
+    // badge the visible tab just set (M0-b spike F1).
+    if (!widget.chromeless) {
+      try {
+        widget.host.sendViewState();
+      } catch (_) {}
+    }
     // held this id's reader in both sets — release them so the add-only
     // sets do not outlive the page.
     final sessionId = _sessionId;
@@ -979,6 +1109,10 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     _routeObserver?.unsubscribe(this);
     widget.host.removeListener(_syncLastError);
     widget.host.removeListener(_onHostChanged);
+    widget.host.removeListener(_syncSideTabs);
+    if (!widget.chromeless) _tabs.removeListener(_onTabsControllerChanged);
+    _ownTabs?.dispose();
+    _ownTabs = null;
     _feed.dispose();
     _git.dispose();
     _editingRowId.dispose();
@@ -1074,6 +1208,14 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       await _bindHandle(handle, sessionId: sessionId);
     } catch (e) {
       debugPrint('[chat] subscribe $sessionId failed: $e');
+      // A restored side-chat tab whose session no longer exists must leave
+      // the container instead of showing a dead tab forever (design §3 /
+      // AC9). Only the authoritative refusal counts — a bridge fault keeps
+      // the retry banner, exactly like every other page.
+      if (widget.chromeless && isSessionNotFoundError(e)) {
+        widget.onSideChatUnavailable?.call();
+        return;
+      }
       if (mounted) setState(() => _error = _subscribeFailureCopy(e));
     }
   }
@@ -1102,7 +1244,10 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       _resumeError = null;
     });
     // mobile-view-state: the desktop shows 「手机正在操作此任务」 from it.
-    widget.host.sendViewState(taskId: sessionId);
+    // D10: a chromeless tab reports the badge only while it is the tab on
+    // screen; a background tab binding its handle must not flip the desk
+    // badge away from the main conversation.
+    if (_ownsViewState) widget.host.sendViewState(taskId: sessionId);
     handle.state.addListener(_scrollToBottom);
     handle.state.addListener(_onConfigMaybeReverted);
     handle.state.addListener(_refreshQueryDirectory);
@@ -1147,8 +1292,14 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final observer = widget.embedded ? null : ChatRouteObserverScope.maybeOf(context);
-    final route = widget.embedded ? null : ModalRoute.of(context);
+    // A chromeless tab lives inside the host route: the host page already
+    // owns the RouteAware registration, and a second subscriber would
+    // compete for `didPopNext` (M0-b spike C1). Same skip as embedded,
+    // decided separately because the two flags differ elsewhere.
+    final skipRouteAware = widget.embedded || widget.chromeless;
+    final observer =
+        skipRouteAware ? null : ChatRouteObserverScope.maybeOf(context);
+    final route = skipRouteAware ? null : ModalRoute.of(context);
     if (route is PageRoute<dynamic>) {
       if (observer != _routeObserver || route != _route) {
         _routeObserver?.unsubscribe(this);
@@ -1183,7 +1334,15 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     if (!mounted || _restoring) return;
     // Draft pages hold no handle; the embedded pane defers to the list page.
     if (widget.embedded || widget.sessionId == null) return;
-    if (_route?.isCurrent != true) return;
+    // A chromeless tab shares the host route, so `isCurrent` is true even
+    // for hidden tabs (M0-b spike E1: a hidden tab stole the single
+    // bridge). Only the tab on screen may resume.
+    if (widget.chromeless && !widget.isActive) return;
+    // A chromeless tab has no route of its own (`_route` is null — the host
+    // route's RouteAware seat belongs to the host page), so the isCurrent
+    // probe below would veto even the tab on screen; its visibility verdict
+    // already came from `isActive` above.
+    if (!widget.chromeless && _route?.isCurrent != true) return;
     // A classified failure already on screen means the user's retry is the
     // next move: auto-retrying on every host notify (the directory tail is a
     // frequent notifier) would hammer the open chain.
@@ -2647,7 +2806,14 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
         }
       },
     );
-    if (deleted && mounted) Navigator.of(context).maybePop();
+    // A chromeless tab must never pop the route itself: the host page owns
+    // the tab, so a delete inside a tab only ends that tab's content (the
+    // host prunes it from the container). Popping here would tear down the
+    // whole chat page — M0-b spike B1/B2, which is why embedded's "hide the
+    // leading" was never enough.
+    if (deleted && mounted && !widget.chromeless) {
+      Navigator.of(context).maybePop();
+    }
   }
 
   /// Mirrors `_run`'s success verdict for one RPC answer: a Map ack whose
@@ -3292,262 +3458,13 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     // on widget identity and the entire chat content subtree skips rebuild;
     // only the cheap layout shrink remains (an order of magnitude cheaper).
     final chat = Scaffold(
-      appBar: AppBar(
-        automaticallyImplyLeading: !widget.embedded,
-        toolbarHeight: short ? 48 : null,
-        title: short
-            ? Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      widget.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: ZType.heading.copyWith(
-                        color: ZInk.solid(context),
-                      ),
-                    ),
-                  ),
-                  if (wsLabel != null) ...[
-                    const SizedBox(width: 6),
-                    _workspaceChip(context),
-                  ],
-                ],
-              )
-            : Text(tr(context, 'chat.appBar')),
-        actions: [
-          if (widget.theme != null)
-            IconButton(
-              icon: Icon(switch (widget.theme!.mode) {
-                ThemeMode.dark => Icons.dark_mode_outlined,
-                ThemeMode.light => Icons.light_mode_outlined,
-                _ => Icons.brightness_6_outlined,
-              }, size: 20),
-              tooltip: tr(context, 'settings.theme'),
-              onPressed: widget.theme!.cycle,
-            ),
-          // Landscape compact: the second row's text 更多 becomes the ⋮
-          // icon here (same menu).
-          if (short)
-            PopupMenuButton<String>(
-              icon: const Icon(Icons.more_vert, size: 22),
-              tooltip: tr(context, 'chat.more'),
-              onSelected: _onMoreMenu,
-              itemBuilder: _moreMenuItems,
-              position: PopupMenuPosition.under,
-            ),
-        ],
-      ),
+      // Chromeless tab (M0-b spike A): the host page already carries the
+      // app bar, so a nested one would stack two title bars.
+      appBar: widget.chromeless ? null : _appBar(context, short, wsLabel),
       body: SafeArea(
         top: false,
         bottom: false,
-        child: Column(
-          children: [
-            // Second header row: task title + workspace chip + 更多
-            // (portrait content; landscape carries all of it in the app
-            // bar). The slot itself stays occupied — constant type, constant
-            // Column position (spec §8.1: a toggling child here shifts every
-            // later child's pairing). Two folds render the same placeholder
-            // inside it: `short` (landscape) and the IME-occupied viewport
-            // (R2 10-16 — the keyboard shrinks the body to short-viewport
-            // territory while heightOf stays at the full screen, so plain
-            // `short` never fires). The inset is not read here; the probe
-            // owns the hysteresis flip (§8.2).
-            ValueListenableBuilder<bool>(
-              valueListenable: _imeOccupied,
-              builder: (context, imeOccupied, _) => _contentCol(
-                short || imeOccupied
-                    ? const SizedBox.shrink()
-                    : _secondHeaderRow(context, wsLabel),
-              ),
-            ),
-            _preListBanners(context),
-            Expanded(
-              child: Stack(
-                children: [
-                  Positioned.fill(child: _messageList(context, state)),
-                  // Jump-to-newest control: floating in the message area it
-                  // covers the list only — the takeover cover, sheets and menus
-                  // are page-level layers painted above it.
-                  Positioned.fill(
-                    bottom: 8,
-                    child: Align(
-                      alignment: Alignment.bottomCenter,
-                      child: JumpToBottomButton(
-                        visible: !_stickToBottom,
-                        onPressed: _animateToBottom,
-                      ),
-                    ),
-                  ),
-                  // Turn navigator (task 10-14): right-edge query strip,
-                  // vertically centered, the visual bars falling entirely
-                  // inside the list's existing 16dp right padding — content
-                  // never yields, zero overlap by construction. The 44dp
-                  // hit band's inner 28dp lies over content by design
-                  // (taps jump; drags pass through to the list). The mount
-                  // is a full fill so the long-press overlay (R2, design
-                  // §3.1) can span its 68dp float panel plus the
-                  // outside-tap barrier; every inactive pixel inside the
-                  // component stays transparent to hit tests.
-                  Positioned.fill(
-                    child: state == null || _queryRowIds.length < 2
-                        ? const SizedBox.shrink()
-                        : AnimatedBuilder(
-                            animation: state,
-                            builder: (context, _) =>
-                                ValueListenableBuilder<int?>(
-                                  valueListenable: _activeQueryIndex,
-                                  builder: (context, active, _) =>
-                                      TurnNavigator(
-                                        key: _turnNavigatorKey,
-                                        rowIds: _queryRowIds,
-                                        activeIndex: active,
-                                        canLoadOlder: state.canLoadOlder,
-                                        onJump: _jumpToQuery,
-                                      ),
-                                ),
-                          ),
-                  ),
-                  // Status strip while the IME is up: floats over the list
-                  // bottom instead of being a Column flex child. The loose
-                  // Flexible it used before (09-18 R2) split the remaining
-                  // height with the Expanded list 1:1 and RenderFlex never
-                  // redistributes what a loose child leaves unused — the free
-                  // space pooled at the Column tail, leaving a blank band the
-                  // height of the strip's unused share between the composer
-                  // and the keyboard (2026-09-20 真机报告). Anchored to the
-                  // bottom it shrink-wraps to min(intrinsic, stack height),
-                  // so the strip still scrolls when the banners overflow and
-                  // the composer stays pinned above the IME.
-                  // The Positioned.fill is unconditional — the slot inside
-                  // consults _KeyboardScope; a conditional here would flip the
-                  // Stack's child count on every keyboard toggle.
-                  Positioned.fill(
-                    child: _StatusStripSlot(
-                      floating: true,
-                      state: state,
-                      buildStrip: _statusStrip,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            AnimatedBuilder(
-              animation: widget.host,
-              builder: (context, _) =>
-                  _GatewayBanner(sessionLink: widget.host),
-            ),
-            // Status strip (goal/works/queue/interactions), no-keyboard
-            // variant: a plain intrinsic-height child so it never splits
-            // leftover space with the message list's Expanded (a permanent
-            // Flexible would shrink the strip below its intrinsic height on
-            // short viewports — visual change; see internal-task
-            // R2). While the IME is up the strip renders inside the Stack
-            // above; this slot must stay occupied (constant type, constant
-            // Column position) — letting the child disappear would shift every
-            // later Column child, force the composer's Element to remount on
-            // the first IME inset frame, drop the TextField focus and cancel
-            // the keyboard right after it started showing (2026-09-20 真机
-            // IME_ANIMATION_CANCEL 回归).
-            _StatusStripSlot(
-              floating: false,
-              state: state,
-              buildStrip: _statusStrip,
-            ),
-            if (_showSlash)
-              _SlashCommandBar(
-                query: _inputController.text,
-                items: _slashItems,
-                onSelect: (item) {
-                  if (item.name == 'compact') {
-                    _inputController.text = '/compact';
-                    _send();
-                  } else {
-                    _inputController.text = item.insert;
-                    _inputController.selection = TextSelection.collapsed(
-                      offset: _inputController.text.length,
-                    );
-                    setState(() => _showSlash = false);
-                  }
-                },
-              ),
-            if (_progress != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-                child: Row(
-                  children: [
-                    const SizedBox(
-                      width: 12,
-                      height: 12,
-                      child: CircularProgressIndicator(strokeWidth: 1.5),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      _progress!,
-                      style: ZType.caption.copyWith(color: ZInk.muted(context)),
-                    ),
-                  ],
-                ),
-              ),
-            if (_pendingFiles.isNotEmpty)
-              _PendingFilesBar(
-                files: _pendingFiles,
-                uploadProgress: _uploadProgress,
-                onRemove: (i) {
-                  setState(() => _pendingFiles.removeAt(i));
-                  unawaited(
-                    widget.host.chatDraftStore.removeAttachmentAt(
-                      _draftKey,
-                      i,
-                    ),
-                  );
-                },
-              ),
-            // Locally-queued replayable messages (3.12.3): sits directly
-            // above the composer like the pendingCommands cards.
-            // Null queue (pre-3.12.3 desktop / not connected) renders nothing.
-            AnimatedBuilder(
-              animation: widget.host,
-              builder: (context, _) {
-                final replayable = widget.host.replayableQueue;
-                if (replayable == null) return const SizedBox.shrink();
-                return AnimatedBuilder(
-                  animation: replayable,
-                  builder: (context, _) => _ReplayableQueueBar(queue: replayable),
-                );
-              },
-            ),
-            AnimatedBuilder(
-              animation: (state == null)
-                ? widget.host
-                : Listenable.merge([state, widget.host]),
-              builder: (context, _) {
-                return _contentCol(
-                  _InputBar(
-                    controller: _inputController,
-                    sending: _sending,
-                    hasAttachments: _pendingFiles.isNotEmpty,
-                    isDraft: _sessionId == null,
-                    state: state,
-                    prep: _prep,
-                    draftConfig: _draftConfig,
-                    conversation: widget.host,
-                    sessionTruth: widget.host,
-                    sessionId: _sessionId,
-                    feed: state == null ? null : _feed,
-                    subagentConfirmWindow: widget.turnFooterConfirmWindow,
-                    onSend: _send,
-                    onAddMenu: _openAddContextMenu,
-                    onModelSheet: _showModelSheet,
-                    onUsage: _showUsageSheet,
-                    onBackgroundWorks: _showBackgroundWorksSheet,
-                  ),
-                  maxWidth: _kComposerColumnWidth,
-                );
-              },
-            ),
-          ],
-        ),
+        child: _tabContainer(context, state, short: short, wsLabel: wsLabel),
       ),
     );
     return _KeyboardProbe(
@@ -3558,6 +3475,548 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
             ? Stack(children: [chat, _kickedOverlay(context)])
             : chat,
       ),
+    );
+  }
+
+  /// The page app bar. Extracted unchanged so the chromeless tab can drop
+  /// it with one null (step B1); the theme cycle and 更多 menu leave with
+  /// it — a known side-chat limitation (design D2).
+  AppBar _appBar(BuildContext context, bool short, String? wsLabel) {
+    return AppBar(
+      automaticallyImplyLeading: !widget.embedded,
+      toolbarHeight: short ? 48 : null,
+      title: short
+          ? Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    widget.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: ZType.heading.copyWith(
+                      color: ZInk.solid(context),
+                    ),
+                  ),
+                ),
+                if (wsLabel != null) ...[
+                  const SizedBox(width: 6),
+                  _workspaceChip(context),
+                ],
+              ],
+            )
+          : Text(tr(context, 'chat.appBar')),
+      actions: [
+        if (widget.theme != null)
+          IconButton(
+            icon: Icon(switch (widget.theme!.mode) {
+              ThemeMode.dark => Icons.dark_mode_outlined,
+              ThemeMode.light => Icons.light_mode_outlined,
+              _ => Icons.brightness_6_outlined,
+            }, size: 20),
+            tooltip: tr(context, 'settings.theme'),
+            onPressed: widget.theme!.cycle,
+          ),
+        // Landscape compact: the second row's text 更多 becomes the ⋮
+        // icon here (same menu).
+        if (short)
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, size: 22),
+            tooltip: tr(context, 'chat.more'),
+            onSelected: _onMoreMenu,
+            itemBuilder: _moreMenuItems,
+            position: PopupMenuPosition.under,
+          ),
+      ],
+    );
+  }
+
+  /// Tab container of the host chat page (design 11-11-btw-side-chat §4,
+  /// steps B1/B2). The main conversation keeps the chrome; its body shares
+  /// one keyed stack with the side-chat pages, so each tab keeps its own
+  /// State (scroll position, composer draft — AC4).
+  ///
+  /// Not an [IndexedStack]: the SDK wraps every child in an UNKEYED
+  /// `_VisibilityScope`, so removing a middle tab re-pairs the later children
+  /// positionally and rebuilds their State (widget-level probe, 2026-11-12 —
+  /// the "关中间 tab 不串 State" AC fails with IndexedStack). The offstage
+  /// stack below keeps the same visible-side semantics (only the selected
+  /// child is painted, hit-tested, honoured for semantics and visited by
+  /// default finders) while the keys sit at the child boundary.
+  ///
+  /// Layout (mock decision 1): the task title row is parent identity, so it
+  /// is hoisted above the strip and out of the per-tab bodies — it stays
+  /// still across switches. The strip sits below it and above the message
+  /// area. With no side tabs the whole container degrades to the plain main
+  /// body (the pre-B2 tree).
+  Widget _tabContainer(
+    BuildContext context,
+    ConversationState? state, {
+    required bool short,
+    required String? wsLabel,
+  }) {
+    final parentId = _sessionId;
+    final tabs = _sideTabs;
+    if (parentId == null || tabs.isEmpty) {
+      // A chromeless page is always a child of a host container that draws
+      // the shared title row above the strip, so it never draws its own
+      // (mock decision 1: the row is parent identity, not tab identity).
+      return _mainTabBody(
+        context,
+        state,
+        short: short,
+        wsLabel: wsLabel,
+        showHeaderRow: !widget.chromeless,
+      );
+    }
+    final mainBody = _mainTabBody(
+      context,
+      state,
+      short: short,
+      wsLabel: wsLabel,
+      showHeaderRow: false,
+    );
+    // A tab may vanish under the controller (close / destroy / self-heal);
+    // the main tab takes over until the user switches again.
+    final requested = _tabs.activeId;
+    final activeId =
+        requested != null && tabs.any((tab) => tab.sessionId == requested)
+            ? requested
+            : parentId;
+    final showSide = activeId != parentId;
+    final stack = Stack(
+      children: [
+        _tabSlot(sessionId: parentId, active: !showSide, child: mainBody),
+        for (final tab in tabs)
+          _tabSlot(
+            sessionId: tab.sessionId,
+            active: tab.sessionId == activeId,
+            child: ChatPage(
+              host: widget.host,
+              sessionId: tab.sessionId,
+              title: trP(context, 'sideChat.tab.title', ['${tab.ordinal}']),
+              theme: widget.theme,
+              chromeless: true,
+              isActive: tab.sessionId == activeId,
+              // The host's resolved controller (test-injected or owned):
+              // a nested side page must switch through the same seam.
+              tabsController: _tabs,
+              onSideChatUnavailable: () =>
+                  unawaited(_selfHealSideTab(tab.sessionId)),
+            ),
+          ),
+      ],
+    );
+    return Column(
+      children: [
+        _headerRowSlot(context, short: short, wsLabel: wsLabel),
+        SideChatTabBar(
+          parentSessionId: parentId,
+          tabs: tabs,
+          activeId: activeId,
+          onSelect: _switchTab,
+          onClose: _closeSideChatTab,
+          onDestroy: _destroySideChatTab,
+        ),
+        Expanded(
+          // Back on a side tab returns to the main tab instead of leaving
+          // the page (AC11); on the main tab the route pop proceeds as
+          // before. An embedded pane owns no route of its own (the
+          // surrounding page does), so it keeps its pre-B2 pop semantics —
+          // the gate only guards a page that is its own route. Precedent:
+          // off_peak_page.dart's discard gate.
+          child: widget.embedded
+              ? stack
+              : PopScope(
+                  canPop: !showSide,
+                  onPopInvokedWithResult: (didPop, _) {
+                    if (didPop) return;
+                    _switchTab(parentId);
+                  },
+                  child: stack,
+                ),
+        ),
+      ],
+    );
+  }
+
+  /// One keyed tab slot. [Offstage] lays the hidden child out but paints,
+  /// hit-tests and publishes nothing for it — the same visible-side contract
+  /// [IndexedStack] gives, minus its unkeyed wrapping.
+  Widget _tabSlot({
+    required String sessionId,
+    required bool active,
+    required Widget child,
+  }) {
+    return Positioned.fill(
+      key: ValueKey('chat-tab-$sessionId'),
+      child: Offstage(
+        offstage: !active,
+        child: TickerMode(
+          // IndexedStack provides no TickerMode (M0-b A2): a hidden tab's
+          // spinners would otherwise keep animating for nothing.
+          enabled: active,
+          // Offstage does NOT exclude focus (IndexedStack does); a hidden
+          // composer must not take the IME (M0-b G1, AC11).
+          child: ExcludeFocus(excluding: !active, child: child),
+        ),
+      ),
+    );
+  }
+
+  /// Switches the visible tab (the parent session id selects the main tab).
+  /// The losing tab's composer drops focus once its slot turns offstage
+  /// (ExcludeFocus — M0-b G1); the explicit unfocus covers the case where the
+  /// IME is already up and would otherwise stay attached to the old field.
+  void _switchTab(String sessionId) {
+    FocusScope.of(context).unfocus();
+    _tabs.activate(sessionId);
+  }
+
+  /// Rebuilds when the tab switch seam moves (the host page only: chromeless
+  /// children receive `isActive` through their own rebuild).
+  void _onTabsControllerChanged() {
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  /// Mirrors the host's tab list into [_sideTabs] on relevant notifies,
+  /// rebuilding only when it actually changed (the directory tail notifies
+  /// frequently and a spurious setState would relayout the whole chat).
+  void _syncSideTabs() {
+    final parentId = _sessionId;
+    if (parentId == null || widget.chromeless || !mounted) return;
+    final next = widget.host.sideChatTabs(parentId);
+    if (_sameTabs(next, _sideTabs)) return;
+    setState(() => _sideTabs = next);
+  }
+
+  static bool _sameTabs(List<SideChatTab> a, List<SideChatTab> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].sessionId != b[i].sessionId || a[i].ordinal != b[i].ordinal) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// Restore entry (R8/AC9): the state layer reads the persisted manifest,
+  /// validates it against `listSessions` and replays it. The page awaits the
+  /// contract, then re-reads [ChatPageHost.sideChatTabs] — a restored tab
+  /// whose subscription then fails self-heals through [_selfHealSideTab]
+  /// (design §3).
+  Future<void> _restoreSideChats() async {
+    final parentId = _sessionId;
+    if (parentId == null || widget.chromeless) return;
+    try {
+      await widget.host.restoreSideChatTabs(parentId);
+    } catch (e) {
+      debugPrint('[chat] restore side chats $parentId failed: $e');
+      return;
+    }
+    if (!mounted) return;
+    _syncSideTabs();
+  }
+
+  /// Removes a side-chat tab whose session is gone (AC9's self-heal). Only
+  /// an authoritative refusal reaches here, so the state layer's destroy
+  /// path (soft delete + manifest prune, idempotent for a session that
+  /// already vanished) is the right teardown; a failed destroy keeps the tab
+  /// so the user can retry.
+  Future<void> _selfHealSideTab(String sessionId) async {
+    final parentId = _sessionId;
+    if (parentId == null) return;
+    try {
+      await widget.host.destroySideChatTab(parentId, sessionId);
+    } catch (e) {
+      debugPrint('[chat] side chat $sessionId self-heal failed: $e');
+      return;
+    }
+    if (!mounted) return;
+    _tabs.activate(parentId);
+    _syncSideTabs();
+  }
+
+  /// Closes a side-chat tab (R4/AC5). Step B2 wires the seam and the
+  /// discoverability toast (design §6: close is restorable, so the user must
+  /// hear about the way back); the device smoke test belongs to step D1. The
+  /// state layer answers with the full teardown (closeSession + unsubscribe
+  /// + registry removal) and never throws — its fault matrix degrades to the
+  /// local teardown. Switching to the main tab first keeps the strip from
+  /// painting a tab that is about to leave.
+  Future<void> _closeSideChatTab(SideChatTab tab) async {
+    final parentId = _sessionId;
+    if (parentId == null) return;
+    if (_tabs.activeId == tab.sessionId) _switchTab(parentId);
+    try {
+      await widget.host.closeSideChatTab(parentId, tab.sessionId);
+    } catch (e) {
+      // Contract says close never throws; a surprise still must not wedge
+      // the strip (the next host notify re-syncs either way).
+      debugPrint('[chat] close side chat ${tab.sessionId} failed: $e');
+    }
+    if (!mounted) return;
+    _syncSideTabs();
+    _toast(trP(context, 'sideChat.closed', ['${tab.ordinal}']));
+  }
+
+  /// Destroys a side-chat tab (R9/AC10). Step B2 wires the seam and the
+  /// completion toast; the irreversible-action confirmation dialog is step
+  /// D2 and will gate this call. A non-idempotent delete fault keeps the tab
+  /// (the state layer rethrows) and surfaces the failure — a silent no-op
+  /// would read as a broken menu item.
+  Future<void> _destroySideChatTab(SideChatTab tab) async {
+    final parentId = _sessionId;
+    if (parentId == null) return;
+    if (_tabs.activeId == tab.sessionId) _switchTab(parentId);
+    try {
+      await widget.host.destroySideChatTab(parentId, tab.sessionId);
+    } catch (e) {
+      debugPrint('[chat] destroy side chat ${tab.sessionId} failed: $e');
+      if (!mounted) return;
+      _toast(trP(context, 'tasks.opFailed', ['$e']));
+      return;
+    }
+    if (!mounted) return;
+    _syncSideTabs();
+    _toast(trP(context, 'sideChat.destroyed', ['${tab.ordinal}']));
+  }
+
+  /// The task title row, lifted out of [_mainTabBody] so the tab container
+  /// can keep it above the strip (mock decision 1: parent identity stays put
+  /// across switches). The slot itself stays occupied — constant type,
+  /// constant Column position (spec §8.1: a toggling child here shifts every
+  /// later child's pairing). Two folds render the same placeholder inside
+  /// it: `short` (landscape) and the IME-occupied viewport (R2 10-16 — the
+  /// keyboard shrinks the body to short-viewport territory while heightOf
+  /// stays at the full screen, so plain `short` never fires). The inset is
+  /// not read here; the probe owns the hysteresis flip (§8.2).
+  Widget _headerRowSlot(
+    BuildContext context, {
+    required bool short,
+    required String? wsLabel,
+  }) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: _imeOccupied,
+      builder: (context, imeOccupied, _) => _contentCol(
+        short || imeOccupied
+            ? const SizedBox.shrink()
+            : _secondHeaderRow(context, wsLabel),
+      ),
+    );
+  }
+
+  /// The main conversation body segments, lifted out of the Scaffold body
+  /// so the tab container can place them beside the side-chat pages (step
+  /// B1). Child list and order are the pre-B1 inline Column verbatim, so the
+  /// IME/status-strip invariants (constant type, constant Column position)
+  /// are untouched.
+  ///
+  /// [showHeaderRow] is false only inside the tab container, which hoists
+  /// the task title row above the strip (mock decision 1: the row is parent
+  /// identity and must stay put while tabs switch). The slot stays occupied
+  /// by an empty box so the Column keeps its child count and every later
+  /// child keeps its index (spec §8.1) — the header row's presence never
+  /// re-pairs the composer.
+  Widget _mainTabBody(
+    BuildContext context,
+    ConversationState? state, {
+    required bool short,
+    required String? wsLabel,
+    bool showHeaderRow = true,
+  }) {
+    return Column(
+      children: [
+        if (showHeaderRow)
+          _headerRowSlot(context, short: short, wsLabel: wsLabel)
+        else
+          const SizedBox.shrink(),
+        _preListBanners(context),
+        Expanded(
+          child: Stack(
+            children: [
+              Positioned.fill(child: _messageList(context, state)),
+              // Jump-to-newest control: floating in the message area it
+              // covers the list only — the takeover cover, sheets and menus
+              // are page-level layers painted above it.
+              Positioned.fill(
+                bottom: 8,
+                child: Align(
+                  alignment: Alignment.bottomCenter,
+                  child: JumpToBottomButton(
+                    visible: !_stickToBottom,
+                    onPressed: _animateToBottom,
+                  ),
+                ),
+              ),
+              // Turn navigator (task 10-14): right-edge query strip,
+              // vertically centered, the visual bars falling entirely
+              // inside the list's existing 16dp right padding — content
+              // never yields, zero overlap by construction. The 44dp
+              // hit band's inner 28dp lies over content by design
+              // (taps jump; drags pass through to the list). The mount
+              // is a full fill so the long-press overlay (R2, design
+              // §3.1) can span its 68dp float panel plus the
+              // outside-tap barrier; every inactive pixel inside the
+              // component stays transparent to hit tests.
+              Positioned.fill(
+                child: state == null || _queryRowIds.length < 2
+                    ? const SizedBox.shrink()
+                    : AnimatedBuilder(
+                        animation: state,
+                        builder: (context, _) =>
+                            ValueListenableBuilder<int?>(
+                              valueListenable: _activeQueryIndex,
+                              builder: (context, active, _) =>
+                                  TurnNavigator(
+                                    key: _turnNavigatorKey,
+                                    rowIds: _queryRowIds,
+                                    activeIndex: active,
+                                    canLoadOlder: state.canLoadOlder,
+                                    onJump: _jumpToQuery,
+                                  ),
+                            ),
+                      ),
+              ),
+              // Status strip while the IME is up: floats over the list
+              // bottom instead of being a Column flex child. The loose
+              // Flexible it used before (09-18 R2) split the remaining
+              // height with the Expanded list 1:1 and RenderFlex never
+              // redistributes what a loose child leaves unused — the free
+              // space pooled at the Column tail, leaving a blank band the
+              // height of the strip's unused share between the composer
+              // and the keyboard (2026-09-20 真机报告). Anchored to the
+              // bottom it shrink-wraps to min(intrinsic, stack height),
+              // so the strip still scrolls when the banners overflow and
+              // the composer stays pinned above the IME.
+              // The Positioned.fill is unconditional — the slot inside
+              // consults _KeyboardScope; a conditional here would flip the
+              // Stack's child count on every keyboard toggle.
+              Positioned.fill(
+                child: _StatusStripSlot(
+                  floating: true,
+                  state: state,
+                  buildStrip: _statusStrip,
+                ),
+              ),
+            ],
+          ),
+        ),
+        AnimatedBuilder(
+          animation: widget.host,
+          builder: (context, _) =>
+              _GatewayBanner(sessionLink: widget.host),
+        ),
+        // Status strip (goal/works/queue/interactions), no-keyboard
+        // variant: a plain intrinsic-height child so it never splits
+        // leftover space with the message list's Expanded (a permanent
+        // Flexible would shrink the strip below its intrinsic height on
+        // short viewports — visual change; see internal-task
+        // R2). While the IME is up the strip renders inside the Stack
+        // above; this slot must stay occupied (constant type, constant
+        // Column position) — letting the child disappear would shift every
+        // later Column child, force the composer's Element to remount on
+        // the first IME inset frame, drop the TextField focus and cancel
+        // the keyboard right after it started showing (2026-09-20 真机
+        // IME_ANIMATION_CANCEL 回归).
+        _StatusStripSlot(
+          floating: false,
+          state: state,
+          buildStrip: _statusStrip,
+        ),
+        if (_showSlash)
+          _SlashCommandBar(
+            query: _inputController.text,
+            items: _slashItems,
+            onSelect: (item) {
+              if (item.name == 'compact') {
+                _inputController.text = '/compact';
+                _send();
+              } else {
+                _inputController.text = item.insert;
+                _inputController.selection = TextSelection.collapsed(
+                  offset: _inputController.text.length,
+                );
+                setState(() => _showSlash = false);
+              }
+            },
+          ),
+        if (_progress != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+            child: Row(
+              children: [
+                const SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(strokeWidth: 1.5),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _progress!,
+                  style: ZType.caption.copyWith(color: ZInk.muted(context)),
+                ),
+              ],
+            ),
+          ),
+        if (_pendingFiles.isNotEmpty)
+          _PendingFilesBar(
+            files: _pendingFiles,
+            uploadProgress: _uploadProgress,
+            onRemove: (i) {
+              setState(() => _pendingFiles.removeAt(i));
+              unawaited(
+                widget.host.chatDraftStore.removeAttachmentAt(
+                  _draftKey,
+                  i,
+                ),
+              );
+            },
+          ),
+        // Locally-queued replayable messages (3.12.3): sits directly
+        // above the composer like the pendingCommands cards.
+        // Null queue (pre-3.12.3 desktop / not connected) renders nothing.
+        AnimatedBuilder(
+          animation: widget.host,
+          builder: (context, _) {
+            final replayable = widget.host.replayableQueue;
+            if (replayable == null) return const SizedBox.shrink();
+            return AnimatedBuilder(
+              animation: replayable,
+              builder: (context, _) => _ReplayableQueueBar(queue: replayable),
+            );
+          },
+        ),
+        AnimatedBuilder(
+          animation: (state == null)
+            ? widget.host
+            : Listenable.merge([state, widget.host]),
+          builder: (context, _) {
+            return _contentCol(
+              _InputBar(
+                controller: _inputController,
+                sending: _sending,
+                hasAttachments: _pendingFiles.isNotEmpty,
+                isDraft: _sessionId == null,
+                state: state,
+                prep: _prep,
+                draftConfig: _draftConfig,
+                conversation: widget.host,
+                sessionTruth: widget.host,
+                sessionId: _sessionId,
+                feed: state == null ? null : _feed,
+                subagentConfirmWindow: widget.turnFooterConfirmWindow,
+                onSend: _send,
+                onAddMenu: _openAddContextMenu,
+                onModelSheet: _showModelSheet,
+                onUsage: _showUsageSheet,
+                onBackgroundWorks: _showBackgroundWorksSheet,
+              ),
+              maxWidth: _kComposerColumnWidth,
+            );
+          },
+        ),
+      ],
     );
   }
 
