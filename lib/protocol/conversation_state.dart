@@ -215,6 +215,12 @@ class SessionEntry {
       'unreadAt': task['unreadAt'],
       'workspacePath': task['workspacePath'],
       'workspaceIdentity': task['workspaceIdentity'],
+      // 3.18.0 worktree placement (`tasks.worktree_root` + the task cwd).
+      // Membership signal of the row's branch chip; the live sessions-index
+      // schema carries neither (strict schema, @317877424), so live overlays
+      // inherit them from this relay row (TaskDirectory._withRelayMeta).
+      'worktreeRoot': task['worktreeRoot'],
+      'cwd': task['cwd'],
       // Task-meta error object (hzi: `{code?, message, traceId?, taskId?,
       // attribution?}`, runtime @805550) — pass-through for the Copy TraceID
       // surface; [lastErrorTraceId] does the defensive read.

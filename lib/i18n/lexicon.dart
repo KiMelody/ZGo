@@ -173,6 +173,7 @@ const _zh = {
   'phase.idle': '待命',
   // ---- task actions & tags (web taskList/task-item menu) ----
   'tasks.awaiting': '等待确认',
+  'tasks.branch.worktree': '工作树分支',
   'tasks.renamePlaceholder': '任务名称',
   'tasks.action.pin': '置顶',
   'tasks.action.unpin': '取消置顶',
@@ -1711,6 +1712,7 @@ const _en = {
   'phase.idle': 'Idle',
   // ---- task actions & tags (web taskList/task-item menu) ----
   'tasks.awaiting': 'Awaiting confirmation',
+  'tasks.branch.worktree': 'Worktree branch',
   'tasks.renamePlaceholder': 'Task name',
   'tasks.action.pin': 'Pin',
   'tasks.action.unpin': 'Unpin',

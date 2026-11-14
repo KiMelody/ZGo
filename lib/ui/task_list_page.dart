@@ -30,6 +30,7 @@ import 'ui_settings.dart';
 import 'widgets/device_name.dart';
 import 'widgets/sheet_scaffold.dart';
 import 'widgets/swipe_actions.dart';
+import 'widgets/task_branch_chip.dart';
 
 /// Activity window of the dual-tier task order (2026-10-31): a card or row
 /// counts as ACTIVE while its most recent activity lies closer to `now` than
@@ -1006,6 +1007,7 @@ class _TaskListPageState extends State<TaskListPage>
     final title = entry.title.trim().isEmpty
         ? tr(context, 'tasks.untitled')
         : entry.title;
+    final branch = _branchChipOf(session, entry);
     return Padding(
       padding: EdgeInsets.only(left: indent ? 12 : 0),
       child: Material(
@@ -1047,6 +1049,10 @@ class _TaskListPageState extends State<TaskListPage>
                   ),
                 ),
                 const SizedBox(width: 6),
+                if (branch != null) ...[
+                  TaskBranchChip(branchName: branch),
+                  const SizedBox(width: 6),
+                ],
                 Text(
                   relativeTimeShort(context, entry.lastActivityAt),
                   style: ZType.caption.copyWith(color: ZInk.ghost(context)),
@@ -1617,6 +1623,7 @@ class _TaskListPageState extends State<TaskListPage>
     final title = entry.title.trim().isEmpty
         ? tr(context, 'tasks.untitled')
         : entry.title;
+    final branch = _branchChipOf(session, entry);
     // No activeWorkspace fallback here: a pinned task of a foreign workspace
     // must open under its OWN scope (the fallback-built map below), never
     // silently under whatever workspace happens to be active.
@@ -1643,13 +1650,23 @@ class _TaskListPageState extends State<TaskListPage>
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: ZType.bodyStrong.copyWith(
-                          fontWeight: FontWeight.w500,
-                        ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: ZType.bodyStrong.copyWith(
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                          if (branch != null) ...[
+                            const SizedBox(width: 6),
+                            TaskBranchChip(branchName: branch),
+                          ],
+                        ],
                       ),
                       const SizedBox(height: 3),
                       Text(
@@ -2475,6 +2492,15 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
+  /// Branch chip label of [entry]: null unless the row belongs to a
+  /// worktree AND the last refresh round cached a branch for its path.
+  /// Archived rows never chip — the archive view reuses the shared row
+  /// builder, and R2 keeps the chip off archived surfaces.
+  String? _branchChipOf(DeviceSession session, SessionEntry entry) {
+    if (entry.raw['archived'] == true) return null;
+    return session.worktreeBranchFor(entry);
+  }
+
   /// One task row: title + phase pill + relative time. No per-row overflow
   /// button — a long press opens the action sheet.
   /// The current (latest running / most recent) row gets the
@@ -2497,6 +2523,7 @@ class _TaskListPageState extends State<TaskListPage>
     final title = entry.title.trim().isEmpty
         ? tr(context, 'tasks.untitled')
         : entry.title;
+    final branch = _branchChipOf(session, entry);
     final subtitle = [
       if (workspaceLabel != null) workspaceLabel,
       relativeTimeShort(context, entry.lastActivityAt),
@@ -2578,6 +2605,12 @@ class _TaskListPageState extends State<TaskListPage>
                             // awaiting warning tone.
                             if (conversation) ...[
                               _conversationTag(context),
+                              const SizedBox(width: 6),
+                            ],
+                            // Read-only worktree branch (R2): display only,
+                            // no tap target.
+                            if (branch != null) ...[
+                              TaskBranchChip(branchName: branch),
                               const SizedBox(width: 6),
                             ],
                             Expanded(

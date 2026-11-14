@@ -22,6 +22,7 @@ import 'package:zgo/ui/task_search_page.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 import 'package:zgo/ui/widgets/swipe_actions.dart';
+import 'package:zgo/ui/widgets/task_branch_chip.dart';
 
 import '../helpers/fake_device_session.dart';
 
@@ -4888,6 +4889,188 @@ void main() {
         tester.getTopLeft(find.text('a 任务')).dy,
         lessThan(tester.getTopLeft(find.text('b 任务')).dy),
       );
+    });
+  });
+
+  group('worktree branch chip', () {
+    const wsPath = '/repo/app';
+    const wtPath = '/repo/app/.worktrees/feat';
+    const branchName = 'feat/login';
+
+    Map<String, dynamic> worktreeTask(
+      String id, {
+      String title = '分支任务',
+      bool pinned = false,
+      bool archived = false,
+      String? worktreeRoot = wtPath,
+      String? cwd = wtPath,
+      String workspacePath = wsPath,
+      String workspaceIdentity = 'app-id',
+    }) =>
+        {
+          'taskId': id,
+          'title': title,
+          'workspacePath': workspacePath,
+          'workspaceIdentity': workspaceIdentity,
+          'displayStatus': 'idle',
+          'createdAt': 1,
+          'updatedAt': DateTime.now().millisecondsSinceEpoch,
+          if (pinned) 'pinned': true,
+          if (archived) 'archived': true,
+          if (worktreeRoot != null) 'worktreeRoot': worktreeRoot,
+          if (cwd != null) 'cwd': cwd,
+        };
+
+    Widget wrapLocale(Widget child, String locale) => MaterialApp(
+          theme: buildDarkTheme(),
+          darkTheme: buildDarkTheme(),
+          builder: (context, child) =>
+              UiSettingsProvider(settings: UiSettings()..locale = locale, child: child!),
+          home: child,
+        );
+
+    Future<FakeDeviceSession> pumpList(
+      WidgetTester tester, {
+      required List<Map<String, dynamic>> relayTasks,
+      bool desktop = false,
+      String? branch = branchName,
+      String branchPath = wtPath,
+      String locale = 'zh-CN',
+    }) async {
+      if (desktop) {
+        useDesktop(tester);
+      } else {
+        usePhone(tester);
+      }
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        workspaces: [
+          {'workspacePath': wsPath, 'workspaceIdentity': 'app-id'},
+        ],
+        relayTasks: relayTasks,
+      );
+      session.debugSeedTaskBranch(branchPath, branch);
+      final page = TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      );
+      await tester.pumpWidget(locale == 'zh-CN' ? wrap(page) : wrapLocale(page, locale));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      return session;
+    }
+
+    testWidgets('mobile task row shows the cached worktree branch',
+        (tester) async {
+      await pumpList(tester, relayTasks: [worktreeTask('t1')]);
+
+      expect(find.text('分支任务'), findsOneWidget);
+      expect(find.byType(TaskBranchChip), findsOneWidget);
+      expect(find.text(branchName), findsOneWidget);
+    });
+
+    testWidgets('no branch name or no worktreeRoot -> no chip', (tester) async {
+      await pumpList(
+        tester,
+        relayTasks: [
+          worktreeTask('t1', title: '无分支任务'),
+          worktreeTask('t2',
+              title: '普通任务', worktreeRoot: null, cwd: null),
+        ],
+        // The cache carries the plain workspace path, but membership comes
+        // from the RELAY row's worktreeRoot only.
+        branchPath: wsPath,
+        branch: 'feat/should-not-show',
+      );
+
+      expect(find.text('无分支任务'), findsOneWidget);
+      expect(find.text('普通任务'), findsOneWidget);
+      expect(find.byType(TaskBranchChip), findsNothing);
+      expect(find.text('feat/should-not-show'), findsNothing);
+    });
+
+    testWidgets('pinned card shows the same read-only chip', (tester) async {
+      await pumpList(
+        tester,
+        relayTasks: [
+          // Foreign workspace: the workspace card cannot render it, so the
+          // pinned card is the only surface the chip can come from.
+          worktreeTask(
+            't1',
+            pinned: true,
+            workspacePath: '/repo/other',
+            workspaceIdentity: 'other-id',
+          ),
+        ],
+      );
+
+      expect(find.text('已置顶'), findsOneWidget);
+      expect(find.byType(TaskBranchChip), findsOneWidget);
+      expect(find.text(branchName), findsOneWidget);
+    });
+
+    testWidgets('desktop sidebar row shows the chip', (tester) async {
+      await pumpList(
+        tester,
+        relayTasks: [worktreeTask('t1')],
+        desktop: true,
+      );
+
+      expect(find.byType(TaskBranchChip), findsOneWidget);
+      expect(find.text(branchName), findsOneWidget);
+    });
+
+    testWidgets('archive view never shows the chip', (tester) async {
+      await pumpList(
+        tester,
+        relayTasks: [
+          worktreeTask('t1', title: '归档任务', archived: true),
+        ],
+      );
+      expect(find.text('归档任务'), findsNothing);
+
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('查看归档'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('归档任务'), findsOneWidget);
+      expect(find.byType(TaskBranchChip), findsNothing);
+    });
+
+    testWidgets('the chip is display-only: no tap target, no button semantics',
+        (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpList(tester, relayTasks: [worktreeTask('t1')]);
+
+      final chip = find.byType(TaskBranchChip);
+      expect(chip, findsOneWidget);
+      expect(find.descendant(of: chip, matching: find.byType(InkWell)),
+          findsNothing);
+      expect(find.descendant(of: chip, matching: find.byType(GestureDetector)),
+          findsNothing);
+      final node = tester.getSemantics(chip);
+      expect(node.getSemanticsData().flagsCollection.isButton, isFalse,
+          reason: 'the chip must not read as an actionable button');
+      handle.dispose();
+    });
+
+    testWidgets('the chip role is translated (en table)', (tester) async {
+      final handle = tester.ensureSemantics();
+      await pumpList(
+        tester,
+        relayTasks: [worktreeTask('t1')],
+        locale: 'en-US',
+      );
+
+      final node = tester.getSemantics(find.byType(TaskBranchChip));
+      expect(node.getSemanticsData().label, contains('Worktree branch'),
+          reason: 'the role copy must come from the en table, not the key');
+      handle.dispose();
     });
   });
 }

@@ -1186,6 +1186,19 @@ class DeviceSession extends ChangeNotifier
   /// In-flight dedup for the cross-workspace pinned-id merge.
   Future<void>? _pinnedMerge;
 
+  /// Branch names of worktree task rows, keyed by the git lookup path
+  /// (`cwd ?? worktreeRoot ?? workspacePath`). One refresh cycle's worth:
+  /// [refreshTaskOverview] refills it after the rows land (same-path rows
+  /// dedupe inside a round) and prunes paths that disappeared; suspend /
+  /// connect clear it so a new link never shows the old link's branches.
+  final Map<String, String> _taskBranchByPath = {};
+
+  /// Connection-level negative cache of the branch chip's git lookups:
+  /// true once the desktop deterministically cannot answer (method absent
+  /// or whole `git` channel missing). Reset by suspend/connect. Timeouts are
+  /// deliberately NOT remembered here — they retry once per round.
+  bool _taskBranchLookupUnavailable = false;
+
   /// `zcode-task.listTaskList` scopes assembled from [workspaces] — the
   /// wire list completed with the desktop's project roots on 3.16.2
   /// (research/07), so workspaces outside the bound window are still
@@ -1402,6 +1415,123 @@ class DeviceSession extends ChangeNotifier
     return gate.call(channel, method, args).timeout(timings.rpcTimeout);
   }
 
+  /// Quiet `git` port of the task-row branch chips. The branch label is a
+  /// decorative poll like the overview legs, so it rides
+  /// [_callChannelQuiet] and NEVER [callChannel]: one missing git channel or
+  /// timed-out RPC would otherwise feed the link supervisor's tri-strike
+  /// ledger (`noteChannelLevelFailure`) and rebuild the link for a chip.
+  late final GitPort _taskBranchGit = GitPort(
+    (method, args) => _callChannelQuiet(Channels.git, method, args),
+  );
+
+  /// Read-only branch chip label of one task row — the UI never issues RPCs
+  /// for it. Non-null only when:
+  /// - the row carries a non-empty `worktreeRoot` (3.18.0 worktree
+  ///   membership; live-only rows without it show no chip until the relay
+  ///   row lands — an expected short window, not a bug), and
+  /// - the last refresh round cached a non-empty branch for the row's path.
+  ///
+  /// A detached HEAD (or any other missing `branchName`) resolves to null:
+  /// the chip's contract is "show the branch name or nothing".
+  String? worktreeBranchFor(SessionEntry entry) {
+    final root = entry.raw['worktreeRoot'];
+    if (root is! String || root.trim().isEmpty) return null;
+    final path = _taskBranchPathOf(entry.raw);
+    if (path == null) return null;
+    return _taskBranchByPath[path];
+  }
+
+  /// The official lookup path precedence of a worktree task row:
+  /// `cwd ?? worktreeRoot ?? workspacePath` (renderer
+  /// `task.cwd ?? task.workspacePath`; `worktreeRoot` is the defensive
+  /// middle leg). Null when no candidate is a usable path.
+  static String? _taskBranchPathOf(Map<String, dynamic> raw) {
+    for (final key in const ['cwd', 'worktreeRoot', 'workspacePath']) {
+      final value = raw[key];
+      if (value is String && value.trim().isNotEmpty) return value;
+    }
+    return null;
+  }
+
+  /// Refills the worktree branch cache from the rows that just landed
+  /// (R3: runs at the tail of [refreshTaskOverview], once per round; no
+  /// timer, no polling). Same-path rows share one git RPC inside a round.
+  ///
+  /// Failure contract (R4): every failure is silent and yields no chip.
+  /// Method absent / channel missing are deterministic answers and suppress
+  /// the lookup for the rest of the CONNECTION (negative cache); a timeout
+  /// aborts the round after the first occurrence and is retried by the next
+  /// cadence tick, never cached. Nothing here may throw — the overview
+  /// refresh calling it is best-effort by design.
+  Future<void> _refreshTaskBranches() async {
+    if (_disposed) return;
+    final paths = <String>{};
+    for (final (entry, _) in _taskHome.directory.allEntries()) {
+      final root = entry.raw['worktreeRoot'];
+      if (root is! String || root.trim().isEmpty) continue;
+      final path = _taskBranchPathOf(entry.raw);
+      if (path != null) paths.add(path);
+    }
+    if (paths.isEmpty) {
+      _taskBranchByPath.clear();
+      return;
+    }
+    // Cache = this refresh cycle: rows that vanished lose their values.
+    _taskBranchByPath.removeWhere((path, _) => !paths.contains(path));
+    if (_taskBranchLookupUnavailable) return;
+    final client = _client;
+    for (final path in paths) {
+      if (_disposed || _client != client) return;
+      try {
+        final info = await _taskBranchGit.repositoryInfo(path);
+        // The link may have been suspended/replaced while the RPC was in
+        // flight; a late answer must not repopulate the cache suspend
+        // cleared.
+        if (_disposed || _client != client) return;
+        final branch = info.branchName;
+        if (branch == null || branch.trim().isEmpty) {
+          _taskBranchByPath.remove(path);
+        } else {
+          _taskBranchByPath[path] = branch.trim();
+        }
+      } on TimeoutException {
+        // A late failure from the old link must not erase the new link's
+        // cache or arm anything against it (same guard as the success path).
+        if (_disposed || _client != client) return;
+        // At most one timeout per round: stacking one per path would turn a
+        // wedged git channel into a long-running round.
+        _taskBranchByPath.remove(path);
+        return;
+      } on ChannelRpcError catch (e) {
+        if (_disposed || _client != client) return;
+        _taskBranchByPath.remove(path);
+        if (MethodProbe.missingMethod(e.message) ||
+            isChannelMissingError(e)) {
+          _taskBranchLookupUnavailable = true;
+          _taskBranchByPath.clear();
+          return;
+        }
+      } catch (_) {
+        if (_disposed || _client != client) return;
+        // Silent by contract: a branch label is decoration; any other
+        // failure just leaves this row without a chip.
+        _taskBranchByPath.remove(path);
+      }
+    }
+  }
+
+  /// Test seam: seeds one resolved branch label for widget tests (production
+  /// values come from [_refreshTaskBranches]). A null/blank [branch] clears
+  /// the path, mirroring a detached HEAD.
+  @visibleForTesting
+  void debugSeedTaskBranch(String path, String? branch) {
+    if (branch == null || branch.trim().isEmpty) {
+      _taskBranchByPath.remove(path);
+    } else {
+      _taskBranchByPath[path] = branch.trim();
+    }
+  }
+
   /// The task-home assembly (design 10-29 §2): relay rows, both alias
   /// tables, live-frame wiring, the snapshot cache, tombstones and the
   /// materialized directory. Lazy so the fake can replace the sidecar
@@ -1572,6 +1702,10 @@ class DeviceSession extends ChangeNotifier
         _lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning;
     _lastWorkspaceOpenFailure = null;
     _error = null;
+    // A fresh connection episode starts with no branch evidence: the rows
+    // are re-fetched and the deterministic-miss negative cache retries.
+    _taskBranchByPath.clear();
+    _taskBranchLookupUnavailable = false;
     if (clearedColdFailure) {
       _log('[session] cold runtime failure cleared by connect start');
     }
@@ -3015,6 +3149,10 @@ class DeviceSession extends ChangeNotifier
         // `listTaskList` leg here (a legacy bootstrap leg short-circuits
         // inside the helper). Failure keeps the old rows.
         await _refreshRelayTasksFromChannel();
+        if (_disposed || _client != client) return;
+        // The branch chips ride the SAME round, AFTER the rows landed: a new
+        // worktree task gets its chip within this refresh, not 30 s later.
+        await _refreshTaskBranches();
         if (_disposed || _client != client) return;
         _recordOverviewWorkspaceActivity();
         notifyListeners();
@@ -4954,6 +5092,11 @@ class DeviceSession extends ChangeNotifier
     _pinnedMerge = null;
     _overviewRefresh = null;
     _overviewRefreshStartedAt = null;
+    // Branch chips belong to the closed link: a reconnect (possibly to
+    // another desktop) must not show the old link's branches, and the
+    // deterministic-miss negative cache starts from scratch.
+    _taskBranchByPath.clear();
+    _taskBranchLookupUnavailable = false;
     // A project read in flight belongs to the closed link; a fresh
     // connection must start its own instead of joining the old answer
     // (whose late-merge guard would drop it anyway).

@@ -319,8 +319,12 @@ class TaskDirectory {
   /// - the archived bit stays relay-authoritative ([byId]'s third slot)
   ///   and is stamped back into the row's raw;
   /// - relay-side fields the sessions-index schema does not carry
-  ///   (`pinned` / `unreadAt` / `lastError`) are inherited from the relay
-  ///   row when the live frame has no value ([_withRelayMeta]).
+  ///   (`pinned` / `unreadAt` / `lastError` / `worktreeRoot` / `cwd`) are
+  ///   inherited from the relay row when the live frame has no value
+  ///   ([_withRelayMeta]). `worktreeRoot`/`cwd` are 3.18.0 task-registry
+  ///   fields: the desktop sessions-index strict schema omits them
+  ///   (@317877424), so the live row of an ACTIVE worktree task would
+  ///   otherwise erase the branch chip's membership signal.
   ///
   /// [onlyExisting] makes the layer a pure body/phase override: ids [byId]
   /// does not already carry are skipped instead of being added (the pinned
@@ -399,11 +403,14 @@ class TaskDirectory {
 
   /// Live body [raw] plus the relay-authoritative fields the live
   /// sessions-index row schema does not carry (`pinned` / `unreadAt` /
-  /// `lastError`). Live values win; the relay row only fills gaps (check
-  /// P1-1). Without the inheritance every live overlay strips the pin /
-  /// unread affordances and the Copy-TraceID meta off rows the list just
-  /// refreshed — the active window had the same latent bug, the sidecar
-  /// tier would have spread it to the top-12 workspaces.
+  /// `lastError` / `worktreeRoot` / `cwd`). Live values win; the relay row
+  /// only fills gaps (check P1-1). Without the inheritance every live
+  /// overlay strips the pin / unread affordances and the Copy-TraceID meta
+  /// off rows the list just refreshed — the active window had the same
+  /// latent bug, the sidecar tier would have spread it to the top-12
+  /// workspaces. `worktreeRoot`/`cwd` follow the same rule: the live
+  /// sessions-index schema omits them (@317877424), so the active
+  /// worktree task's branch chip would vanish on every live frame.
   Map<String, dynamic> _withRelayMeta(
     Map<String, dynamic> raw,
     Map<String, dynamic>? relayRaw,
@@ -417,6 +424,10 @@ class TaskDirectory {
         'unreadAt': relayRaw['unreadAt'],
       if (raw['lastError'] == null && relayRaw['lastError'] != null)
         'lastError': relayRaw['lastError'],
+      if (raw['worktreeRoot'] == null && relayRaw['worktreeRoot'] != null)
+        'worktreeRoot': relayRaw['worktreeRoot'],
+      if (raw['cwd'] == null && relayRaw['cwd'] != null)
+        'cwd': relayRaw['cwd'],
     };
   }
 

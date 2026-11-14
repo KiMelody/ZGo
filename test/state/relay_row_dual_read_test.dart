@@ -78,6 +78,24 @@ void main() {
       final timeline = SessionEntry.fromRelayTask(newRow());
       expect(timeline.raw['archived'], isNull);
     });
+
+    test('3.18.0 worktreeRoot / cwd survive the whitelist rebuild', () {
+      // Membership signal of the task row's branch chip; `cwd` is the git
+      // lookup path the official renderer uses (`task.cwd ?? workspacePath`).
+      final worktree = SessionEntry.fromRelayTask({
+        ...newRow(),
+        'worktreeRoot': '/repo/.worktrees/feat',
+        'cwd': '/repo/.worktrees/feat',
+      });
+      expect(worktree.raw['worktreeRoot'], '/repo/.worktrees/feat');
+      expect(worktree.raw['cwd'], '/repo/.worktrees/feat');
+
+      // Older desktops (and plain task rows) carry neither: the rebuild
+      // must not invent keys, the display rule simply never chips them.
+      final plain = SessionEntry.fromRelayTask(newRow());
+      expect(plain.raw['worktreeRoot'], isNull);
+      expect(plain.raw['cwd'], isNull);
+    });
   });
 
   group('TaskDirectory with 3.16.2 rows', () {

@@ -1547,6 +1547,62 @@ void main() {
       expect(overridden.raw['unreadAt'], 7);
     });
 
+    test('relay worktree placement survives a live override (branch chip)',
+        () {
+      // The desktop sessions-index strict schema has no worktreeRoot/cwd
+      // (@317877424), so an active worktree task's live frame would erase
+      // the chip's membership signal without the inheritance. Live values
+      // stay authoritative when present.
+      final dir = TaskDirectory(
+        relayTasks: [
+          {
+            ..._relayTask('t1', 'alpha'),
+            'worktreeRoot': '/repo/.worktrees/feat',
+            'cwd': '/repo/.worktrees/feat',
+          },
+        ],
+        sessions: _liveIndex([
+          {'sessionId': 't1', 'title': 'live-t1', 'phase': 'running'},
+        ], subscribedWorkspaceKey: 'alpha'),
+      );
+      final row = dir.allEntries().single.$1;
+      expect(row.phase, 'running', reason: 'the live body still wins');
+      expect(row.raw['worktreeRoot'], '/repo/.worktrees/feat');
+      expect(row.raw['cwd'], '/repo/.worktrees/feat');
+
+      // A live-only row has no relay source to inherit from: the fields
+      // stay absent (the pre-3.18 / live-window expected behavior).
+      final liveOnly = TaskDirectory(
+        sessions: _liveIndex([
+          {'sessionId': 't2', 'title': 'draft', 'phase': 'running'},
+        ], subscribedWorkspaceKey: 'alpha'),
+      ).allEntries().single.$1;
+      expect(liveOnly.raw['worktreeRoot'], isNull);
+      expect(liveOnly.raw['cwd'], isNull);
+    });
+
+    test('live-provided worktree fields override the relay copy', () {
+      final row = TaskDirectory(
+        relayTasks: [
+          {
+            ..._relayTask('t1', 'alpha'),
+            'worktreeRoot': '/repo/.worktrees/old',
+          },
+        ],
+        sessions: _liveIndex([
+          {
+            'sessionId': 't1',
+            'title': 'live-t1',
+            'phase': 'running',
+            'worktreeRoot': '/repo/.worktrees/new',
+            'cwd': '/repo/.worktrees/new',
+          },
+        ], subscribedWorkspaceKey: 'alpha'),
+      ).allEntries().single.$1;
+      expect(row.raw['worktreeRoot'], '/repo/.worktrees/new');
+      expect(row.raw['cwd'], '/repo/.worktrees/new');
+    });
+
     test('the pinned projection picks up a sidecar phase and keeps the pin '
         '(check P1-2)', () {
       final dir = TaskDirectory(
