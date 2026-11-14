@@ -93,6 +93,34 @@ void main() {
     expect(payload.containsKey('workspaceIdentity'), isFalse);
   });
 
+  test('queueLocal carries conversationQuotes into the replay payload',
+      () async {
+    final wire = _FakeWire();
+    final recovered = ValueNotifier<int>(0);
+    final queue = _queue(wire, recovered);
+    const quotes = [
+      {'text': '选中的段', 'comment': '批注'},
+    ];
+
+    queue.queueLocal(taskId: 's1', content: 'a', conversationQuotes: quotes);
+    await _settle(queue);
+
+    final payload = wire.calls.single.$2.single as Map;
+    expect(payload['conversationQuotes'], quotes);
+  });
+
+  test('plain queueLocal omits conversationQuotes entirely', () async {
+    final wire = _FakeWire();
+    final recovered = ValueNotifier<int>(0);
+    final queue = _queue(wire, recovered);
+
+    queue.queueLocal(taskId: 's1', content: 'a');
+    await _settle(queue);
+
+    final payload = wire.calls.single.$2.single as Map;
+    expect(payload.containsKey('conversationQuotes'), isFalse);
+  });
+
   test('channel-level failure requeues; recovered triggers the replay',
       () async {
     final wire = _FakeWire()

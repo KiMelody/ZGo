@@ -658,6 +658,7 @@ const _zh = {
   'chat.skills.empty': '没有可用的 Skills',
   'chat.input.hint': '提出后续修改要求',
   'chat.input.hint.queued': '继续输入以排队后续修改',
+  'chat.input.hint.quoted': '输入正文以发送引用',
   'chat.code.lines': '\$0 行',
   'chat.input.toolsExpand': '展开工具行',
   'chat.input.toolsCollapse': '收起工具行',
@@ -744,6 +745,25 @@ const _zh = {
   'chat.selections.askInSideChat': '在辅助对话中提问',
   'chat.selections.askHint': '输入你的问题',
   'chat.selections.askConfirm': '提问',
+  // ---- selection quote + comment (task 11-13-quote-comment-lite) ----
+  // The entry/title copy is ZGo's own (the official floating editor has no
+  // equivalent label); `comment` reuses the official `chat.selections.comment`
+  // value (注释 / Annotate) and the limit family mirrors the official
+  // `chat.selections.limit.*` copy from the runtime validator.
+  'chat.selections.quote': '引用此段',
+  'chat.selections.quoteTitle': '引用此段',
+  'chat.selections.quoteSelectHint': '长按并拖动选择要引用的文字',
+  'chat.selections.quoteSelectAll': '全选',
+  'chat.selections.quoteNext': '下一步',
+  'chat.selections.quoteBack': '重新选择',
+  'chat.selections.quoteConfirm': '添加引用',
+  'chat.selections.comment': '注释',
+  'chat.selections.commentHint': '添加批注（可选）',
+  'chat.selections.remove': '移除对话引用',
+  'chat.selections.limit.single': '单条引用最多 8,000 字',
+  'chat.selections.limit.count': '最多引用 8 段',
+  'chat.selections.limit.total': '引用文字合计最多 16,000 字',
+  'chat.selections.limit.comment': '批注最多 2,000 字',
   'chat.selectionSideChat.restricted': '辅助对话中不支持此操作',
   'chat.diff.truncated': '…（diff 过长已截断）',
   // ---- git panel (parity-git-panel D2-D5) ----
@@ -2235,6 +2255,7 @@ const _en = {
   'chat.skills.empty': 'No skills available',
   'chat.input.hint': 'Describe the next change',
   'chat.input.hint.queued': 'Continue typing to queue changes',
+  'chat.input.hint.quoted': 'Type a message to send with quotes',
   'chat.code.lines': '\$0 lines',
   'chat.input.toolsExpand': 'Show tool row',
   'chat.input.toolsCollapse': 'Hide tool row',
@@ -2320,6 +2341,24 @@ const _en = {
   'chat.selections.askInSideChat': 'Add in side chat',
   'chat.selections.askHint': 'Type your question',
   'chat.selections.askConfirm': 'Ask',
+  // ---- selection quote + comment (task 11-13-quote-comment-lite) ----
+  'chat.selections.quote': 'Quote this text',
+  'chat.selections.quoteTitle': 'Quote this text',
+  'chat.selections.quoteSelectHint':
+      'Long-press and drag to select the text you want to quote',
+  'chat.selections.quoteSelectAll': 'Select all',
+  'chat.selections.quoteNext': 'Next',
+  'chat.selections.quoteBack': 'Reselect',
+  'chat.selections.quoteConfirm': 'Add quote',
+  'chat.selections.comment': 'Annotate',
+  'chat.selections.commentHint': 'Add a comment (optional)',
+  'chat.selections.remove': 'Remove conversation reference',
+  'chat.selections.limit.single':
+      'A selection can be up to 8,000 characters',
+  'chat.selections.limit.count': 'Up to 8 selections',
+  'chat.selections.limit.total':
+      'Selected text can total up to 16,000 characters',
+  'chat.selections.limit.comment': 'A comment can be up to 2,000 characters',
   'chat.selectionSideChat.restricted':
       "This action isn't available in a side conversation",
   'chat.diff.truncated': '… (diff truncated)',

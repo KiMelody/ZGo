@@ -66,6 +66,8 @@ final List<_Cap> _caps = [
       (c) => c.modelSelectionCatalog),
   _Cap('archivedDelete', 3, 17, 1, CapabilitySource.liveThenSnapshot,
       (c) => c.archivedDelete),
+  _Cap('conversationQuoteComment', 3, 18, 0, CapabilitySource.liveThenSnapshot,
+      (c) => c.conversationQuoteComment),
 ];
 
 RemoteConnectionParams _paramsOf(String? version) =>
@@ -171,6 +173,22 @@ void main() {
       expect(caps.prepareWorkspaceTaskOptions, isFalse);
       expect(caps.quotaWire, isFalse);
     });
+
+    test('conversationQuoteComment opens at the 3.18.0 conservative floor',
+        () {
+      expect(_capsOf('3.17.1', live: null).conversationQuoteComment, isFalse);
+      expect(_capsOf('3.18.0', live: null).conversationQuoteComment, isTrue);
+      expect(
+        _capsOf('3.17.1', live: '3.18.0').conversationQuoteComment,
+        isTrue,
+        reason: 'a stale link snapshot must not hide a running 3.18 desktop',
+      );
+      expect(
+        _capsOf('3.18.0', live: '3.17.1').conversationQuoteComment,
+        isFalse,
+        reason: 'the live version is authoritative in both directions',
+      );
+    });
   });
 
   group('frozen capabilities', () {
@@ -182,7 +200,8 @@ void main() {
         if (cap.name == 'bridgeAddressing' ||
             cap.name == 'projectCreateAddressing' ||
             cap.name == 'prepareWorkspaceTaskOptions' ||
-            cap.name == 'quotaWire') {
+            cap.name == 'quotaWire' ||
+            cap.name == 'conversationQuoteComment') {
           continue;
         }
         expect(

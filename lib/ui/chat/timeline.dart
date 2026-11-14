@@ -518,6 +518,8 @@ class ChatPageActions {
     this.askInSideChat,
     this.openSubagent,
     this.openWorkflowRun,
+    this.quote,
+    this.quoteEntryAllowed,
   });
 
   /// Message-action sheet / feedback 「分叉」: the page runs
@@ -549,6 +551,23 @@ class ChatPageActions {
   /// Drill-in to the read-only workflow run page (design 11-03 §6). Read-only
   /// surfaces omit it; the workflow card's detail chevron then disappears.
   final OpenWorkflowRun? openWorkflowRun;
+
+  /// 「引用此段」 of the message-action sheet (task 11-13-quote-comment-lite
+  /// R1): the page opens the isolated selection view and keeps the resulting
+  /// quote in its composer state. [markdown] tells the page how to render the
+  /// row body inside the selection surface.
+  final void Function(
+    BuildContext context,
+    String sessionId,
+    String text, {
+    required bool markdown,
+  })? quote;
+
+  /// Live capability gate of [quote] (version gate + cached probe verdict).
+  /// A callback, not a bool: the sheet is built on long-press, so a probe
+  /// verdict landing after page construction must be honored. Null keeps the
+  /// entry visible (tests / partial renders).
+  final bool Function()? quoteEntryAllowed;
 }
 
 class ChatTurnGroup extends StatefulWidget {
@@ -1025,6 +1044,7 @@ class ChatRow extends StatelessWidget {
     // The row's own element outlives the sheet — the fork flow navigates and
     // snacks after the command round-trip, when the sheet context is gone.
     final rowContext = context;
+    final quoteText = row['text'] is String ? row['text'] as String : '';
     showModalBottomSheet(
       context: context,
       showDragHandle: true,
@@ -1034,6 +1054,26 @@ class ChatRow extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Selection quote entry (task 11-13 R1). Reachable on every
+            // long-pressable surface EXCEPT readOnly (gated in ChatRow.build
+            // before this sheet can open); available in side chats too — the
+            // composer there owns its own quote chips.
+            if (actions?.quote != null &&
+                quoteText.trim().isNotEmpty &&
+                (actions!.quoteEntryAllowed?.call() ?? true))
+              ListTile(
+                leading: const Icon(Icons.format_quote, size: 20),
+                title: Text(tr(context, 'chat.selections.quote')),
+                onTap: () {
+                  Navigator.pop(context);
+                  actions!.quote!(
+                    rowContext,
+                    sessionId,
+                    quoteText,
+                    markdown: kind == 'assistantText',
+                  );
+                },
+              ),
             if (!sideChat &&
                 kind == 'userInput' &&
                 rowActionAllowed(state, row, 'canEdit') != false)

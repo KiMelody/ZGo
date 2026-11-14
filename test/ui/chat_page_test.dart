@@ -9155,6 +9155,7 @@ class _AttachRecordingTransport implements ConversationTransport {
     String sessionId,
     String text, {
     List<Map<String, dynamic>>? attachments,
+    List<Map<String, dynamic>>? conversationQuotes,
     String? heldQueueDisposition,
   }) async {
     sendCalls++;

@@ -93,9 +93,17 @@ class RecordingConversationTransport implements ConversationTransport {
     String sessionId,
     String text, {
     List<Map<String, dynamic>>? attachments,
+    List<Map<String, dynamic>>? conversationQuotes,
     String? heldQueueDisposition,
   }) async {
-    _accept('sendTextOrQueue', [sessionId, text, heldQueueDisposition]);
+    _accept('sendTextOrQueue', [
+      sessionId,
+      text,
+      heldQueueDisposition,
+      // Appended only when present so every pre-quote call-shape assertion
+      // in the suite keeps its three-element form.
+      if (conversationQuotes != null) conversationQuotes,
+    ]);
     if (sendTextOrQueueResults.isNotEmpty) {
       return sendTextOrQueueResults.removeAt(0);
     }
@@ -1258,6 +1266,29 @@ class ChatGatewayBundle extends ChangeNotifier
   set useQuotaError(Object? value) => quota.useQuotaError = value;
 
   List<(String, String?, String)> get useQuotaCalls => quota.useQuotaCalls;
+
+  // ------------------------------------------- selection quote surface
+  //
+  // [QuoteCommentPort] stand-in (task 11-13-quote-comment-lite): the page
+  // reads the gate synchronously on sheet open and seeds the probe once in
+  // initState. Tests flip [selectionQuoteEntryEnabled] directly and program
+  // [selectionQuoteSupportVerdict].
+
+  /// Whether the long-press 「引用此段」 entry renders.
+  @override
+  bool selectionQuoteEntryEnabled = true;
+
+  /// Programmed probe answer; null models unknown-method / transient failure.
+  bool? selectionQuoteSupportVerdict;
+
+  /// Number of probe calls (dedup/caching observability).
+  int probeSelectionQuoteSupportCalls = 0;
+
+  @override
+  Future<bool?> probeSelectionQuoteSupport() async {
+    probeSelectionQuoteSupportCalls++;
+    return selectionQuoteSupportVerdict;
+  }
 
   // ------------------------------------------------------------ side chat
   //

@@ -890,6 +890,10 @@ class ConversationTransport implements ConversationCommands {
     String sessionId,
     String text, {
     List<Map<String, dynamic>>? attachments,
+    /// Structured selection quotes (`conversationQuotes`, official renderer
+    /// @316542246 / runtime @1296577). The desktop assembles the
+    /// `# userselect` prompt fence itself; this client only ships the field.
+    List<Map<String, dynamic>>? conversationQuotes,
     String? heldQueueDisposition,
     List<String>? expectedHeldQueueItemIds,
     String? automationId,
@@ -901,6 +905,8 @@ class ConversationTransport implements ConversationCommands {
     'text': text,
     if (attachments != null && attachments.isNotEmpty)
       'attachments': attachments,
+    if (conversationQuotes != null && conversationQuotes.isNotEmpty)
+      'conversationQuotes': conversationQuotes,
     if (heldQueueDisposition != null)
       'heldQueueDisposition': heldQueueDisposition,
     if (expectedHeldQueueItemIds != null && expectedHeldQueueItemIds.isNotEmpty)
@@ -1520,6 +1526,7 @@ class ConversationTransport implements ConversationCommands {
     String sessionId,
     String text, {
     List<Map<String, dynamic>>? attachments,
+    List<Map<String, dynamic>>? conversationQuotes,
     String? heldQueueDisposition,
   }) async {
     dynamic res;
@@ -1528,6 +1535,7 @@ class ConversationTransport implements ConversationCommands {
         sessionId,
         text,
         attachments: attachments,
+        conversationQuotes: conversationQuotes,
         heldQueueDisposition: heldQueueDisposition,
       );
     } catch (e) {
@@ -1545,7 +1553,11 @@ class ConversationTransport implements ConversationCommands {
           (attachments == null || attachments.isEmpty) &&
           isChannelLevelError(e)) {
         return SendTextResult.queued(
-          queue.queueLocal(taskId: sessionId, content: text),
+          queue.queueLocal(
+            taskId: sessionId,
+            content: text,
+            conversationQuotes: conversationQuotes,
+          ),
         );
       }
       return SendTextResult.failed(e);

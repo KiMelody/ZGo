@@ -22,12 +22,13 @@ import 'conversation_transport.dart';
 abstract interface class ConversationCommands {
   // ------------------------------------------------- sending & control
 
-  /// Sends a plain message (`sendText`) with optional attachments and
-  /// automation/off-peak routing fields.
+  /// Sends a plain message (`sendText`) with optional attachments,
+  /// structured selection quotes and automation/off-peak routing fields.
   Future<dynamic> sendText(
     String sessionId,
     String text, {
     List<Map<String, dynamic>>? attachments,
+    List<Map<String, dynamic>>? conversationQuotes,
     String? heldQueueDisposition,
     List<String>? expectedHeldQueueItemIds,
     String? automationId,
@@ -54,6 +55,7 @@ abstract interface class ConversationCommands {
     String sessionId,
     String text, {
     List<Map<String, dynamic>>? attachments,
+    List<Map<String, dynamic>>? conversationQuotes,
     String? heldQueueDisposition,
   });
 

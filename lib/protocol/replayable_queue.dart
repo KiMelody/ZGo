@@ -23,6 +23,11 @@ class ReplayableQueueItem {
   final String taskId;
   final String content;
 
+  /// Structured selection quotes of the original `sendText` (task
+  /// quote-comment-lite). Carried into the enqueue payload so an offline
+  /// replay never loses the user's citations; null/empty for plain sends.
+  final List<Map<String, dynamic>>? conversationQuotes;
+
   ReplayableQueueItemState state = ReplayableQueueItemState.queued;
 
   /// Channel-level send attempts consumed (requeue budget — see
@@ -36,6 +41,7 @@ class ReplayableQueueItem {
     required this.commandId,
     required this.taskId,
     required this.content,
+    this.conversationQuotes,
   });
 }
 
@@ -108,11 +114,13 @@ class ReplayableCommandQueue extends ChangeNotifier {
   ReplayableQueueItem queueLocal({
     required String taskId,
     required String content,
+    List<Map<String, dynamic>>? conversationQuotes,
   }) {
     final item = ReplayableQueueItem(
       commandId: generateUuid(),
       taskId: taskId,
       content: content,
+      conversationQuotes: conversationQuotes,
     );
     _items.add(item);
     notifyListeners();
@@ -156,6 +164,7 @@ class ReplayableCommandQueue extends ChangeNotifier {
     required String commandId,
     required String taskId,
     required String content,
+    List<Map<String, dynamic>>? conversationQuotes,
   }) => call('enqueueTaskCommand', [
     {
       ...scope,
@@ -163,6 +172,11 @@ class ReplayableCommandQueue extends ChangeNotifier {
       'taskId': taskId,
       'type': 'send_prompt',
       'content': content,
+      // Runtime queue items carry the same structured field as userInput
+      // rows (runtime @766251); keeping it here is what makes an offline
+      // replay carry the citations.
+      if (conversationQuotes != null && conversationQuotes.isNotEmpty)
+        'conversationQuotes': conversationQuotes,
       'clientId': clientId,
       'clientLabel': 'ZGo',
     },
@@ -217,6 +231,7 @@ class ReplayableCommandQueue extends ChangeNotifier {
         commandId: item.commandId,
         taskId: item.taskId,
         content: item.content,
+        conversationQuotes: item.conversationQuotes,
       );
     } catch (e) {
       failure = e;

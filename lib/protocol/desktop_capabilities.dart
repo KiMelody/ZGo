@@ -120,6 +120,16 @@ class DesktopCapabilities {
   bool get modelSelectionCatalog =>
       _gate(3, 14, 0, source: CapabilitySource.snapshot);
 
+  /// 3.18.0 conservative floor for the `conversationQuotes` sendText field
+  /// (quote-comment-lite, PRD R4). The field family is present in
+  /// `editUserQuery` since 3.15.1; `sendText`'s introduction is not
+  /// fully proven, and an unsupported desktop silently strips unknown keys
+  /// (zod default — the citation disappears without an error). Prefer the
+  /// live bootstrap version: the paired link's snapshot can lag a running
+  /// desktop.
+  bool get conversationQuoteComment =>
+      _gate(3, 18, 0, source: CapabilitySource.liveThenSnapshot);
+
   // --- UI-derived surface ----------------------------------------------------
 
   /// Cached legacy-channel verdict; null until probed, re-read per call.

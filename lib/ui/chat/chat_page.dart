@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 import '../../i18n/lexicon.dart';
 import '../../protocol/channel_client.dart';
 import '../../protocol/conversation.dart';
+import '../../protocol/conversation_quote.dart';
 import '../../state/device_session.dart';
 import '../../state/entitlement_poller.dart';
 import '../../state/new_task_defaults.dart';
@@ -29,6 +30,8 @@ import 'interaction_answer.dart';
 import 'goal_panel.dart';
 import 'jump_to_bottom_button.dart';
 import 'mention_sheet.dart';
+import 'quote_chip_bar.dart';
+import 'selection_quote_page.dart';
 import 'side_chat_command.dart';
 import 'side_chat_tab_bar.dart';
 import 'subagent_feed.dart';
@@ -355,6 +358,8 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
         ),
       );
     },
+    quote: _openSelectionQuote,
+    quoteEntryAllowed: () => widget.host.selectionQuoteEntryEnabled,
   );
 
   /// Marks the message list subtree for the history anchor-compensation
@@ -564,6 +569,11 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   bool get _mentionEnabled => true;
   String? _progress;
   final List<_PendingFile> _pendingFiles = [];
+
+  /// Pending selection quotes of the NEXT send (task 11-13-quote-comment-lite
+  /// R1). In-memory for the composer's lifetime only: cleared after a sent
+  /// message, on session/tab switches; retained on failure/queue/suspension.
+  final List<ConversationQuote> _quotes = [];
   double? _uploadProgress;
   WorkspacePrep? _prep;
   List<SkillEntry> _skills = [];
@@ -747,6 +757,9 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     }
     _loadPrep();
     _loadEntitlement();
+    // Capability gate seed (task 11-13 R4): fire-and-forget negative
+    // evidence; the version gate keeps the entry visible while unknown.
+    unawaited(widget.host.probeSelectionQuoteSupport());
     _inputController.addListener(() {
       final text = _inputController.text;
       final show =
@@ -1098,8 +1111,10 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     }
     if (!widget.isActive) {
       // Tab switch (design 11-13 chip lifecycle): a hidden tab drops the
-      // chip; its late terminal must not toast over the visible tab.
+      // chip; its late terminal must not toast over the visible tab. Pending
+      // quote chips die with the hidden composer too.
       _clearSuspendedSend();
+      if (_quotes.isNotEmpty) setState(() => _quotes.clear());
       return;
     }
     // A tab just came back on screen: it owns the desk badge again (D10),
@@ -2089,7 +2104,17 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
 
   Future<void> _send() async {
     final text = _inputController.text.trim();
-    if ((text.isEmpty && _pendingFiles.isEmpty) || _sending) return;
+    if (_sending) return;
+    if (text.isEmpty && _pendingFiles.isEmpty) {
+      // Quote-only tap (task 11-13 R1): armed quotes keep the send button
+      // live, but ZGo never sends an empty-body text (product choice — the
+      // schema itself tolerates text:'', 11-14 second check) — say what is
+      // missing instead of silently swallowing the tap.
+      if (_quotes.isNotEmpty) {
+        _toast(tr(context, 'chat.input.hint.quoted'));
+      }
+      return;
+    }
     // The ledger owns a suspended send's retry (task 11-13): until its
     // terminal lands, the whole composer input is locked — an edited text
     // or a second tap must never produce a duplicate message.
@@ -2104,6 +2129,13 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     // come back as `session not found`. Absorb the tap (zero RPC, no queue —
     // the user re-taps once the banner clears).
     if (_restoring) return;
+    // Selection quote limits (task 11-13 R3): refuse before any RPC or
+    // session creation so an over-limit set cannot half-send.
+    final quoteError = conversationQuoteLimitErrorKey(_quotes);
+    if (quoteError != null) {
+      _toast(tr(context, quoteError));
+      return;
+    }
     // Subscribe before any RPC: a suspension's terminal settlement can
     // arrive before the typed result is handled on a fast bridge.
     _ensureCommandOutcomeSubscription();
@@ -2246,6 +2278,9 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
         final canUseFirstInput =
             text.isNotEmpty &&
             _pendingFiles.isEmpty &&
+            // createSession's firstInput carries no conversationQuotes —
+            // quotes force the follow-up sendText path instead.
+            _quotes.isEmpty &&
             !text.startsWith('/goal ') &&
             heldDisposition == null;
         final workspaceId = widget.host.chatWorkspaceId;
@@ -2323,15 +2358,24 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
             sessionId,
             text,
             attachments: attachments,
+            conversationQuotes: _quotes.isEmpty
+                ? null
+                : [for (final quote in _quotes) quote.toWire()],
             heldQueueDisposition: heldDisposition,
           );
       switch (result) {
         case SendTextSent():
           _inputController.clear();
-          setState(() => _pendingFiles.clear());
+          setState(() {
+            _pendingFiles.clear();
+            // The citations traveled with the sent message.
+            _quotes.clear();
+          });
         case SendTextQueued():
           // The transport already parked the message (the bar above shows
-          // it); attachments cannot be present in this branch.
+          // it); attachments cannot be present in this branch. The queue
+          // item carries the quotes (R2 passthrough), and the chips stay
+          // per PRD lifecycle (the message itself is still pending).
           _inputController.clear();
         case SendTextRejected(:final reason):
           if (mounted) {
@@ -2392,6 +2436,31 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
         });
       }
     }
+  }
+
+  /// 「引用此段」 → isolated selection view → composer chip (task 11-13 R1).
+  /// The quote never lands in the list when the runtime limits reject it
+  /// (R3) — the official `chat.selections.limit.*` copy is toasted instead.
+  Future<void> _openSelectionQuote(
+    BuildContext context,
+    String sessionId,
+    String text, {
+    required bool markdown,
+  }) async {
+    final quote = await Navigator.of(context).push<ConversationQuote>(
+      zRoute((_) => SelectionQuotePage(text: text, markdown: markdown)),
+    );
+    if (!mounted || quote == null) return;
+    // A hidden side-chat tab dropped its chips while the view was open; a
+    // late confirmation must not resurrect them.
+    if (widget.chromeless && !widget.isActive) return;
+    final next = [..._quotes, quote];
+    final errorKey = conversationQuoteLimitErrorKey(next);
+    if (errorKey != null) {
+      _toast(tr(this.context, errorKey));
+      return;
+    }
+    setState(() => _quotes.add(quote));
   }
 
   /// Creation hook of the `/side` `/btw` interception and of the ask-in-side-
@@ -3974,9 +4043,11 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   void _onTabsControllerChanged() {
     if (!mounted) return;
     // Switching to a side-chat tab hides the main conversation: its
-    // suspension chip is dropped with the tab (task 11-13 lifecycle).
-    if (_suspendedSendId != null && _tabs.activeId != _sessionId) {
-      _clearSuspendedSend();
+    // suspension chip and pending quote chips are dropped with the tab
+    // (task 11-13 lifecycle).
+    if (_tabs.activeId != _sessionId) {
+      if (_suspendedSendId != null) _clearSuspendedSend();
+      _quotes.clear();
     }
     setState(() {});
   }
@@ -4313,6 +4384,12 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
             );
           },
         ),
+        // Pending selection quotes of the next send (task 11-13 R1).
+        if (_quotes.isNotEmpty)
+          QuoteChipBar(
+            quotes: _quotes,
+            onRemove: (i) => setState(() => _quotes.removeAt(i)),
+          ),
         AnimatedBuilder(
           animation: (state == null)
             ? widget.host
@@ -4323,6 +4400,7 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
                 controller: _inputController,
                 sending: _sending,
                 hasAttachments: _pendingFiles.isNotEmpty,
+                hasQuotes: _quotes.isNotEmpty,
                 isDraft: _sessionId == null,
                 state: state,
                 prep: _prep,
@@ -8824,6 +8902,11 @@ class _InputBar extends StatefulWidget {
 
   final VoidCallback onSend;
 
+  /// Pending selection quotes of the next send — armed quotes keep the send
+  /// button live with an empty composer (the tap then explains what is
+  /// missing; quote-only sends do not exist on the wire).
+  final bool hasQuotes;
+
   /// Opens the add-context panel (official ＋ / `chat.composer.actionMenu`);
   /// 附件/目标/工作流/文件/会话/插件 sections live there (design D4).
   final VoidCallback onAddMenu;
@@ -8838,6 +8921,7 @@ class _InputBar extends StatefulWidget {
     required this.controller,
     required this.sending,
     required this.hasAttachments,
+    required this.hasQuotes,
     required this.isDraft,
     required this.state,
     required this.prep,
@@ -9091,6 +9175,8 @@ class _InputBarState extends State<_InputBar> {
                           context,
                           queued
                               ? 'chat.input.hint.queued'
+                              : widget.hasQuotes
+                              ? 'chat.input.hint.quoted'
                               : 'chat.input.hint',
                         ),
                   hintStyle: TextStyle(color: ZInk.ghost(context)),
@@ -9138,7 +9224,7 @@ class _InputBarState extends State<_InputBar> {
                               _StopButton(onStop: () => _stop(context))
                             else
                               _SendButton(
-                                enabled: _hasInput &&
+                                enabled: (_hasInput || widget.hasQuotes) &&
                                     !sending &&
                                     !_sessionDeleted &&
                                     !_sessionMissing,
@@ -9244,7 +9330,7 @@ class _InputBarState extends State<_InputBar> {
                         : showStop
                         ? _StopButton(onStop: () => _stop(context))
                         : _SendButton(
-                            enabled: _hasInput &&
+                            enabled: (_hasInput || widget.hasQuotes) &&
                                 !sending &&
                                 !_sessionDeleted &&
                                 !_sessionMissing,

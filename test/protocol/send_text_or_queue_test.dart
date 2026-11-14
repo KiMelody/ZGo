@@ -77,6 +77,55 @@ void main() {
     expect(wireCalls.where((c) => c.$1 == 'enqueueTaskCommand'), hasLength(1));
   });
 
+  test('ack pass forwards conversationQuotes to sendText verbatim',
+      () async {
+    final t = _StubTransport(session: _fakeSession());
+    final quotes = [
+      {'text': '选中的段', 'comment': '批注'},
+    ];
+    final res = await t.sendTextOrQueue(
+      's1',
+      '带引用的消息',
+      conversationQuotes: quotes,
+    );
+
+    expect(res, isA<SendTextSent>());
+    expect(t.sendCalls.single.conversationQuotes, quotes);
+  });
+
+  test('channel error parks the message WITH its quotes in the queue',
+      () async {
+    final wireCalls = <(String, List<Object?>)>[];
+    final channels = _channelClient((channel, method, args) {
+      wireCalls.add((method, args));
+      if (method == 'enqueueTaskCommand') {
+        throw "Channel name 'zcode-task' timed out after 1000ms";
+      }
+      return const {'status': 'accepted'};
+    });
+    final t = _StubTransport(
+      session: _FakeBridgeSession(channels),
+      sendError: TimeoutException('bridge down'),
+      workspaceHookReviewUi: true,
+    );
+    final quotes = [
+      {'text': '选中的段', 'comment': '批注'},
+    ];
+    final res = await t.sendTextOrQueue(
+      's1',
+      '弱网里的引用',
+      conversationQuotes: quotes,
+    );
+    await _settle();
+
+    final queued = res as SendTextQueued;
+    // ADR-0010 replay must not lose the citations (PRD R2 passthrough).
+    expect(queued.item.conversationQuotes, quotes);
+    final enqueue = wireCalls.firstWhere((c) => c.$1 == 'enqueueTaskCommand');
+    final payload = enqueue.$2.single as Map;
+    expect(payload['conversationQuotes'], quotes);
+  });
+
   test('attachments present answers failed and never queues', () async {
     final wireCalls = <(String, List<Object?>)>[];
     final channels = _channelClient((channel, method, args) {
@@ -292,6 +341,7 @@ class _StubTransport extends ConversationTransport {
         String text,
         List<Map<String, dynamic>>? attachments,
         String? heldQueueDisposition,
+        List<Map<String, dynamic>>? conversationQuotes,
       })> sendCalls = [];
 
   @override
@@ -299,6 +349,7 @@ class _StubTransport extends ConversationTransport {
     String sessionId,
     String text, {
     List<Map<String, dynamic>>? attachments,
+    List<Map<String, dynamic>>? conversationQuotes,
     String? heldQueueDisposition,
     List<String>? expectedHeldQueueItemIds,
     String? automationId,
@@ -312,6 +363,7 @@ class _StubTransport extends ConversationTransport {
       text: text,
       attachments: attachments,
       heldQueueDisposition: heldQueueDisposition,
+      conversationQuotes: conversationQuotes,
     ));
     final err = sendError;
     if (err != null) throw err;

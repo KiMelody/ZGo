@@ -17,6 +17,7 @@ import '../protocol/channel_client.dart'
         isSessionNotFoundText;
 import '../protocol/connection_params.dart';
 import '../protocol/conversation.dart';
+import '../protocol/conversation_quote.dart';
 import '../protocol/desktop_capabilities.dart';
 import '../protocol/file_service.dart';
 import '../protocol/git_service.dart';
@@ -731,6 +732,23 @@ abstract interface class SideChatPort {
   Future<SideChatTab> createSideChatTab(String parent, {String? firstInput});
 }
 
+/// Selection quote + comment surface of the chat page (task
+/// quote-comment-lite, PRD R4). The version gate lives in
+/// [DesktopCapabilities.conversationQuoteComment]; the capability probe is
+/// best-effort and only contributes NEGATIVE evidence.
+abstract interface class QuoteCommentPort {
+  /// Whether the long-press 「引用此段」 entry renders: version gate AND the
+  /// cached probe verdict is not an explicit false.
+  bool get selectionQuoteEntryEnabled;
+
+  /// Best-effort `supportsConversationQuoteComment` probe. The method only
+  /// exists on the desktop's rendering service (app.asar @319128691) — the
+  /// remote channel may not register it, in which case this answers null.
+  /// Only an explicit boolean answer is cached; unknown-method and
+  /// transient failures stay unknown (never hide the entry).
+  Future<bool?> probeSelectionQuoteSupport();
+}
+
 /// Page-construction boundary of the chat UI (ADR-0008 rule ii): the union
 /// of every role a chat page may need, held only by the page classes
 /// ([ChatPage] / [SubagentDetailPage]) and the composition root
@@ -747,7 +765,8 @@ abstract interface class ChatPageHost
         SessionTruthPort,
         SideChatPort,
         GitAccessPort,
-        QuotaAccessPort {}
+        QuotaAccessPort,
+        QuoteCommentPort {}
 
 /// One quota route the usage page renders (design 10-25): the resolved plan
 /// access the snapshot was requested for, and that route's poller view.
@@ -3365,6 +3384,59 @@ class DeviceSession extends ChangeNotifier
       return _modelProviderAvailable = false;
     } finally {
       _modelProviderProbe = null;
+    }
+  }
+
+  // --- selection quote + comment gate (task quote-comment-lite) ---
+  /// Cached probe verdict: null = not probed / unknown, false = the desktop
+  /// explicitly disabled the feature. Only an explicit boolean answer is
+  /// cached; unknown-method and transient failures stay unknown (PRD R4:
+  /// the version gate carries the entry, the probe is negative evidence
+  /// only).
+  bool? _quoteCommentProbeVerdict;
+
+  /// In-flight dedup for [probeSelectionQuoteSupport].
+  Future<bool?>? _quoteCommentProbe;
+
+  @override
+  bool get selectionQuoteEntryEnabled => selectionQuoteEntryAllowed(
+    versionOk: capabilities.conversationQuoteComment,
+    probeVerdict: _quoteCommentProbeVerdict,
+  );
+
+  @override
+  Future<bool?> probeSelectionQuoteSupport() {
+    if (!capabilities.conversationQuoteComment) return Future.value(null);
+    final cached = _quoteCommentProbeVerdict;
+    if (cached != null) return Future.value(cached);
+    return _quoteCommentProbe ??= _probeQuoteComment();
+  }
+
+  Future<bool?> _probeQuoteComment() async {
+    // Live capture 2026-11-14 (desktop 3.18.2): the method is reachable on
+    // the agent channel but ONLY with the active workspace scope — an empty
+    // argument list throws `Cannot read properties of undefined (reading
+    // 'workspaceIdentity')`. No workspace known → nothing to ask.
+    final args = conversationQuoteProbeArgs(_activeWorkspace);
+    if (args == null) return null;
+    try {
+      // The official method is defined by the renderer's capability service
+      // (app.asar @319128691). Probe the conversation channel with the
+      // library's method-missing classifier: a missing method answers null
+      // (unknown), never false.
+      final res = await MethodProbe(
+        (method, args) => callChannel(Channels.zcodeAgent, method, args),
+      ).run('supportsConversationQuoteComment',
+          const ['supportsConversationQuoteComment'],
+          argsOf: (_) => args);
+      final verdict = parseQuoteSupportVerdict(res);
+      if (verdict != null) _quoteCommentProbeVerdict = verdict;
+      return verdict;
+    } catch (_) {
+      // unknown-method / permission / timeout: unknown. Do not cache.
+      return null;
+    } finally {
+      _quoteCommentProbe = null;
     }
   }
 
