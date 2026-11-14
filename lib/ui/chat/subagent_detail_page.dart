@@ -325,7 +325,12 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
     try {
       await widget.host.conversationCommands.cancelBackgroundWork(parent, workId);
     } catch (e) {
-      _toast('$e');
+      if (!mounted) return;
+      _toast(
+        e is CommandSuspendedException
+            ? tr(context, 'chat.suspend.pending')
+            : '$e',
+      );
     }
   }
 

@@ -2784,6 +2784,9 @@ void main() {
       expect(channels.envelopes[1]['commandId'],
           channels.envelopes[0]['commandId']);
       expect('${channels.envelopes[1]['type']}', 'createSession');
+      // Idempotent replay pairs stay outside the reconciliation ledger.
+      expect(transport.ledger.entries, isEmpty);
+      expect(channels.queries, isEmpty);
     });
 
     test('no degradation during flight: timeout rethrows, no retry',
@@ -2845,8 +2848,8 @@ void main() {
           channels.envelopes[0]['commandId']);
     });
 
-    test('sendText regression: pendulum retry keeps the fresh-commandId '
-        'semantics', () async {
+    test('sendText regression: pendulum timeout suspends for reconciliation, '
+        'no blind resend', () async {
       final done = transport.sendCommand(
         's1',
         'sendText',
@@ -2857,15 +2860,75 @@ void main() {
       session.markDegraded('rpc-transport-fault');
       session.degraded.value = null;
 
-      final answering = answerWhenParked(1, const {'status': 'accepted'});
-      await done;
-      await answering;
-      expect(channels.envelopes, hasLength(2));
-      // Not an idempotent session-creating command: the replay still carries
-      // a fresh commandId (the conservative double-delivery guard).
-      expect(channels.envelopes[1]['commandId'],
-          isNot(channels.envelopes[0]['commandId']));
-      expect('${channels.envelopes[1]['type']}', 'sendText');
+      final commandId = '${channels.envelopes[0]['commandId']}';
+      await expectLater(
+        done,
+        throwsA(
+          isA<CommandSuspendedException>()
+              .having((e) => e.commandId, 'commandId', commandId),
+        ),
+      );
+      // The degraded-window timeout is handed to the ledger: no fresh-id
+      // blind replay is issued and the entry stays suspended until the
+      // query settles it.
+      expect(channels.envelopes, hasLength(1));
+      expect(
+        transport.ledger.entry(commandId)?.state,
+        CommandLedgerState.suspended,
+      );
+
+      // The fire-and-forget first reconcile round runs against the ledger's
+      // single-leg address. Answer it as delivered so the TTL cannot fire
+      // after the test.
+      await pumpUntil(() => channels.queries.isNotEmpty);
+      final address = channels.queries.single.single;
+      expect(address['sessionId'], 's1');
+      expect(address['commandId'], commandId);
+      channels.answerQuery(0, {
+        'results': [
+          {
+            'key': {'sessionId': 's1', 'commandId': commandId},
+            'result': {'commandId': commandId, 'status': 'accepted'},
+          },
+        ],
+      });
+      await pumpUntil(() => transport.ledger.entry(commandId) == null);
+    });
+
+    test('a suspended command reports no channel-level failure', () async {
+      final failures = <Object>[];
+      transport = ConversationTransport(
+        session: session,
+        scope: {'workspacePath': '/repo'},
+        onLinkLevelFailure: (_, error) => failures.add(error),
+      );
+      final done = transport.sendCommand(
+        's1',
+        'sendText',
+        {'text': 'hi'},
+        timeout: const Duration(milliseconds: 80),
+      );
+      await pumpUntil(() => channels.envelopes.isNotEmpty);
+      session.markDegraded('rpc-transport-fault');
+      session.degraded.value = null;
+
+      final commandId = '${channels.envelopes[0]['commandId']}';
+      await expectLater(done, throwsA(isA<CommandSuspendedException>()));
+      // Suspension is not a link failure: the sentinel must be exempted
+      // from the ledger that feeds the link supervisor (three strikes would
+      // otherwise rebuild the whole link).
+      expect(failures, isEmpty);
+
+      await pumpUntil(() => channels.queries.isNotEmpty);
+      channels.answerQuery(0, {
+        'results': [
+          {
+            'key': {'sessionId': 's1', 'commandId': commandId},
+            'result': {'commandId': commandId, 'status': 'accepted'},
+          },
+        ],
+      });
+      await pumpUntil(() => transport.ledger.entry(commandId) == null);
     });
 
     test('sendText with a degradation predating the send: timeout rethrows, '
@@ -2881,6 +2944,10 @@ void main() {
       await pumpUntil(() => channels.envelopes.isNotEmpty);
       await expectLater(done, throwsA(isA<TimeoutException>()));
       expect(channels.envelopes, hasLength(1));
+      // Non-degraded timeout: the tracked item is cleared before rethrow
+      // (TTL only scans suspended entries, so no inflight leftovers).
+      expect(transport.ledger.entries, isEmpty);
+      expect(channels.queries, isEmpty);
     });
   });
 }
@@ -2967,12 +3034,17 @@ class _ManualChannels {
 }
 
 /// Parked-command channel for retry-timing tests: handshake answers
-/// immediately; every `sendConversationCommandV4` parks (envelope recorded)
-/// until [answer] completes the [at]-th parked call.
+/// immediately; every `sendConversationCommandV4` and
+/// `queryConversationCommandsV4` parks (payload recorded) until [answer] /
+/// [answerQuery] completes the [at]-th parked call.
 class _RetryChannels {
   /// Envelope of every parked `sendConversationCommandV4`, in call order.
   final List<Map> envelopes = [];
+
+  /// Address list of every parked `queryConversationCommandsV4`, in order.
+  final List<List<Map>> queries = [];
   final _parkedIds = <int>[];
+  final _parkedQueryIds = <int>[];
   late final ChannelClient client;
 
   _RetryChannels() {
@@ -2992,6 +3064,14 @@ class _RetryChannels {
           final request = (arg is List ? arg : <Object?>[arg]).single as Map;
           envelopes.add((request['envelope'] ?? const {}) as Map);
           _parkedIds.add(id);
+        case 'queryConversationCommandsV4':
+          final arg = decodeValue(reader);
+          final request = (arg is List ? arg : <Object?>[arg]).single as Map;
+          queries.add([
+            for (final raw in (request['commands'] as List? ?? const []))
+              (raw as Map).cast<String, dynamic>(),
+          ]);
+          _parkedQueryIds.add(id);
       }
     });
     final init = ValueWriter();
@@ -3002,6 +3082,11 @@ class _RetryChannels {
 
   void answer(int at, Object? payload) {
     final id = _parkedIds.removeAt(at);
+    _reply(client, id, payload);
+  }
+
+  void answerQuery(int at, Object? payload) {
+    final id = _parkedQueryIds.removeAt(at);
     _reply(client, id, payload);
   }
 

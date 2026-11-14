@@ -11,6 +11,8 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 import 'channel_client.dart';
+import 'command_ledger.dart';
+import 'conversation_command_query.dart';
 import 'conversation_commands.dart';
 import 'conversation_state.dart';
 import 'conversation_subscription.dart';
@@ -67,6 +69,12 @@ class ConversationTransport implements ConversationCommands {
   @override
   ValueListenable<String?> get degraded => session.degraded;
 
+  /// [ConversationCommands.commandOutcomes] — the ledger's terminal
+  /// settlements, the UI chip's upgrade source (task 11-13). Read-only
+  /// accessor: the ledger itself and its wiring are unchanged.
+  @override
+  Stream<CommandLedgerOutcome> get commandOutcomes => ledger.outcomes;
+
   final void Function(String line)? onLog;
 
   /// Link-failure ledger hooks for the send paths ([sendCommand] /
@@ -116,6 +124,14 @@ class ConversationTransport implements ConversationCommands {
   /// pre-3.16.2 desktops and every non-create command keep the old payload.
   final Future<String?> Function(String workspacePath)? projectIdFor;
 
+  /// Reconciliation-ledger tuning (task 11-13): lifetime of a suspended
+  /// command, the unknown-bucket second-confirmation delay, and the
+  /// query-failure backoff schedule. Injectable so protocol tests can shrink
+  /// them (real timers, no fake_async); production uses the design values.
+  final Duration commandLedgerTtl;
+  final Duration commandLedgerSecondConfirmDelay;
+  final List<Duration> commandLedgerQueryRetryDelays;
+
   final String clientId = generateUuid();
   bool _handshaken = false;
   Future<void>? _handshakeFuture;
@@ -133,10 +149,17 @@ class ConversationTransport implements ConversationCommands {
     this.watchdogTickInterval = const Duration(seconds: 10),
     this.contentSilenceThreshold = const Duration(seconds: 20),
     this.projectIdFor,
+    this.commandLedgerTtl = const Duration(minutes: 2),
+    this.commandLedgerSecondConfirmDelay = const Duration(seconds: 5),
+    this.commandLedgerQueryRetryDelays = const [
+      Duration(seconds: 5),
+      Duration(seconds: 15),
+    ],
     this.onLog,
     this.onLinkLevelFailure,
     this.onChannelSuccess,
-  }) {
+    CommandLedgerResend? ledgerResend,
+  }) : _ledgerResend = ledgerResend {
     // A reopened bridge has no handshake state — start over (the cache is
     // per service instance).
     session.recovered.addListener(_onBridgeRecovered);
@@ -152,6 +175,10 @@ class ConversationTransport implements ConversationCommands {
     // transport's lifetime (the hello retry is one-shot, so re-arming the key
     // cannot loop).
     _workflowRunDeltasDegraded = false;
+    // Compensation trigger (task 11-13): the recovered wave retries every
+    // suspended command. Fire-and-forget — the ledger's query callback
+    // awaits [handshake] first, so this never races the reset above.
+    unawaited(ledger.reconcile());
   }
 
   /// Internal: exposed for the subscription files split out of this
@@ -325,17 +352,142 @@ class ConversationTransport implements ConversationCommands {
   /// CAS command must not go stale.
   final _ackedRevisions = <String, int>{};
 
+  /// V4 command reconciliation ledger (task 11-13, R7): created lazily and
+  /// DETACHABLE. A whole-link rebuild moves the same instance onto the next
+  /// transport, so suspended chains survive the bridge replacement; the
+  /// outcome stream stays the same object, so UI chip subscriptions survive
+  /// too. [configureLedger] lets the host supply its preflight-aware resend
+  /// callback (the default is this transport's own re-entry).
+  CommandLedger? _ledger;
+  CommandLedgerResend? _ledgerResend;
+  Duration? _ledgerTtlOverride;
+  Duration? _ledgerSecondConfirmOverride;
+  List<Duration>? _ledgerRetryDelaysOverride;
+
+  CommandLedger get ledger {
+    final existing = _ledger;
+    if (existing != null) return existing;
+    final created = CommandLedger(
+      query: queryCommands,
+      resend: _ledgerResend ?? _resendFromLedger,
+      ttl: _ledgerTtlOverride ?? commandLedgerTtl,
+      secondConfirmDelay:
+          _ledgerSecondConfirmOverride ?? commandLedgerSecondConfirmDelay,
+      queryRetryDelays:
+          _ledgerRetryDelaysOverride ?? commandLedgerQueryRetryDelays,
+      onLog: log,
+    );
+    _ledger = created;
+    return created;
+  }
+
+  /// Host seam (R7): bind the preflight-aware resend callback and optional
+  /// test timings before the ledger is first touched.
+  void configureLedger({
+    required CommandLedgerResend resend,
+    Duration? ttl,
+    Duration? secondConfirmDelay,
+    List<Duration>? queryRetryDelays,
+  }) {
+    _ledgerResend = resend;
+    _ledgerTtlOverride = ttl ?? _ledgerTtlOverride;
+    _ledgerSecondConfirmOverride =
+        secondConfirmDelay ?? _ledgerSecondConfirmOverride;
+    _ledgerRetryDelaysOverride =
+        queryRetryDelays ?? _ledgerRetryDelaysOverride;
+    _ledger?.rebind(query: queryCommands, resend: resend, onLog: log);
+  }
+
+  /// Detaches the ledger for a lifetime move. Null when this transport never
+  /// touched it (nothing to preserve). The reference is deliberately KEPT:
+  /// a send that was already in flight when the teardown began must still
+  /// settle its entry on the shared instance the next transport adopts —
+  /// clearing it here used to turn that late settle into a StateError.
+  CommandLedger? detachLedger() => _ledger;
+
+  /// Adopts a ledger detached from a previous transport: entries, timers and
+  /// the outcome stream move over; query/resend ride this transport (and its
+  /// configured host resend) from now on.
+  void adoptLedger(CommandLedger adopted) {
+    _ledger = adopted;
+    adopted.rebind(
+      query: queryCommands,
+      resend: _ledgerResend ?? _resendFromLedger,
+      onLog: log,
+    );
+  }
+
+  /// Ledger re-entry binding: a suspended command is re-sent THROUGH
+  /// [sendCommand] (fresh commandId, fresh CAS base) instead of replaying the
+  /// old envelope. The stale bucket seeds `_ackedRevisions` first so the
+  /// re-entry does not immediately hit the same stale decision.
+  Future<void> _resendFromLedger(CommandResendRequest request) async {
+    final sessionId = request.sessionId;
+    final seed = request.seedRevision;
+    if (sessionId != null && seed != null) {
+      if (seed > (_ackedRevisions[sessionId] ?? 0)) {
+        _ackedRevisions[sessionId] = seed;
+      }
+    }
+    await sendCommand(
+      sessionId,
+      request.kind,
+      request.payload,
+      channelExtra: request.channelExtra,
+      attempt: request.attempt,
+      rootCommandId: request.rootCommandId,
+      reconcile: request.reconcile,
+      supersedeCommandId: request.commandId,
+      ledgerSentAt: request.sentAt,
+      notFoundRetries: request.notFoundRetries,
+    );
+  }
+
+  /// Host-facing re-entry for the ledger handed off to this transport (the
+  /// DeviceSession's preflight-aware resend calls this).
+  Future<void> resendFromLedger(CommandResendRequest request) =>
+      _resendFromLedger(request);
+
   Future<dynamic> sendCommand(
     String? sessionId,
     String type,
     Map<String, dynamic> payload, {
     Duration timeout = const Duration(seconds: 30),
     Map<String, dynamic>? channelExtra,
+    int attempt = 0,
+    String? rootCommandId,
+    bool reconcile = true,
+    String? supersedeCommandId,
+    DateTime? ledgerSentAt,
+    int notFoundRetries = 0,
   }) async {
     // The ledger hooks bracket the whole path (handshake + health gate +
     // wire call): a TimeoutException or channel-missing rejection anywhere
     // on it is a link fact for the host's failure ledger (ADR-0009), while
-    // deterministic RPC errors are normal answers and report nothing.
+    // deterministic RPC errors are normal answers and report nothing. The
+    // suspension sentinel is exempted FIRST: a suspended command is not a
+    // link failure (task 11-13).
+    //
+    // The item is recorded BEFORE the gates so the handshake/waitHealthy
+    // failure paths also have an item to clear (R1: no inflight leftovers);
+    // `reconcile:false` is the gate-close handoff and records nothing.
+    final initialCommandId = generateUuid();
+    String? activeCommandId;
+    if (reconcile &&
+        ledger.record(
+          commandId: initialCommandId,
+          sessionId: sessionId,
+          kind: type,
+          semanticPayload: payload,
+          channelExtra: channelExtra,
+          attempt: attempt,
+          rootCommandId: rootCommandId,
+          supersedeCommandId: supersedeCommandId,
+          sentAt: ledgerSentAt,
+          notFoundRetries: notFoundRetries,
+        )) {
+      activeCommandId = initialCommandId;
+    }
     try {
       await handshake();
       // Gate on a healthy bridge: during a relay drop/recovery the old bridge
@@ -350,7 +502,7 @@ class ConversationTransport implements ConversationCommands {
               _ackedRevisions[sessionId] ?? 0,
             ].reduce((a, b) => a > b ? a : b);
       final envelope = {
-        'commandId': generateUuid(),
+        'commandId': initialCommandId,
         'clientId': clientId,
         'sessionId': sessionId,
         if (_casCommands.contains(type)) 'baseRevision': baseRevision,
@@ -360,16 +512,43 @@ class ConversationTransport implements ConversationCommands {
         'payload': payload,
         'issuedAt': DateTime.now().millisecondsSinceEpoch,
       };
+      final commandId = initialCommandId;
       log('[v4] command $type');
-      var res = await _sendCommandWithRetry(envelope, timeout, channelExtra);
+      var res = await _sendCommandWithRetry(
+        envelope,
+        timeout,
+        channelExtra: channelExtra,
+        reconcile: reconcile,
+      );
       // Runtime events (turn completion etc.) also bump the revision, so a
       // CAS base can go stale even with ack tracking. The stale ack tells
       // the server's current revision — retry once with it (stale-revision
       // retry).
-      if (sessionId != null &&
+      final staleRetry = sessionId != null &&
           res is Map &&
           res['status'] == 'stale' &&
-          res['revisionAtDecision'] is num) {
+          res['revisionAtDecision'] is num;
+      // R7: a resend refused with sessionNotFound never executed (the
+      // session was not live on the bridge). Keep the chain and schedule one
+      // preflight+resend cycle instead of reporting a terminal failure.
+      final recoverableNotFound =
+          reconcile &&
+          rootCommandId != null &&
+          res is Map &&
+          res['status'] == 'rejected' &&
+          res['reasonCode'] == commandSessionNotFoundReasonCode;
+      if (reconcile) {
+        if (staleRetry) {
+          // The stale ack is not terminal: the internal one-shot retry below
+          // continues the same logical command, so clear silently.
+          ledger.discard(commandId);
+        } else if (recoverableNotFound) {
+          ledger.recoverableSessionNotFound(commandId, res);
+        } else {
+          ledger.settleFromAck(commandId, res);
+        }
+      }
+      if (staleRetry) {
         final serverRevision = (res['revisionAtDecision'] as num).toInt();
         log('[v4] command $type stale, retry at rev $serverRevision');
         if (serverRevision > (_ackedRevisions[sessionId] ?? 0)) {
@@ -381,7 +560,37 @@ class ConversationTransport implements ConversationCommands {
           'baseRevision': serverRevision,
           'issuedAt': DateTime.now().millisecondsSinceEpoch,
         };
-        res = await _sendCommandWithRetry(retryEnvelope, timeout, channelExtra);
+        final retryCommandId = '${retryEnvelope['commandId']}';
+        if (reconcile &&
+            ledger.record(
+              commandId: retryCommandId,
+              sessionId: sessionId,
+              kind: type,
+              semanticPayload: payload,
+              channelExtra: channelExtra,
+              attempt: attempt,
+              rootCommandId: rootCommandId,
+              sentAt: ledgerSentAt,
+              notFoundRetries: notFoundRetries,
+            )) {
+          activeCommandId = retryCommandId;
+        }
+        res = await _sendCommandWithRetry(
+          retryEnvelope,
+          timeout,
+          channelExtra: channelExtra,
+          reconcile: reconcile,
+        );
+        if (reconcile) {
+          if (rootCommandId != null &&
+              res is Map &&
+              res['status'] == 'rejected' &&
+              res['reasonCode'] == commandSessionNotFoundReasonCode) {
+            ledger.recoverableSessionNotFound(retryCommandId, res);
+          } else {
+            ledger.settleFromAck(retryCommandId, res);
+          }
+        }
       }
       if (sessionId != null &&
           res is Map &&
@@ -403,8 +612,17 @@ class ConversationTransport implements ConversationCommands {
       onChannelSuccess?.call(channel);
       return res;
     } catch (e) {
-      if (e is TimeoutException || isChannelMissingError(e)) {
-        onLinkLevelFailure?.call(channel, e);
+      final commandId = activeCommandId;
+      if (e is! CommandSuspendedException) {
+        if (commandId != null) {
+          // Non-suspension failure path: clear the tracked item before the
+          // caller sees the error. A resend-chain item emits its terminal
+          // `failed` outcome here; a fresh send clears silently.
+          ledger.settleFromAck(commandId, const {'status': 'failed'});
+        }
+        if (e is TimeoutException || isChannelMissingError(e)) {
+          onLinkLevelFailure?.call(channel, e);
+        }
       }
       rethrow;
     }
@@ -424,11 +642,19 @@ class ConversationTransport implements ConversationCommands {
   /// mid-flight) waits for bridge recovery and retries. Session-creating
   /// commands replay with their original commandId (server-side dedupe),
   /// everything else with a fresh one.
+  ///
+  /// Task 11-13: when the timeout happened inside a degraded-bridge window
+  /// and the ledger gate is open, a tracked (non-idempotent) command is
+  /// SUSPENDED instead: [CommandLedger.suspend] throws the sentinel at once
+  /// and starts the first query fire-and-forget. `attempt >= 1` items never
+  /// suspend again (terminal, no loop); `reconcile:false` and a closed gate
+  /// keep the legacy blind-resend implementation.
   Future<dynamic> _sendCommandWithRetry(
     Map<String, dynamic> envelope,
-    Duration timeout, [
+    Duration timeout, {
     Map<String, dynamic>? channelExtra,
-  ]) async {
+    bool reconcile = true,
+  }) async {
     final sendStart = DateTime.now();
     try {
       return await channels.call(channel, 'sendConversationCommandV4', [
@@ -451,6 +677,22 @@ class ConversationTransport implements ConversationCommands {
       final degradedInFlight = session.degraded.value != null ||
           (degradedAt != null && !degradedAt.isBefore(sendStart));
       if (!degradedInFlight) rethrow;
+      final commandId = '${envelope['commandId']}';
+      if (reconcile && ledger.canSuspend) {
+        final tracked = ledger.entry(commandId);
+        if (tracked != null) {
+          if (!ledger.shouldSuspend(commandId)) rethrow;
+          log(
+            '[v4] command timed out during drop, suspending for '
+            'reconciliation',
+          );
+          throw ledger.suspend(commandId);
+        }
+      } else if (ledger.ledgerDisabled) {
+        // Gate closed: existing suspended items fall back to the legacy
+        // blind-resend implementation instead of waiting for the TTL.
+        unawaited(ledger.handOffSuspended());
+      }
       log(
         '[v4] command timed out during drop, waiting for recovery and '
         'retrying',
@@ -1068,6 +1310,43 @@ class ConversationTransport implements ConversationCommands {
     ]);
   }
 
+  /// Per-query wire timeout (task 11-13): the reconciliation budget assumes
+  /// at most 10s per attempt (three attempts + backoff still fit the 2min
+  /// TTL). The channel default (30s) would blow that budget.
+  static const Duration commandQueryTimeout = Duration(seconds: 10);
+
+  /// `zcode-agent.queryConversationCommandsV4` — inbox outcome lookup for
+  /// commands this client already delivered (reconciliation entry point).
+  ///
+  /// Single-leg addressing `{sessionId, commandId}`: live 3.18.2 proved the
+  /// `sessionId:null` leg only ever addresses global/clock commands and
+  /// answers `"unknown"` for every session command (research/query-shape.md
+  /// §4). Arrays over [commandQueryBatchSize] are split into schema-legal
+  /// batches (`commands` accepts 1-64) and merged back by address.
+  ///
+  /// Batch failures propagate: the ledger treats a failed round as a
+  /// QUERY-side failure and retries with backoff — never as a command
+  /// verdict. [handshake] runs first, matching every other V4 RPC wrapper
+  /// (the bridge recovery wave clears the handshake state).
+  Future<CommandQueryOutcome> queryCommands(
+    List<CommandAddress> commands, {
+    Duration timeout = commandQueryTimeout,
+  }) async {
+    if (commands.isEmpty) return CommandQueryOutcome.empty();
+    await handshake();
+    final outcomes = <CommandQueryOutcome>[];
+    for (final batch in commandQueryBatches(commands)) {
+      final result = await channels.call(
+        channel,
+        'queryConversationCommandsV4',
+        [commandQueryPayload(scope, batch)],
+        timeout: timeout,
+      );
+      outcomes.add(CommandQueryOutcome.parse(result, batch));
+    }
+    return CommandQueryOutcome.merge(outcomes);
+  }
+
   // ------------------------------------------------------ sessions-index
 
   /// Subscribes the sessions-index of this workspace
@@ -1225,14 +1504,18 @@ class ConversationTransport implements ConversationCommands {
   /// - the error came from the [sendText] call itself — this method's body
   ///   is that call's scope, replacing the former UI `sendTextInFlight`
   ///   flag;
+  /// - the error is NOT a [CommandSuspendedException] (task 11-13: a
+  ///   suspended command belongs to the reconciliation ledger, never to the
+  ///   offline queue);
   /// - [replayableQueue] != null (the 3.12.3 version gate — null on older
   ///   desktops, which then never queue);
   /// - [text] is non-empty;
   /// - [attachments] is null/empty (the enqueue schema is text-only);
   /// - `isChannelLevelError(e)` holds.
-  /// Any other thrown error surfaces as [SendTextFailed] carrying the
-  /// original error; a wire-shaped ack rejection becomes
-  /// [SendTextRejected] via [ackRejected] / [ackReason].
+  /// A suspension answers [SendTextSuspended]; any other thrown error
+  /// surfaces as [SendTextFailed] carrying the original error; a wire-shaped
+  /// ack rejection becomes [SendTextRejected] via [ackRejected] /
+  /// [ackReason].
   Future<SendTextResult> sendTextOrQueue(
     String sessionId,
     String text, {
@@ -1248,6 +1531,14 @@ class ConversationTransport implements ConversationCommands {
         heldQueueDisposition: heldQueueDisposition,
       );
     } catch (e) {
+      // Task 11-13: a degraded-window timeout was handed to the
+      // reconciliation ledger. It is NOT a queueable channel failure — the
+      // ledger owns the retry, so enqueueing would double-track the message.
+      // This check must precede isChannelLevelError (the sentinel IS a
+      // TimeoutException).
+      if (e is CommandSuspendedException) {
+        return SendTextResult.suspended(e.commandId);
+      }
       final queue = replayableQueue;
       if (queue != null &&
           text.isNotEmpty &&
@@ -1286,6 +1577,12 @@ sealed class SendTextResult {
   const factory SendTextResult.queued(ReplayableQueueItem item) =
       SendTextQueued;
 
+  /// Degraded-window timeout handed to the reconciliation ledger (task
+  /// 11-13). [commandId] identifies the suspended command (the UI chip binds
+  /// this as its root); this result is NEVER enqueued.
+  const factory SendTextResult.suspended(String commandId) =
+      SendTextSuspended;
+
   /// Not queueable — non-channel error, attachments present, empty text,
   /// or null queue on pre-3.12.3 desktops. [error] is the original failure
   /// for the toast.
@@ -1305,6 +1602,11 @@ class SendTextRejected extends SendTextResult {
 class SendTextQueued extends SendTextResult {
   final ReplayableQueueItem item;
   const SendTextQueued(this.item) : super._();
+}
+
+class SendTextSuspended extends SendTextResult {
+  final String commandId;
+  const SendTextSuspended(this.commandId) : super._();
 }
 
 class SendTextFailed extends SendTextResult {

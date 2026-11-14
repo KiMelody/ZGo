@@ -52,6 +52,21 @@ class RecordingConversationTransport implements ConversationTransport {
   final dynamic Function(String method, List<Object?> args) _accept;
   final bool Function() _strictIsOn;
 
+  /// Terminal ledger settlements for the suspension-chip tests: the real
+  /// transport forwards the ledger's broadcast stream.
+  final StreamController<CommandLedgerOutcome> _outcomes =
+      StreamController<CommandLedgerOutcome>.broadcast();
+
+  @override
+  Stream<CommandLedgerOutcome> get commandOutcomes => _outcomes.stream;
+
+  void emitCommandOutcome(CommandLedgerOutcome outcome) => _outcomes.add(outcome);
+
+  /// Programmed failures keyed by the recorded method name; the
+  /// noSuchMethod default throws them (a sentinel exercises the suspension
+  /// copy branches).
+  final Map<String, Object> commandErrors = {};
+
   @override
   Future<String> createSession(
     String workspaceId, {
@@ -190,11 +205,15 @@ class RecordingConversationTransport implements ConversationTransport {
     if (_strictIsOn()) {
       throw UnimplementedError('unexpected ${invocation.memberName}');
     }
+    final name = _symbolName(invocation.memberName);
+    final args = [...invocation.positionalArguments];
+    final error = commandErrors[name];
+    if (error != null) {
+      _accept(name, args); // record the failed attempt too
+      return Future<Map<String, dynamic>>.error(error);
+    }
     return Future<Map<String, dynamic>>.value(
-      Map<String, dynamic>.from(
-        _accept(_symbolName(invocation.memberName),
-            [...invocation.positionalArguments]) as Map,
-      ),
+      Map<String, dynamic>.from(_accept(name, args) as Map),
     );
   }
 }
@@ -351,6 +370,14 @@ class FakeConversation extends ChangeNotifier implements ConversationPort {
   /// tests program at the result level.
   List<SendTextResult> get sendTextOrQueueResults =>
       _commands.sendTextOrQueueResults;
+
+  /// Emits a ledger terminal settlement through the shared recording
+  /// transport (the page's suspension chip listens to it).
+  void emitCommandOutcome(CommandLedgerOutcome outcome) =>
+      _commands.emitCommandOutcome(outcome);
+
+  /// Programmed command failures keyed by the recorded method name.
+  Map<String, Object> get commandErrors => _commands.commandErrors;
 
   /// Programmed [ConversationTransport.forkAssistant] acks — fork-jump
   /// tests program at the ack level.
@@ -897,6 +924,10 @@ class ChatGatewayBundle extends ChangeNotifier
   @override
   ConversationCommands get conversationCommands =>
       conversation.conversationCommands;
+
+  /// Ledger terminal settlements for the suspension-chip tests.
+  void emitCommandOutcome(CommandLedgerOutcome outcome) =>
+      conversation.emitCommandOutcome(outcome);
 
   @override
   ReplayableCommandQueue? get replayableQueue => conversation.replayableQueue;

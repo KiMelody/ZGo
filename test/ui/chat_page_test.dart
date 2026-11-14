@@ -104,6 +104,15 @@ class _SwitchTransport implements ConversationTransport {
   int _consumed = 0;
   final List<({String provider, String model, String thought})> switches = [];
 
+  /// Ledger terminal settlements for the AC8 coexistence assertion.
+  final StreamController<CommandLedgerOutcome> _outcomes =
+      StreamController<CommandLedgerOutcome>.broadcast();
+
+  @override
+  Stream<CommandLedgerOutcome> get commandOutcomes => _outcomes.stream;
+
+  void emitCommandOutcome(CommandLedgerOutcome outcome) => _outcomes.add(outcome);
+
   @override
   Future<dynamic> switchModelConfig(
     String sessionId, {
@@ -1878,6 +1887,249 @@ void main() {
         .toList()
         .single;
     expect(call.$2, ['s1', '继续', null]);
+  });
+
+  group('suspended send (task 11-13): chip + composer lock', () {
+    /// Pumps a live page and arms one suspended send result.
+    Future<FakeChatGateway> pumpSuspended(
+      WidgetTester tester, {
+      bool chromeless = false,
+      bool isActive = true,
+    }) async {
+      final gateway = FakeChatGateway();
+      gateway.sendTextOrQueueResults.add(
+        const SendTextSuspended('cmd-1'),
+      );
+      await tester.pumpWidget(
+        wrap(ChatPage(
+          host: gateway,
+          sessionId: 's1',
+          title: 't',
+          chromeless: chromeless,
+          isActive: isActive,
+        )),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      ]);
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '挂起中的消息');
+      await tester.pump();
+      await tester.tap(find.byIcon(Icons.arrow_upward));
+      await tester.pump();
+      return gateway;
+    }
+
+    testWidgets('the chip keeps the input in place, locks the whole input, '
+        'and a delivered outcome on the resend chain clears it', (tester) async {
+      final gateway = await pumpSuspended(tester);
+
+      expect(find.byKey(const ValueKey('chat-suspend-chip')), findsOneWidget);
+      expect(find.byIcon(Icons.arrow_upward), findsNothing);
+      expect(find.text('确认中'), findsOneWidget);
+      expect(find.text('命令确认中，暂不可发送'), findsOneWidget);
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.readOnly, isTrue,
+          reason: 'editing the text must not reopen the send path');
+      expect(field.controller!.text, '挂起中的消息',
+          reason: 'the suspended message stays in the composer');
+      expect(
+        gateway.calls.where((c) => c.$1 == 'sendTextOrQueue'),
+        hasLength(1),
+      );
+
+      // The chip is not a second send entry.
+      await tester.tap(find.byKey(const ValueKey('chat-suspend-chip')));
+      await tester.pump();
+      expect(
+        gateway.calls.where((c) => c.$1 == 'sendTextOrQueue'),
+        hasLength(1),
+      );
+
+      // A resend gets a fresh commandId; the outcome binds the original
+      // root, so the chip upgrades and the normal sent flow resumes.
+      gateway.emitCommandOutcome(
+        const CommandLedgerOutcome(
+          commandId: 'cmd-2',
+          rootCommandId: 'cmd-1',
+          sessionId: 's1',
+          kind: 'sendText',
+          settlement: CommandLedgerSettlement.delivered,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('chat-suspend-chip')), findsNothing);
+      expect(find.byIcon(Icons.arrow_upward), findsOneWidget);
+      final after = tester.widget<TextField>(find.byType(TextField));
+      expect(after.controller!.text, isEmpty);
+      expect(after.readOnly, isFalse);
+    });
+
+    testWidgets('a rejected outcome clears the chip, keeps the text and '
+        'shows the existing failure copy family', (tester) async {
+      final gateway = await pumpSuspended(tester);
+
+      gateway.emitCommandOutcome(
+        const CommandLedgerOutcome(
+          commandId: 'cmd-1',
+          rootCommandId: 'cmd-1',
+          sessionId: 's1',
+          kind: 'sendText',
+          settlement: CommandLedgerSettlement.rejected,
+          decision: CommandDecision(
+            status: CommandDecisionStatus.rejected,
+            wireStatus: 'rejected',
+            raw: {'status': 'rejected', 'reasonCode': 'NO_ACTIVE_TURN'},
+            reasonCode: 'NO_ACTIVE_TURN',
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('chat-suspend-chip')), findsNothing);
+      expect(
+        find.text(chatLabel('chat.send.failed', ['NO_ACTIVE_TURN'])),
+        findsOneWidget,
+      );
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.controller!.text, '挂起中的消息',
+          reason: 'a failed send keeps the text for a retry');
+      expect(field.readOnly, isFalse);
+    });
+
+    testWidgets('a failed outcome clears the chip and routes the decision '
+        'reason through the failure prefix', (tester) async {
+      final gateway = await pumpSuspended(tester);
+
+      gateway.emitCommandOutcome(
+        const CommandLedgerOutcome(
+          commandId: 'cmd-1',
+          rootCommandId: 'cmd-1',
+          sessionId: 's1',
+          kind: 'sendText',
+          settlement: CommandLedgerSettlement.failed,
+          decision: CommandDecision(
+            status: CommandDecisionStatus.failed,
+            wireStatus: 'failed',
+            raw: {'status': 'failed', 'reasonCode': 'DESK_BUSY'},
+            reasonCode: 'DESK_BUSY',
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('chat-suspend-chip')), findsNothing);
+      expect(
+        find.text(chatLabel('chat.send.failed', ['DESK_BUSY'])),
+        findsOneWidget,
+      );
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.controller!.text, '挂起中的消息',
+          reason: 'a failed send keeps the text for a retry');
+      expect(field.readOnly, isFalse);
+    });
+
+    testWidgets('a timedOut outcome clears the chip and routes the timeout '
+        'copy through the same failure prefix', (tester) async {
+      final gateway = await pumpSuspended(tester);
+
+      gateway.emitCommandOutcome(
+        const CommandLedgerOutcome(
+          commandId: 'cmd-1',
+          rootCommandId: 'cmd-1',
+          sessionId: 's1',
+          kind: 'sendText',
+          settlement: CommandLedgerSettlement.timedOut,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('chat-suspend-chip')), findsNothing);
+      expect(
+        find.text(
+          chatLabel('chat.send.failed', [chatLabel('chat.error.timeout')]),
+        ),
+        findsOneWidget,
+      );
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.controller!.text, '挂起中的消息',
+          reason: 'a timed-out send keeps the text for a retry');
+      expect(field.readOnly, isFalse);
+    });
+
+    testWidgets('switching the side-chat tab away drops the chip', (
+      tester,
+    ) async {
+      final gateway = await pumpSuspended(
+        tester,
+        chromeless: true,
+        isActive: true,
+      );
+      expect(find.byKey(const ValueKey('chat-suspend-chip')), findsOneWidget);
+
+      await tester.pumpWidget(
+        wrap(ChatPage(
+          host: gateway,
+          sessionId: 's1',
+          title: 't',
+          chromeless: true,
+          isActive: false,
+        )),
+      );
+      await tester.pump();
+      expect(find.byKey(const ValueKey('chat-suspend-chip')), findsNothing);
+    });
+
+    testWidgets('an operation command suspended inside _run shows the '
+        'pending notice, not the failure prefix', (tester) async {
+      final gateway = FakeChatGateway();
+      gateway.conversation.commandErrors['compact'] =
+          CommandSuspendedException(commandId: 'cmp-1', sessionId: 's1');
+      await tester.pumpWidget(
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'userInput', 'text': 'hi'},
+      ]);
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), '/compact');
+      await tester.pump();
+      await tester.tap(find.byIcon(Icons.arrow_upward));
+      await tester.pumpAndSettle();
+
+      expect(find.text(chatLabel('chat.suspend.pending')), findsOneWidget);
+      expect(find.textContaining(chatLabel('chat.compact.failed')), findsNothing);
+      expect(
+        gateway.calls.where((c) => c.$1 == 'compact'),
+        hasLength(1),
+      );
+    });
+
+    testWidgets('setAssistantFeedback suspended: the added catch shows the '
+        'pending notice (non-chat entry)', (tester) async {
+      final gateway = FakeChatGateway();
+      gateway.conversation.commandErrors['setAssistantFeedback'] =
+          CommandSuspendedException(commandId: 'fb-1', sessionId: 's1');
+      await tester.pumpWidget(
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot([
+        {'rowId': 1, 'kind': 'assistantText', 'text': '回答完毕'},
+      ]);
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.thumb_up_alt_outlined), findsOneWidget);
+
+      await tester.tap(find.byIcon(Icons.thumb_up_alt_outlined));
+      await tester.pump();
+
+      expect(find.text(chatLabel('chat.suspend.pending')), findsOneWidget);
+      expect(
+        gateway.calls.where((c) => c.$1 == 'setAssistantFeedback'),
+        hasLength(1),
+      );
+    });
   });
 
   testWidgets('attachment upload failure: snack retry action re-runs _send '
@@ -7316,6 +7568,54 @@ void main() {
     expect(transport.switches, hasLength(1));
     expect(find.text('切换未生效，正在重试…'), findsNothing);
     expect(find.text('模型/思考切换未生效，已恢复为桌面当前设置'), findsNothing);
+  });
+
+  testWidgets('switchModelConfig suspension coexists with a ledger terminal: '
+      'the suspension copy is switchPending and §12 owns the visible '
+      'terminal (auto retry → revert notice), with no suspension chip',
+      (tester) async {
+    final (gateway, transport) = await pumpSheetSwitch(
+      tester,
+      results: [
+        CommandSuspendedException(commandId: 'sw-1', sessionId: 's1'),
+        TimeoutException('retry also lost'),
+      ],
+    );
+
+    // The sentinel rides the existing lost-ack §12 path: optimistic patch
+    // landed and the sheet's pending copy is the suspension notice.
+    expect(find.text('已切换，下一条消息生效'), findsOneWidget);
+    expect(find.byKey(const ValueKey('chat-suspend-chip')), findsNothing);
+    expect(find.text(chatLabel('chat.suspend.pending')), findsNothing);
+
+    // The ledger's terminal for this kind is recorded but never rendered
+    // (step-3 kind gate): it must not clear anything or add copy.
+    transport.emitCommandOutcome(
+      const CommandLedgerOutcome(
+        commandId: 'sw-2',
+        rootCommandId: 'sw-1',
+        sessionId: 's1',
+        kind: 'switchModelConfig',
+        settlement: CommandLedgerSettlement.failed,
+      ),
+    );
+    await tester.pump();
+    expect(find.byKey(const ValueKey('chat-suspend-chip')), findsNothing);
+    expect(find.text(chatLabel('chat.suspend.pending')), findsNothing);
+    expect(transport.switches, hasLength(1));
+
+    // §12 still owns the terminal: the old-config snapshot triggers the one
+    // auto retry, whose failure falls back to the honest revert notice.
+    gateway.snapshotExtra = {'config': desktopBaselineConfig()};
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '帮我修复登录'},
+    ]);
+    await tester.pump();
+    await tester.pump();
+    expect(transport.switches, hasLength(2));
+    await advancePastShowingToast(tester);
+    expect(find.text('模型/思考切换未生效，已恢复为桌面当前设置'), findsOneWidget);
+    expect(find.byKey(const ValueKey('chat-suspend-chip')), findsNothing);
   });
 
   // ---- fork lands the new session (10-05-fork-session-lifecycle C1) ----

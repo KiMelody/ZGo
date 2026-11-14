@@ -288,6 +288,10 @@ const _zh = {
   'chat.resume.failed.sessionMissing': '会话不存在',
   'chat.creating': '正在创建会话（首次可能需要预热）…',
   'chat.send.failed': '发送失败: \$0',
+  'chat.suspend.pending': '连接中断，正在确认命令结果',
+  // Suspension-chip family (task 11-13, kept apart from the failure copy).
+  'chat.suspend.chip': '确认中',
+  'chat.suspend.inputHint': '命令确认中，暂不可发送',
   'chat.op.failed': '操作失败: \$0',
   // Non-template sibling for _run's error prefix (the raw error rides
   // after the colon — a template $0 here would leak literally).
@@ -1841,6 +1845,11 @@ const _en = {
   'chat.resume.failed.sessionMissing': 'Session not found',
   'chat.creating': 'Creating the session (first run may warm up)…',
   'chat.send.failed': 'Send failed: \$0',
+  'chat.suspend.pending':
+      'Connection interrupted; the command is waiting for confirmation.',
+  // Suspension-chip family (task 11-13, kept apart from the failure copy).
+  'chat.suspend.chip': 'Confirming',
+  'chat.suspend.inputHint': 'Confirming the command — sending is paused.',
   'chat.op.failed': 'Operation failed: \$0',
   'chat.op.failed.generic': 'Operation failed',
   'chat.compact.failed': 'Compact failed',

@@ -849,6 +849,26 @@ class DeviceSession extends ChangeNotifier
   @visibleForTesting
   final Duration sidecarCooldown;
 
+  /// Suspended-command ledger budget handed to every transport this session
+  /// builds (11-13 R7). Only tests shrink these; production keeps the
+  /// design values: a 2 min TTL bounds the whole chain, the second
+  /// confirmation waits ~5 s, and a failed resend preflight backs off 5 s
+  /// then 15 s exactly like a query-side failure.
+  @visibleForTesting
+  final Duration commandLedgerTtl;
+
+  @visibleForTesting
+  final Duration commandLedgerSecondConfirmDelay;
+
+  @visibleForTesting
+  final List<Duration> commandLedgerQueryRetryDelays;
+
+  /// Upper bound on the resend preflight's workspace-open + subscribe chain
+  /// (R7): a hung open leaves the command suspended (the ledger backs off)
+  /// instead of blocking its retry slot forever.
+  @visibleForTesting
+  final Duration resendPreflightTimeout;
+
   DeviceSession({
     required this.deviceId,
     required this.params,
@@ -864,6 +884,13 @@ class DeviceSession extends ChangeNotifier
     this.timings = const StallTimings(),
     this.sidecarCooldown = const Duration(minutes: 10),
     this.overviewRefreshThrottle = const Duration(milliseconds: 2500),
+    this.commandLedgerTtl = const Duration(minutes: 2),
+    this.commandLedgerSecondConfirmDelay = const Duration(seconds: 5),
+    this.commandLedgerQueryRetryDelays = const [
+      Duration(seconds: 5),
+      Duration(seconds: 15),
+    ],
+    this.resendPreflightTimeout = const Duration(seconds: 10),
   }) : _homeStore = TaskHomeStore(deviceId: deviceId),
        _activityStore = WorkspaceActivityStore(deviceId: deviceId) {
     // Persisted task-home anchors + local delete tombstones (design
@@ -907,6 +934,14 @@ class DeviceSession extends ChangeNotifier
   RemoteClient? _client;
   BridgeSession? _bridge;
   ConversationTransport? _conversation;
+
+  /// Suspended-command ledger detached from the previous transport and
+  /// waiting for the next one (11-13 R7). A whole-link rebuild replaces the
+  /// transport but must NOT replace the ledger — its entries are the only
+  /// memory that a pre-rebuild command was never answered (acceptance
+  /// Run C: zero compensation because the old ledger died with its bridge).
+  CommandLedger? _retainedLedger;
+
   SessionsIndexSubscription? _sessionsSub;
   final Map<String, ConversationSubscription> _chatSubs = {};
 
@@ -2183,6 +2218,12 @@ class DeviceSession extends ChangeNotifier
       // switch must never read the previous workspace's ids as mass
       // deletions).
       _taskHome.onWorkspaceOpened();
+      // R7: the ledger outlives the transport. Detach it BEFORE the old
+      // transport dies so its suspended items survive this switch and are
+      // adopted by the conversation built below (a workspace switch and a
+      // whole-link rebuild take the same path).
+      final detachedLedger = _conversation?.detachLedger();
+      if (detachedLedger != null) _retainedLedger = detachedLedger;
       _conversation = null;
       _chatSubs.clear();
       _chatTerminalSubs.clear();
@@ -2245,6 +2286,22 @@ class DeviceSession extends ChangeNotifier
         onChannelSuccess: _onTransportChannelSuccess,
       );
       _conversation = conversation;
+      // R7: every transport gets the host's preflight-aware resend seam and
+      // the session-wide ledger budget. A retained ledger is adopted here
+      // (keeping its entries, timers and outcome stream) and immediately
+      // reconciles against THIS bridge — the compensation Run C missed.
+      conversation.configureLedger(
+        resend: _resendSuspendedCommand,
+        ttl: commandLedgerTtl,
+        secondConfirmDelay: commandLedgerSecondConfirmDelay,
+        queryRetryDelays: commandLedgerQueryRetryDelays,
+      );
+      final retainedLedger = _retainedLedger;
+      if (retainedLedger != null) {
+        _retainedLedger = null;
+        conversation.adoptLedger(retainedLedger);
+        unawaited(retainedLedger.reconcile());
+      }
       final sub = await conversation.subscribeSessionsIndex();
       if (_disposed || _bridge != bridge) {
         await sub.dispose();
@@ -3327,6 +3384,60 @@ class DeviceSession extends ChangeNotifier
     final conv = _conversation;
     if (conv == null) throw StateError('not connected');
     return conv;
+  }
+
+  /// Host seam for ledger resends (11-13 R7): preflight the entry's session
+  /// onto the active bridge, then let the CURRENT transport send the
+  /// envelope.
+  ///
+  /// The desktop answers `proto.sessionNotFound` for a command addressed to
+  /// a session that is not loaded on the bridge, and that decision is
+  /// deterministic — a resend right after a bridge rebuild lands on
+  /// whichever workspace the bridge happens to hold (acceptance Run B: the
+  /// carrier session lived in the default workspace while the bridge held
+  /// PaiSmart). Preflight failures are not command verdicts: they surface
+  /// as [CommandPreflightException] and the ledger backs off (5 s/15 s,
+  /// TTL capped) exactly like a query-side failure.
+  Future<void> _resendSuspendedCommand(CommandResendRequest request) async {
+    if (_disposed) throw const CommandPreflightException('disposed');
+    final sessionId = request.sessionId;
+    if (sessionId == null) {
+      throw const CommandPreflightException('missing session id');
+    }
+    await _ensureSessionLiveForResend(sessionId);
+    final conversation = _conversation;
+    if (_disposed || conversation == null) {
+      throw const CommandPreflightException('not connected');
+    }
+    await conversation.resendFromLedger(request);
+  }
+
+  Future<void> _ensureSessionLiveForResend(String sessionId) async {
+    // A live entry can only belong to the CURRENT bridge: every workspace
+    // switch and suspend clears [_chatSubs] in its teardown, so this is
+    // already the "subscribed live + workspace active" invariant. A
+    // no-op here keeps the healthy path at zero RPC.
+    if (_chatSubs[sessionId] != null) return;
+    try {
+      // Reuse the app's own recovery chain: resolve the session's owning
+      // workspace, open it when it is not the active bridge, re-subscribe.
+      await resumeSessionOnReturn(sessionId).timeout(resendPreflightTimeout);
+    } on TimeoutException {
+      throw CommandPreflightException(
+        'session $sessionId not live within '
+        '${resendPreflightTimeout.inMilliseconds}ms',
+      );
+    } on SessionResumeException catch (error) {
+      throw CommandPreflightException('session $sessionId resume: $error');
+    } catch (error) {
+      // Any preflight failure is a retryable context problem (the ledger
+      // backs off), never a command verdict.
+      throw CommandPreflightException('session $sessionId preflight: $error');
+    }
+    if (_disposed) throw const CommandPreflightException('disposed');
+    if (_chatSubs[sessionId] == null) {
+      throw CommandPreflightException('session $sessionId not subscribed');
+    }
   }
 
   /// Conversation V4 command surface (ConversationPort): the live transport of
@@ -4812,6 +4923,10 @@ class DeviceSession extends ChangeNotifier
     final sub = _sessionsSub;
     final chats = Map.of(_chatSubs);
     final chatTerminals = Map.of(_chatTerminalSubs);
+    // R7: keep the suspended-command ledger across the rebuild; the next
+    // conversation adopts it (see [_openWorkspaceNow]).
+    final detachedLedger = _conversation?.detachLedger();
+    if (detachedLedger != null) _retainedLedger = detachedLedger;
     _client = null;
     _bridge = null;
     _conversation = null;
@@ -4882,6 +4997,14 @@ class DeviceSession extends ChangeNotifier
     if (_disposed) return;
     _disposed = true;
     await suspend();
+    // R7 explicit teardown: the retained ledger outlives transports by
+    // design, so nothing else cancels its TTL/retry timers. [suspend]
+    // returned early above (`_disposed` was already set), so drain the
+    // still-attached instance as well — both branches are the same object
+    // whenever the session actually connected through a transport.
+    final ledger = _retainedLedger ?? _conversation?.detachLedger();
+    _retainedLedger = null;
+    ledger?.dispose();
     for (final poller in _entitlementPollers.values) {
       poller.dispose();
     }

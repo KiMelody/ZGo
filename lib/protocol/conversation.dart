@@ -21,6 +21,8 @@
 /// procedure. Callers import this file, not the parts.
 library;
 
+export 'command_ledger.dart';
+export 'conversation_command_query.dart';
 export 'conversation_commands.dart';
 export 'conversation_state.dart';
 export 'conversation_subscription.dart';

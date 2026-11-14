@@ -8,6 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:zgo/protocol/channel_client.dart';
+import 'package:zgo/protocol/conversation.dart'
+    show CommandSuspendedException;
 import 'package:zgo/protocol/conversation_state.dart';
 import 'package:zgo/protocol/task_group_resolver.dart';
 import 'package:zgo/protocol/task_groups.dart';
@@ -3504,6 +3506,32 @@ void main() {
       // maps to tasks.error.sessionBusy instead of surfacing raw.
       expect(find.textContaining('会话正在处理中，请稍后重试'), findsOneWidget);
       expect(find.textContaining('ChannelRpcError'), findsNothing);
+
+      // Drain the SnackBar auto-dismiss timer.
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets(
+        'a suspended deleteSession surfaces the pending notice through the '
+        '_runOp prefix, not the raw sentinel', (tester) async {
+      final (_, _, session) = await setupC1(tester, relayTasks: const []);
+      session.deleteSessionResults.add(
+        CommandSuspendedException(commandId: 'del-1', sessionId: 'fork1'),
+      );
+
+      await deleteViaSheet(tester);
+
+      // The ledger still owns the delete: keep the tasks.opFailed prefix
+      // but announce the pending confirmation instead of a failure.
+      expect(find.text('操作失败: 连接中断，正在确认命令结果'), findsOneWidget);
+      expect(find.textContaining('CommandSuspendedException'), findsNothing);
+      expect(
+        session.conversationCalls.where((c) => c.$1 == 'deleteSession'),
+        hasLength(1),
+      );
+      // A suspension is not a completion: the row must stay.
+      expect(find.text('Fork 草稿'), findsOneWidget);
 
       // Drain the SnackBar auto-dismiss timer.
       await tester.pump(const Duration(seconds: 4));

@@ -6,6 +6,7 @@
 // bookkeeping) is intentionally NOT on it.
 import 'package:flutter/foundation.dart';
 
+import 'command_ledger.dart';
 import 'conversation_transport.dart';
 
 /// Conversation V4 commands of the active workspace, as consumed by the
@@ -245,4 +246,10 @@ abstract interface class ConversationCommands {
   /// while the native bridge is down/rebuilding. Same state source as the
   /// send path's queue decision; the loading placeholder listens to it.
   ValueListenable<String?> get degraded;
+
+  /// Terminal settlements of suspended commands (task 11-13): delivered /
+  /// rejected / failed / timedOut, with [CommandLedgerOutcome.rootCommandId]
+  /// binding a chain's resend back to the chip that waits on it. Internal
+  /// transitions and `switchModelConfig` are never emitted.
+  Stream<CommandLedgerOutcome> get commandOutcomes;
 }

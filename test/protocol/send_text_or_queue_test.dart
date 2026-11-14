@@ -136,6 +136,37 @@ void main() {
     expect(t.replayableQueue?.items, isEmpty);
   });
 
+  test('a suspended sentinel answers suspended and never queues', () async {
+    final t = _StubTransport(
+      session: _fakeSession(),
+      sendError: CommandSuspendedException(
+        commandId: 'cmd-1',
+        sessionId: 's1',
+      ),
+      workspaceHookReviewUi: true, // queue would materialize if consulted
+    );
+    final res = await t.sendTextOrQueue('s1', '挂起中的消息');
+    await _settle();
+
+    // Task 11-13: the ledger owns a suspended command's retry. The sentinel
+    // must be checked BEFORE isChannelLevelError (it is a TimeoutException
+    // subclass), and it must never enter the replayable queue — otherwise
+    // the same message would be on two retry tracks.
+    expect(res, isA<SendTextSuspended>());
+    expect((res as SendTextSuspended).commandId, 'cmd-1');
+    expect(t.replayableQueue?.items, isEmpty);
+  });
+
+  test('the suspension sentinel stays a TimeoutException subclass', () {
+    final sentinel = CommandSuspendedException(
+      commandId: 'cmd-2',
+      sessionId: 's1',
+    );
+    expect(sentinel, isA<TimeoutException>());
+    expect(sentinel.commandId, 'cmd-2');
+    expect(sentinel.sessionId, 's1');
+  });
+
   test('empty text answers failed even on a channel error', () async {
     final t = _StubTransport(
       session: _fakeSession(),

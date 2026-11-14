@@ -3576,11 +3576,18 @@ class _TaskListPageState extends State<TaskListPage>
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            // Same humanized-error chain as chat's _run: classify the
-            // raw message (resolve-failure / busy) before falling back
-            // to the generic prefix.
-            businessErrorCopy('$e', locale) ??
-                trP(context, 'tasks.opFailed', ['$e']),
+            // A suspended deleteSession is still owned by the ledger: the
+            // entry keeps its tasks.opFailed prefix but announces the
+            // pending confirmation, never the raw sentinel (task 11-13).
+            e is CommandSuspendedException
+                ? trP(context, 'tasks.opFailed', [
+                    tr(context, 'chat.suspend.pending'),
+                  ])
+                // Same humanized-error chain as chat's _run: classify the
+                // raw message (resolve-failure / busy) before falling back
+                // to the generic prefix.
+                : businessErrorCopy('$e', locale) ??
+                      trP(context, 'tasks.opFailed', ['$e']),
           ),
         ),
       );

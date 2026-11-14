@@ -362,6 +362,26 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   final GlobalKey _listKey = GlobalKey();
   String? _sessionId;
 
+  /// Root commandId of a send suspended pending ledger reconciliation
+  /// (task 11-13). Non-null means the suspension chip owns the send slot
+  /// and the entire composer input is locked (a second send must never
+  /// happen while the ledger owns the retry).
+  String? _suspendedSendId;
+
+  /// Session the suspended command was addressed to — outcomes of another
+  /// session (or a page that has since switched tabs) must not clear it.
+  String? _suspendedSessionId;
+
+  /// Lazy outcome subscription: only pages that actually suspend a send
+  /// pay for it, and the subscription starts before the RPC so a fast
+  /// terminal settlement cannot be missed.
+  StreamSubscription<CommandLedgerOutcome>? _commandOutcomeSub;
+
+  /// Chip backstop (ledger TTL is 2min): covers a gate-close handoff and the
+  /// extreme "outcome before subscription" race — the chip can never stick.
+  static const Duration _suspendFallbackDelay = Duration(minutes: 2, seconds: 5);
+  Timer? _suspendFallback;
+
   /// Composer-draft persistence key: the session once created, else a
   /// workspace-scoped placeholder that dies with the first successful
   /// send (design 10-20). Follows [_sessionId] live so a draft page that
@@ -1076,7 +1096,12 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     if (!widget.chromeless || oldWidget.isActive == widget.isActive) {
       return;
     }
-    if (!widget.isActive) return;
+    if (!widget.isActive) {
+      // Tab switch (design 11-13 chip lifecycle): a hidden tab drops the
+      // chip; its late terminal must not toast over the visible tab.
+      _clearSuspendedSend();
+      return;
+    }
     // A tab just came back on screen: it owns the desk badge again (D10),
     // and a handle revoked while it was hidden gets the resume it had to
     // defer (`_onHostChanged` is gated by `isActive` — M0-b spike E1).
@@ -1130,6 +1155,10 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     // pane switch, hot restart); an already-cleared one was removed by
     // the debounced write after the send that cleared it.
     _draftPersistTimer?.cancel();
+    _commandOutcomeSub?.cancel();
+    _commandOutcomeSub = null;
+    _suspendFallback?.cancel();
+    _suspendFallback = null;
     if (_inputController.text.isNotEmpty || _pendingFiles.isNotEmpty) {
       unawaited(_persistDraft());
     }
@@ -1166,17 +1195,21 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       _editingRowId.value = null;
     } catch (e) {
       debugPrint('[chat] editUserQuery: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              trP(context, 'chat.action.edit.failed', [
-                commandErrorCopy('$e', locale) ?? '$e',
-              ]),
-            ),
-          ),
-        );
+      if (!mounted) return;
+      if (e is CommandSuspendedException) {
+        // The editor stays open: the ledger may still deliver the edit.
+        _toast(tr(context, 'chat.suspend.pending'));
+        return;
       }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            trP(context, 'chat.action.edit.failed', [
+              commandErrorCopy('$e', locale) ?? '$e',
+            ]),
+          ),
+        ),
+      );
     }
   }
 
@@ -1686,6 +1719,108 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     }
   }
 
+  /// Starts the ledger's termination feed (idempotent). The UI only learns
+  /// about a suspension from a typed send result, so subscribing at the
+  /// send entry — before the RPC — closes the "terminal lands before the
+  /// chip exists" race.
+  void _ensureCommandOutcomeSubscription() {
+    if (_commandOutcomeSub != null) return;
+    try {
+      _commandOutcomeSub = widget.host.conversationCommands.commandOutcomes
+          .listen(
+        _onCommandOutcome,
+        onError: (Object error) {
+          debugPrint('[chat] command outcome stream: $error');
+        },
+      );
+    } catch (error) {
+      // Partial test transports (noSuchMethod fakes) may not implement the
+      // accessor; production always does.
+      debugPrint('[chat] command outcome stream unavailable: $error');
+    }
+  }
+
+  /// The suspension chip's only upgrade source. The ledger binds a whole
+  /// resend chain to its root commandId, so the chip follows that root
+  /// across the resend's fresh commandId (design: 重发成功状态衔接).
+  void _onCommandOutcome(CommandLedgerOutcome outcome) {
+    final root = _suspendedSendId;
+    if (root == null || outcome.rootCommandId != root) return;
+    if (!mounted) return;
+    // A hidden side-chat tab dropped its chip on the tab switch; a late
+    // terminal must not toast over the visible tab.
+    if (widget.chromeless && !widget.isActive) return;
+    final sessionId = _suspendedSessionId;
+    if (sessionId != null &&
+        outcome.sessionId != null &&
+        outcome.sessionId != sessionId) {
+      return;
+    }
+    switch (outcome.settlement) {
+      case CommandLedgerSettlement.delivered:
+        // Normal sent flow: the message has landed, so the composer text
+        // and its attachments are consumed.
+        _clearSuspendedSend(clearInput: true, clearFiles: true);
+      case CommandLedgerSettlement.rejected:
+      case CommandLedgerSettlement.failed:
+        final reason =
+            outcome.decision?.reasonCode ??
+            outcome.decision?.wireStatus ??
+            outcome.settlement.name;
+        _clearSuspendedSend();
+        _toast(trP(context, 'chat.send.failed', [reason]));
+      case CommandLedgerSettlement.timedOut:
+        _clearSuspendedSend();
+        _toast(
+          trP(context, 'chat.send.failed', [
+            tr(context, 'chat.error.timeout'),
+          ]),
+        );
+      case CommandLedgerSettlement.superseded:
+      case CommandLedgerSettlement.abandoned:
+        // Internal transitions only: keep the chip bound to the root — the
+        // resend's own terminal carries the same rootCommandId.
+        break;
+    }
+  }
+
+  /// Arms the chip for [commandId]. The fallback timer mirrors the ledger's
+  /// bounded lifetime (TTL 2min) so a gate-close handoff — which settles the
+  /// item silently — cannot leave the composer locked forever.
+  void _armSuspendedSend(String commandId, String sessionId) {
+    setState(() {
+      _suspendedSendId = commandId;
+      _suspendedSessionId = sessionId;
+    });
+    _ensureCommandOutcomeSubscription();
+    _suspendFallback?.cancel();
+    _suspendFallback = Timer(_suspendFallbackDelay, () {
+      _suspendFallback = null;
+      if (!mounted || _suspendedSendId == null) return;
+      _clearSuspendedSend();
+      _toast(
+        trP(context, 'chat.send.failed', [
+          tr(context, 'chat.error.timeout'),
+        ]),
+      );
+    });
+  }
+
+  void _clearSuspendedSend({
+    bool clearInput = false,
+    bool clearFiles = false,
+  }) {
+    _suspendFallback?.cancel();
+    _suspendFallback = null;
+    if (clearInput) _inputController.clear();
+    if (!mounted) return;
+    setState(() {
+      _suspendedSendId = null;
+      _suspendedSessionId = null;
+      if (clearFiles) _pendingFiles.clear();
+    });
+  }
+
   /// Config-revert notice (design 09-25 D3): an authoritative snapshot
   /// overrode a still-fresh optimistic model/thought switch (the command
   /// was lost in a bridge swing) — surface it instead of silently
@@ -1849,6 +1984,14 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       // Raw error to the log; the snack bar gets plain language for the
       // known transport shapes (commandErrorCopy, R3).
       debugPrint('[chat] $errorPrefix: $e');
+      if (e is CommandSuspendedException) {
+        // Operation commands (compact, goal pause/resume, retryTurn,
+        // applyFileRewind, deleteSession fallback…): the ledger owns the
+        // retry and the terminal outcome; the entry only announces the
+        // suspension (design 11-13 UI 形态).
+        if (mounted) _toast(tr(context, 'chat.suspend.pending'));
+        return;
+      }
       _toast(
         commandErrorCopy('$e', locale) ??
             businessErrorCopy('$e', locale) ??
@@ -1947,6 +2090,10 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   Future<void> _send() async {
     final text = _inputController.text.trim();
     if ((text.isEmpty && _pendingFiles.isEmpty) || _sending) return;
+    // The ledger owns a suspended send's retry (task 11-13): until its
+    // terminal lands, the whole composer input is locked — an edited text
+    // or a second tap must never produce a duplicate message.
+    if (_suspendedSendId != null) return;
     // Absence guards (10-06 tombstone + 10-11 sessionNotFound terminal):
     // a deleted-elsewhere or refused session accepts no sends — the
     // slash-bar shortcuts below route here directly, past the greyed
@@ -1957,6 +2104,9 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     // come back as `session not found`. Absorb the tap (zero RPC, no queue —
     // the user re-taps once the banner clears).
     if (_restoring) return;
+    // Subscribe before any RPC: a suspension's terminal settlement can
+    // arrive before the typed result is handled on a fast bridge.
+    _ensureCommandOutcomeSubscription();
     HapticFeedback.lightImpact();
 
     // Builtin side-chat aliases (R1/R2, design §5/D7): `/side [text]` and
@@ -2165,8 +2315,9 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
         setState(() => _progress = null);
       }
       // Plain send: the transport classifies the outcome (queued on a
-      // channel-level failure, ADR-0010) and this switch maps the four
-      // variants 1:1 onto the former inline handling.
+      // channel-level failure, ADR-0010; suspended on a degraded-window
+      // timeout, task 11-13) and this switch maps the variants 1:1 onto the
+      // former inline handling.
       final result = await widget.host.conversationCommands
           .sendTextOrQueue(
             sessionId,
@@ -2186,6 +2337,13 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
           if (mounted) {
             _toast(trP(context, 'chat.send.failed', [reason]));
           }
+        case SendTextSuspended(:final commandId):
+          // The ledger owns the retry; the chip occupies the send slot and
+          // the text/attachments stay in the composer until the outcome
+          // stream reports delivered (consume) or failed (keep + failure
+          // copy). `SendTextQueued` above is unchanged: a queued message
+          // stays in the replayable queue, never behind this chip.
+          if (mounted) _armSuspendedSend(commandId, sessionId);
         case SendTextFailed(:final error):
           if (mounted) {
             _toast(trP(context, 'chat.send.failed', ['$error']));
@@ -2198,7 +2356,11 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       // oversize copy (D6), and with attachments still pending the bar gets
         // a one-tap retry (files stay in _pendingFiles by design).
         debugPrint('[chat] send failed: $e');
-        if (mounted) {
+        if (mounted && e is CommandSuspendedException) {
+          // Non-sendText entries (sendGoalCommand) have no chip: a
+          // suspension notice is their whole UI, the ledger owns the rest.
+          _toast(tr(context, 'chat.suspend.pending'));
+        } else if (mounted) {
           final locale = localeOf(context);
           final message =
               attachmentErrorCopy('$e', locale) ??
@@ -3262,6 +3424,16 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
             conversation: widget.host,
             actions: _actions,
             feed: _feed,
+            // Route the panel's entries through the page runner: its catch
+            // turns a suspension into the pending notice (task 11-13).
+            onPauseGoal: (sid) => _run(
+              tr(context, 'chat.goal.pauseFailed'),
+              () => widget.host.conversationCommands.pauseGoal(sid),
+            ),
+            onResumeGoal: (sid) => _run(
+              tr(context, 'chat.goal.resumeFailed'),
+              () => widget.host.conversationCommands.resumeGoal(sid),
+            ),
             // R5/AC6 closure: the goal process panel carries the
             // pause/resume entries (restricted commands in a side chat);
             // it renders nothing there.
@@ -3801,6 +3973,11 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   /// children receive `isActive` through their own rebuild).
   void _onTabsControllerChanged() {
     if (!mounted) return;
+    // Switching to a side-chat tab hides the main conversation: its
+    // suspension chip is dropped with the tab (task 11-13 lifecycle).
+    if (_suspendedSendId != null && _tabs.activeId != _sessionId) {
+      _clearSuspendedSend();
+    }
     setState(() {});
   }
 
@@ -4153,6 +4330,7 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
                 conversation: widget.host,
                 sessionTruth: widget.host,
                 sessionId: _sessionId,
+                suspendedCommandId: _suspendedSendId,
                 feed: state == null ? null : _feed,
                 subagentConfirmWindow: widget.turnFooterConfirmWindow,
                 onSend: _send,
@@ -4283,6 +4461,7 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     final locale = localeOf(context);
     final errorPrefix = tr(context, 'chat.action.fork.failed');
     final createdCopy = tr(context, 'chat.fork.created');
+    final suspendedCopy = tr(context, 'chat.suspend.pending');
     final draftTitle = tr(context, 'tasks.new');
     dynamic ack;
     try {
@@ -4293,9 +4472,11 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       messenger.showSnackBar(
         SnackBar(
           content: Text(
-            commandErrorCopy('$e', locale) ??
-                businessErrorCopy('$e', locale) ??
-                '$errorPrefix: $e',
+            e is CommandSuspendedException
+                ? suspendedCopy
+                : commandErrorCopy('$e', locale) ??
+                      businessErrorCopy('$e', locale) ??
+                      '$errorPrefix: $e',
           ),
         ),
       );
@@ -4728,6 +4909,13 @@ class _GoalProcessPanel extends StatelessWidget {
   /// Page-level navigation (ADR-0008 rule ii) — the agent drill-in.
   final ChatPageActions? actions;
 
+  /// Page-wired pause/resume entries. The goal panel's own buttons are
+  /// fire-and-forget; routing them through the page's `_run` gives the
+  /// suspension sentinel its notice (task 11-13). Null keeps the historical
+  /// direct call (tests / embedders without a page runner).
+  final Future<void> Function(String sessionId)? onPauseGoal;
+  final Future<void> Function(String sessionId)? onResumeGoal;
+
   /// Side-chat restricted-command closure (task 11-11 R5/AC6): the goal
   /// panel is hidden there — its pause/resume entries send restricted
   /// commands (the desktop hides the same area). Default false keeps the
@@ -4739,6 +4927,8 @@ class _GoalProcessPanel extends StatelessWidget {
     required this.conversation,
     this.feed,
     this.actions,
+    this.onPauseGoal,
+    this.onResumeGoal,
     this.sideChat = false,
   });
 
@@ -4750,8 +4940,12 @@ class _GoalProcessPanel extends StatelessWidget {
     return GoalPanel(
       state: state,
       feed: feed,
-      onPauseGoal: (sid) => conversation.conversationCommands.pauseGoal(sid),
-      onResumeGoal: (sid) => conversation.conversationCommands.resumeGoal(sid),
+      onPauseGoal: (sid) =>
+          onPauseGoal?.call(sid) ??
+          conversation.conversationCommands.pauseGoal(sid),
+      onResumeGoal: (sid) =>
+          onResumeGoal?.call(sid) ??
+          conversation.conversationCommands.resumeGoal(sid),
       onOpenAgent: pooledFeed == null || actions?.openSubagent == null
           ? null
           : (agent) => actions!.openSubagent!(
@@ -5046,7 +5240,12 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
     try {
       await widget.conversation.conversationCommands.cancelBackgroundWork(_sessionId, workId);
     } catch (e) {
-      _toast('$e');
+      if (!mounted) return;
+      _toast(
+        e is CommandSuspendedException
+            ? tr(context, 'chat.suspend.pending')
+            : '$e',
+      );
     }
   }
 
@@ -5217,14 +5416,24 @@ class _BackgroundWorksSheetState extends State<_BackgroundWorksSheet> {
   void _cancelWork(Map<String, dynamic> work) {
     final workId = '${work['workId'] ?? work['id'] ?? ''}';
     if (workId.isEmpty || _sessionId.isEmpty) return;
-    try {
-      widget.conversation.conversationCommands.cancelBackgroundWork(
-        _sessionId,
-        workId,
-      );
-    } catch (e) {
-      _toast('$e');
-    }
+    // The command is fire-and-forget: attach the catch to the returned
+    // future (a try/catch around the un-awaited call never fired).
+    unawaited(
+      widget.conversation.conversationCommands
+          .cancelBackgroundWork(_sessionId, workId)
+          .then<void>(
+            (_) {},
+            onError: (Object e, StackTrace stack) {
+              if (mounted) {
+                _toast(
+                  e is CommandSuspendedException
+                      ? tr(context, 'chat.suspend.pending')
+                      : '$e',
+                );
+              }
+            },
+          ),
+    );
   }
 
   /// One running bash work row: spinner + title + elapsed + ✕ (direct
@@ -5827,6 +6036,15 @@ class _QueueBar extends StatelessWidget {
   /// everything else reads 「操作失败: …」).
   void _toastQueueFailure(BuildContext context, String command, Object error) {
     debugPrint('[chat] $command: $error');
+    if (error is CommandSuspendedException) {
+      // The optimistic rollback at each call site already ran; the ledger
+      // still owns the command's retry, so the row reports a suspension
+      // rather than a failed operation.
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(tr(context, 'chat.suspend.pending'))),
+      );
+      return;
+    }
     final locale = localeOf(context);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -6270,12 +6488,33 @@ class _InteractionCardState extends State<_InteractionCard> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(tr(context, 'chat.interact.submitFailed')),
+            content: Text(
+              e is CommandSuspendedException
+                  ? tr(context, 'chat.suspend.pending')
+                  : tr(context, 'chat.interact.submitFailed'),
+            ),
           ),
         );
       }
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Snooze is fire-and-forget on the sheet row: a suspension still owns a
+  /// retry in the ledger, so surface the same notice the other operation
+  /// commands use instead of letting the sentinel become an unhandled
+  /// Future error.
+  Future<void> _snooze() async {
+    try {
+      await widget.onSnooze!();
+    } catch (e) {
+      debugPrint('[chat] snoozeInteractionAutoResolution: $e');
+      if (e is CommandSuspendedException && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr(context, 'chat.suspend.pending'))),
+        );
+      }
     }
   }
 
@@ -6415,7 +6654,7 @@ class _InteractionCardState extends State<_InteractionCard> {
                 padding: const EdgeInsets.only(top: 2),
                 child: InkWell(
                   borderRadius: BorderRadius.circular(ZRadius.mini),
-                  onTap: _busy ? null : () => widget.onSnooze!(),
+                  onTap: _busy ? null : _snooze,
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 6,
@@ -6549,7 +6788,11 @@ class _HookReviewCardState extends State<_HookReviewCard> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(tr(context, 'chat.interact.submitFailed')),
+            content: Text(
+              e is CommandSuspendedException
+                  ? tr(context, 'chat.suspend.pending')
+                  : tr(context, 'chat.interact.submitFailed'),
+            ),
           ),
         );
       }
@@ -7812,12 +8055,17 @@ Future<bool> _apply(
       }
       return true;
     } else if (context.mounted) {
+      // switchModelConfig keeps the §12 path above (onTimeoutOptimistic);
+      // every other config command gets the suspension notice, never the
+      // raw sentinel text.
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            trP(context, 'chat.op.failed', [
-              commandErrorCopy('$e', localeOf(context)) ?? '$e',
-            ]),
+            e is CommandSuspendedException
+                ? tr(context, 'chat.suspend.pending')
+                : trP(context, 'chat.op.failed', [
+                    commandErrorCopy('$e', localeOf(context)) ?? '$e',
+                  ]),
           ),
         ),
       );
@@ -8561,6 +8809,11 @@ class _InputBar extends StatefulWidget {
   final SessionTruthPort sessionTruth;
   final String? sessionId;
 
+  /// Root commandId of a send suspended pending reconciliation (task
+  /// 11-13). Non-null: the suspension chip owns the send slot, the text
+  /// field is read-only and [_send]'s page-level guard refuses a submit.
+  final String? suspendedCommandId;
+
   /// Shared child-session pool backing the subagent pill's terminal
   /// hysteresis view (null in draft mode → no pill).
   final SubagentFeed? feed;
@@ -8592,6 +8845,7 @@ class _InputBar extends StatefulWidget {
     required this.conversation,
     required this.sessionTruth,
     required this.sessionId,
+    this.suspendedCommandId,
     required this.feed,
     required this.subagentConfirmWindow,
     required this.onSend,
@@ -8686,6 +8940,7 @@ class _InputBarState extends State<_InputBar> {
   WorkspacePrep? get prep => widget.prep;
   Map<String, String>? get draftConfig => widget.draftConfig;
   String? get sessionId => widget.sessionId;
+  bool get suspended => widget.suspendedCommandId != null;
   VoidCallback get onSend => widget.onSend;
   VoidCallback get onAddMenu => widget.onAddMenu;
   VoidCallback get onModelSheet => widget.onModelSheet;
@@ -8775,7 +9030,9 @@ class _InputBarState extends State<_InputBar> {
     // right slot is the stop button only while the composer is empty and
     // the desktop reports canStop (pre-3.15: falls back to isRunning);
     // with input the send button owns the slot.
-    final showStop = !_hasInput && (state?.effectiveCanStop ?? false);
+    final showStop = !suspended &&
+        !_hasInput &&
+        (state?.effectiveCanStop ?? false);
     // The hint swaps once messages are queued, so typing more
     // keeps appending to the queue instead of looking like a fresh message.
     final queued = state?.queueItems.isNotEmpty ?? false;
@@ -8823,14 +9080,19 @@ class _InputBarState extends State<_InputBar> {
               TextField(
                 controller: controller,
                 focusNode: _inputFocus,
+                readOnly: suspended,
                 minLines: 1,
                 maxLines: 6,
                 style: ZType.body.copyWith(color: ZInk.solid(context)),
                 decoration: InputDecoration(
-                  hintText: tr(
-                    context,
-                    queued ? 'chat.input.hint.queued' : 'chat.input.hint',
-                  ),
+                  hintText: suspended
+                      ? tr(context, 'chat.suspend.inputHint')
+                      : tr(
+                          context,
+                          queued
+                              ? 'chat.input.hint.queued'
+                              : 'chat.input.hint',
+                        ),
                   hintStyle: TextStyle(color: ZInk.ghost(context)),
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,
@@ -8865,10 +9127,14 @@ class _InputBarState extends State<_InputBar> {
                                 () => _toolsExpanded = !_toolsExpanded,
                               ),
                             ),
-                            // Same swap as the wide row below: stop owns
-                            // the slot on an empty composer, send takes
-                            // it back once there is input.
-                            if (showStop)
+                            // Same swap as the wide row below: the
+                            // suspension chip owns the slot while the
+                            // ledger reconciles; otherwise stop owns it on
+                            // an empty composer and send takes it back
+                            // once there is input.
+                            if (suspended)
+                              const _SuspendChip(compact: true)
+                            else if (showStop)
                               _StopButton(onStop: () => _stop(context))
                             else
                               _SendButton(
@@ -8973,7 +9239,9 @@ class _InputBarState extends State<_InputBar> {
                   // landscape states share this row). A cross-terminal
                   // deletion tombstone (10-06) greys the button instead.
                   if (!short)
-                    showStop
+                    suspended
+                        ? const _SuspendChip()
+                        : showStop
                         ? _StopButton(onStop: () => _stop(context))
                         : _SendButton(
                             enabled: _hasInput &&
@@ -8989,6 +9257,35 @@ class _InputBarState extends State<_InputBar> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  /// Fire-and-forget composer commands (mode/model/stop) have no awaiting
+  /// caller: a suspension sentinel must still surface its notice instead of
+  /// becoming an unhandled Future error. Non-suspension failures keep the
+  /// historical silent shape.
+  void _fireCommand(
+    Future<dynamic> command, {
+    String noticeKey = 'chat.suspend.pending',
+  }) {
+    unawaited(
+      // then<void> (not catchError): the future's reified type varies with
+      // the transport (test fakes may hand back Future<Map>), and
+      // catchError's handler must return that exact type.
+      command.then<void>(
+        (_) {},
+        onError: (Object e, StackTrace stack) {
+          if (e is! CommandSuspendedException) {
+            debugPrint('[chat] composer command failed: $e');
+            return;
+          }
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(tr(context, noticeKey))),
+            );
+          }
+        },
       ),
     );
   }
@@ -9021,7 +9318,9 @@ class _InputBarState extends State<_InputBar> {
     );
     if (value == null || value == _modeValue) return;
     if (isDraft || sid == null) return; // draft chips go through the sheet
-    conversation.conversationCommands.switchCollaborationMode(sid, value);
+    _fireCommand(
+      conversation.conversationCommands.switchCollaborationMode(sid, value),
+    );
   }
 
   Future<void> _pickThought(BuildContext context) async {
@@ -9063,11 +9362,16 @@ class _InputBarState extends State<_InputBar> {
     final provider = '${state?.config?['provider'] ?? ''}';
     final model = '${state?.config?['model'] ?? ''}';
     if (provider.isEmpty || model.isEmpty) return;
-    conversation.conversationCommands.switchModelConfig(
-      sid,
-      provider: provider,
-      model: model,
-      thought: value,
+    _fireCommand(
+      conversation.conversationCommands.switchModelConfig(
+        sid,
+        provider: provider,
+        model: model,
+        thought: value,
+      ),
+      // §12 owns this command's visible terminal; a suspension reuses the
+      // sheet's existing pending copy (design 11-13 switchModelConfig).
+      noticeKey: 'chat.sheet.switchPending',
     );
   }
 
@@ -9085,7 +9389,7 @@ class _InputBarState extends State<_InputBar> {
     // hide the stop button immediately; the next authoritative control
     // frame recalibrates (canStop back to true restores it).
     st?.optimisticStop();
-    conversation.conversationCommands.stop(sid);
+    _fireCommand(conversation.conversationCommands.stop(sid));
   }
 }
 
@@ -9490,6 +9794,63 @@ class _SendButton extends StatelessWidget {
                           : Colors.white.withValues(alpha: 0.7),
                     ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Send-slot chip while the command ledger reconciles a suspended send
+/// (task 11-13). Non-interactive by design: it reports the pending result,
+/// the composer's text field and send entry are locked alongside it.
+class _SuspendChip extends StatelessWidget {
+  /// Short-viewport form: the 48px square suffixIcon slot, spinner only.
+  final bool compact;
+
+  const _SuspendChip({this.compact = false});
+
+  /// Stable finder key for widget tests and semantics tooling.
+  static const ValueKey<String> chipKey = ValueKey('chat-suspend-chip');
+
+  @override
+  Widget build(BuildContext context) {
+    final label = compact ? null : tr(context, 'chat.suspend.chip');
+    return Tooltip(
+      message: tr(context, 'chat.suspend.pending'),
+      child: Semantics(
+        label: tr(context, 'chat.suspend.pending'),
+        liveRegion: true,
+        child: Container(
+          key: chipKey,
+          width: compact ? 48 : null,
+          height: compact ? 48 : 32,
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          padding: compact
+              ? EdgeInsets.zero
+              : const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color: ZInk.tile(context),
+            borderRadius: BorderRadius.circular(ZRadius.mini),
+            border: Border.all(color: ZInk.hairline(context)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              if (label != null) ...[
+                const SizedBox(width: 6),
+                Text(
+                  label,
+                  style: ZType.caption.copyWith(color: ZInk.soft(context)),
+                ),
+              ],
+            ],
           ),
         ),
       ),

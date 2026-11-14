@@ -1747,14 +1747,36 @@ class _AssistantBubble extends StatelessWidget {
     this.sideChat = false,
   });
 
-  void _setFeedback(String? value) {
+  void _setFeedback(BuildContext context, String? value) {
     if (sessionId.isEmpty) return;
     // Optimistic: update the icon instantly; server row.upserted confirms.
     state.optimisticRowUpdate(row['rowId'] as num?, {'feedback': value});
-    conversation.conversationCommands.setAssistantFeedback(sessionId, {
-      'rowId': row['rowId'],
-      if (row['entityId'] != null) 'entityId': row['entityId'],
-    }, value);
+    // Fire-and-forget but never unhandled (task 11-13 reconciliation): a
+    // degraded-window timeout suspends instead of throwing a plain error,
+    // and the sentinel must surface the pending notice. No optimistic
+    // rollback: the ledger may still deliver it and the server snapshot is
+    // the truth.
+    unawaited(
+      conversation.conversationCommands
+          .setAssistantFeedback(sessionId, {
+            'rowId': row['rowId'],
+            if (row['entityId'] != null) 'entityId': row['entityId'],
+          }, value)
+          // then<void> (not catchError): the future's reified type varies
+          // with the transport (test fakes may hand back Future<Map>), and
+          // catchError's handler must return that exact type.
+          .then<void>(
+            (_) {},
+            onError: (Object e, StackTrace stack) {
+              debugPrint('[chat] setAssistantFeedback: $e');
+              if (e is CommandSuspendedException && context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(tr(context, 'chat.suspend.pending'))),
+                );
+              }
+            },
+          ),
+    );
   }
 
   /// Read-only hook run sheet (D4). Local navigator per the embedded/dual-
@@ -1811,14 +1833,14 @@ class _AssistantBubble extends StatelessWidget {
                     tooltip: tr(context, 'chat.feedback.like'),
                     active: feedback == 'like',
                     onTap: () =>
-                        _setFeedback(feedback == 'like' ? null : 'like'),
+                        _setFeedback(context, feedback == 'like' ? null : 'like'),
                   ),
                   _FeedbackButton(
                     icon: Icons.thumb_down_alt_outlined,
                     tooltip: tr(context, 'chat.feedback.dislike'),
                     active: feedback == 'dislike',
                     onTap: () =>
-                        _setFeedback(feedback == 'dislike' ? null : 'dislike'),
+                        _setFeedback(context, feedback == 'dislike' ? null : 'dislike'),
                   ),
                   if (!sideChat &&
                       actions?.fork != null &&
