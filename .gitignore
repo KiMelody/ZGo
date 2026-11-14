@@ -81,3 +81,6 @@ app.*.map.json
 .zcode/agents/
 .claude/agents/
 .opencode/agents/
+
+# deja local session memory (per-repo AI session records)
+.deja/
