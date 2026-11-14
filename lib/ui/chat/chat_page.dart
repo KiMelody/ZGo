@@ -29,6 +29,7 @@ import 'interaction_answer.dart';
 import 'goal_panel.dart';
 import 'jump_to_bottom_button.dart';
 import 'mention_sheet.dart';
+import 'side_chat_command.dart';
 import 'side_chat_tab_bar.dart';
 import 'subagent_feed.dart';
 import 'timeline.dart';
@@ -381,6 +382,11 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   String? _error;
   bool _sending = false;
 
+  /// True while the `/side` `/btw` interception is creating its side chat
+  /// (R2, design §5). Debounces a double submit; the composer stays usable
+  /// otherwise (the send button keeps its normal shape, unlike [_sending]).
+  bool _creatingSideChat = false;
+
   /// The task row's `lastError` meta of [_sessionId] (task 11-08-error-
   /// detail): the errored-turn preview line and the start-failed card's
   /// real message, both backed by the same sheet.
@@ -726,7 +732,11 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       final show =
           (text.startsWith('/') || text.startsWith('\$')) &&
           !text.contains(' ');
-      if (show != _showSlash && mounted) {
+      // Rebuild while the popup is open too, not only on the visibility
+      // flip: the popup's prefix filter reads the live query, so a stale
+      // build here would keep the first frame's unfiltered list (typing
+      // `/si` after `/` must narrow to /side).
+      if (mounted && (show || _showSlash)) {
         setState(() => _showSlash = show);
       }
       _maybeOpenMentionPicker(text);
@@ -1946,6 +1956,52 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     if (_restoring) return;
     HapticFeedback.lightImpact();
 
+    // Builtin side-chat aliases (R1/R2, design §5/D7): `/side [text]` and
+    // `/btw [text]` are consumed here — the slash text never reaches any
+    // conversation. A side-chat composer passes straight through: R5's
+    // nesting protection is two legs, and this is the second (step C1 hides
+    // the popup entry; the backend sets no guard on the create command).
+    switch (sideChatVerdict(
+      text: text,
+      sideChat: widget.chromeless,
+      draft: _sessionId == null,
+      hasAttachments: _pendingFiles.isNotEmpty,
+      creating: _creatingSideChat,
+    )) {
+      case SideChatVerdict.passThrough:
+        break;
+      case SideChatVerdict.creating:
+        // A double submit while the create RPC is in flight: swallow it.
+        return;
+      case SideChatVerdict.draft:
+        // Drafts have no parent session; the popup is hidden there too, so
+        // this is the manual-typing dead end (R5/design §5).
+        _toast(tr(context, 'sideChat.draftGuard'));
+        return;
+      case SideChatVerdict.attachments:
+        // The create command has no attachment payload — refusing beats
+        // silently dropping the files (the plain send would ship them with
+        // the literal slash text).
+        _toast(tr(context, 'sideChat.attachmentsUnsupported'));
+        return;
+      case SideChatVerdict.create:
+        // Fire-and-forget: creation + insert + switch is its own async flow
+        // (step C3). Consuming the submit here (instead of awaiting) keeps
+        // `_send`'s existing slash chain untouched; the flag debounces a
+        // second submit until that flow settles.
+        final firstInput = SideChatCommand.parse(text)?.firstInput;
+        setState(() {
+          _showSlash = false;
+          _creatingSideChat = true;
+        });
+        unawaited(
+          _createSideChat(firstInput: firstInput).whenComplete(() {
+            if (mounted) setState(() => _creatingSideChat = false);
+          }),
+        );
+        return;
+    }
+
     // Slash commands (as in the web composer).
     if (text == '/compact' || text.startsWith('/compact ')) {
       _inputController.clear();
@@ -2165,6 +2221,45 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
         });
       }
     }
+  }
+
+  /// Creation hook of the `/side` `/btw` interception and of the ask-in-side-
+  /// chat entry (R2/R6/AC1/AC2, design §5).
+  ///
+  /// Runs the whole shared flow on [SideChatPort.createSideChatTab] (the
+  /// state layer issues `createSelectionSideSession` + `registry.register`
+  /// and notifies): re-read the tab view so the keyed container inserts the
+  /// child, switch to it, then clear the composer. Both entry points converge
+  /// here — the slash submit passes its trailing text, the ask dialog its
+  /// typed question. A failed create toasts the operation copy and keeps the
+  /// composer text (retry is one tap away; the ask dialog already closed).
+  Future<void> _createSideChat({
+    String? firstInput,
+    bool clearComposer = true,
+  }) async {
+    final parentId = _sessionId;
+    // Defensive: the verdict matrix already refuses drafts, and R5 leg 2
+    // (no nesting) keeps a side chat's composer out of this path.
+    if (parentId == null || widget.chromeless) return;
+    final SideChatTab tab;
+    try {
+      tab = await widget.host.createSideChatTab(
+        parentId,
+        firstInput: firstInput,
+      );
+    } catch (e) {
+      debugPrint('[chat] create side chat under $parentId failed: $e');
+      if (!mounted) return;
+      _toast(trP(context, 'tasks.opFailed', ['$e']));
+      return;
+    }
+    if (!mounted) return;
+    // The create ack notifies the host, but a host whose notification policy
+    // differs must not leave the container without the child that
+    // [_switchTab] is about to select.
+    _syncSideTabs();
+    _switchTab(tab.sessionId);
+    if (clearComposer) _inputController.clear();
   }
 
   String _requireSession() {
@@ -2436,11 +2531,24 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   /// capability panel merges [commands, skills, subagents], so subagents
   /// moved here out of the `@` mention panel. The synthesis lives in
   /// [buildSlashItems] — shared with the task-search page's actions tab.
+  ///
+  /// The builtin side-chat aliases (`/side`, `/btw`) never come from
+  /// `prepareWorkspace`'s command list — they are injected here, and only
+  /// where they can execute (an existing conversation's composer, never a
+  /// side chat; see [buildSlashItems]'s `sideChatDescription`).
   List<SlashItem> get _slashItems => buildSlashItems(
         commands: _prep?.slashCommands,
         skills: _skills,
         subagents: _subagents,
+        sideChatDescription: _sideChatAliasesVisible
+            ? tr(context, 'chat.slash.app.side.description')
+            : null,
       );
+
+  /// R1/R5: `/side` and `/btw` are offered only in an existing
+  /// conversation's composer — a draft would hit the first-message guard
+  /// (dead end), and a side chat itself must not offer nesting.
+  bool get _sideChatAliasesVisible => _sessionId != null && !widget.chromeless;
 
   /// Dedicated skill picker so skills are one tap away (no `/` guessing).
   void _openSkillsPicker() {
@@ -3825,7 +3933,7 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     required String? wsLabel,
     bool showHeaderRow = true,
   }) {
-    return Column(
+    final body = Column(
       children: [
         if (showHeaderRow)
           _headerRowSlot(context, short: short, wsLabel: wsLabel)
@@ -4018,6 +4126,18 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
         ),
       ],
     );
+    // The slash popup caps itself against the body's LAID-OUT height (the
+    // body MediaQuery keeps the full-screen height, so an IME-shrunk body
+    // is only visible here). [body] is built once and handed back unchanged
+    // on every constraint pass, so the IME animation's per-frame layout
+    // changes stop at this builder — the popup, a scope dependent, is the
+    // only child that re-caps.
+    return LayoutBuilder(
+      builder: (context, constraints) => _SlashPopupHeightScope(
+        available: constraints.maxHeight,
+        child: body,
+      ),
+    );
   }
 
   Widget _kickedOverlay(BuildContext context) {
@@ -4166,11 +4286,11 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
 
   /// Side-chat flow behind the message-action sheet's 「在辅助对话中提问」
   /// entry (task parity-reference D2, official ask-in-side-chat parity): ask
-  /// the user what to send, then `createSelectionSideSession(firstInput:
-  /// {text})` and push the new sessionId as a fresh ChatPage (the fork-jump
-  /// precedent — the landing is the feedback, no extra toast). Cancelled or
-  /// blank input creates NOTHING: ZGo never sends a first message the user
-  /// did not type.
+  /// the user what to send, then create the side chat through the SAME tab
+  /// flow as the `/side` `/btw` aliases (R6, design §5) — the new tab appears
+  /// and activates in place, with no full-screen route pushed over the main
+  /// conversation. Cancelled or blank input creates NOTHING: ZGo never sends
+  /// a first message the user did not type.
   ///
   /// Lives on the page since ADR-0008 rule ii (same host reuse rule as
   /// [_forkToNewSession]).
@@ -4178,15 +4298,18 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     BuildContext context,
     String sessionId,
   ) async {
-    final navigator = Navigator.of(context);
-    final messenger = ScaffoldMessenger.of(context);
-    final locale = localeOf(context);
+    // The callback carries the row's session id — always this page's own
+    // (the timeline is built here); a mismatch would mean the action came
+    // from another conversation, whose tabs this page does not own.
+    if (sessionId != _sessionId) return;
+    // One creation at a time (the same busy window as the composer's alias
+    // submit, R2/design §5): a second entry while the create RPC is in
+    // flight is swallowed.
+    if (_creatingSideChat) return;
     final dialogTitle = tr(context, 'chat.selections.askInSideChat');
     final hint = tr(context, 'chat.selections.askHint');
     final cancelCopy = tr(context, 'devices.add.cancel');
     final confirmCopy = tr(context, 'chat.selections.askConfirm');
-    final errorPrefix = tr(context, 'chat.selections.askFailed');
-    final pageTitle = tr(context, 'sidePane.selectionChat');
     final asked = await showDialog<String>(
       context: context,
       useRootNavigator: false,
@@ -4200,37 +4323,15 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     final text = asked?.trim() ?? '';
     // Empty/cancel: create nothing, send no first message.
     if (text.isEmpty) return;
-    String newId;
+    if (!mounted) return;
+    setState(() => _creatingSideChat = true);
     try {
-      newId = await widget.host.conversationCommands
-          .createSelectionSideSession(
-        sessionId,
-        firstText: text,
-      );
-    } catch (e) {
-      debugPrint('[chat] $errorPrefix: $e');
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(
-            commandErrorCopy('$e', locale) ??
-                businessErrorCopy('$e', locale) ??
-                '$errorPrefix: $e',
-          ),
-        ),
-      );
-      return;
+      // The dialog's text is the first message; the composer is unrelated
+      // here (it may hold the user's own draft), so it must not be cleared.
+      await _createSideChat(firstInput: text, clearComposer: false);
+    } finally {
+      if (mounted) setState(() => _creatingSideChat = false);
     }
-    navigator.push(
-      zRoute(
-        (_) => ChatPage(
-          host: widget.host,
-          sessionId: newId,
-          title: pageTitle,
-          workspaceLabel: widget.workspaceLabel,
-          theme: widget.theme,
-        ),
-      ),
-    );
   }
 }
 
@@ -8153,6 +8254,42 @@ String _fmtPercentValue(double percent) => percent == percent.roundToDouble()
 
 /// ---------------------------------------------------------------- input
 
+/// Slash popup list: the pre-existing ceiling (four dense tiles) before the
+/// list scrolls.
+const double _kSlashPopupMaxHeight = 260;
+
+/// Share of the laid-out chat body the slash popup may claim. The popup
+/// rides directly above the composer, and an IME-shrunk body can fall below
+/// the four-item list's fixed height — the F 终验 debug build showed
+/// `BOTTOM OVERFLOWED BY 20 PIXELS` on a bare `/`. The cap follows the body
+/// constraint and the ListView scrolls the remainder.
+const double _kSlashPopupBodyFraction = 0.4;
+
+/// Publishes the chat body's laid-out height to the slash popup. The body's
+/// MediaQuery keeps the full-screen height (the Scaffold strips the IME
+/// inset), so the keyboard-shrunk height is only knowable from the layout
+/// constraints — the popup derives its cap from this instead of assuming
+/// room for the full list.
+class _SlashPopupHeightScope extends InheritedWidget {
+  const _SlashPopupHeightScope({
+    required this.available,
+    required super.child,
+  });
+
+  /// Laid-out height of the chat body (the `_mainTabBody` Column slot).
+  final double available;
+
+  static double of(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<_SlashPopupHeightScope>()
+          ?.available ??
+      double.infinity;
+
+  @override
+  bool updateShouldNotify(_SlashPopupHeightScope oldWidget) =>
+      oldWidget.available != available;
+}
+
 /// One entry in the slash popup: a builtin/custom command or a skill.
 /// Type moved to [SlashItem] (slash_items.dart) — shared with the
 /// task-search actions tab.
@@ -8191,9 +8328,16 @@ class _SlashCommandBar extends StatelessWidget {
         ),
       );
     }
+    // The fixed four-item cap overflows a keyboard-shrunk body (the popup
+    // sits above the composer); scale it to the body the layout actually
+    // gave us and let the ListView scroll the rest.
+    final maxHeight = math.min(
+      _kSlashPopupMaxHeight,
+      _SlashPopupHeightScope.of(context) * _kSlashPopupBodyFraction,
+    );
     return Container(
       margin: const EdgeInsets.fromLTRB(14, 4, 14, 0),
-      constraints: const BoxConstraints(maxHeight: 260),
+      constraints: BoxConstraints(maxHeight: maxHeight),
       decoration: BoxDecoration(
         color: ZInk.card(context),
         borderRadius: BorderRadius.circular(ZRadius.tile),

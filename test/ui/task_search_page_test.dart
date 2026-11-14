@@ -193,6 +193,10 @@ void main() {
     ));
     await tester.pumpAndSettle();
     expect(find.text('/compact'), findsOneWidget);
+    expect(find.text('/side'), findsNothing,
+        reason: 'side-chat aliases never ride the search actions tab — its '
+            'selection only pre-fills a new chat (draft guard dead end)');
+    expect(find.text('/btw'), findsNothing);
 
     // contains matching on name/description (the retired sheet's口径).
     await tester.enterText(find.byType(TextField), '压缩');

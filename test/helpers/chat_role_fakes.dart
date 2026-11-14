@@ -1253,7 +1253,9 @@ class ChatGatewayBundle extends ChangeNotifier
 
   /// Programmed create outcomes, dequeued front-per-call: a [SideChatTab]
   /// answers it, a String becomes a fresh tab, an Exception/Error is thrown
-  /// (empty → a `sess_side` tab). Mirrors the transport's
+  /// (empty → a `sess_side` tab), and a `Future<SideChatTab>` holds the
+  /// answer open (the busy-window probe for the double-submit debounce).
+  /// Mirrors the transport's
   /// [FakeConversation.createSelectionSideSessionResults] pattern.
   final List<Object?> createSideChatTabResults = [];
 
@@ -1305,6 +1307,11 @@ class ChatGatewayBundle extends ChangeNotifier
     if (createSideChatTabResults.isNotEmpty) {
       answer = createSideChatTabResults.removeAt(0);
     }
+    if (answer is Exception) throw answer;
+    if (answer is Error) throw answer;
+    // A pending future parks this call (and the page's busy window) until
+    // the test completes it — the deterministic double-submit probe.
+    if (answer is Future<SideChatTab>) answer = await answer;
     if (answer is Exception) throw answer;
     if (answer is Error) throw answer;
     final SideChatTab tab;

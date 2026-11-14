@@ -14,6 +14,7 @@ import 'package:zgo/protocol/remote_client.dart';
 import 'package:zgo/state/device_session.dart';
 import 'package:zgo/state/entitlement_poller.dart';
 import 'package:zgo/state/quota_reset.dart';
+import 'package:zgo/state/side_chat_registry.dart';
 import 'package:zgo/ui/chat/chat_page.dart';
 import 'package:zgo/ui/chat/subagent_detail_page.dart';
 import 'package:zgo/ui/chat/timeline.dart';
@@ -148,6 +149,28 @@ class _SwitchGateway extends FakeChatGateway {
     }
     return _prep ?? await super.prepareWorkspace();
   }
+}
+
+/// prepareWorkspace with the desktop's `goal` and `workflow` commands: with
+/// the builtin `/side` `/btw` aliases the `/` popup lists four entries — the
+/// F 终验 overflow scenario.
+class _FullSlashGateway extends FakeChatGateway {
+  @override
+  Future<WorkspacePrep> prepareWorkspace() async =>
+      WorkspacePrep.fromMap(const {
+        'configOptions': <Map<String, dynamic>>[],
+        'slashCommands': [
+          {
+            'name': 'goal',
+            'description': 'Show or set the current session goal.',
+          },
+          {
+            'name': 'workflow',
+            'description':
+                'Design and launch a dynamic workflow for a session.',
+          },
+        ],
+      });
 }
 
 /// prepareWorkspace that ships no config options — the sheet-fallback
@@ -363,6 +386,32 @@ class _FailingPrepGateway extends FakeChatGateway {
   Future<WorkspacePrep> prepareWorkspace() async =>
       throw StateError('prep unavailable');
 }
+
+/// The composer TextField of one tab slot, default (visible-side) finder:
+/// it resolves only while that tab is on screen — the activation assertion
+/// of the creation-flow tests.
+Finder visibleComposerOf(String sessionId) => find.descendant(
+  of: find.byKey(ValueKey('chat-tab-$sessionId'), skipOffstage: false),
+  matching: find.byType(TextField),
+);
+
+/// Composer text of one tab slot, hidden tabs included (the host composer
+/// stays mounted offstage after a switch). Scoped to the composer's
+/// [TextField]: the transcript's [SelectableText]s also build EditableTexts.
+String tabComposerText(WidgetTester tester, String sessionId) =>
+    tester
+        .widget<TextField>(
+          find.descendant(
+            of: find.byKey(
+              ValueKey('chat-tab-$sessionId'),
+              skipOffstage: false,
+            ),
+            matching: find.byType(TextField, skipOffstage: false),
+            skipOffstage: false,
+          ),
+        )
+        .controller!
+        .text;
 
 Widget wrap(Widget child, {String locale = 'zh-CN'}) => MaterialApp(
   theme: buildDarkTheme(),
@@ -7466,10 +7515,9 @@ void main() {
         matching: find.byType(TextField),
       );
 
-  testWidgets('action sheet 「在辅助对话中提问」 asks, creates with the typed '
-      'firstInput and pushes the acked session', (tester) async {
-    final gateway = await pumpSideChatSource(tester, workspaceLabel: 'ZLinker');
-    gateway.createSelectionSideSessionResults.add('sess_side');
+  testWidgets('action sheet 「在辅助对话中提问」 creates and activates a side '
+      'tab through the shared tab flow (no pushed page)', (tester) async {
+    final gateway = await pumpSideChatSource(tester);
 
     await openRowActions(tester);
     await tester.tap(find.text('在辅助对话中提问'));
@@ -7482,22 +7530,29 @@ void main() {
     await tester.tap(find.text('提问'));
     await tester.pumpAndSettle();
 
-    // Wire: the trimmed firstText rode the command; no modelSelection from
-    // the UI.
-    final call = gateway.calls
-        .firstWhere((c) => c.$1 == 'createSelectionSideSession');
-    expect(call.$2[0], 's1');
-    expect(call.$2[1], '为什么要这样');
-    expect(call.$2[2], isNull);
+    // Same host port as the /side /btw aliases (R6): the trimmed question
+    // is the first message, and the page never issues the command itself.
+    expect(gateway.createdSideChatRequests.single, ('s1', '为什么要这样'));
+    expect(
+      gateway.calls.where((c) => c.$1 == 'createSelectionSideSession'),
+      isEmpty,
+      reason: 'the ask entry must ride SideChatPort.createSideChatTab',
+    );
 
-    // Ack landed on the pushed page (the landing IS the feedback).
-    expect(gateway.subscribedSessions, contains('sess_side'));
-    final pushed = tester.widget<ChatPage>(find.byType(ChatPage).last);
-    expect(pushed.sessionId, 'sess_side');
-    expect(pushed.host, same(gateway));
-    expect(pushed.workspaceLabel, 'ZLinker');
-    // The pushed page's title is the official side-chat tab copy.
-    expect(find.text('辅助对话'), findsOneWidget);
+    // The tab appeared and activated in place; nothing was pushed over the
+    // main conversation.
+    expect(gateway.sideChatTabsByParent['s1']!.single.sessionId, 'sess_side');
+    expect(visibleComposerOf('sess_side'), findsOneWidget);
+    final sidePages = tester
+        .widgetList<ChatPage>(find.byType(ChatPage, skipOffstage: false))
+        .where((page) => page.sessionId == 'sess_side');
+    expect(
+      sidePages.single.chromeless,
+      isTrue,
+      reason: 'the side chat is a tab child, not a pushed full-screen page',
+    );
+    expect(find.text(chatLabel('sideChat.tab.title', ['1'])), findsOneWidget);
+    expect(find.byType(AlertDialog), findsNothing);
   });
 
   testWidgets('empty ask input creates nothing and stays put (no silent '
@@ -7513,6 +7568,12 @@ void main() {
     expect(
       gateway.calls.where((c) => c.$1 == 'createSelectionSideSession'),
       isEmpty,
+    );
+    expect(
+      gateway.createdSideChatRequests,
+      isEmpty,
+      reason: 'blank input must create NOTHING (no first message the user '
+          'did not type)',
     );
     expect(find.byType(ChatPage), findsOneWidget);
   });
@@ -7530,13 +7591,14 @@ void main() {
       gateway.calls.where((c) => c.$1 == 'createSelectionSideSession'),
       isEmpty,
     );
+    expect(gateway.createdSideChatRequests, isEmpty);
     expect(find.byType(ChatPage), findsOneWidget);
   });
 
-  testWidgets('a thrown side-chat creation surfaces the guard copy, no '
-      'navigation', (tester) async {
+  testWidgets('a thrown ask-entry creation surfaces the operation copy, no '
+      'tab', (tester) async {
     final gateway = await pumpSideChatSource(tester);
-    gateway.createSelectionSideSessionResults.add(
+    gateway.createSideChatTabResults.add(
       StateError(
         'createSelectionSideSession rejected: '
         'guard.selectionSideChatRestrictedCommand '
@@ -7551,8 +7613,13 @@ void main() {
     await tester.tap(find.text('提问'));
     await tester.pumpAndSettle();
 
-    expect(find.text('辅助对话中不支持此操作'), findsOneWidget);
+    expect(gateway.createdSideChatRequests.single, ('s1', '问题'));
+    expect(
+      find.textContaining(chatLabel('tasks.opFailed', ['Bad state'])),
+      findsOneWidget,
+    );
     expect(find.byType(ChatPage), findsOneWidget);
+    expect(gateway.sideChatTabsByParent, isEmpty);
     expect(gateway.subscribedSessions, isNot(contains('sess_side')));
   });
 
@@ -7570,6 +7637,465 @@ void main() {
       gateway.calls.where((c) => c.$1 == 'createSelectionSideSession'),
       isEmpty,
     );
+  });
+
+  // ---- side-chat slash aliases (11-11 C1) ----
+
+  /// Types into the composer and pumps one frame (the slash popup follows
+  /// the controller's listener synchronously).
+  Future<void> typeComposer(WidgetTester tester, String text) async {
+    await tester.enterText(find.byType(TextField).first, text);
+    await tester.pump();
+  }
+
+  testWidgets('an existing conversation composer offers the builtin /side '
+      'and /btw aliases with the shared description', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot(const []);
+    await tester.pumpAndSettle();
+
+    await typeComposer(tester, '/');
+    expect(find.text('/side'), findsOneWidget);
+    expect(find.text('/btw'), findsOneWidget);
+    expect(find.text('新建并打开一个辅助对话'), findsNWidgets(2));
+
+    // Prefix hits mirror the popup filter: /si → /side only, /bt → /btw only.
+    await typeComposer(tester, '/si');
+    expect(find.text('/side'), findsOneWidget);
+    expect(find.text('/btw'), findsNothing);
+
+    await typeComposer(tester, '/bt');
+    expect(find.text('/btw'), findsOneWidget);
+    expect(find.text('/side'), findsNothing);
+  });
+
+  testWidgets(
+      'a four-item slash popup fits the keyboard-shrunk body instead of '
+      'overflowing the composer (F 终验: BOTTOM OVERFLOWED BY 20 PIXELS)',
+      (tester) async {
+    // Keyboard shrink as the physical window shrinking (844 → 390), the
+    // documented recipe: injecting viewInsets alone never shrinks the test
+    // viewport. A bare `/` then lists four entries (the builtin aliases plus
+    // goal/workflow), whose fixed 260dp cap pushed the composer 20dp past
+    // the body bottom on the PMA110 debug build.
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 390);
+    addTearDown(tester.view.reset);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final gateway = _FullSlashGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot(const []);
+    await tester.pumpAndSettle();
+
+    await typeComposer(tester, '/');
+    expect(find.text('/side'), findsOneWidget);
+    expect(find.text('/btw'), findsOneWidget);
+    expect(
+      tester.takeException(),
+      isNull,
+      reason: 'the popup caps to the laid-out body and the list scrolls '
+          'instead of pushing the composer past the viewport',
+    );
+
+    // The cap keeps the list scrollable: the overflow items stay reachable.
+    await tester.drag(
+      find.ancestor(of: find.text('/side'), matching: find.byType(ListView)),
+      const Offset(0, -120),
+    );
+    await tester.pump();
+    expect(find.text('/workflow'), findsOneWidget);
+  });
+
+  testWidgets('side-chat alias description locks the English copy',
+      (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(
+        ChatPage(host: gateway, sessionId: 's1', title: 't'),
+        locale: 'en-US',
+      ),
+    );
+    gateway.feedSnapshot(const []);
+    await tester.pumpAndSettle();
+
+    await typeComposer(tester, '/');
+    expect(find.text('Create and open a side conversation'), findsNWidgets(2));
+  });
+
+  testWidgets('picking /side only pre-fills the composer — the static item '
+      'path never sends on its own', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot(const []);
+    await tester.pumpAndSettle();
+
+    await typeComposer(tester, '/si');
+    await tester.tap(find.text('/side'));
+    await tester.pump();
+
+    final field = tester.widget<TextField>(find.byType(TextField).first);
+    expect(field.controller!.text, '/side ');
+    expect(
+      gateway.calls.where((c) => c.$1 == 'sendTextOrQueue'),
+      isEmpty,
+      reason: 'selection inserts text only (the /compact special case is the '
+          'sole auto-send); the /side interception consumes the submit, not '
+          'the popup pick',
+    );
+  });
+
+  testWidgets('a draft composer keeps the aliases out (the draft guard '
+      'would dead-end an empty-argument creation)', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(wrap(ChatPage(host: gateway, title: '新任务')));
+    await tester.pumpAndSettle();
+
+    await typeComposer(tester, '/');
+    expect(find.text('/compact'), findsOneWidget);
+    expect(find.text('/side'), findsNothing);
+    expect(find.text('/btw'), findsNothing);
+  });
+
+  testWidgets('a side-chat composer keeps the aliases out (no nesting)',
+      (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(
+        ChatPage(
+          host: gateway,
+          sessionId: 's1',
+          title: '辅助对话 1',
+          chromeless: true,
+        ),
+      ),
+    );
+    gateway.feedSnapshot(const []);
+    await tester.pumpAndSettle();
+
+    await typeComposer(tester, '/');
+    expect(find.text('/compact'), findsOneWidget);
+    expect(find.text('/side'), findsNothing);
+    expect(find.text('/btw'), findsNothing);
+  });
+
+  // ---- side-chat /side /btw interception (11-11 C2) ----
+
+  Finder sendButton() => find.byIcon(Icons.arrow_upward);
+
+  testWidgets('alias submissions ride the side-chat port with the parsed '
+      'first input — the slash text never lands in any conversation',
+      (tester) async {
+    for (final (text, expected) in [
+      ('/btw 你好', '你好'), // argument
+      ('/SIDE 你好', '你好'), // case-insensitive
+      ('/side', null), // empty argument
+      ('/btw 第一行\n第二行', '第一行\n第二行'), // multi-line first message
+    ]) {
+      // Fresh page per case: each submission opens a side tab of its own.
+      await tester.pumpWidget(const SizedBox.shrink());
+      final gateway = FakeChatGateway();
+      await tester.pumpWidget(
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+      );
+      gateway.feedSnapshot(const []);
+      await tester.pumpAndSettle();
+
+      await typeComposer(tester, text);
+      await tester.tap(sendButton());
+      await tester.pumpAndSettle();
+
+      expect(
+        gateway.createdSideChatRequests,
+        [('s1', expected)],
+        reason: '"$text" must create its side chat with the parsed first '
+            'input',
+      );
+      expect(
+        gateway.calls.where((c) => c.$1 == 'sendTextOrQueue'),
+        isEmpty,
+        reason: '"$text" must never be sent to any conversation',
+      );
+      expect(
+        find.text(text, skipOffstage: false),
+        findsNothing,
+        reason: 'the slash literal must not survive in any composer or row',
+      );
+      expect(find.byType(SnackBar), findsNothing);
+    }
+  });
+
+  testWidgets('non-alias lookalikes still send normally', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot(const []);
+    await tester.pumpAndSettle();
+
+    for (final text in ['/sidex 你好', '/side1 2']) {
+      await typeComposer(tester, text);
+      await tester.tap(sendButton());
+      await tester.pumpAndSettle();
+
+      final call = gateway.calls
+          .where((c) => c.$1 == 'sendTextOrQueue')
+          .last;
+      expect(call.$2, ['s1', text, null]);
+      expect(gateway.createdSideChatRequests, isEmpty);
+    }
+  });
+
+  testWidgets('a side chat sends /side as a plain message (nesting leg 2)',
+      (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(
+        ChatPage(
+          host: gateway,
+          sessionId: 's1',
+          title: '辅助对话 1',
+          chromeless: true,
+        ),
+      ),
+    );
+    gateway.feedSnapshot(const []);
+    await tester.pumpAndSettle();
+
+    await typeComposer(tester, '/side 你好');
+    await tester.tap(sendButton());
+    await tester.pumpAndSettle();
+
+    final call = gateway.calls
+        .where((c) => c.$1 == 'sendTextOrQueue')
+        .single;
+    expect(call.$2, ['s1', '/side 你好', null]);
+    expect(gateway.createdSideChatRequests, isEmpty);
+  });
+
+  testWidgets('a manual /btw in a draft is refused with the first-message '
+      'guard', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(wrap(ChatPage(host: gateway, title: '新任务')));
+    await tester.pumpAndSettle();
+
+    await typeComposer(tester, '/btw 你好');
+    await tester.tap(sendButton());
+    await tester.pump();
+
+    expect(find.text(chatLabel('sideChat.draftGuard')), findsOneWidget);
+    expect(
+      gateway.calls.where((c) => c.$1 == 'sendTextOrQueue'),
+      isEmpty,
+    );
+    expect(gateway.createdSideChatRequests, isEmpty);
+    expect(
+      gateway.ensuredDraftWorkspaces,
+      isEmpty,
+      reason: 'the guard answers before the draft workspace RPC',
+    );
+  });
+
+  testWidgets('attachments refuse a side-chat command instead of dropping '
+      'them', (tester) async {
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('miguelruivo.flutter.plugins.filepicker'),
+      (call) async => call.method == 'any'
+          ? [
+              {
+                'name': 'a.txt',
+                'size': 3,
+                'bytes': Uint8List.fromList([1, 2, 3]),
+              },
+            ]
+          : null,
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('miguelruivo.flutter.plugins.filepicker'),
+        null,
+      );
+    });
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot(const []);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.add_circle_outline));
+    for (var i = 0; i < 6; i++) {
+      await tester.pump(const Duration(milliseconds: 150));
+    }
+    await tester.tap(find.text('附件'));
+    await tester.pumpAndSettle();
+    expect(find.text('a.txt'), findsOneWidget); // pending bar chip
+
+    await typeComposer(tester, '/side 你好');
+    await tester.tap(sendButton());
+    await tester.pump();
+
+    expect(
+      find.text(chatLabel('sideChat.attachmentsUnsupported')),
+      findsOneWidget,
+    );
+    expect(
+      gateway.calls.where((c) => c.$1 == 'sendTextOrQueue'),
+      isEmpty,
+    );
+    expect(gateway.createdSideChatRequests, isEmpty);
+    expect(
+      find.text('a.txt'),
+      findsOneWidget,
+      reason: 'the refusal must keep the pending files (no silent drop)',
+    );
+  });
+
+  // ---- side-chat creation flow (11-11 C3) ----
+
+  testWidgets('/btw <text> creates a side tab, activates it and ships the '
+      'text as its first input (the main timeline gains no row)',
+      (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': '已有消息', 'state': 'done'},
+    ]);
+    await tester.pumpAndSettle();
+
+    await typeComposer(tester, '/btw 你好');
+    await tester.tap(sendButton());
+    await tester.pumpAndSettle();
+
+    // AC2 core: the text rode the create command's firstText via the host
+    // port; nothing was sent to the main conversation.
+    expect(gateway.createdSideChatRequests.single, ('s1', '你好'));
+    expect(
+      gateway.calls.where((c) => c.$1 == 'sendTextOrQueue'),
+      isEmpty,
+      reason: 'the main timeline must gain no row',
+    );
+    expect(
+      find.text('/btw 你好', skipOffstage: false),
+      findsNothing,
+      reason: 'the slash literal must never land in a conversation',
+    );
+
+    // The acked tab appeared and the container switched to it.
+    expect(gateway.sideChatTabsByParent['s1']!.single.sessionId, 'sess_side');
+    expect(find.text(chatLabel('sideChat.tab.title', ['1'])), findsOneWidget);
+    expect(
+      visibleComposerOf('sess_side'),
+      findsOneWidget,
+      reason: 'the created tab must be the visible one',
+    );
+    expect(
+      tabComposerText(tester, 's1'),
+      isEmpty,
+      reason: 'the host composer is cleared only after the ack',
+    );
+    expect(gateway.subscribedSessions, contains('sess_side'));
+  });
+
+  testWidgets('/side with no argument still creates and activates the side '
+      'tab (AC1)', (tester) async {
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot(const []);
+    await tester.pumpAndSettle();
+
+    await typeComposer(tester, '/side');
+    await tester.tap(sendButton());
+    await tester.pumpAndSettle();
+
+    expect(gateway.createdSideChatRequests.single, ('s1', null));
+    expect(visibleComposerOf('sess_side'), findsOneWidget);
+    expect(tabComposerText(tester, 's1'), isEmpty);
+    expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('a failed create toasts the operation copy, keeps the typed '
+      'text and adds no tab', (tester) async {
+    final gateway = FakeChatGateway();
+    gateway.createSideChatTabResults.add(Exception('boom'));
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot(const []);
+    await tester.pumpAndSettle();
+
+    await typeComposer(tester, '/btw 你好');
+    await tester.tap(sendButton());
+    await tester.pumpAndSettle();
+
+    expect(gateway.createdSideChatRequests.single, ('s1', '你好'));
+    expect(
+      find.text(chatLabel('tasks.opFailed', ['Exception: boom'])),
+      findsOneWidget,
+    );
+    expect(gateway.sideChatTabsByParent, isEmpty);
+    expect(
+      find.byKey(const ValueKey('chat-tab-sess_side'), skipOffstage: false),
+      findsNothing,
+    );
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      '/btw 你好',
+      reason: 'a failed create must keep the text for a retry',
+    );
+    expect(
+      gateway.calls.where((c) => c.$1 == 'sendTextOrQueue'),
+      isEmpty,
+      reason: 'a failed create must not fall through to a conversation send',
+    );
+  });
+
+  testWidgets('a double submit inside the create RPC is swallowed (the busy '
+      'window spans the ack)', (tester) async {
+    final gateway = FakeChatGateway();
+    final gate = Completer<SideChatTab>();
+    gateway.createSideChatTabResults.add(gate.future);
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot(const []);
+    await tester.pumpAndSettle();
+
+    await typeComposer(tester, '/btw 你好');
+    await tester.tap(sendButton());
+    await tester.pump();
+    expect(gateway.createdSideChatRequests, hasLength(1));
+
+    // The composer still holds the slash text (cleared only on the ack), so
+    // the send button is live — the second tap must be absorbed.
+    await tester.tap(sendButton());
+    await tester.pump();
+    expect(
+      gateway.createdSideChatRequests,
+      hasLength(1),
+      reason: 'the busy window must debounce the second submit',
+    );
+    expect(gateway.calls.where((c) => c.$1 == 'sendTextOrQueue'), isEmpty);
+
+    gate.complete(const SideChatTab(sessionId: 'sess_side', ordinal: 1));
+    await tester.pumpAndSettle();
+
+    expect(gateway.createdSideChatRequests, hasLength(1));
+    expect(visibleComposerOf('sess_side'), findsOneWidget);
+    expect(tabComposerText(tester, 's1'), isEmpty);
   });
 
   testWidgets('assistant copy feedback morphs copy → check with no toast, '

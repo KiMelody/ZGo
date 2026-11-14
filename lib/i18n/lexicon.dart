@@ -646,6 +646,9 @@ const _zh = {
   'chat.contextUsage.cacheHitRate': '平均缓存命中率',
   'chat.json.empty': '（无数据）',
   'chat.slash.empty': '没有匹配的命令',
+  // Builtin /side /btw command description (desktop key parity, task
+  // 11-11 R1): registered under two names, one description.
+  'chat.slash.app.side.description': '新建并打开一个辅助对话',
   'chat.skills.title': '选择 Skills',
   'chat.skills.empty': '没有可用的 Skills',
   'chat.input.hint': '提出后续修改要求',
@@ -736,7 +739,6 @@ const _zh = {
   'chat.selections.askInSideChat': '在辅助对话中提问',
   'chat.selections.askHint': '输入你的问题',
   'chat.selections.askConfirm': '提问',
-  'chat.selections.askFailed': '侧聊创建失败',
   'chat.selectionSideChat.restricted': '辅助对话中不支持此操作',
   'chat.diff.truncated': '…（diff 过长已截断）',
   // ---- git panel (parity-git-panel D2-D5) ----
@@ -842,6 +844,11 @@ const _zh = {
   // back so the recovery entry stays discoverable.
   'sideChat.closed': '辅助对话 \$0 已关闭，重新进入会话可恢复',
   'sideChat.destroyed': '辅助对话 \$0 已销毁',
+  // Composer interception guards (R2, design §5): a manual `/side` in a
+  // draft has no parent session, and the create command carries no
+  // attachment payload — both refuse with copy instead of dead-ending.
+  'sideChat.draftGuard': '请先发送首条消息，再使用 /side 或 /btw',
+  'sideChat.attachmentsUnsupported': '辅助对话不支持附件，请先移除附件',
   // ---- task list (mobile layout) ----
   'tasks.sectionTitle': '当前设备上的工作区和任务',
   'tasks.stats': '\$0 个工作区 · \$1 个任务',
@@ -2207,6 +2214,7 @@ const _en = {
   'chat.contextUsage.cacheHitRate': 'Average cache hit rate',
   'chat.json.empty': '(no data)',
   'chat.slash.empty': 'No matching commands',
+  'chat.slash.app.side.description': 'Create and open a side conversation',
   'chat.skills.title': 'Pick skills',
   'chat.skills.empty': 'No skills available',
   'chat.input.hint': 'Describe the next change',
@@ -2296,7 +2304,6 @@ const _en = {
   'chat.selections.askInSideChat': 'Add in side chat',
   'chat.selections.askHint': 'Type your question',
   'chat.selections.askConfirm': 'Ask',
-  'chat.selections.askFailed': 'Failed to start side chat',
   'chat.selectionSideChat.restricted':
       "This action isn't available in a side conversation",
   'chat.diff.truncated': '… (diff truncated)',
@@ -2407,6 +2414,10 @@ const _en = {
   'sideChat.closed':
       'Side conversation \$0 closed. Reopen the session to restore it',
   'sideChat.destroyed': 'Side conversation \$0 deleted',
+  'sideChat.draftGuard':
+      'Send the first message before using /side or /btw',
+  'sideChat.attachmentsUnsupported':
+      'Side conversations do not support attachments — remove them first',
   // ---- task list (mobile layout) ----
   'tasks.sectionTitle': 'Workspaces & tasks on this device',
   'tasks.stats': '\$0 workspaces · \$1 tasks',

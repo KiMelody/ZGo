@@ -36,12 +36,36 @@ class SlashItem {
 /// `prepareWorkspace`, the desktop's enabled skills (`$name`) and its
 /// subagents (`@name`). Semantics frozen from the former chat_page
 /// `_slashItems`, extended with the subagent segment.
+///
+/// [sideChatDescription] enables the builtin side-chat aliases `/side` and
+/// `/btw` (the desktop registers one builtin command under both names,
+/// description key `chat.slash.app.side.description`): pass a localized
+/// description only where the aliases are actually executable — an existing
+/// conversation's composer. Null suppresses the segment entirely: no session
+/// id yet (drafts have their own guard dead end), the task-search actions tab
+/// (its selection merely pre-fills a new chat), and side-chat composers
+/// (task 11-11 R5: no nesting, desktop hides the same entries).
+///
+/// Dedupe: a desktop-issued command with the same name wins — the builtin
+/// alias is dropped so `/side` never appears twice.
 List<SlashItem> buildSlashItems({
   List<SlashCommand>? commands,
   List<SkillEntry>? skills,
   List<Map<String, dynamic>>? subagents,
+  String? sideChatDescription,
 }) {
+  final issued = {
+    for (final c in commands ?? const <SlashCommand>[]) c.name.toLowerCase(),
+  };
   return [
+    if (sideChatDescription != null)
+      for (final alias in const ['side', 'btw'])
+        if (!issued.contains(alias))
+          SlashItem(
+            name: alias,
+            description: sideChatDescription,
+            insert: '/$alias ',
+          ),
     for (final c in commands ?? const <SlashCommand>[])
       SlashItem(
         name: c.name,
