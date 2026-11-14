@@ -593,6 +593,14 @@ class ChatTurnGroup extends StatefulWidget {
   /// drill-in, previews, diff/collapse) stays.
   final bool readOnly;
 
+  /// Side-chat restricted-command closure (task 11-11 R5/AC6): true on the
+  /// chromeless tab child. Hides the restricted entries only — the
+  /// long-press sheet's edit-resend / retry / fork / side-ask, the feedback
+  /// row's fork button and the user bubble's edit affordance. Browsing
+  /// stays (copy/like/hooks/rewind/file changes/drill-in), which is where
+  /// this differs from [readOnly].
+  final bool sideChat;
+
   /// The task row's `lastError` meta (`TaskMetaPort.taskLastError`) — shown
   /// as the one-line preview under an errored turn's pill, and as the
   /// detail sheet behind it (task 11-08-error-detail). Null on surfaces
@@ -615,6 +623,7 @@ class ChatTurnGroup extends StatefulWidget {
     this.onEditSend,
     this.gitController,
     this.readOnly = false,
+    this.sideChat = false,
     this.lastError,
   });
 
@@ -756,6 +765,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
           onEditSend: widget.onEditSend,
           actions: widget.actions,
           readOnly: widget.readOnly,
+          sideChat: widget.sideChat,
         ),
       );
     }
@@ -821,6 +831,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
             turnFeedbackLocked: _feedbackLocked,
             actions: widget.actions,
             readOnly: widget.readOnly,
+            sideChat: widget.sideChat,
           ),
         );
       } else if (p.kind == 'rowGroup') {
@@ -854,6 +865,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
             feed: widget.feed,
             actions: widget.actions,
             readOnly: widget.readOnly,
+            sideChat: widget.sideChat,
           ),
         );
       }
@@ -976,6 +988,12 @@ class ChatRow extends StatelessWidget {
   /// nulls the user bubble's edit-resend plumbing.
   final bool readOnly;
 
+  /// Side-chat restricted-command closure (task 11-11 R5/AC6): drops the
+  /// long-press sheet's edit-resend / retry / fork / side-ask entries, the
+  /// feedback row's fork button and the user bubble's edit affordance.
+  /// Everything else (copy/like/hooks/rewind/file changes) stays.
+  final bool sideChat;
+
   const ChatRow({
     super.key,
     required this.row,
@@ -992,6 +1010,7 @@ class ChatRow extends StatelessWidget {
     this.onEditSend,
     this.actions,
     this.readOnly = false,
+    this.sideChat = false,
   });
 
   Map<String, dynamic> get _target => {
@@ -1015,7 +1034,8 @@ class ChatRow extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (kind == 'userInput' &&
+            if (!sideChat &&
+                kind == 'userInput' &&
                 rowActionAllowed(state, row, 'canEdit') != false)
               ListTile(
                 leading: const Icon(Icons.edit_outlined, size: 20),
@@ -1027,18 +1047,21 @@ class ChatRow extends StatelessWidget {
                   editingRowId?.value = '${row['rowId']}';
                 },
               ),
-            ListTile(
-              leading: const Icon(Icons.replay, size: 20),
-              title: Text(tr(context, 'chat.action.retry')),
-              onTap: () {
-                Navigator.pop(context);
-                onAction(
-                  tr(context, 'chat.action.retry.failed'),
-                  () => conversation.conversationCommands.retryTurn(sessionId, _target),
-                );
-              },
-            ),
-            if (actions?.fork != null &&
+            if (!sideChat)
+              ListTile(
+                leading: const Icon(Icons.replay, size: 20),
+                title: Text(tr(context, 'chat.action.retry')),
+                onTap: () {
+                  Navigator.pop(context);
+                  onAction(
+                    tr(context, 'chat.action.retry.failed'),
+                    () => conversation.conversationCommands
+                        .retryTurn(sessionId, _target),
+                  );
+                },
+              ),
+            if (!sideChat &&
+                actions?.fork != null &&
                 rowActionAllowed(state, row, 'canFork') != false)
               ListTile(
                 leading: const Icon(Icons.fork_right, size: 20),
@@ -1048,7 +1071,7 @@ class ChatRow extends StatelessWidget {
                   actions!.fork!(rowContext, sessionId, _target);
                 },
               ),
-            if (actions?.askInSideChat != null)
+            if (!sideChat && actions?.askInSideChat != null)
               ListTile(
                 leading: const Icon(Icons.forum_outlined, size: 20),
                 title: Text(tr(context, 'chat.selections.askInSideChat')),
@@ -1161,11 +1184,12 @@ class ChatRow extends StatelessWidget {
         row: row,
         conversation: conversation,
         sessionId: sessionId,
-        // Read-only boundary (D2): null plumbing keeps the legacy static
-        // bubble (no edit affordance, no inline edit card).
-        editingRowId: readOnly ? null : editingRowId,
+        // Read-only boundary (D2) and the side-chat closure (R5/AC6): null
+        // plumbing keeps the legacy static bubble (no edit affordance, no
+        // inline edit card).
+        editingRowId: readOnly || sideChat ? null : editingRowId,
         // The page callback carries the target; the bubble passes it on.
-        onEditSend: readOnly || onEditSend == null
+        onEditSend: readOnly || sideChat || onEditSend == null
             ? null
             : (newText, rewind) => onEditSend!(_target, newText, rewind),
         // Row-level availability, resolved here so the bubble stays dumb
@@ -1187,6 +1211,7 @@ class ChatRow extends StatelessWidget {
         hookRows: hookRows,
         turnFeedbackLocked: turnFeedbackLocked,
         actions: actions,
+        sideChat: sideChat,
       ),
       'reasoning' => _ReasoningTile(
         text: row['text'] as String? ?? '',
@@ -1705,6 +1730,10 @@ class _AssistantBubble extends StatelessWidget {
   /// fork entry.
   final ChatPageActions? actions;
 
+  /// Side-chat closure (task 11-11 R5/AC6): the feedback row's fork button
+  /// is a restricted command there; copy/like/hooks stay (unlike [readOnly]).
+  final bool sideChat;
+
   const _AssistantBubble({
     required this.row,
     required this.conversation,
@@ -1715,6 +1744,7 @@ class _AssistantBubble extends StatelessWidget {
     this.hookRows = const [],
     this.turnFeedbackLocked = false,
     this.actions,
+    this.sideChat = false,
   });
 
   void _setFeedback(String? value) {
@@ -1790,7 +1820,8 @@ class _AssistantBubble extends StatelessWidget {
                     onTap: () =>
                         _setFeedback(feedback == 'dislike' ? null : 'dislike'),
                   ),
-                  if (actions?.fork != null &&
+                  if (!sideChat &&
+                      actions?.fork != null &&
                       rowActionAllowed(state, row, 'canFork') != false)
                     _FeedbackButton(
                       icon: Icons.fork_right,

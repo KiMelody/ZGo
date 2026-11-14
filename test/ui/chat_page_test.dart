@@ -8539,6 +8539,145 @@ void main() {
       expect(find.text('提交或推送'), findsNothing);
     });
   });
+
+  // ---- side-chat restricted closure (11-11 E1: R5/AC6) ----
+
+  group('side-chat restricted closure (R5/AC6)', () {
+    /// The chromeless tab child the host container builds, over `s1`.
+    Future<FakeChatGateway> pumpSideTab(
+      WidgetTester tester, {
+      Map<String, dynamic> snapshotExtra = const {},
+      List<Map<String, dynamic>> rows = const [],
+    }) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.reset);
+      final gateway = FakeChatGateway()..snapshotExtra = snapshotExtra;
+      await tester.pumpWidget(
+        wrap(
+          ChatPage(
+            host: gateway,
+            sessionId: 's1',
+            title: '辅助对话 1',
+            chromeless: true,
+          ),
+        ),
+      );
+      gateway.feedSnapshot(rows);
+      await tester.pumpAndSettle();
+      return gateway;
+    }
+
+    Map<String, dynamic> goalSnapshot() => {
+          'goal': {
+            'summaryTitle': '侧聊目标',
+            'objective': '侧聊目标',
+            'status': 'active',
+          },
+        };
+
+    testWidgets('the goal process panel (pause/resume) stays off a side tab '
+        'while the host page keeps it', (tester) async {
+      // Control: the same goal snapshot renders the panel on the main tab.
+      final host = FakeChatGateway()..snapshotExtra = goalSnapshot();
+      await tester.pumpWidget(
+        wrap(ChatPage(host: host, sessionId: 's1', title: '主会话')),
+      );
+      host.feedSnapshot(const []);
+      await tester.pumpAndSettle();
+      expect(find.text(chatLabel('goalPanel.title')), findsOneWidget);
+      expect(find.byIcon(Icons.pause), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      final side = await pumpSideTab(tester, snapshotExtra: goalSnapshot());
+      expect(side.state.snapshot?['goal'], isNotNull,
+          reason: 'the gate must hide a live goal, not just an absent one');
+      expect(find.text(chatLabel('goalPanel.title')), findsNothing);
+      expect(find.byIcon(Icons.pause), findsNothing);
+    });
+
+    testWidgets('/goal pause|resume|prefix reach no restricted command in a '
+        'side tab — they go out as plain messages', (tester) async {
+      final gateway = await pumpSideTab(tester);
+
+      for (final text in ['/goal pause', '/goal resume', '/goal 做点什么']) {
+        await typeComposer(tester, text);
+        await tester.tap(sendButton());
+        await tester.pumpAndSettle();
+
+        expect(
+          gateway.calls.where((c) =>
+              c.$1 == 'pauseGoal' ||
+              c.$1 == 'resumeGoal' ||
+              c.$1 == 'sendGoalCommand'),
+          isEmpty,
+          reason: '"$text" must not reach a restricted goal command',
+        );
+        final call = gateway.calls
+            .where((c) => c.$1 == 'sendTextOrQueue')
+            .last;
+        expect(call.$2, ['s1', text, null]);
+      }
+    });
+
+    testWidgets('the host page still intercepts /goal pause (no over-gating)',
+        (tester) async {
+      final gateway = FakeChatGateway();
+      await tester.pumpWidget(
+        wrap(ChatPage(host: gateway, sessionId: 's1', title: '主会话')),
+      );
+      gateway.feedSnapshot(const []);
+      await tester.pumpAndSettle();
+
+      await typeComposer(tester, '/goal pause');
+      await tester.tap(sendButton());
+      await tester.pumpAndSettle();
+
+      expect(gateway.calls.where((c) => c.$1 == 'pauseGoal'), hasLength(1));
+      expect(gateway.calls.where((c) => c.$1 == 'sendTextOrQueue'), isEmpty);
+    });
+
+    testWidgets('row actions: edit-resend / retry / fork / side-ask stay '
+        'hidden; the browsing entries stay', (tester) async {
+      await pumpSideTab(
+        tester,
+        rows: [
+          {'rowId': 1, 'kind': 'userInput', 'text': '侧聊提问', 'state': 'done'},
+          {'rowId': 2, 'kind': 'assistantText', 'text': '侧聊回答'},
+        ],
+      );
+
+      // Feedback row keeps copy/like, loses the fork button; the user
+      // bubble loses its edit affordance.
+      expect(find.byIcon(Icons.fork_right), findsNothing);
+      expect(find.byIcon(Icons.thumb_up_alt_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.copy_outlined), findsWidgets);
+      expect(find.byIcon(Icons.edit_outlined), findsNothing);
+
+      final textTopLeft = tester.getTopLeft(find.text('侧聊提问'));
+      await tester.longPressAt(textTopLeft - const Offset(8, 4));
+      await tester.pumpAndSettle();
+
+      expect(find.text(chatLabel('chat.action.editResend')), findsNothing);
+      expect(find.text(chatLabel('chat.action.retry')), findsNothing);
+      expect(find.text(chatLabel('chat.action.fork')), findsNothing);
+      expect(
+        find.text(chatLabel('chat.selections.askInSideChat')),
+        findsNothing,
+      );
+      expect(find.text(chatLabel('chat.action.fileChanges')), findsOneWidget);
+    });
+
+    testWidgets('the add-context panel offers no 目标 item in a side tab '
+        '(side chats are never drafts)', (tester) async {
+      await pumpSideTab(tester);
+      await tester.tap(find.byIcon(Icons.add_circle_outline));
+      await tester.pumpAndSettle();
+
+      expect(find.text(chatLabel('chat.composer.attachment')), findsOneWidget);
+      expect(find.text(chatLabel('chat.goalBanner.label')), findsNothing);
+    });
+  });
 }
 
 /// Unmounts the page, then unblocks a [_StalledGateway] subscribe: the

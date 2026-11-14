@@ -380,8 +380,8 @@ void main() {
     });
 
     testWidgets(
-        'the sheet reaches the destroy port (the D2 confirm gate is '
-        'not wired yet)', (tester) async {
+        'the destroy entry asks first: cancel runs no port and keeps the tab',
+        (tester) async {
       final gw = await _pumpHost(
         tester,
         tabs: const [SideChatTab(sessionId: 's1', ordinal: 1)],
@@ -392,10 +392,89 @@ void main() {
       await tester.tap(find.text('销毁旁支会话'));
       await tester.pumpAndSettle();
 
+      // Design §7/R9: the gate names the target and warns that the delete is
+      // permanent; nothing has been sent yet.
+      expect(find.text('销毁辅助对话 1？'), findsOneWidget);
+      expect(
+        find.text('该操作不可恢复：辅助对话及其消息记录将被永久删除。'),
+        findsOneWidget,
+      );
+      expect(gw.destroyedSideChatTabs, isEmpty);
+
+      await tester.tap(find.widgetWithText(TextButton, '取消'));
+      await tester.pumpAndSettle();
+      expect(gw.destroyedSideChatTabs, isEmpty);
+      expect(gw.closedSideChatTabs, isEmpty);
+      expect(find.byKey(const ValueKey('side-tab-s1')), findsOneWidget);
+      expect(find.text('辅助对话 1 已销毁'), findsNothing);
+    });
+
+    testWidgets('confirming the gate reaches the destroy port', (tester) async {
+      final gw = await _pumpHost(
+        tester,
+        tabs: const [SideChatTab(sessionId: 's1', ordinal: 1)],
+      );
+
+      await tester.longPress(find.byKey(const ValueKey('side-tab-s1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('销毁旁支会话'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '销毁旁支会话'));
+      await tester.pumpAndSettle();
+
       expect(gw.destroyedSideChatTabs, [('p1', 's1')]);
       expect(gw.closedSideChatTabs, isEmpty);
       expect(find.byKey(const ValueKey('side-tab-s1')), findsNothing);
       expect(find.text('辅助对话 1 已销毁'), findsOneWidget);
+    });
+
+    testWidgets('a failed destroy keeps the tab and surfaces the failure',
+        (tester) async {
+      final gw = await _pumpHost(
+        tester,
+        tabs: const [SideChatTab(sessionId: 's1', ordinal: 1)],
+      );
+      gw.destroySideChatTabResults.add(Exception('boom'));
+
+      await tester.longPress(find.byKey(const ValueKey('side-tab-s1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('销毁旁支会话'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '销毁旁支会话'));
+      await tester.pumpAndSettle();
+
+      // The state layer rethrows a non-idempotent delete fault with the tab
+      // untouched (AC10 retry path); the page must not claim success.
+      expect(gw.destroyedSideChatTabs, [('p1', 's1')]);
+      expect(find.byKey(const ValueKey('side-tab-s1')), findsOneWidget);
+      expect(find.text('辅助对话 1 已销毁'), findsNothing);
+      expect(find.text('操作失败: Exception: boom'), findsOneWidget);
+    });
+
+    testWidgets('the gate renders the EN copy', (tester) async {
+      final gw = await _pumpHost(
+        tester,
+        tabs: const [SideChatTab(sessionId: 's1', ordinal: 1)],
+        locale: 'en-US',
+        // The EN pills are wider than the zh ones; keep both inside the
+        // viewport so the long-press lands on the pill (the 360/390 cases
+        // live in the scroll group).
+        width: 500,
+      );
+
+      await tester.longPress(find.byKey(const ValueKey('side-tab-s1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete side conversation'));
+      await tester.pumpAndSettle();
+      expect(find.text('Delete side conversation 1?'), findsOneWidget);
+      expect(
+        find.text('The side conversation and its messages will be '
+            'permanently deleted. This cannot be undone.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+      expect(gw.destroyedSideChatTabs, isEmpty);
     });
 
     testWidgets('dismissing the sheet runs no action', (tester) async {

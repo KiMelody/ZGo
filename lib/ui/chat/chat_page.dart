@@ -1150,6 +1150,9 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     String newText,
     bool rewind,
   ) async {
+    // R5/AC6 closure: editUserQuery is restricted in a side chat; the bubble
+    // edit plumbing is nulled there, this keeps the command unreachable.
+    if (widget.chromeless) return;
     final sessionId = _sessionId;
     if (sessionId == null) return;
     final locale = localeOf(context);
@@ -2012,7 +2015,11 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       );
       return;
     }
-    if (text == '/goal pause') {
+    // R5/AC6 closure: pauseGoal/resumeGoal are restricted commands inside a
+    // side chat (the desktop hides the same UI and guards the commands).
+    // The interception is disabled there, so a hand-typed `/goal …` falls
+    // through as a plain message — the same shape as the `/side` alias leg.
+    if (!widget.chromeless && text == '/goal pause') {
       _inputController.clear();
       setState(() => _showSlash = false);
       await _run(
@@ -2021,7 +2028,7 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       );
       return;
     }
-    if (text == '/goal resume') {
+    if (!widget.chromeless && text == '/goal resume') {
       _inputController.clear();
       setState(() => _showSlash = false);
       await _run(
@@ -2134,7 +2141,9 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
         // subscription, so wait for it before proceeding.
         await _subscribe();
       }
-      if (text.startsWith('/goal ')) {
+      // sendGoalCommand is restricted in side chats too (R5/AC6): the prefix
+      // route stays off, so the text is delivered as a plain message.
+      if (!widget.chromeless && text.startsWith('/goal ')) {
         final res = await widget.host.conversationCommands.sendGoalCommand(
           sessionId,
           text.substring('/goal '.length).trim(),
@@ -3124,6 +3133,10 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
                               onEditSend: _sendUserEdit,
                               gitController: _git,
                               lastError: _lastError,
+                              // R5/AC6 closure: restricted row actions
+                              // (edit-resend / retry / fork / side-ask)
+                              // never render inside a side-chat tab.
+                              sideChat: widget.chromeless,
                             ),
                             // D9: interactions anchored to a row of this
                             // group render directly after it (in-stream),
@@ -3249,6 +3262,10 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
             conversation: widget.host,
             actions: _actions,
             feed: _feed,
+            // R5/AC6 closure: the goal process panel carries the
+            // pause/resume entries (restricted commands in a side chat);
+            // it renders nothing there.
+            sideChat: widget.chromeless,
           ),
           _QueueBar(state: state, conversation: widget.host),
           _PendingInteractions(state: state, conversation: widget.host),
@@ -3868,14 +3885,38 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     _toast(trP(context, 'sideChat.closed', ['${tab.ordinal}']));
   }
 
-  /// Destroys a side-chat tab (R9/AC10). Step B2 wires the seam and the
-  /// completion toast; the irreversible-action confirmation dialog is step
-  /// D2 and will gate this call. A non-idempotent delete fault keeps the tab
-  /// (the state layer rethrows) and surfaces the failure — a silent no-op
-  /// would read as a broken menu item.
+  /// Destroys a side-chat tab (R9/AC10). The irreversible-action confirmation
+  /// (design §7) gates this call: cancel — the text button, the barrier or the
+  /// back key — leaves the tab and the active tab untouched. Only an explicit
+  /// confirm switches to the main tab and runs the port. A non-idempotent
+  /// delete fault keeps the tab (the state layer rethrows) and surfaces the
+  /// failure — a silent no-op would read as a broken menu item.
   Future<void> _destroySideChatTab(SideChatTab tab) async {
     final parentId = _sessionId;
     if (parentId == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      useRootNavigator: false,
+      builder: (dialogCtx) => AlertDialog(
+        title:
+            Text(trP(dialogCtx, 'sideChat.destroy.title', ['${tab.ordinal}'])),
+        content: Text(tr(dialogCtx, 'sideChat.destroy.desc')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx, false),
+            child: Text(tr(dialogCtx, 'common.cancel')),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialogCtx).colorScheme.error,
+            ),
+            onPressed: () => Navigator.pop(dialogCtx, true),
+            child: Text(tr(dialogCtx, 'sideChat.menu.destroy')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
     if (_tabs.activeId == tab.sessionId) _switchTab(parentId);
     try {
       await widget.host.destroySideChatTab(parentId, tab.sessionId);
@@ -4233,6 +4274,10 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     String sessionId,
     Map<String, dynamic> target,
   ) async {
+    // R5/AC6 closure: forkAssistant is restricted in a side chat. The row
+    // entries are hidden by the timeline's `sideChat` gate; this keeps the
+    // command unreachable even if a callback leaks through.
+    if (widget.chromeless) return;
     final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
     final locale = localeOf(context);
@@ -4298,6 +4343,10 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     BuildContext context,
     String sessionId,
   ) async {
+    // R5/AC6 closure: a side chat cannot create another side chat. The
+    // row-sheet entry is hidden by the timeline's `sideChat` gate; this is
+    // the page-side guard for any other path.
+    if (widget.chromeless) return;
     // The callback carries the row's session id — always this page's own
     // (the timeline is built here); a mismatch would mean the action came
     // from another conversation, whose tabs this page does not own.
@@ -4679,15 +4728,23 @@ class _GoalProcessPanel extends StatelessWidget {
   /// Page-level navigation (ADR-0008 rule ii) — the agent drill-in.
   final ChatPageActions? actions;
 
+  /// Side-chat restricted-command closure (task 11-11 R5/AC6): the goal
+  /// panel is hidden there — its pause/resume entries send restricted
+  /// commands (the desktop hides the same area). Default false keeps the
+  /// main conversation unchanged.
+  final bool sideChat;
+
   const _GoalProcessPanel({
     required this.state,
     required this.conversation,
     this.feed,
     this.actions,
+    this.sideChat = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    if (sideChat) return const SizedBox.shrink();
     if (state.snapshot?['goal'] is! Map) return const SizedBox.shrink();
     final pooledFeed = feed;
     return GoalPanel(

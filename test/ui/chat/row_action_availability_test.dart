@@ -86,8 +86,10 @@ void main() {
     Widget harness(
       FakeConversation conversation,
       SubagentFeed feed,
-      ValueNotifier<String?> editingRowId,
-    ) =>
+      ValueNotifier<String?> editingRowId, {
+      bool sideChat = false,
+      bool withAskInSideChat = false,
+    }) =>
         wrap(
           ListenableBuilder(
             listenable: conversation.state,
@@ -103,7 +105,14 @@ void main() {
               confirmWindow: const Duration(milliseconds: 150),
               editingRowId: editingRowId,
               onEditSend: (target, newText, rewind) async {},
-              actions: ChatPageActions(fork: (context, sessionId, target) {}),
+              sideChat: sideChat,
+              actions: ChatPageActions(
+                fork: (context, sessionId, target) {},
+                // Non-null only where the test needs to prove the side-chat
+                // gate (not the optional-callback default) hides the entry.
+                askInSideChat:
+                    withAskInSideChat ? (context, sessionId) {} : null,
+              ),
             ),
           ),
         );
@@ -166,8 +175,10 @@ void main() {
           ValueNotifier<String?>,
         )> pumpTurn(
       WidgetTester tester,
-      List<Map<String, dynamic>> rows,
-    ) async {
+      List<Map<String, dynamic>> rows, {
+      bool sideChat = false,
+      bool withAskInSideChat = false,
+    }) async {
       tester.view.devicePixelRatio = 1.0;
       tester.view.physicalSize = const Size(390, 844);
       addTearDown(tester.view.reset);
@@ -178,7 +189,13 @@ void main() {
       final editingRowId = ValueNotifier<String?>(null);
       addTearDown(editingRowId.dispose);
       conversation.feedSnapshot(rows);
-      await tester.pumpWidget(harness(conversation, feed, editingRowId));
+      await tester.pumpWidget(harness(
+        conversation,
+        feed,
+        editingRowId,
+        sideChat: sideChat,
+        withAskInSideChat: withAskInSideChat,
+      ));
       await tester.pump();
       return (conversation, feed, editingRowId);
     }
@@ -268,6 +285,35 @@ void main() {
       feedUpsert(conversation, [headerRow(null)]);
       await tester.pump();
       expect(find.text('撤销'), findsNothing);
+    });
+
+    testWidgets('side-chat gate hides the restricted entries even when the '
+        'row actions allow them; browsing entries stay (R5/AC6)',
+        (tester) async {
+      final (conversation, _, _) = await pumpTurn(
+        tester,
+        [
+          userRow({'canEdit': true, 'canFork': true}),
+          assistantRow({'canFork': true}),
+        ],
+        sideChat: true,
+        withAskInSideChat: true,
+      );
+      expect(conversation.state.sawRowActions, isTrue);
+
+      // Feedback row: fork gone, the other buttons stay; the user bubble's
+      // edit affordance is gone too (null edit-resend plumbing).
+      expect(find.byIcon(Icons.fork_right), findsNothing);
+      expect(find.byIcon(Icons.thumb_up_alt_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.edit_outlined), findsNothing);
+
+      await openSheet(tester, '帮我修复登录');
+      expect(find.text('编辑并重发'), findsNothing);
+      expect(find.text('重试本轮'), findsNothing);
+      expect(find.text('分叉对话'), findsNothing);
+      expect(find.text('在辅助对话中提问'), findsNothing);
+      // Browsing entries survive: R5 restricts commands, not reading.
+      expect(find.text('查看文件变更'), findsOneWidget);
     });
 
     testWidgets('legacy desktop shape (no actions ever) renders every entry '

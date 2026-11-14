@@ -839,6 +839,11 @@ const _zh = {
   'sideChat.tabs.main': '主会话',
   'sideChat.menu.close': '关闭旁支',
   'sideChat.menu.destroy': '销毁旁支会话',
+  // Destroy is irreversible (R9/AC10): the confirm gate names the target and
+  // warns that the deletion cannot be restored before the long-press action
+  // reaches the port. Cancel reuses `common.cancel` untouched.
+  'sideChat.destroy.title': '销毁辅助对话 \$0？',
+  'sideChat.destroy.desc': '该操作不可恢复：辅助对话及其消息记录将被永久删除。',
   'sideChat.close.aria': '关闭辅助对话 \$0',
   // Close is a restorable collapse (design §6): the toast carries the way
   // back so the recovery entry stays discoverable.
@@ -2410,6 +2415,10 @@ const _en = {
   'sideChat.tabs.main': 'Main conversation',
   'sideChat.menu.close': 'Close side chat',
   'sideChat.menu.destroy': 'Delete side conversation',
+  'sideChat.destroy.title': 'Delete side conversation \$0?',
+  'sideChat.destroy.desc':
+      'The side conversation and its messages will be permanently deleted. '
+      'This cannot be undone.',
   'sideChat.close.aria': 'Close side conversation \$0',
   'sideChat.closed':
       'Side conversation \$0 closed. Reopen the session to restore it',
