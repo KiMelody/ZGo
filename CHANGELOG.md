@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.5] - 2026-11-15
+
+### Added
+
+- **Side conversations**: `/side` and `/btw` slash commands spawn
+  auxiliary chats as tabs over the main conversation — pill tab bar
+  with long-press close/destroy menu (destroy behind a confirm
+  dialog), chromeless sub-pages, and restricted command entries gated
+  inside side chats.
+- **Selection quote & annotation**: long-press a message to quote a
+  freely selected passage (optional annotation); the quote chip rides
+  the next outgoing message via structured `conversationQuotes` —
+  replay-queue passthrough with runtime-enforced limits (8 quotes,
+  8,000 chars each, 16,000 total, 2,000 annotation).
+- **Archive deletion three-stage flow**: window-controller port with
+  lazy degradation; preview and idempotent execution in the task list.
+- **V4 command reconcile**: `queryConversationCommandsV4` parsing with
+  single-leg batched queries, a command ledger with degradation gate,
+  downgrade-timeout pending chips, resend pre-check (re-open the
+  entry session before resending), and ledger lifetime lifted above
+  the transport so workspace switches no longer drop pending commands.
+- **Worktree branch chip**: read-only branch name on task rows,
+  pinned cards and the desktop sidebar, with connection-level
+  negative caching when the Git channel is absent.
+
+### Changed
+
+- **Row-action availability gating**: sheet edit/fork/rewind and
+  related entries now consume desktop-pushed row-level actions
+  (`canFork`/`canEdit`/`canRewindFiles`); a missing key hides the
+  entry, and conversations that never surfaced actions fall back to
+  the previous rendering.
+
+### Fixed
+
+- **Row-action sheet unreachable on device**: message text and
+  assistant markdown downgraded from SelectableText (it captured the
+  long-press inside row gesture detectors); copy buttons preserved
+  and free selection moved to the quote view.
+- **Slash popup overflow** on compressed viewports: height capped at
+  40% of the body with internal scrolling.
+- **Closing the active side tab** no longer sends a bare view-state
+  clear (dispose read a stale isActive).
+- **Empty body with a quote attached** now toasts instead of being
+  silently swallowed (no wire call; send button stays enabled).
+- **Ledger retry guard**: in-flight resends are no longer
+  double-sent, and retry/TTL timers terminate on dispose.
+
 ## [1.16.0] - 2026-11-10
 
 ### Added
