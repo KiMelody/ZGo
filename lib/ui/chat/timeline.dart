@@ -1358,9 +1358,15 @@ class _UserBubbleState extends State<_UserBubble> {
                         sessionId: widget.sessionId,
                       ),
                 if (text.isNotEmpty)
-                  // SelectableText with maxLines inflates to maxLines height
-                  // inside unbounded parents (ListView) — cap collapsed long
-                  // texts with a non-scrollable clip instead.
+                  // Plain Text on purpose (M0, quote-comment-lite): the
+                  // bubble's SelectableText installed a long-press selection
+                  // recognizer that won the arena against the row's
+                  // actions sheet, so a real-device long-press on the glyphs
+                  // never reached the sheet. Selection moved to the isolated
+                  // quote view; the bubble keeps its full-copy button below.
+                  // The non-scrollable clip still caps collapsed long texts
+                  // inside the unbounded ListView (a maxLines cap would
+                  // inflate short bubbles to the full line budget).
                   longText && !_expanded
                       ? ConstrainedBox(
                           constraints: const BoxConstraints(
@@ -1368,13 +1374,13 @@ class _UserBubbleState extends State<_UserBubble> {
                           ),
                           child: SingleChildScrollView(
                             physics: const NeverScrollableScrollPhysics(),
-                            child: SelectableText(
+                            child: Text(
                               text,
                               style: ZType.body,
                             ),
                           ),
                         )
-                      : SelectableText(
+                      : Text(
                           text,
                           style: ZType.body,
                         ),
@@ -1809,6 +1815,14 @@ class _AssistantBubble extends StatelessWidget {
         children: [
           AppMarkdown(
             text,
+            // M0 (quote-comment-lite): plain Text + Text code bodies, so the
+            // row's long-press action sheet stays reachable on the glyphs
+            // (a SelectableText here owned the long-press arena). Free
+            // selection lives in the isolated quote view; copy stays on the
+            // feedback row and the code-block header. Applies to the
+            // subagent detail page and inline expansion too (same shared
+            // row) — the recorded, accepted trade-off.
+            selectable: false,
             proseRightInset: 24,
             imageResolver: preview.resolveImage,
             onLinkTap: (href) => preview.openLink(context, href),

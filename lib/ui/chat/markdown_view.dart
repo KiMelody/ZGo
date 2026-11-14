@@ -104,7 +104,8 @@ class AppMarkdown extends StatelessWidget {
       selectable: selectable,
       styleSheet: styleSheet,
       builders: {
-        'code': _CodeBlockBuilder(codeStyle: code, highlight: highlight),
+        'code': _CodeBlockBuilder(
+            codeStyle: code, highlight: highlight, selectable: selectable),
       },
       softLineBreak: true,
       sizedImageBuilder: imageResolver == null
@@ -230,7 +231,16 @@ class _CodeBlockBuilder extends MarkdownElementBuilder {
   /// before the parameter existed.
   final bool highlight;
 
-  _CodeBlockBuilder({required this.codeStyle, required this.highlight});
+  /// Shared [AppMarkdown.selectable]: chat rows turn it off so the block's
+  /// text stops owning the long-press arena on the row's action sheet
+  /// (M0, quote-comment-lite); the header copy button still copies.
+  final bool selectable;
+
+  _CodeBlockBuilder({
+    required this.codeStyle,
+    required this.highlight,
+    required this.selectable,
+  });
 
   @override
   Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
@@ -250,7 +260,8 @@ class _CodeBlockBuilder extends MarkdownElementBuilder {
         code: code,
         language: language,
         codeStyle: codeStyle,
-        highlight: highlight);
+        highlight: highlight,
+        selectable: selectable);
   }
 }
 
@@ -262,12 +273,14 @@ class _CodeBlock extends StatefulWidget {
   final String language;
   final TextStyle codeStyle;
   final bool highlight;
+  final bool selectable;
 
   const _CodeBlock({
     required this.code,
     required this.language,
     required this.codeStyle,
     required this.highlight,
+    required this.selectable,
   });
 
   @override
@@ -384,10 +397,11 @@ class _CodeBlockState extends State<_CodeBlock> {
     );
   }
 
-  /// Expanded body: the plain [SelectableText] the chat has always rendered,
-  /// or its rich twin when highlighting is on and the language resolves to a
-  /// registered grammar (source_highlight.dart). Both keep the horizontal
-  /// scroll, the trimmed trailing newline and selection.
+  /// Expanded body: a selectable [SelectableText] / rich twin by default, or
+  /// the plain [Text] twins when [AppMarkdown.selectable] is off (chat rows —
+  /// M0: the block must not own the row's long-press arena). Both shapes keep
+  /// the horizontal scroll, the trimmed trailing newline; selection is the
+  /// caller's choice, the header copy button works either way.
   Widget _body(BuildContext context) {
     final code = widget.code;
     final text =
@@ -400,6 +414,10 @@ class _CodeBlockState extends State<_CodeBlock> {
         ? highlightSpan(context,
             text: text, language: widget.language, base: style)
         : null;
+    if (!widget.selectable) {
+      if (span == null) return Text(text, style: style);
+      return Text.rich(span, style: style);
+    }
     if (span == null) return SelectableText(text, style: style);
     return SelectableText.rich(span, style: style);
   }

@@ -5189,10 +5189,8 @@ void main() {
     expect(editField, findsNothing);
     expect(gateway.calls.where((c) => c.$1 == 'editUserQuery'), isEmpty);
 
-    // Long-press bottom sheet entry. The bubble is a SelectableText — its
-    // long-press selection would win the gesture arena, so press the bubble
-    // padding just outside the text where the row's GestureDetector owns
-    // the press.
+    // Long-press bottom sheet entry. Pre-M0 recipe kept as a regression
+    // guard: press the bubble padding just outside the text.
     final textTopLeft = tester.getTopLeft(find.text('帮我修复登录'));
     await tester.longPressAt(textTopLeft - const Offset(8, 4));
     await tester.pumpAndSettle();
@@ -6499,40 +6497,56 @@ void main() {
       math.max(64.0, controller.position.viewportDimension * 2) / 2;
 
   /// Message texts currently built inside the list viewport — the
-  /// "what the reader sees" set for the anchor assertions. User bubbles
-  /// render as [SelectableText] (assistant markdown as [Text]), so match
-  /// both. The compensation jump approximates the exact offset within
+  /// "what the reader sees" set for the anchor assertions. User bubbles and
+  /// assistant prose render as [Text] since M0 (quote-comment-lite);
+  /// [SelectableText] survives only in expanded code blocks, and is matched
+  /// too. The compensation jump approximates the exact offset within
   /// SliverList's trailing-extent estimate, so anchoring is asserted
   /// semantically: the visible set must survive the load (a teleport to
   /// the page top or bottom would show none of the old messages).
-  Set<String> visibleMessages(WidgetTester tester) => {
-    for (final w in tester.widgetList<SelectableText>(
-      find.descendant(
-        of: messageList(),
-        matching: find.byType(SelectableText),
-      ),
-    ))
-      w.data,
+  Set<String> visibleMessages(WidgetTester tester) {
+    final texts = <String>{};
     for (final w in tester.widgetList<Text>(
       find.descendant(of: messageList(), matching: find.byType(Text)),
-    ))
-      w.data,
-  }.whereType<String>().toSet();
-
-  /// The topmost visible history message: (text, screen Y of its top) —
-  /// the reading anchor for pixel-level displacement assertions.
-  (String, double) topmostHistoryMessage(WidgetTester tester) {
-    final entries = <(String, double)>[];
+    )) {
+      final data = w.data ?? w.textSpan?.toPlainText();
+      if (data != null) texts.add(data);
+    }
     for (final w in tester.widgetList<SelectableText>(
       find.descendant(
         of: messageList(),
         matching: find.byType(SelectableText),
       ),
     )) {
-      final data = w.data ?? '';
-      if (!data.startsWith('历史消息')) continue;
-      final box = tester.renderObject(find.byWidget(w)) as RenderBox;
+      final data = w.data ?? w.textSpan?.toPlainText();
+      if (data != null) texts.add(data);
+    }
+    return texts;
+  }
+
+  /// The topmost visible history message: (text, screen Y of its top) —
+  /// the reading anchor for pixel-level displacement assertions.
+  (String, double) topmostHistoryMessage(WidgetTester tester) {
+    final entries = <(String, double)>[];
+    void collect(Widget widget, String? text) {
+      final data = text ?? '';
+      if (!data.startsWith('历史消息')) return;
+      final box = tester.renderObject(find.byWidget(widget)) as RenderBox;
       entries.add((data, box.localToGlobal(Offset.zero).dy));
+    }
+
+    for (final w in tester.widgetList<Text>(
+      find.descendant(of: messageList(), matching: find.byType(Text)),
+    )) {
+      collect(w, w.data ?? w.textSpan?.toPlainText());
+    }
+    for (final w in tester.widgetList<SelectableText>(
+      find.descendant(
+        of: messageList(),
+        matching: find.byType(SelectableText),
+      ),
+    )) {
+      collect(w, w.data ?? w.textSpan?.toPlainText());
     }
     entries.sort((a, b) => a.$2.compareTo(b.$2));
     return entries.first;
@@ -7711,8 +7725,8 @@ void main() {
     final gateway = await pumpForkSource(tester);
     gateway.forkAssistantResults.add(forkAck());
 
-    // Long-press just outside the bubble text: the row's GestureDetector
-    // owns the press there (the SelectableText would win on the text).
+    // Pre-M0 long-press recipe (regression guard): press just outside the
+    // bubble text. Glyph presses now reach the sheet too (M0 tests).
     final textTopLeft = tester.getTopLeft(find.text('帮我修复登录'));
     await tester.longPressAt(textTopLeft - const Offset(8, 4));
     await tester.pumpAndSettle();
@@ -7799,9 +7813,8 @@ void main() {
     return gateway;
   }
 
-  /// Long-press just outside the first bubble's text — the row's
-  /// GestureDetector owns the press there (SelectableText would win on the
-  /// text) — then the action sheet is up.
+  /// Long-press just outside the first bubble's text — the pre-M0 recipe,
+  /// kept as a regression guard — then the action sheet is up.
   Future<void> openRowActions(WidgetTester tester) async {
     final textTopLeft = tester.getTopLeft(find.text('帮我修复登录'));
     await tester.longPressAt(textTopLeft - const Offset(8, 4));

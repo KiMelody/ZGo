@@ -115,6 +115,18 @@ List<Map<String, dynamic>> turns(int from, int to) => [
       ],
     ];
 
+/// [turns] with a collapsed fenced code block on the FIRST turn — a
+/// deterministic in-row gesture recognizer (the header InkWell) for the
+/// "finger down before the veil arms" test after M0 made message text
+/// non-selectable.
+List<Map<String, dynamic>> turnsWithCode(int from, int to) => [
+      for (final row in turns(from, to))
+        if (row['kind'] == 'assistantText' && row['rowId'] == from * 2)
+          {...row, 'text': '回答 $from\n\n```dart\nvoid main() {}\n```'}
+        else
+          row,
+    ];
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -328,13 +340,13 @@ void main() {
     tester.view.physicalSize = const Size(390, 844);
     addTearDown(tester.view.reset);
     final gateway = _VeilGateway(
-      rows: turns(1, 8),
+      rows: turnsWithCode(1, 8),
       totalCount: 100,
       rangeResult: {
         'hasMore': true,
         'atLogEpoch': 'e1',
         'rows': {
-          'window': turns(-19, 0),
+          'window': turnsWithCode(-19, 0),
           'firstRowId': -39,
         },
       },
@@ -353,9 +365,15 @@ void main() {
     // Finger down BEFORE the veil arms: pointer streams keep their down-time
     // hit path, so an in-flight gesture still reaches the scrollable through
     // the veiled frames (exactly how a real reader's moving finger does).
-    final gesture = await tester.startGesture(
-      tester.getCenter(find.byType(ListView)),
-    );
+    // M0 (quote-comment-lite) made message text non-selectable, so pressing
+    // the ListView center would let the lone drag recognizer win on down and
+    // park the arriving page. Press a row-local recognizer instead (the code
+    // block header InkWell on turn 1): its tap recognizer keeps the arena
+    // open on down, and the first vertical movement still hands the drag to
+    // the scrollable.
+    final header = find.text('dart');
+    expect(header, findsOneWidget);
+    final gesture = await tester.startGesture(tester.getCenter(header));
     await pumpUntilVeiled(tester);
 
     // The freeze must never feel sticky: the first drag movement reveals

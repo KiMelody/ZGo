@@ -158,9 +158,10 @@ void main() {
           if (actions != null) 'actions': actions,
         };
 
-    /// Opens the long-press sheet. The bubble text is a SelectableText, so
-    /// pressing the bubble padding just outside the glyphs keeps the row's
-    /// own GestureDetector in the arena (established page-test recipe).
+    /// Opens the long-press sheet via the pre-M0 workaround (bubble padding
+    /// just outside the glyphs) — kept as a regression guard for the
+    /// established recipe. Glyph-center presses are covered by the M0 tests
+    /// below.
     Future<void> openSheet(WidgetTester tester, String text) async {
       final topLeft = tester.getTopLeft(find.text(text));
       await tester.longPressAt(topLeft - const Offset(8, 4));
@@ -199,6 +200,31 @@ void main() {
       await tester.pump();
       return (conversation, feed, editingRowId);
     }
+
+    testWidgets('long-press on the bubble glyphs opens the row action sheet '
+        '(M0: no SelectableText arena steal)', (tester) async {
+      await pumpTurn(tester, [
+        userRow(null),
+        assistantRow(null),
+      ]);
+
+      // The exact real-device gesture: press the center of the text glyphs.
+      await tester.longPress(find.text('帮我修复登录'));
+      await tester.pumpAndSettle();
+      expect(find.text('查看文件变更'), findsOneWidget);
+    });
+
+    testWidgets('long-press on assistant prose glyphs opens the sheet too',
+        (tester) async {
+      await pumpTurn(tester, [
+        userRow(null),
+        assistantRow(null),
+      ]);
+
+      await tester.longPress(find.text('已修复'));
+      await tester.pumpAndSettle();
+      expect(find.text('查看文件变更'), findsOneWidget);
+    });
 
     testWidgets('fork glyph stays while the row allows it and disappears '
         'when an upsert replaces the row without actions', (tester) async {

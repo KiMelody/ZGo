@@ -63,18 +63,10 @@ void main() {
     final blockBox = tester.renderObject<RenderBox>(codeBlock());
     final blockLeft = blockBox.localToGlobal(Offset.zero).dx;
 
-    // The prose paragraph directly above the block (the user bubble's
-    // SelectableText sits to the right; the trailing paragraph below).
-    final blockTop = blockBox.localToGlobal(Offset.zero).dy;
-    final proseBox = find
-        .byType(SelectableText)
-        .evaluate()
-        .map((el) => tester.renderObject<RenderBox>(find.byWidget(el.widget)))
-        .where((b) => b.localToGlobal(Offset.zero).dy < blockTop)
-        .reduce((a, b) =>
-            a.localToGlobal(Offset.zero).dy > b.localToGlobal(Offset.zero).dy
-                ? a
-                : b);
+    // The prose paragraph directly above the block (M0: assistant markdown
+    // renders plain Text now, so the prose is found by its content rather
+    // than by SelectableText type).
+    final proseBox = tester.renderObject<RenderBox>(find.text(longWord));
     // Left edge aligns with the prose text left edge (the list padding).
     expect(proseBox.localToGlobal(Offset.zero).dx, blockLeft);
     expect(blockLeft, listPad);
