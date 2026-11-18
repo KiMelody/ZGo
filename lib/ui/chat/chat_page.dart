@@ -2261,6 +2261,7 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
           final key = switch (draftGuard) {
             WorkspaceOpenRuntimeNotRunning() =>
               'tasks.agentRuntimeNotRunning',
+            WorkspaceOpenProviderNotReady() => 'tasks.providerNotReady',
             WorkspaceOpenUnreachable() ||
             WorkspaceOpenTransportFailure() =>
               'tasks.workspaceUnreachable',

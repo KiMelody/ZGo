@@ -281,6 +281,7 @@ class _TaskListPageState extends State<TaskListPage>
   @override
   void dispose() {
     _overviewTimer?.cancel();
+    _openingTask.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -337,6 +338,34 @@ class _TaskListPageState extends State<TaskListPage>
   /// round-trip (no stale-row taps mid-reshuffle; page-level, not per row).
   bool _reloading = false;
 
+  /// True while a task tap must re-point the bridge before it can land
+  /// (cold-runtime wake included: the desktop may spend 2-4s starting the
+  /// workspace runtime). Kept on its own notifier so flipping it does NOT
+  /// rebuild the banner with a just-recorded failure — the toast stays the
+  /// single immediate explanation, exactly as before this feature.
+  final ValueNotifier<bool> _openingTask = ValueNotifier<bool>(false);
+
+  /// The list's in-flight replace window: a reload round-trip OR an open
+  /// that has to (re)point / wake the bridge first. Only the 2dp bar and
+  /// the pointer gate ride it — [child] is a stable widget instance, so an
+  /// open-flag flip never repaints the banner/rows.
+  Widget _busyScope({required Widget child}) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: _openingTask,
+      builder: (context, openingTask, _) {
+        final busy = _reloading || openingTask;
+        return Column(
+          children: [
+            if (busy) const _ReloadBar(),
+            Expanded(
+              child: IgnorePointer(ignoring: busy, child: child),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   /// True while the native link is being suspended for the WebView handover
   /// (B-01): all four entry points funnel through [_openRemote], which shows
   /// the wait and refuses a second tap.
@@ -380,11 +409,14 @@ class _TaskListPageState extends State<TaskListPage>
 
   /// Whether opening a task/draft must re-point the bridge first. A cold
   /// runtime failure means the previous open failed: even the active
-  /// workspace needs a successful re-open to clear the banner and rebuild
-  /// its live index (the chat subscription alone only warms the runtime).
+  /// workspace needs a successful re-open to retire its 「休眠」 evidence and
+  /// rebuild its live index (the chat subscription alone only warms the
+  /// runtime). Provider-not-ready behaves the same way — the retry re-runs
+  /// the wake, which re-checks the desktop provider gate.
   bool _needsWorkspaceOpen(DeviceSession session, Map<String, dynamic> ws) =>
       !_isWorkspaceActive(session, ws) ||
-      session.lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning;
+      session.lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning ||
+      session.lastWorkspaceOpenFailure is WorkspaceOpenProviderNotReady;
 
   /// 3.16.2 conversation workspaces (desktop "New task" drafts,
   /// `.zcode/workspace/draft-*`) own no card: the desktop hides them from
@@ -579,7 +611,7 @@ class _TaskListPageState extends State<TaskListPage>
         session.status == DeviceStatus.connected &&
         !session.kicked &&
         (session.error?.isEmpty ?? true) &&
-        session.lastWorkspaceOpenFailure == null;
+        _keepsBannerOnline(session.lastWorkspaceOpenFailure);
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 0,
@@ -790,19 +822,14 @@ class _TaskListPageState extends State<TaskListPage>
                 ],
               ),
             ),
-            // Same replace-window discipline as the mobile list: the sidebar
-            // tree goes pointer-dead (with the same 2dp bar) while a reload
-            // is in flight.
-            if (_reloading) const _ReloadBar(),
+            // Same replace-window discipline as the mobile list (see
+            // [_busyScope]): the sidebar tree goes pointer-dead with the
+            // same 2dp bar while a reload/open round-trip is in flight.
             Expanded(
-              child: session == null || session.workspaces.isEmpty
-                  ? _fallback(context, session)
-                  // Same replace-window discipline as the mobile list: the
-                  // sidebar tree goes pointer-dead while a reload is in
-                  // flight.
-                  : IgnorePointer(
-                      ignoring: _reloading,
-                      child: ListView(
+              child: _busyScope(
+                child: session == null || session.workspaces.isEmpty
+                    ? _fallback(context, session)
+                    : ListView(
                         padding: zScreenPadding(context,
                             top: 0, bottom: 16, horizontal: 6),
                         children: [
@@ -811,7 +838,7 @@ class _TaskListPageState extends State<TaskListPage>
                             _desktopWorkspaceFolder(context, session, ws),
                         ],
                       ),
-                    ),
+              ),
             ),
           ],
         );
@@ -1310,34 +1337,27 @@ class _TaskListPageState extends State<TaskListPage>
                 ),
           ],
         ];
-        // The replace window: while a reload RPC is in flight the list is
-        // pointer-dead (stale-row taps would act on rows about to reshuffle).
-        // The 2dp bar above it is the only visible trace of that window — a
-        // pointer-dead list with zero progress read as a hung page.
-        return Column(
-          children: [
-            if (_reloading) const _ReloadBar(),
-            Expanded(
-              child: IgnorePointer(
-                ignoring: _reloading,
-                child: RefreshIndicator(
-                  onRefresh: () async => session == null
-                      ? widget.hub.ensure(widget.device)
-                      : _reloadTasks(session),
-                  child: ListView.builder(
-                    // Always scrollable: a short list (one workspace, no
-                    // tasks) must still accept the pull gesture for the
-                    // refresh indicator.
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    padding: zScreenPadding(
-                        context, top: 12, bottom: 32, horizontal: 12),
-                    itemCount: rows.length,
-                    itemBuilder: (context, i) => rows[i],
-                  ),
-                ),
-              ),
+        // The replace window: while a reload/open RPC is in flight the list
+        // is pointer-dead (stale-row taps would act on rows about to
+        // reshuffle). The 2dp bar above it is the only visible trace of that
+        // window — a pointer-dead list with zero progress read as a hung
+        // page.
+        return _busyScope(
+          child: RefreshIndicator(
+            onRefresh: () async => session == null
+                ? widget.hub.ensure(widget.device)
+                : _reloadTasks(session),
+            child: ListView.builder(
+              // Always scrollable: a short list (one workspace, no
+              // tasks) must still accept the pull gesture for the
+              // refresh indicator.
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: zScreenPadding(
+                  context, top: 12, bottom: 32, horizontal: 12),
+              itemCount: rows.length,
+              itemBuilder: (context, i) => rows[i],
             ),
-          ],
+          ),
         );
       },
     );
@@ -2243,6 +2263,7 @@ class _TaskListPageState extends State<TaskListPage>
     // with its richer phase/interaction overriding the relay rows per task
     // id). Others: relay rows — the web mobile home does the same.
     final dirKey = workspaceKeyOf(ws);
+    final cold = dirKey != null && session.coldWorkspaceKeys.contains(dirKey);
     var entries = dirKey == null
         ? const <SessionEntry>[]
         : [
@@ -2291,6 +2312,10 @@ class _TaskListPageState extends State<TaskListPage>
                             ),
                             const SizedBox(width: 6),
                             _kindBadge(context, ws),
+                            if (cold) ...[
+                              const SizedBox(width: 6),
+                              _coldBadge(context),
+                            ],
                           ],
                         ),
                         const SizedBox(height: 4),
@@ -2421,20 +2446,39 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
+  /// Per-workspace cold-runtime marker (design 11-17-cold-workspace-badge
+  /// §5, mock P1-a): plain text chip, neutral gray, no icon, 6px after the
+  /// kind badge. Purely informational — tapping a task still runs the
+  /// transparent wake.
+  Widget _coldBadge(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: ZInk.tile(context),
+        borderRadius: BorderRadius.circular(ZRadius.mini),
+      ),
+      child: Text(
+        tr(context, 'tasks.card.runtimeCold'),
+        style: ZType.caption.copyWith(color: ZInk.muted(context)),
+      ),
+    );
+  }
+
   /// Sidebar "new task": same cold-runtime rule as the card ＋ — a typed
   /// cold-runtime failure means the previous open failed, so re-point the
-  /// active workspace first (a successful open clears the stale banner). No
-  /// active workspace means there is nothing to re-point: a cold-runtime
-  /// failure still explains the failure on the list; otherwise the
-  /// pre-existing draft path runs.
+  /// active workspace first (a successful open retires the card's 「休眠」
+  /// evidence). No active workspace means there is nothing to re-point: a
+  /// cold-runtime failure still explains the failure on the list; otherwise
+  /// the pre-existing draft path runs.
   Future<void> _startNewTask() async {
     final session = _session;
     if (session != null) {
       final ws = session.activeWorkspace;
       if (ws == null) {
         final failure = session.lastWorkspaceOpenFailure;
-        if (failure is WorkspaceOpenRuntimeNotRunning) {
-          _showWorkspaceOpenFailure(failure);
+        if (failure is WorkspaceOpenRuntimeNotRunning ||
+            failure is WorkspaceOpenProviderNotReady) {
+          _showWorkspaceOpenFailure(failure!);
           return;
         }
       } else if (_needsWorkspaceOpen(session, ws)) {
@@ -2748,14 +2792,25 @@ class _TaskListPageState extends State<TaskListPage>
     SessionEntry entry,
     String title,
   ) async {
-    if (workspace == null) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr(context, 'tasks.scopeUnknown'))),
-      );
-      return;
+    if (_openingTask.value) return;
+    // The open chain can include the cold-runtime wake (2-4s on the
+    // desktop); only that window needs the visible replace-window bar.
+    final needsOpen =
+        workspace == null || _needsWorkspaceOpen(session, workspace);
+    if (needsOpen) _openingTask.value = true;
+    WorkspaceOpenResult? result;
+    try {
+      if (workspace == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tr(context, 'tasks.scopeUnknown'))),
+        );
+        return;
+      }
+      result = await session.prepareTaskOpen(entry.sessionId);
+    } finally {
+      if (mounted) _openingTask.value = false;
     }
-    final result = await session.prepareTaskOpen(entry.sessionId);
     if (result is WorkspaceOpenAborted) return;
     if (result is! WorkspaceOpenOpened) {
       if (!mounted) return;
@@ -2785,12 +2840,26 @@ class _TaskListPageState extends State<TaskListPage>
   void _showWorkspaceOpenFailure(WorkspaceOpenResult result) {
     final key = switch (result) {
       WorkspaceOpenRuntimeNotRunning() => 'tasks.agentRuntimeNotRunning',
+      WorkspaceOpenProviderNotReady() => 'tasks.providerNotReady',
       WorkspaceOpenUnreachable() ||
       WorkspaceOpenTransportFailure() =>
         'tasks.workspaceUnreachable',
       WorkspaceOpenOpened() || WorkspaceOpenAborted() => null,
     };
     if (key == null) return;
+    // The card's 「休眠」 marker / provider copy already explains the two
+    // workspace-level dead ends; a toast would repeat the same fact. The
+    // predicate is bound to the failure EVIDENCE, not to banner visibility
+    // (the banner no longer carries cold copy since the badge landed) — the
+    // marker is the workspace-level explanation now. Every other failure
+    // shows a device-level banner reason, so the toast is the only
+    // explanation and stays.
+    if ((result is WorkspaceOpenRuntimeNotRunning &&
+            _coldRuntimeExplainedByCard(_session)) ||
+        (result is WorkspaceOpenProviderNotReady &&
+            _showsProviderNotReadyBanner(_session))) {
+      return;
+    }
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(tr(context, key))),
     );
@@ -3757,6 +3826,43 @@ class _TaskListPageState extends State<TaskListPage>
   }
 }
 
+/// Whether a typed workspace-open failure leaves the device banner in its
+/// online state. A cold per-workspace runtime is workspace-local
+/// information now — the card 「休眠」 marker owns it (design
+/// 11-17-cold-workspace-badge §4), so it must not flip the banner out of
+/// the green online card and offer device-level retry/web actions. Every
+/// other typed failure (transport / window gate / provider not ready) keeps
+/// the degraded banner.
+bool _keepsBannerOnline(WorkspaceOpenResult? failure) =>
+    failure == null || failure is WorkspaceOpenRuntimeNotRunning;
+
+/// Whether the session carries a cold-runtime failure whose copy the
+/// workspace card's 「休眠」 marker already owns. Evidence-based on purpose
+/// (PRD 11-17 P2: the P0 dedupe predicate is bound to the failure field,
+/// not to banner visibility), so it keeps suppressing the duplicate toast
+/// after the banner stopped showing cold copy. The kicked / stage /
+/// connecting guards mirror the banner's branch order, and a null app-error
+/// reason keeps a link-level failure from being papered over by workspace
+/// copy.
+bool _coldRuntimeExplainedByCard(DeviceSession? session) =>
+    session != null &&
+    session.failureReason == null &&
+    session.lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning &&
+    !session.kicked &&
+    session.connectionStage == null &&
+    session.status != DeviceStatus.connecting;
+
+/// Same evidence rule for the provider-not-ready dead end: the desktop has
+/// no usable model provider, so the runtime cannot start until it is
+/// configured there. The banner explains that instead of the runtime copy.
+bool _showsProviderNotReadyBanner(DeviceSession? session) =>
+    session != null &&
+    session.failureReason == null &&
+    session.lastWorkspaceOpenFailure is WorkspaceOpenProviderNotReady &&
+    !session.kicked &&
+    session.connectionStage == null &&
+    session.status != DeviceStatus.connecting;
+
 /// Degraded-link copy. First available source wins: the app-error reason
 /// (`remote.failure.*`) → the typed workspace-open failure → the raw
 /// session error text → the generic fallback body.
@@ -3770,6 +3876,8 @@ String _errorCopy(BuildContext context, DeviceSession? session) {
   switch (failure) {
     case WorkspaceOpenRuntimeNotRunning():
       return tr(context, 'tasks.agentRuntimeNotRunning');
+    case WorkspaceOpenProviderNotReady():
+      return tr(context, 'tasks.providerNotReady');
     case WorkspaceOpenUnreachable():
       return tr(context, 'tasks.workspaceUnreachable');
     case WorkspaceOpenTransportFailure(:final error):
@@ -3837,7 +3945,7 @@ class _ConnectionBanner extends StatelessWidget {
       // the green "all good" card through it would hide the reconnect.
       session!.connectionStage == null &&
       (session!.error?.isEmpty ?? true) &&
-      session!.lastWorkspaceOpenFailure == null;
+      _keepsBannerOnline(session!.lastWorkspaceOpenFailure);
 
   @override
   Widget build(BuildContext context) {
@@ -3892,8 +4000,20 @@ class _ConnectionBanner extends StatelessWidget {
       icon = Icons.sync;
       color = ZColors.sky400;
     } else {
-      title = tr(context, 'tasks.fallback.title');
-      body = _failureBody(context, s);
+      // Provider-not-ready is a device-level dead end (the desktop cannot
+      // start any runtime until configured); cold-runtime never reaches
+      // this card — [_keepsBannerOnline] keeps the banner online and the
+      // workspace card carries the 「休眠」 marker.
+      final provider = _showsProviderNotReadyBanner(s);
+      title = tr(
+        context,
+        provider
+            ? 'tasks.banner.providerNotReadyTitle'
+            : 'tasks.fallback.title',
+      );
+      body = provider
+          ? tr(context, 'tasks.banner.providerNotReadyBody')
+          : _failureBody(context, s);
       icon = Icons.cloud_off;
       color = ZInk.dangerTone(context);
     }

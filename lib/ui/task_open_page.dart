@@ -178,6 +178,9 @@ class _TaskOpenPageState extends State<TaskOpenPage> {
           case WorkspaceOpenRuntimeNotRunning():
             _fail('tasks.agentRuntimeNotRunning', result);
             return;
+          case WorkspaceOpenProviderNotReady():
+            _fail('tasks.providerNotReady', result);
+            return;
           case WorkspaceOpenUnreachable() || WorkspaceOpenTransportFailure():
             _fail('tasks.workspaceUnreachable', result);
             return;

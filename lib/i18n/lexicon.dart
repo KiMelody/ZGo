@@ -116,7 +116,7 @@ const _zh = {
   'status.online': '在线',
   'status.connecting': '连接中…',
   'status.offline': '离线',
-  'status.error': '原生列表不可用，请用网页版',
+  'status.error': '连接异常',
   'status.kicked': '已被其他终端接管',
   'status.tasksRunning': '\$0 个任务运行中',
   // 连接阶段的细则文案（V9：沿用 status.* 家族）。短 key 给设备卡片副标题
@@ -216,6 +216,8 @@ const _zh = {
   'tasks.workspaceKind.local': '本地',
   'tasks.workspaceKind.conversation': '对话',
   'tasks.workspaceKind.remote': '远程',
+  // 工作区卡片的 runtime 冷状态标记（design 11-17-cold-workspace-badge §6）。
+  'tasks.card.runtimeCold': '休眠',
   'common.cancel': '取消',
   'common.close': '关闭',
   'common.retryLater': '稍后重试',
@@ -910,6 +912,11 @@ const _zh = {
   'tasks.banner.nativeOff': '原生列表未启用，可在设置中开启',
   'tasks.banner.kicked': '其他终端占用了此设备连接，可等待其退出后重试',
   'tasks.banner.connecting': '正在连接桌面端…',
+  'tasks.banner.providerNotReadyTitle': '桌面端模型服务未就绪',
+  'tasks.banner.providerNotReadyBody':
+      '该工作区的智能体运行时需要桌面端可用的模型服务商。请先在桌面 ZCode 中配置模型，再点重试。',
+  'tasks.providerNotReady':
+      '该工作区的智能体运行时无法启动：桌面端没有可用的模型服务商。请先在桌面 ZCode 中配置模型，然后重试。',
   'tasks.banner.onlineTitle': 'ZCode 远程控制',
   'tasks.banner.onlineSubtitle': '已连接到当前桌面窗口',
   'tasks.banner.onlineDesc': '本次连接可以查看当前设备上已打开的项目、任务和会话；二维码失效后需要回到桌面端重新连接。',
@@ -1665,7 +1672,7 @@ const _en = {
   'status.online': 'Online',
   'status.connecting': 'Connecting…',
   'status.offline': 'Offline',
-  'status.error': 'Native list unavailable — use the web version',
+  'status.error': 'Connection error',
   'status.kicked': 'Taken over by another terminal',
   'status.tasksRunning': '\$0 task(s) running',
   // Connection-stage detail copy (V9: stays inside the status.* family).
@@ -1782,6 +1789,8 @@ const _en = {
   'tasks.workspaceKind.local': 'Local',
   'tasks.workspaceKind.conversation': 'Conversation',
   'tasks.workspaceKind.remote': 'Remote',
+  // Per-workspace runtime cold marker (design 11-17-cold-workspace-badge §6).
+  'tasks.card.runtimeCold': 'asleep',
   'common.cancel': 'Cancel',
   'common.close': 'Close',
   'common.retryLater': 'Retry later',
@@ -2511,6 +2520,11 @@ const _en = {
   'tasks.banner.kicked':
       'Another terminal holds this device connection; retry after it exits',
   'tasks.banner.connecting': 'Connecting to the desktop…',
+  'tasks.banner.providerNotReadyTitle': 'Model provider not ready on desktop',
+  'tasks.banner.providerNotReadyBody':
+      'This workspace needs a model provider configured in the desktop ZCode app before its agent runtime can start. Configure one, then retry.',
+  'tasks.providerNotReady':
+      'The agent runtime for this workspace could not start because the desktop has no usable model provider. Configure a model in the desktop ZCode app, then retry.',
   'tasks.banner.onlineTitle': 'ZCode Remote Control',
   'tasks.banner.onlineSubtitle': 'Connected to the current desktop window',
   'tasks.banner.onlineDesc':

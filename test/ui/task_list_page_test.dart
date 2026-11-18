@@ -138,6 +138,18 @@ Widget wrap(Widget child) => MaterialApp(
       home: child,
     );
 
+/// Same page wrapper with an explicit locale (new UI surfaces lock the
+/// rendered en copy — i18n spec §2.10).
+Widget wrapLocale(Widget child, String locale) => MaterialApp(
+      theme: buildDarkTheme(),
+      darkTheme: buildDarkTheme(),
+      builder: (context, child) => UiSettingsProvider(
+        settings: UiSettings()..locale = locale,
+        child: child!,
+      ),
+      home: child,
+    );
+
 /// Logical 390×844 phone viewport (below the 768 dual-pane breakpoint).
 void usePhone(WidgetTester tester) {
   tester.view.devicePixelRatio = 1.0;
@@ -1401,7 +1413,11 @@ void main() {
   // ---- collapse model (web) ----
 
   Future<(DeviceStore, Device, FakeDeviceSession)> setupTwoWorkspaces(
-      WidgetTester tester) async {
+      WidgetTester tester, {
+    WorkspaceOpenResult? coldFailure,
+    Set<String> coldKeys = const {},
+    String locale = 'zh-CN',
+  }) async {
     usePhone(tester);
     final (store, device) = await setupDevice();
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -1441,12 +1457,18 @@ void main() {
         },
       ],
     );
-    await tester.pumpWidget(wrap(TaskListPage(
+    if (coldFailure != null) {
+      session.lastWorkspaceOpenFailure = coldFailure;
+    }
+    if (coldKeys.isNotEmpty) {
+      session.coldWorkspaceKeys = coldKeys;
+    }
+    await tester.pumpWidget(wrapLocale(TaskListPage(
       store: store,
       hub: DeviceSessionHub(nativeListEnabled: () => false),
       device: device,
       sessionOverride: session,
-    )));
+    ), locale));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     return (store, device, session);
@@ -1588,11 +1610,13 @@ void main() {
     expect(find.textContaining('不在当前桌面窗口中'), findsNothing);
   });
 
-  testWidgets('a cold-runtime failure renders its actionable copy',
+  testWidgets(
+      'a cold-runtime failure keeps the online banner and marks the card',
       (tester) async {
     // The bridge is attached but the workspace's agent runtime is not
-    // running: the banner must point at the runtime (open the workspace on
-    // the desktop), never at "workspace is not open".
+    // running: this is workspace-local information now — the banner stays in
+    // its online state and the card carries the 「休眠」 marker
+    // (design 11-17-cold-workspace-badge §4/§5).
     usePhone(tester);
     final (store, device) = await setupDevice();
     final session = FakeDeviceSession(
@@ -1601,8 +1625,10 @@ void main() {
       workspaces: [
         {'workspacePath': '/repo/app'},
       ],
-    )..lastWorkspaceOpenFailure = const WorkspaceOpenRuntimeNotRunning(
-        'ZCode Agent runtime is not running.');
+    )
+      ..lastWorkspaceOpenFailure = const WorkspaceOpenRuntimeNotRunning(
+          'ZCode Agent runtime is not running.')
+      ..coldWorkspaceKeys = {'/repo/app'};
     await tester.pumpWidget(wrap(TaskListPage(
       store: store,
       hub: DeviceSessionHub(nativeListEnabled: () => false),
@@ -1611,16 +1637,148 @@ void main() {
     )));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('该工作区的智能体运行时未启动'), findsOneWidget);
+    // Online state: the explanatory card, not the degraded one.
+    expect(find.textContaining('本次连接可以查看'), findsOneWidget);
+    expect(find.text('当前工作区需在桌面端打开'), findsNothing);
+    expect(find.textContaining('任务列表与静态进度可用'), findsNothing);
+    expect(find.text('原生列表不可用'), findsNothing,
+        reason: 'the device link is healthy — the list must not read degraded');
+    expect(find.text('重试'), findsNothing,
+        reason: 'no device-level retry for a workspace-local runtime');
+    // The workspace card owns the cold information.
+    expect(
+      find.descendant(of: cardOf('/repo/app'), matching: find.text('休眠')),
+      findsOneWidget,
+    );
+    expect(find.byType(SnackBar), findsNothing);
     expect(find.textContaining('该工作区未在桌面端打开'), findsNothing);
     expect(find.textContaining('runtime is not running'), findsNothing,
         reason: 'the desktop English message must never leak into the UI');
   });
 
   testWidgets(
-      'a cold-runtime failed ＋ open says the runtime is not running',
+      'only cold-evidence workspaces carry the marker; phase pills unchanged',
       (tester) async {
-    final (_, _, session) = await setupTwoWorkspaces(tester);
+    await setupTwoWorkspaces(tester, coldKeys: {'alpha'});
+    expect(
+      find.descendant(of: cardOf('alpha'), matching: find.text('休眠')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: cardOf('beta'), matching: find.text('休眠')),
+      findsNothing,
+      reason: 'unknown is not warm: no evidence means no marker',
+    );
+    // The marker coexists with the phase pill; it must not replace or alter
+    // the row phase copy.
+    expect(
+      find.descendant(of: cardOf('alpha'), matching: find.text('已完成')),
+      findsWidgets,
+    );
+    expect(
+      find.descendant(
+        of: cardOf('alpha'),
+        matching: find.byTooltip('新建任务'),
+      ),
+      findsOneWidget,
+      reason: 'the title row keeps its existing actions',
+    );
+  });
+
+  testWidgets('the cold marker renders its English copy', (tester) async {
+    // New UI surface: lock the en table value, not just the key
+    // (i18n spec §2.10).
+    await setupTwoWorkspaces(
+      tester,
+      coldKeys: {'beta'},
+      locale: 'en-US',
+    );
+    expect(
+      find.descendant(of: cardOf('beta'), matching: find.text('asleep')),
+      findsOneWidget,
+    );
+    expect(find.text('休眠'), findsNothing);
+  });
+
+  testWidgets('a provider-not-ready failure renders provider guidance',
+      (tester) async {
+    // The wake reached initializeWorkspace, which refused because the
+    // desktop has no usable model provider. The banner must point at the
+    // provider configuration instead of the runtime-start action.
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      workspaces: [
+        {'workspacePath': '/repo/app'},
+      ],
+    )..lastWorkspaceOpenFailure =
+        const WorkspaceOpenProviderNotReady('provider_not_ready');
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pumpAndSettle();
+
+    expect(find.text('桌面端模型服务未就绪'), findsOneWidget);
+    expect(find.textContaining('请先在桌面 ZCode 中配置模型'), findsOneWidget);
+    expect(find.text('当前工作区需在桌面端打开'), findsNothing,
+        reason: 'provider readiness is not the cold-runtime action');
+    expect(find.textContaining('该工作区的智能体运行时未启动'), findsNothing);
+    expect(find.textContaining('provider_not_ready'), findsNothing,
+        reason: 'the desktop code must never leak into the UI');
+    expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('a task open that re-points the bridge shows the in-flight bar',
+      (tester) async {
+    // The cold-wake path can hold the open for 2-4s; the list must show the
+    // same 2dp replace-window bar the reload path uses instead of reading
+    // like a dead tap.
+    final (_, _, session) = await setupTwoWorkspaces(
+      tester,
+      coldFailure: const WorkspaceOpenProviderNotReady('provider_not_ready'),
+    );
+    session.openWorkspaceSucceeds = false;
+    session.openWorkspaceFailure =
+        const WorkspaceOpenProviderNotReady('provider_not_ready');
+    final gate = Completer<void>();
+    session.openWorkspaceGate = gate.future;
+
+    await tester.tap(find.text('beta'));
+    await tester.pump();
+    await tester.tap(find.descendant(
+      of: cardOf('beta'),
+      matching: find.text('中继任务乙'),
+    ));
+    await tester.pump();
+
+    expect(find.byType(LinearProgressIndicator), findsWidgets,
+        reason: 'the open/wake window is visible');
+
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    expect(session.openWorkspacePurposes, [WorkspaceOpenPurpose.openTask]);
+    expect(find.byType(SnackBar), findsNothing,
+        reason: 'the provider banner is the single explanation');
+    expect(find.text('桌面端模型服务未就绪'), findsOneWidget);
+  });
+
+  testWidgets('a cold-runtime failed ＋ open stays on the card marker alone',
+      (tester) async {
+    // "No new interaction": the card's 「休眠」 marker is the workspace-level
+    // explanation, so a repeated cold failure must not stack a toast (the
+    // P0 dedupe predicate is evidence-based).
+    final (_, _, session) = await setupTwoWorkspaces(
+      tester,
+      coldFailure: const WorkspaceOpenRuntimeNotRunning(
+          'ZCode Agent runtime is not running.'),
+      coldKeys: {'beta'},
+    );
     session.openWorkspaceSucceeds = false;
     session.openWorkspaceFailure = const WorkspaceOpenRuntimeNotRunning(
         'ZCode Agent runtime is not running.');
@@ -1635,14 +1793,24 @@ void main() {
 
     expect(find.byType(ChatPage), findsNothing);
     expect(session.openWorkspacePurposes, [WorkspaceOpenPurpose.chatNew]);
-    expect(find.textContaining('该工作区的智能体运行时未启动'), findsWidgets);
+    expect(find.textContaining('任务列表与静态进度可用'), findsNothing);
+    expect(find.byType(SnackBar), findsNothing,
+        reason: 'the card marker already says the runtime is cold');
+    expect(
+      find.descendant(of: cardOf('beta'), matching: find.text('休眠')),
+      findsOneWidget,
+    );
     expect(find.textContaining('该工作区未在桌面端打开'), findsNothing);
   });
 
-  testWidgets(
-      'a cold-runtime failed task open says the runtime is not running',
+  testWidgets('a cold-runtime failed task open stays on the card marker alone',
       (tester) async {
-    final (_, _, session) = await setupTwoWorkspaces(tester);
+    final (_, _, session) = await setupTwoWorkspaces(
+      tester,
+      coldFailure: const WorkspaceOpenRuntimeNotRunning(
+          'ZCode Agent runtime is not running.'),
+      coldKeys: {'beta'},
+    );
     session.openWorkspaceSucceeds = false;
     session.openWorkspaceFailure = const WorkspaceOpenRuntimeNotRunning(
         'ZCode Agent runtime is not running.');
@@ -1660,10 +1828,127 @@ void main() {
 
     expect(find.byType(ChatPage), findsNothing);
     expect(session.openWorkspacePurposes, [WorkspaceOpenPurpose.openTask]);
-    expect(find.textContaining('该工作区的智能体运行时未启动'), findsWidgets,
-        reason: 'both the snackbar and the degraded-link banner carry the '
-            'actionable runtime copy');
+    expect(find.textContaining('任务列表与静态进度可用'), findsNothing);
+    expect(find.byType(SnackBar), findsNothing,
+        reason: 'the card marker is the single explanation');
+    expect(
+      find.descendant(of: cardOf('beta'), matching: find.text('休眠')),
+      findsOneWidget,
+    );
     expect(find.textContaining('该工作区未在桌面端打开'), findsNothing);
+  });
+
+  testWidgets('a cold-runtime failed sidebar new task stays silent',
+      (tester) async {
+    // The wide layout's sidebar entry goes through the same failure-copy
+    // helper as the card surfaces: the predicate is session evidence, not
+    // banner visibility, so the cold-runtime toast is suppressed here too
+    // (the wide layout has no marker surface; the list stays the state).
+    useDesktop(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      workspaces: [
+        {'workspacePath': '/repo/app', 'workspaceIdentity': 'app'},
+      ],
+    )..lastWorkspaceOpenFailure = const WorkspaceOpenRuntimeNotRunning(
+        'ZCode Agent runtime is not running.');
+    session.openWorkspaceSucceeds = false;
+    session.openWorkspaceFailure = const WorkspaceOpenRuntimeNotRunning(
+        'ZCode Agent runtime is not running.');
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.text('新建任务').first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(session.openWorkspacePurposes, [WorkspaceOpenPurpose.chatNew]);
+    expect(find.byType(ChatPage), findsNothing);
+    expect(find.byType(SnackBar), findsNothing,
+        reason: 'the cold-runtime failure is deduplicated, not toasted');
+  });
+
+  testWidgets('a transport-failure open keeps its toast', (tester) async {
+    // Only the cold-runtime class is deduplicated; every other failure has
+    // no workspace-level banner counterpart, so its toast is the only
+    // explanation and must stay.
+    final (_, _, session) = await setupTwoWorkspaces(tester);
+    session.openWorkspaceSucceeds = false;
+    session.openWorkspaceFailure =
+        WorkspaceOpenTransportFailure(Exception('link broken'));
+
+    await tester.tap(find.descendant(
+      of: cardOf('beta'),
+      matching: find.byTooltip('新建任务'),
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(ChatPage), findsNothing);
+    expect(find.byType(SnackBar), findsOneWidget,
+        reason: 'a non-cold failure keeps its toast');
+    expect(find.textContaining('该工作区未在桌面端打开'), findsOneWidget,
+        reason: 'the transport failure maps to the unreachable toast copy');
+  });
+
+  testWidgets('a transport failure keeps the generic degraded banner',
+      (tester) async {
+    // Negative guard: only the typed cold-runtime failure earns the
+    // workspace-level copy; a transport failure keeps the pre-existing
+    // fallback title and its raw reason.
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      workspaces: [
+        {'workspacePath': '/repo/app'},
+      ],
+    )..lastWorkspaceOpenFailure =
+        WorkspaceOpenTransportFailure(Exception('link broken'));
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pumpAndSettle();
+
+    expect(find.text('原生列表不可用'), findsOneWidget);
+    expect(find.text('当前工作区需在桌面端打开'), findsNothing);
+    expect(find.textContaining('任务列表与静态进度可用'), findsNothing);
+  });
+
+  testWidgets('the empty-list fallback keeps its own copy', (tester) async {
+    // The shared fallback title stays on the no-data whole-page fallback;
+    // the workspace-level cold copy must not leak into it (negative guard).
+    usePhone(tester);
+    final (store, device) = await setupDevice();
+    final session = FakeDeviceSession(
+      deviceId: device.id,
+      params: device.params!,
+      workspaces: const [],
+    );
+    await tester.pumpWidget(wrap(TaskListPage(
+      store: store,
+      hub: DeviceSessionHub(nativeListEnabled: () => false),
+      device: device,
+      sessionOverride: session,
+    )));
+    await tester.pumpAndSettle();
+
+    expect(find.text('原生列表不可用'), findsOneWidget);
+    expect(find.text('当前工作区需在桌面端打开'), findsNothing);
   });
 
   testWidgets('an unclassified error keeps the runtime copy off the banner',

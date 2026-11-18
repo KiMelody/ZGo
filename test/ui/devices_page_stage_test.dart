@@ -37,6 +37,19 @@ class _StagedSession extends FakeDeviceSession {
   bool get kicked => kickedFlag;
 }
 
+/// Session that never dials: seeding `DeviceStatus.error` would otherwise
+/// make the page's hub sync call `connect()` and arm the session's retry
+/// timer inside the test binding (a pending timer fails the test teardown).
+class _OfflineSession extends FakeDeviceSession {
+  _OfflineSession({
+    required super.deviceId,
+    required super.params,
+  });
+
+  @override
+  Future<void> connect() async {}
+}
+
 Widget wrap(Widget child) => MaterialApp(
       theme: buildLightTheme(),
       darkTheme: buildDarkTheme(),
@@ -143,6 +156,26 @@ void main() {
     await pumpDevices(tester, store: store, hub: hub, ui: UiSettings());
 
     expect(find.textContaining('在线', findRichText: true), findsOneWidget);
+  });
+
+  testWidgets('a plain error status reads the neutral device copy',
+      (tester) async {
+    // DeviceStatus.error without an auth/kicked detail is a neutral device
+    // state label, not a list hint — the old copy carried a "use the web
+    // version" instruction that belongs to no surface here.
+    final (store, device) = await setupDevice();
+    final hub = DeviceSessionHub(nativeListEnabled: () => true);
+    final session = _OfflineSession(
+      deviceId: device.id,
+      params: device.params!,
+    )..status = DeviceStatus.error;
+    addTearDown(session.dispose);
+    hub.installForTesting(session);
+
+    await pumpDevices(tester, store: store, hub: hub, ui: UiSettings());
+
+    expect(find.textContaining('连接异常', findRichText: true), findsOneWidget);
+    expect(find.textContaining('请用网页版', findRichText: true), findsNothing);
   });
 
   testWidgets('the kicked copy wins over a stage (terminal state)',

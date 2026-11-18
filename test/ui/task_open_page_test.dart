@@ -151,6 +151,23 @@ void main() {
     expect(find.text('关闭'), findsOneWidget);
   });
 
+  testWidgets('providerNotReady: stays with provider guidance and a retry',
+      (tester) async {
+    openHost.results
+        .add(const WorkspaceOpenProviderNotReady('provider_not_ready'));
+    await tester.pumpWidget(wrap(page()));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byType(ChatPage), findsNothing);
+    expect(find.textContaining('请先在桌面 ZCode 中配置模型'), findsOneWidget);
+    expect(find.textContaining('该工作区的智能体运行时未启动'), findsNothing,
+        reason: 'provider readiness needs the provider copy, not the runtime '
+            'open instruction');
+    expect(find.text('重试'), findsOneWidget);
+    expect(find.text('关闭'), findsOneWidget);
+  });
+
   testWidgets('null ownership: reports the scope-unknown copy instead of '
       'guessing a workspace', (tester) async {
     // Overview already landed (the fake's default): null is a REAL dead
