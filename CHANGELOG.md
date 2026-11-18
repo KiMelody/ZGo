@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.7] - 2026-11-18
+
+### Added
+
+- Cold-runtime fallback leg for waking from legacy desktop, with provider-not-ready probing and self-healing
+- Workspace-level dormant marker and banner online-state convergence
+
+### Fixed
+
+- Cold runtime no longer auto-wakes; degrades gracefully when provider is not ready
+- Resume single-shot probe self-heals the cold-runtime banner
+- Dedupe workspace-level banner text against similar toasts
+- ACK frame now carries bridge identity fields and discards stale-generation assembly
+
 ## [1.16.5] - 2026-11-15
 
 ### Added
