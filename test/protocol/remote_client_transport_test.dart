@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:zgo/protocol/connection_params.dart';
+import 'package:zgo/protocol/ipc_codec.dart';
 import 'package:zgo/protocol/relay_client.dart';
 import 'package:zgo/protocol/relay_transport.dart';
 import 'package:zgo/protocol/relay_v2.dart';
@@ -328,6 +330,39 @@ void main() {
         'both bridges healthy',
       );
     });
+    test('rpc-frame-ack carries the bridge identity from the ready reply',
+        () async {
+      final session = await open('draft-ack');
+
+      // A channel body the attached ChannelClient ignores (non-list
+      // header): enough to exercise the transport ack path.
+      final writer = ValueWriter();
+      encodeValue(writer, 'ack-shape-probe');
+      final body = writer.toBytes();
+
+      fake.sent.clear();
+      fake.deliver({
+        'zcode_type': 'rpc-frame',
+        'bridgeSessionId': session.bridge['bridgeSessionId'],
+        'bridgeGeneration': session.bridge['bridgeGeneration'],
+        'messageSeq': 1,
+        'fragmentIndex': 0,
+        'fragmentCount': 1,
+        'messageBytes': body.length,
+        'dataBase64': base64.encode(body),
+      });
+      await settle(
+        () => sentCount('rpc-frame-ack') == 1,
+        'rpc-frame-ack for the delivered frame',
+      );
+
+      final ack = lastSent('rpc-frame-ack');
+      expect(ack['bridgeSessionId'], session.bridge['bridgeSessionId']);
+      expect(ack['bridgeGeneration'], session.bridge['bridgeGeneration']);
+      expect(ack['recoveryId'], 'recovery-draft-ack');
+      expect(ack['ackMessageSeq'], 1);
+    });
+
     test('a late markDegraded after dispose is a no-op', () async {
       final session = await open('draft-late');
       session.dispose();

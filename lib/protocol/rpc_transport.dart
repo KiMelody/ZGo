@@ -34,6 +34,11 @@ class RpcFrameTransport {
   /// subscriptions, handshakes. Incoming frames carry the server's
   /// generation, so a bump past the baseline is the deterministic "the
   /// bridge under you changed" signal.
+  ///
+  /// A bump also drops partial assemblies started under the old
+  /// generation (same rebuild signal the watchdog consumes): the new
+  /// instance restarts messageSeq at 1, so old and new fragments sharing
+  /// a seq must never be mixed into one message.
   int? _seenServerGeneration;
 
   /// Fires once per server-side rebuild ([_seenServerGeneration] bump).
@@ -124,10 +129,18 @@ class RpcFrameTransport {
       if (seen == null) {
         _seenServerGeneration = serverGeneration;
       } else if (serverGeneration > seen) {
-        _seenServerGeneration = serverGeneration;
+        // The new bridge instance restarts messageSeq at 1; partial
+        // assemblies keyed by the old sequence space must not survive.
+        _assemblies.clear();
         onLog?.call(
             '[rpc] server bridge rebuilt (generation $seen -> $serverGeneration)');
+        _seenServerGeneration = serverGeneration;
         onServerBridgeRebuilt?.call();
+      } else if (serverGeneration < seen) {
+        // Older generation: its bridge instance is gone, so its
+        // messageSeq space is meaningless. Ignore before assembling
+        // (and silently — a stale stream must not flood the log).
+        return true;
       }
     }
 
@@ -166,7 +179,7 @@ class RpcFrameTransport {
         _messageController.add(message);
         sendPayload({
           'zcode_type': 'rpc-frame-ack',
-          'bridgeSessionId': bridgeSessionId,
+          ..._identity,
           'ackMessageSeq': messageSeq,
         });
       } else {

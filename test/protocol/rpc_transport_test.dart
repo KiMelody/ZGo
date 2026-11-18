@@ -270,4 +270,250 @@ void main() {
     expect(rebuilt, 2);
     await t.dispose();
   });
+
+  test('ack carries the full bridge identity', () {
+    final sent = <Map<String, dynamic>>[];
+    final t = RpcFrameTransport(
+      bridgeSessionId: 'bridge-1',
+      bridgeGeneration: 5,
+      recoveryId: 'rec-99',
+      sendPayload: sent.add,
+    );
+
+    t.acceptPayload(completeFrame(1, [1, 2, 3], generation: 5));
+
+    final ack = sent.single;
+    // Exactly the identity keys shared with outbound rpc-frame: the
+    // desktop zod is `.strict()` and an undeclared key is a terminal
+    // `remote.rpcFrame.invalidPayload`, so the set is load-bearing.
+    expect(ack.keys.toSet(), {
+      'zcode_type',
+      'bridgeSessionId',
+      'bridgeGeneration',
+      'recoveryId',
+      'ackMessageSeq',
+    });
+    expect(ack['bridgeSessionId'], 'bridge-1');
+    expect(ack['bridgeGeneration'], 5);
+    expect(ack['recoveryId'], 'rec-99');
+    expect(ack['ackMessageSeq'], 1);
+    t.dispose();
+  });
+
+  test('ack omits identity fields the transport does not have', () {
+    final sent = <Map<String, dynamic>>[];
+    final t = RpcFrameTransport(
+      bridgeSessionId: 'bridge-1',
+      sendPayload: sent.add,
+    );
+
+    t.acceptPayload(completeFrame(1, [4, 5, 6]));
+
+    final ack = sent.single;
+    expect(ack.keys.toSet(), {
+      'zcode_type',
+      'bridgeSessionId',
+      'ackMessageSeq',
+    });
+    expect(ack.containsKey('bridgeGeneration'), isFalse);
+    expect(ack.containsKey('recoveryId'), isFalse);
+    t.dispose();
+  });
+
+  test('ack carries generation but no recoveryId (ZGo wire shape)', () {
+    final sent = <Map<String, dynamic>>[];
+    final t = RpcFrameTransport(
+      bridgeSessionId: 'bridge-1',
+      bridgeGeneration: 3,
+      sendPayload: sent.add,
+    );
+
+    t.acceptPayload(completeFrame(1, [7], generation: 3));
+
+    final ack = sent.single;
+    expect(ack.keys.toSet(), {
+      'zcode_type',
+      'bridgeSessionId',
+      'bridgeGeneration',
+      'ackMessageSeq',
+    });
+    expect(ack['bridgeGeneration'], 3);
+    expect(ack.containsKey('recoveryId'), isFalse);
+    t.dispose();
+  });
+
+  test('generation bump drops the old generation partial assembly', () async {
+    final messages = <Uint8List>[];
+    final sent = <Map<String, dynamic>>[];
+    var rebuilt = 0;
+    final t = RpcFrameTransport(
+      bridgeSessionId: 'bridge-1',
+      sendPayload: sent.add,
+      onServerBridgeRebuilt: () => rebuilt++,
+    );
+    t.messages.listen(messages.add);
+
+    Map<String, dynamic> fragment(int generation, int fragmentIndex) => {
+          'zcode_type': 'rpc-frame',
+          'bridgeSessionId': 'bridge-1',
+          'bridgeGeneration': generation,
+          'messageSeq': 1,
+          'fragmentIndex': fragmentIndex,
+          'fragmentCount': 2,
+          'messageBytes': 200,
+          'dataBase64': base64.encode(
+            Uint8List.fromList(List.generate(100, (i) => i)),
+          ),
+        };
+
+    // Baseline generation 7: first fragment of a two-fragment message.
+    t.acceptPayload(fragment(7, 0));
+    expect(rebuilt, 0);
+    expect(messages, isEmpty);
+
+    // A generation 8 frame is the rebuild signal (no message fields, so
+    // the bump itself must not emit or ack anything).
+    t.acceptPayload({
+      'zcode_type': 'rpc-frame',
+      'bridgeSessionId': 'bridge-1',
+      'bridgeGeneration': 8,
+    });
+    expect(rebuilt, 1);
+
+    // The trailing fragment still says generation 7: the dropped assembly
+    // must not complete, and the frame must not be acked.
+    t.acceptPayload(fragment(7, 1));
+    await Future<void>.delayed(Duration.zero);
+    expect(messages, isEmpty);
+    expect(sent.where((p) => p['zcode_type'] == 'rpc-frame-ack'), isEmpty);
+    expect(rebuilt, 1);
+    await t.dispose();
+  });
+
+  test('generation bump clears the old generation assembly (same messageSeq)',
+      () async {
+    final messages = <Uint8List>[];
+    final sent = <Map<String, dynamic>>[];
+    var rebuilt = 0;
+    final t = RpcFrameTransport(
+      bridgeSessionId: 'bridge-1',
+      sendPayload: sent.add,
+      onServerBridgeRebuilt: () => rebuilt++,
+    );
+    t.messages.listen(messages.add);
+
+    // Generation 7, two-fragment message: only the first fragment arrives.
+    t.acceptPayload({
+      'zcode_type': 'rpc-frame',
+      'bridgeSessionId': 'bridge-1',
+      'bridgeGeneration': 7,
+      'messageSeq': 5,
+      'fragmentIndex': 0,
+      'fragmentCount': 2,
+      'messageBytes': 8,
+      'dataBase64': base64.encode(Uint8List.fromList([0xA0, 0xA1, 0xA2, 0xA3])),
+    });
+    expect(rebuilt, 0);
+    expect(messages, isEmpty);
+    expect(sent, isEmpty);
+
+    // A generation 8 frame bumps the baseline and must drop the
+    // half-built assembly.
+    t.acceptPayload({
+      'zcode_type': 'rpc-frame',
+      'bridgeSessionId': 'bridge-1',
+      'bridgeGeneration': 8,
+    });
+    expect(rebuilt, 1);
+
+    // Same messageSeq 5, now a complete single-fragment generation 8
+    // message. Without the clear, putIfAbsent would reuse the old
+    // two-fragment assembly (one fragment received), so the frame would
+    // never complete: no message, no ack.
+    final gen8 = Uint8List.fromList([0xB0, 0xB1, 0xB2, 0xB3]);
+    t.acceptPayload({
+      'zcode_type': 'rpc-frame',
+      'bridgeSessionId': 'bridge-1',
+      'bridgeGeneration': 8,
+      'messageSeq': 5,
+      'fragmentIndex': 0,
+      'fragmentCount': 1,
+      'messageBytes': gen8.length,
+      'dataBase64': base64.encode(gen8),
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(messages, hasLength(1));
+    expect(messages.single, gen8);
+    final acks = sent.where((p) => p['zcode_type'] == 'rpc-frame-ack');
+    expect(acks, hasLength(1));
+    expect(acks.single['ackMessageSeq'], 5);
+    expect(rebuilt, 1);
+    await t.dispose();
+  });
+
+  test('frames from a superseded generation are ignored after a bump',
+      () async {
+    final messages = <Uint8List>[];
+    final sent = <Map<String, dynamic>>[];
+    final t = RpcFrameTransport(
+      bridgeSessionId: 'bridge-1',
+      sendPayload: sent.add,
+    );
+    t.messages.listen(messages.add);
+
+    // Establish generation 7 as the baseline, then bump to 8.
+    t.acceptPayload({
+      'zcode_type': 'rpc-frame',
+      'bridgeSessionId': 'bridge-1',
+      'bridgeGeneration': 7,
+    });
+    t.acceptPayload({
+      'zcode_type': 'rpc-frame',
+      'bridgeSessionId': 'bridge-1',
+      'bridgeGeneration': 8,
+    });
+
+    // A complete old-generation message must not assemble or ack.
+    t.acceptPayload(completeFrame(1, [1, 2, 3], generation: 7));
+    await Future<void>.delayed(Duration.zero);
+    expect(messages, isEmpty);
+    expect(sent, isEmpty);
+    await t.dispose();
+  });
+
+  test('frames without a generation still assemble and ack', () async {
+    final messages = <Uint8List>[];
+    final sent = <Map<String, dynamic>>[];
+    final t = RpcFrameTransport(
+      bridgeSessionId: 'bridge-1',
+      sendPayload: sent.add,
+    );
+    t.messages.listen(messages.add);
+
+    t.acceptPayload(completeFrame(1, [9, 9]));
+    await Future<void>.delayed(Duration.zero);
+    expect(messages, hasLength(1));
+    expect(sent.single.keys.toSet(), {
+      'zcode_type',
+      'bridgeSessionId',
+      'ackMessageSeq',
+    });
+    await t.dispose();
+  });
 }
+
+Map<String, dynamic> completeFrame(
+  int messageSeq,
+  List<int> bytes, {
+  int? generation,
+}) =>
+    {
+      'zcode_type': 'rpc-frame',
+      'bridgeSessionId': 'bridge-1',
+      if (generation != null) 'bridgeGeneration': generation,
+      'messageSeq': messageSeq,
+      'fragmentIndex': 0,
+      'fragmentCount': 1,
+      'messageBytes': bytes.length,
+      'dataBase64': base64.encode(bytes),
+    };
