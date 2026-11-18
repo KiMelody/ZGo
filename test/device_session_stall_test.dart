@@ -105,7 +105,12 @@ class FakeGate implements WorkspaceGate {
   }
 
   @override
-  Future<dynamic> call(String channel, String method, List<Object?> args) {
+  Future<dynamic> call(
+    String channel,
+    String method,
+    List<Object?> args, {
+    Duration? timeout,
+  }) {
     calls += 1;
     final respond = this.respond;
     if (respond == null) return Completer<dynamic>().future;

@@ -12,6 +12,8 @@ import 'package:zgo/protocol/remote_client.dart';
 import 'package:zgo/protocol/relay_transport.dart';
 import 'package:zgo/state/device_session.dart';
 
+import '../helpers/fake_device_session.dart';
+
 /// Workspace bridge window-gate fallback (3.16.3+): when the bound-window
 /// registry misses the workspace, an open retries with an addressing leg —
 /// `taskId + taskHostId` for an existing task (and for a new chat by
@@ -28,6 +30,32 @@ const _fastTimings = StallTimings(
   listReadyTimeout: Duration(seconds: 300),
   minRebuildInterval: Duration(milliseconds: 5),
   retryBackoff: Duration(milliseconds: 60),
+);
+
+/// Resume-probe policy with the watchdog out of the way — the probe's own
+/// clear path is what the assertions read.
+const _probeTimings = StallTimings(
+  healthyWaitTimeout: Duration(milliseconds: 40),
+  rpcTimeout: Duration(milliseconds: 200),
+  dialTimeout: Duration(milliseconds: 60),
+  listReadyTimeout: Duration(seconds: 300),
+  minRebuildInterval: Duration(milliseconds: 5),
+  retryBackoff: Duration(milliseconds: 60),
+  resumeProbeDebounce: Duration(milliseconds: 120),
+  resumeProbeDelay: Duration(milliseconds: 10),
+);
+
+/// Same probe policy with a watchdog window short enough that a lost cold
+/// park visibly escalates (soft reopen, then forced rebuild) inside a test.
+const _probeEscalationTimings = StallTimings(
+  healthyWaitTimeout: Duration(milliseconds: 40),
+  rpcTimeout: Duration(milliseconds: 200),
+  dialTimeout: Duration(milliseconds: 60),
+  listReadyTimeout: Duration(milliseconds: 60),
+  minRebuildInterval: Duration(milliseconds: 5),
+  retryBackoff: Duration(milliseconds: 60),
+  resumeProbeDebounce: Duration(milliseconds: 120),
+  resumeProbeDelay: Duration(milliseconds: 10),
 );
 
 RemoteConnectionParams _params(String appVersion) =>
@@ -68,6 +96,9 @@ class _ScriptedClient extends RemoteClient {
 
   final opens = <_OpenCall>[];
 
+  /// Dial count — the resume probe must self-heal without a reconnect.
+  int connectCalls = 0;
+
   Future<BridgeSession> Function(_OpenCall call)? handler;
 
   /// Live desktop version riding the bootstrap-response frame (null models
@@ -88,7 +119,10 @@ class _ScriptedClient extends RemoteClient {
   bool failBootstrapOnce = false;
 
   @override
-  Future<void> connect() => Future.value();
+  Future<void> connect() {
+    connectCalls += 1;
+    return Future.value();
+  }
 
   @override
   Future<void> waitPaired({Duration timeout = const Duration(seconds: 60)}) =>
@@ -135,7 +169,13 @@ class _ScriptedClient extends RemoteClient {
 /// answering the conversation handshake + sessions-index subscribe, so
 /// [_openWorkspaceNow] can finish exactly like it does against a desktop.
 class _FakeBridge implements BridgeSession {
-  _FakeBridge({this.workspaceKey, this.subscribeError});
+  _FakeBridge({
+    this.workspaceKey,
+    this.subscribeError,
+    this.coldSubscribeFailures = -1,
+    this.initializeReply,
+    this.initializeError,
+  });
 
   /// The workspace the READY frame points at (null = same as requested).
   @override
@@ -143,8 +183,21 @@ class _FakeBridge implements BridgeSession {
 
   /// When non-null, `subscribeSessionsIndexV4` answers this 202 error map
   /// instead of the ack — the cold-runtime refusal shape
-  /// (`{message, code}`).
+  /// (`{message, code}`). [coldSubscribeFailures] bounds how many attempts
+  /// see it (negative = forever, the pre-wake cold dead end).
   final Map<String, dynamic>? subscribeError;
+  int coldSubscribeFailures;
+
+  /// `zcode-session.initializeWorkspace` answer (null → `{}`, the pre-wake
+  /// unknown-method degrade shape). [initializeError] scripts the 202 error
+  /// branch (missing method / transport failure).
+  final Map<String, dynamic>? initializeReply;
+  final Map<String, dynamic>? initializeError;
+
+  /// Wire counters / recorded requests (channel, method, args).
+  int subscribeCalls = 0;
+  int initializeCalls = 0;
+  final List<(String, String, List<Object?>)> channelCalls = [];
 
   /// Event-listener request ids registered on [channels], so a test can
   /// deliver a `onDynamicSessionsIndexFrame` event exactly like the relay
@@ -164,7 +217,7 @@ class _FakeBridge implements BridgeSession {
     client = ChannelClient(sendBody: (body) {
       final reader = ValueReader(body);
       final header = decodeValue(reader) as List;
-      decodeValue(reader); // the request args; answers are fixed here
+      final decodedArgs = decodeValue(reader); // the request args
       final type = (header[0] as num).toInt();
       final id = header[1] as int;
       // EventListen carries a free-form arg; the channel answers it with
@@ -174,19 +227,37 @@ class _FakeBridge implements BridgeSession {
         return;
       }
       if (type == ChannelClient.reqEventDispose) return;
+      final channel = '${header[2]}';
       final method = '${header[3]}';
+      channelCalls.add((
+        channel,
+        method,
+        decodedArgs is List ? decodedArgs.cast<Object?>() : const <Object?>[],
+      ));
       var resType = ChannelClient.resPromiseSuccess;
       Object? payload;
       if (method == 'helloConversationV4') {
         payload = <String, dynamic>{'connectionId': 'conn-1'};
-      } else if (method == 'subscribeSessionsIndexV4' &&
-          subscribeError != null) {
-        resType = ChannelClient.resPromiseError;
-        payload = subscribeError;
       } else if (method == 'subscribeSessionsIndexV4') {
-        payload = <String, dynamic>{
-          'ack': <String, dynamic>{'subscriptionId': 'sub-1'},
-        };
+        subscribeCalls += 1;
+        if (subscribeError != null && coldSubscribeFailures != 0) {
+          if (coldSubscribeFailures > 0) coldSubscribeFailures -= 1;
+          resType = ChannelClient.resPromiseError;
+          payload = subscribeError;
+        } else {
+          payload = <String, dynamic>{
+            'ack': <String, dynamic>{'subscriptionId': 'sub-1'},
+          };
+        }
+      } else if (method == 'initializeWorkspace') {
+        initializeCalls += 1;
+        final error = initializeError;
+        if (error != null) {
+          resType = ChannelClient.resPromiseError;
+          payload = error;
+        } else {
+          payload = initializeReply ?? <String, dynamic>{};
+        }
       } else {
         payload = <String, dynamic>{};
       }
@@ -293,6 +364,56 @@ Future<DeviceSession> _connected(
   await session.connect();
   return session;
 }
+
+/// Connects over [client] into the cold-runtime dead end: the bootstrap
+/// auto-open attaches the bridge and the sessions-index subscribe answers
+/// `ZCODE_AGENT_RUNTIME_UNAVAILABLE`, so the active workspace is set and the
+/// remembered failure is the typed cold verdict (the probe's trigger).
+Future<DeviceSession> _coldRuntimeSession(
+  _ScriptedClient client, {
+  StallTimings timings = _probeTimings,
+}) async {
+  client
+    ..bootstrapWorkspaces = [
+      {'workspacePath': '/repo/beta'},
+    ]
+    ..handler = (_) async => _coldRuntimeBridge();
+  final session = await _connected(client, timings: timings);
+  expect(
+    session.lastWorkspaceOpenFailure,
+    isA<WorkspaceOpenRuntimeNotRunning>(),
+    reason: 'the scripted desktop must leave the cold parked state behind',
+  );
+  expect(session.activeWorkspace?['workspacePath'], '/repo/beta');
+  return session;
+}
+
+/// Polls [condition] every 10ms (no fake clock: teardown microtasks on this
+/// layer are timing-sensitive — spec/state/session-lifecycle §8).
+Future<void> _until(bool Function() condition, {int maxMs = 2000}) async {
+  final deadline = DateTime.now().add(Duration(milliseconds: maxMs));
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('condition not met within ${maxMs}ms');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+}
+
+/// A [FakeDeviceSession] already in the cold parked state (the gate and
+/// debounce tests only need the public verdict seeded).
+FakeDeviceSession _fakeColdSession({
+  List<Map<String, dynamic>>? workspaces,
+  StallTimings timings = _probeTimings,
+}) =>
+    FakeDeviceSession(
+      deviceId: 'd1',
+      params: _params('3.16.3'),
+      timings: timings,
+      workspaces: workspaces ?? [
+        {'workspacePath': '/repo/beta'},
+      ],
+    )..lastWorkspaceOpenFailure = const WorkspaceOpenRuntimeNotRunning('cold');
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -1134,6 +1255,398 @@ void main() {
     });
   });
 
+  group('cold workspace wake (11-17 P2)', () {
+    test('a cold subscribe wakes the runtime and retries the index once',
+        () async {
+      final bridge = _FakeBridge(
+        subscribeError: const {
+          'message': 'ZCode Agent runtime is not running.',
+          'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+        },
+        coldSubscribeFailures: 1,
+        initializeReply: const {
+          'available': true,
+          'workspaceKey': '/repo/beta',
+          'protocolName': 'ZCode Protocol',
+          'protocolVersion': 1,
+          'transportKind': 'stdio',
+        },
+      );
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => bridge;
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      final result = await session.openWorkspace(_ws('/repo/beta'));
+
+      expect(result, isA<WorkspaceOpenOpened>());
+      expect(session.lastWorkspaceOpenFailure, isNull,
+          reason: 'the successful retry rides the existing clear path');
+      expect(bridge.subscribeCalls, 2, reason: 'initial refusal + one retry');
+      expect(bridge.initializeCalls, 1);
+      final init = bridge.channelCalls
+          .singleWhere((call) => call.$2 == 'initializeWorkspace');
+      expect(init.$1, 'zcode-session');
+      expect(init.$3, [
+        {'workspacePath': '/repo/beta'},
+      ], reason: 'wake scope is exactly {workspacePath, workspaceIdentity?}');
+    });
+
+    test('provider_not_ready becomes its own classification and never retries '
+        'the subscribe', () async {
+      final bridge = _FakeBridge(
+        subscribeError: const {
+          'message': 'ZCode Agent runtime is not running.',
+          'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+        },
+        initializeReply: const {
+          'available': false,
+          'reason': 'No model provider is ready.',
+          'reasonCode': 'provider_not_ready',
+        },
+      );
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => bridge;
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      final result = await session.openWorkspace(_ws('/repo/beta'));
+
+      expect(result, isA<WorkspaceOpenProviderNotReady>());
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenProviderNotReady>());
+      expect(bridge.initializeCalls, 1);
+      expect(bridge.subscribeCalls, 1,
+          reason: 'provider_not_ready must not retry the subscribe');
+    });
+
+    test('a missing initializeWorkspace method falls back to one '
+        'start-if-needed subscribe and is remembered for the session',
+        () async {
+      final bridge = _FakeBridge(
+        subscribeError: const {
+          'message': 'ZCode Agent runtime is not running.',
+          'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+        },
+        // Forever cold: both the initial subscribe and the fallback retry
+        // refuse, so the outer classification still has to decide.
+        coldSubscribeFailures: -1,
+        initializeError: const {
+          'message': 'Method not found: initializeWorkspace',
+        },
+      );
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => bridge;
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      final first = await session.openWorkspace(_ws('/repo/beta'));
+      expect(first, isA<WorkspaceOpenRuntimeNotRunning>(),
+          reason: 'a still-cold fallback keeps the cold verdict');
+      expect(bridge.initializeCalls, 1);
+      expect(bridge.subscribeCalls, 2,
+          reason: 'initial refusal + one start-if-needed retry');
+      final frames = bridge.channelCalls
+          .where((call) => call.$2 == 'subscribeSessionsIndexV4')
+          .toList();
+      expect(frames[0].$3, [
+        {'workspacePath': '/repo/beta', 'runtimePolicy': 'existing-only'},
+      ], reason: 'the normal frame keeps the existing-only byte shape');
+      expect(frames[1].$3, [
+        {'workspacePath': '/repo/beta'},
+      ], reason: 'the fallback frame omits runtimePolicy (start-if-needed)');
+
+      final second = await session.openWorkspace(_ws('/repo/beta'));
+      expect(second, isA<WorkspaceOpenRuntimeNotRunning>());
+      expect(bridge.initializeCalls, 1,
+          reason: 'the missing-method verdict is cached for the session');
+      expect(bridge.subscribeCalls, 4,
+          reason: 'each new open still subscribes and falls back once');
+    });
+
+    test('a usable start-if-needed retry opens the workspace (wake fallback)',
+        () async {
+      final bridge = _FakeBridge(
+        subscribeError: const {
+          'message': 'ZCode Agent runtime is not running.',
+          'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+        },
+        coldSubscribeFailures: 1,
+        initializeError: const {
+          'message': 'Method not found: initializeWorkspace',
+        },
+      );
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => bridge;
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      final result = await session.openWorkspace(_ws('/repo/beta'));
+
+      expect(result, isA<WorkspaceOpenOpened>());
+      expect(session.lastWorkspaceOpenFailure, isNull,
+          reason: 'the fallback success rides the normal open clear path');
+      expect(bridge.initializeCalls, 1,
+          reason: 'the method miss is still probed once, never retried');
+      expect(bridge.subscribeCalls, 2);
+      final frames = bridge.channelCalls
+          .where((call) => call.$2 == 'subscribeSessionsIndexV4')
+          .toList();
+      expect(frames.last.$3, [
+        {'workspacePath': '/repo/beta'},
+      ], reason: 'the desktop started the runtime from the default policy');
+    });
+
+    test('a channel-level initialize miss also degrades to the cold verdict',
+        () async {
+      // "Channel not whitelisted" is the other pre-wake shape: the bridge
+      // answers the desktop's channel-timeout line instead of a method
+      // error. It must classify exactly like the pre-wake cold open.
+      final bridge = _FakeBridge(
+        subscribeError: const {
+          'message': 'ZCode Agent runtime is not running.',
+          'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+        },
+        initializeError: const {
+          'message': "Channel name 'zcode-session' timed out after 1000ms",
+        },
+      );
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => bridge;
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      final result = await session.openWorkspace(_ws('/repo/beta'));
+
+      expect(result, isA<WorkspaceOpenRuntimeNotRunning>());
+      expect(bridge.initializeCalls, 1);
+      expect(bridge.subscribeCalls, 1);
+    });
+
+    test('a still-cold retry does not wake again inside the same open chain',
+        () async {
+      final bridge = _FakeBridge(
+        subscribeError: const {
+          'message': 'ZCode Agent runtime is not running.',
+          'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+        },
+        initializeReply: const {'available': true, 'workspaceKey': '/repo/beta'},
+      );
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => bridge;
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      final result = await session.openWorkspace(_ws('/repo/beta'));
+
+      expect(result, isA<WorkspaceOpenRuntimeNotRunning>());
+      expect(bridge.initializeCalls, 1,
+          reason: 'at most one wake per open chain');
+      expect(bridge.subscribeCalls, 2,
+          reason: 'one retry, never a wake/retry loop');
+    });
+
+    test('a window-gate refusal never triggers the wake', () async {
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => throw StateError(_windowGateMessage);
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      final result = await session.openWorkspace(
+        _ws('/repo/beta'),
+        purpose: WorkspaceOpenPurpose.openTask,
+      );
+
+      expect(result, isA<WorkspaceOpenUnreachable>());
+    });
+
+    test('a non-cold subscribe failure never triggers the wake', () async {
+      final bridge = _FakeBridge(
+        subscribeError: const {'message': 'bridge exploded'},
+      );
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => bridge;
+      final session = await _connected(client);
+      addTearDown(session.dispose);
+
+      final result = await session.openWorkspace(_ws('/repo/beta'));
+
+      expect(result, isA<WorkspaceOpenTransportFailure>());
+      expect(bridge.initializeCalls, 0);
+    });
+
+    test('provider_not_ready parks the list watchdog (no reopen amplification)',
+        () async {
+      final bridge = _FakeBridge(
+        subscribeError: const {
+          'message': 'ZCode Agent runtime is not running.',
+          'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+        },
+        initializeReply: const {
+          'available': false,
+          'reasonCode': 'provider_not_ready',
+        },
+      );
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..handler = (_) async => bridge;
+      final session = await _connected(client, timings: _probeEscalationTimings);
+      addTearDown(session.dispose);
+
+      await session.openWorkspace(_ws('/repo/beta'));
+      expect(client.opens, hasLength(1));
+      // The watchdog window is 60ms; a non-parked provider verdict would
+      // soft-reopen here and double the bridge churn.
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(client.opens, hasLength(1),
+          reason: 'a provider dead end cannot be fixed by reconnecting');
+    });
+  });
+
+  group('per-workspace cold evidence (11-17 P2 badge)', () {
+    test('a cold open records evidence; a healthy open of that workspace '
+        'clears it', () async {
+      final client = _ScriptedClient(_params('3.18.2'));
+      final session = await _coldRuntimeSession(client);
+      addTearDown(session.dispose);
+
+      expect(session.coldWorkspaceKeys, {'/repo/beta'});
+
+      client.handler = (_) async => _FakeBridge();
+      final result = await session.openWorkspace(_ws('/repo/beta'));
+
+      expect(result, isA<WorkspaceOpenOpened>());
+      expect(session.coldWorkspaceKeys, isEmpty,
+          reason: 'the ack is proof this workspace runtime is up');
+    });
+
+    test('cold evidence expires after the sidecar cooldown window', () async {
+      final client = _ScriptedClient(_params('3.18.2'))
+        ..bootstrapWorkspaces = [
+          {'workspacePath': '/repo/beta'},
+        ]
+        ..handler = (_) async => _coldRuntimeBridge();
+      final session = DeviceSession(
+        deviceId: 'd1',
+        params: client.params,
+        timings: _probeTimings,
+        sidecarCooldown: const Duration(milliseconds: 30),
+        clientFactory: () => client,
+      );
+      addTearDown(session.dispose);
+      await session.connect();
+
+      expect(session.coldWorkspaceKeys, {'/repo/beta'});
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(session.coldWorkspaceKeys, isEmpty,
+          reason: 'TTL mirrors the sidecar ledger window; expired = no '
+              'evidence, not warm');
+    });
+
+    test('cold evidence survives suspend and a connect start', () async {
+      final client = _ScriptedClient(_params('3.18.2'));
+      final session = await _coldRuntimeSession(client);
+      addTearDown(session.dispose);
+
+      await session.suspend();
+      expect(session.lastWorkspaceOpenFailure, isNull,
+          reason: 'the failure field keeps its four-timing clear contract');
+      expect(session.coldWorkspaceKeys, {'/repo/beta'},
+          reason: 'evidence is a desktop fact, not link state');
+
+      // Reconnect with no auto-open: nothing may erase the record.
+      client.bootstrapWorkspaces = const [];
+      await session.connect();
+      expect(session.coldWorkspaceKeys, {'/repo/beta'});
+    });
+
+    test('a sidecar cold refusal records that workspace', () async {
+      final bridge = _FakeBridge(
+        subscribeError: const {
+          'message': 'ZCode Agent runtime is not running.',
+          'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+        },
+        coldSubscribeFailures: 2,
+      );
+      final client = _ScriptedClient(_params('3.18.2'))
+        ..bootstrapWorkspaces = [
+          {'workspacePath': '/repo/beta'},
+        ]
+        ..bootstrapTasks = [
+          {
+            'taskId': 'g1',
+            'workspacePath': '/repo/gamma',
+            'displayStatus': 'idle',
+            'updatedAt': 1,
+          },
+        ]
+        ..handler = (_) async => bridge;
+      final session = DeviceSession(
+        deviceId: 'd1',
+        params: client.params,
+        timings: _probeTimings,
+        clientFactory: () => client,
+      );
+      addTearDown(session.dispose);
+      await session.connect();
+      expect(session.coldWorkspaceKeys, {'/repo/beta'},
+          reason: "the active workspace's cold open is the first fact");
+
+      session.sidecarManager.reconcile();
+      await _until(
+        () => session.coldWorkspaceKeys.contains('/repo/gamma'),
+      );
+      expect(session.coldWorkspaceKeys, {'/repo/beta', '/repo/gamma'},
+          reason: 'both failure sources feed the same per-workspace ledger');
+    });
+
+    test('a resolved sidecar subscribe clears that key', () async {
+      final bridge = _FakeBridge(
+        subscribeError: const {
+          'message': 'ZCode Agent runtime is not running.',
+          'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+        },
+        coldSubscribeFailures: 2,
+      );
+      final client = _ScriptedClient(_params('3.18.2'))
+        ..bootstrapWorkspaces = [
+          {'workspacePath': '/repo/beta'},
+        ]
+        ..bootstrapTasks = [
+          {
+            'taskId': 'g1',
+            'workspacePath': '/repo/gamma',
+            'displayStatus': 'idle',
+            'updatedAt': 1,
+          },
+        ]
+        ..handler = (_) async => bridge;
+      final session = DeviceSession(
+        deviceId: 'd1',
+        params: client.params,
+        timings: _probeTimings,
+        sidecarCooldown: const Duration(milliseconds: 20),
+        coldEvidenceTtl: const Duration(minutes: 10),
+        clientFactory: () => client,
+      );
+      addTearDown(session.dispose);
+      await session.connect();
+
+      session.sidecarManager.reconcile();
+      await _until(
+        () => session.coldWorkspaceKeys.contains('/repo/gamma'),
+      );
+
+      // Cooldown expires = the sidecar retries; the ack retires the fact.
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      session.sidecarManager.reconcile();
+      await _until(
+        () => !session.coldWorkspaceKeys.contains('/repo/gamma'),
+      );
+      expect(bridge.subscribeCalls, 3,
+          reason: 'active open refusal + gamma refusal + gamma retry ack');
+    });
+  });
+
   group('prepareTaskOpen (the shared task-open entry, 11-07)', () {
     test('a task already in the active workspace answers opened with no RPC',
         () async {
@@ -1445,6 +1958,321 @@ void main() {
       expect(projectFrame.containsKey('taskId'), isFalse);
       _answerWindowGate(relay, projectFrame);
       await expectLater(project, throwsStateError);
+    });
+  });
+
+  group('resume probe (cold banner self-heal, 11-17)', () {
+    test('a successful probe clears the cold verdict through the open path',
+        () async {
+      final client = _ScriptedClient(_params('3.16.3'));
+      final session = await _coldRuntimeSession(client);
+      addTearDown(session.dispose);
+      // The user opened the workspace on the desktop meanwhile: the same
+      // open now attaches and subscribes.
+      client.handler = (_) async => _FakeBridge();
+      final opensBefore = client.opens.length;
+      final connectsBefore = client.connectCalls;
+
+      await session.resumeProbeIfCold();
+
+      expect(client.opens, hasLength(opensBefore + 1));
+      expect(client.opens.last.key, '/repo/beta',
+          reason: 'the probe targets the active workspace');
+      expect(client.connectCalls, connectsBefore,
+          reason: 'self-heal comes from the open path, not a reconnect');
+      expect(session.lastWorkspaceOpenFailure, isNull,
+          reason: 'the normal open clear path retires the banner');
+      expect(session.error, isNull);
+      expect(session.status, DeviceStatus.connected,
+          reason: 'no connect / relay re-pair was needed to self-heal');
+      expect(session.connectionStage, isNull);
+    });
+
+    test('a probe on a cold park runs the wake chain (one initializeWorkspace '
+        'then one subscribe retry)', () async {
+      final client = _ScriptedClient(_params('3.16.3'));
+      final session = await _coldRuntimeSession(client);
+      addTearDown(session.dispose);
+      expect(session.coldWorkspaceKeys, {'/repo/beta'});
+      // The user configured the desktop / started the workspace meanwhile:
+      // the probe's open hits one cold subscribe, the wake succeeds, the
+      // retry subscribes.
+      final bridge = _FakeBridge(
+        subscribeError: const {
+          'message': 'ZCode Agent runtime is not running.',
+          'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+        },
+        coldSubscribeFailures: 1,
+        initializeReply: const {
+          'available': true,
+          'workspaceKey': '/repo/beta',
+        },
+      );
+      client.handler = (_) async => bridge;
+      final opensBefore = client.opens.length;
+
+      await session.resumeProbeIfCold();
+
+      expect(client.opens, hasLength(opensBefore + 1));
+      expect(bridge.initializeCalls, 1,
+          reason: 'the probe open reaches the wake chain, it is not indirect');
+      expect(bridge.subscribeCalls, 2,
+          reason: 'cold refusal + exactly one post-wake retry');
+      expect(session.lastWorkspaceOpenFailure, isNull,
+          reason: 'the successful retry rides the normal clear path');
+      expect(session.coldWorkspaceKeys, isEmpty,
+          reason: 'the cold evidence retires with the successful open');
+    });
+
+    test('provider_not_ready parks are probed: a renewed refusal keeps the '
+        'park, a ready provider self-heals', () async {
+      final parkedBridge = _FakeBridge(
+        subscribeError: const {
+          'message': 'ZCode Agent runtime is not running.',
+          'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+        },
+        initializeReply: const {
+          'available': false,
+          'reasonCode': 'provider_not_ready',
+        },
+      );
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..bootstrapWorkspaces = [
+          {'workspacePath': '/repo/beta'},
+        ]
+        ..handler = (_) async => parkedBridge;
+      final session = await _connected(client, timings: _probeTimings);
+      addTearDown(session.dispose);
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenProviderNotReady>(),
+          reason: 'the bootstrap auto-open parks the provider dead end');
+      final parked = session.lastWorkspaceOpenFailure;
+      final opensBefore = client.opens.length;
+
+      // Before R2 this path returned at the eligibility gate (no opens).
+      await session.resumeProbeIfCold();
+
+      expect(client.opens, hasLength(opensBefore + 1),
+          reason: 'the provider park is probe-eligible');
+      expect(parkedBridge.initializeCalls, 2,
+          reason: 'auto-open wake + the probe wake');
+      expect(session.lastWorkspaceOpenFailure, same(parked),
+          reason: 'a renewed provider refusal is discarded, never overwrites '
+              'the parked fact (the P1 drop rule)');
+
+      // The user configured a provider on the desktop; the next resume
+      // edge re-runs the whole chain: initializeWorkspace available → woken
+      // → subscribe retry succeeds → the existing clear path runs.
+      final readyBridge = _FakeBridge(
+        subscribeError: const {
+          'message': 'ZCode Agent runtime is not running.',
+          'code': 'ZCODE_AGENT_RUNTIME_UNAVAILABLE',
+        },
+        coldSubscribeFailures: 1,
+        initializeReply: const {
+          'available': true,
+          'workspaceKey': '/repo/beta',
+        },
+      );
+      client.handler = (_) async => readyBridge;
+      await Future<void>.delayed(
+        _probeTimings.resumeProbeDebounce + const Duration(milliseconds: 20),
+      );
+
+      await session.resumeProbeIfCold();
+
+      expect(readyBridge.initializeCalls, 1);
+      expect(readyBridge.subscribeCalls, 2);
+      expect(session.lastWorkspaceOpenFailure, isNull,
+          reason: 'a ready provider lets the probe open clear the park');
+      expect(client.opens, hasLength(opensBefore + 2));
+    });
+
+    test('the probe rides the window-gate fallback chain (purpose is set)',
+        () async {
+      final client = _ScriptedClient(_params('3.16.3'))
+        ..desktopAppVersion = '3.16.3'
+        ..bootstrapTasks = [
+          {
+            'taskId': 'task-beta',
+            'workspacePath': '/repo/beta',
+            'updatedAt': 1,
+          },
+        ];
+      final session = await _coldRuntimeSession(client);
+      addTearDown(session.dispose);
+      // The desktop moved the workspace into another window: the first leg
+      // hits the gate, the resumeProbe purpose must borrow the workspace's
+      // task for the addressing leg instead of rethrowing.
+      client.handler = (call) async {
+        if (call.taskHostId == null) throw StateError(_windowGateMessage);
+        return _FakeBridge();
+      };
+      final opensBefore = client.opens.length;
+
+      await session.resumeProbeIfCold();
+
+      expect(client.opens, hasLength(opensBefore + 2),
+          reason: 'first leg + borrowed-task leg');
+      expect(client.opens[opensBefore].taskId, isNull);
+      expect(client.opens[opensBefore].taskHostId, isNull);
+      expect(client.opens.last.taskId, 'task-beta');
+      expect(client.opens.last.taskHostId, 'local');
+      expect(session.lastWorkspaceOpenFailure, isNull,
+          reason: 'a successful second leg is a normal clearing open');
+    });
+
+    test('a transient probe failure is discarded and the park stands',
+        () async {
+      final client = _ScriptedClient(_params('3.16.3'));
+      final session = await _coldRuntimeSession(
+        client,
+        timings: _probeEscalationTimings,
+      );
+      addTearDown(session.dispose);
+      final cold = session.lastWorkspaceOpenFailure;
+      // Resume edge: the relay is still redialing, so the probe's open never
+      // reaches the desktop.
+      client.handler =
+          (_) async => throw TimeoutException('workspace-bridge-open');
+      final opensBefore = client.opens.length;
+
+      await session.resumeProbeIfCold();
+
+      expect(client.opens, hasLength(opensBefore + 1),
+          reason: 'the probe really ran through the open chain');
+      expect(session.lastWorkspaceOpenFailure, same(cold),
+          reason: 'a transient probe failure must not replace the parked '
+              'cold verdict — that would un-park the watchdog');
+
+      // A lost park escalates after listReadyTimeout: soft reopen first,
+      // forced rebuild second. Nothing may move.
+      await Future<void>.delayed(
+        _probeEscalationTimings.listReadyTimeout * 3,
+      );
+      expect(client.opens, hasLength(opensBefore + 1),
+          reason: 'the watchdog stays parked through the probe failure');
+    });
+
+    test('an unreachable probe (window gate with no addressable leg) is '
+        'discarded', () async {
+      final client = _ScriptedClient(_params('3.16.3'));
+      final session = await _coldRuntimeSession(
+        client,
+        timings: _probeEscalationTimings,
+      );
+      addTearDown(session.dispose);
+      final cold = session.lastWorkspaceOpenFailure;
+      client.handler = (_) async => throw StateError(_windowGateMessage);
+      final opensBefore = client.opens.length;
+
+      await session.resumeProbeIfCold();
+
+      expect(client.opens, hasLength(opensBefore + 1),
+          reason: 'no borrowable task and no desktop-managed path: single leg');
+      expect(session.lastWorkspaceOpenFailure, same(cold),
+          reason: 'Unreachable is discarded like any transient failure');
+
+      await Future<void>.delayed(
+        _probeEscalationTimings.listReadyTimeout * 3,
+      );
+      expect(client.opens, hasLength(opensBefore + 1),
+          reason: 'no soft reopen / forced rebuild from the discarded result');
+    });
+
+    test('a probe that finds the runtime still down keeps the cold verdict',
+        () async {
+      final client = _ScriptedClient(_params('3.16.3'));
+      final session = await _coldRuntimeSession(
+        client,
+        timings: _probeEscalationTimings,
+      );
+      addTearDown(session.dispose);
+      final opensBefore = client.opens.length;
+
+      await session.resumeProbeIfCold();
+
+      expect(client.opens, hasLength(opensBefore + 1));
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenRuntimeNotRunning>(),
+          reason: 'the cold classification is renewed, not cleared');
+
+      await Future<void>.delayed(
+        _probeEscalationTimings.listReadyTimeout * 3,
+      );
+      expect(client.opens, hasLength(opensBefore + 1),
+          reason: 'the renewed cold verdict keeps the watchdog parked');
+    });
+
+    test('a burst of resumed edges probes once (debounce)', () async {
+      final session = _fakeColdSession()
+        ..openWorkspaceSucceeds = false
+        ..openWorkspaceFailure =
+            const WorkspaceOpenRuntimeNotRunning('still cold');
+      addTearDown(session.dispose);
+
+      final edges = [
+        session.resumeProbeIfCold(),
+        session.resumeProbeIfCold(),
+        session.resumeProbeIfCold(),
+      ];
+      await Future.wait(edges);
+
+      expect(session.openWorkspaceCalls, hasLength(1),
+          reason: 'all three edges landed inside resumeProbeDebounce');
+      expect(session.openWorkspacePurposes.single,
+          WorkspaceOpenPurpose.resumeProbe);
+      expect(session.lastWorkspaceOpenFailure,
+          isA<WorkspaceOpenRuntimeNotRunning>());
+    });
+
+    test('silent gates: every precondition skips the probe', () async {
+      Future<int> probes(
+        void Function(FakeDeviceSession session) seed, {
+        bool withWorkspace = true,
+      }) async {
+        final session = _fakeColdSession(
+          workspaces: withWorkspace ? null : const [],
+        );
+        addTearDown(session.dispose);
+        seed(session);
+        await session.resumeProbeIfCold();
+        return session.openWorkspaceCalls.length;
+      }
+
+      expect(await probes((_) {}), 1,
+          reason: 'control: the cold parked state probes');
+      expect(await probes((s) {
+        s.kicked = true;
+      }), 0,
+          reason: 'a taken-over device must never send another bridge-open');
+      expect(await probes((s) {
+        s.status = DeviceStatus.connecting;
+      }), 0);
+      expect(await probes((s) {
+        s.openingWorkspace = true;
+      }), 0);
+      expect(await probes((s) {
+        s.debugHasClient = false;
+      }), 0);
+      expect(await probes((_) {}, withWorkspace: false), 0,
+          reason: 'no active workspace to probe');
+      expect(
+        await probes((s) {
+          s.lastWorkspaceOpenFailure =
+              const WorkspaceOpenUnreachable('window gate');
+        }),
+        0,
+        reason: 'only the two actionable dead ends are probed',
+      );
+      expect(
+        await probes((s) {
+          s.lastWorkspaceOpenFailure =
+              const WorkspaceOpenProviderNotReady('provider gate');
+        }),
+        1,
+        reason: 'a provider park self-heals when the desktop gets a provider',
+      );
     });
   });
 }

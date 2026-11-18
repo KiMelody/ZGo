@@ -161,6 +161,33 @@ void main() {
       await sub.dispose();
     });
 
+    test('omitRuntimePolicy drops the key from the subscribe frame only',
+        () async {
+      // The wake fallback leg (state layer `_openWorkspaceNow`): the desktop
+      // reads the omitted policy as start-if-needed. Only THIS subscribe
+      // frame changes — unsubscribe must keep the existing-only shape.
+      final done = transport.subscribeSessionsIndex(
+        scope: {'workspacePath': '/cold'},
+        omitRuntimePolicy: true,
+      );
+      await pumpUntil(
+        () => channels.count('subscribeSessionsIndexV4') == 1,
+      );
+      expect(channels.argsFor('subscribeSessionsIndexV4').single, {
+        'workspacePath': '/cold',
+      });
+      channels.answer('subscribeSessionsIndexV4', {
+        'ack': {'subscriptionId': 'sub-cold'},
+      });
+      final sub = await done;
+      await sub.dispose();
+      expect(channels.argsFor('unsubscribeSessionsIndexV4').single, {
+        'workspacePath': '/cold',
+        'subscriptionId': 'sub-cold',
+        'runtimePolicy': 'existing-only',
+      });
+    });
+
     test('frames route by topic: a sibling subscription state never sees them',
         () async {
       final subA = await subscribe({'workspacePath': '/a'}, 'sub-a');

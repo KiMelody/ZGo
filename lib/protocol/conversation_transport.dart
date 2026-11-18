@@ -1365,15 +1365,21 @@ class ConversationTransport implements ConversationCommands {
   /// transport's own scope, byte-identical to the pre-10-28 shape.
   /// [onSubscribeFailure] forwards automatic-resubscribe failures to the
   /// caller's classifier (cold-runtime cooldown); initial failures rethrow.
+  /// [omitRuntimePolicy] drops `runtimePolicy` from this subscription's
+  /// subscribe frame only, which the desktop treats as the default
+  /// `start-if-needed` policy (wire-3-18-2.md §1) — the wake fallback for
+  /// desktops without `initializeWorkspace`. Default keeps `existing-only`.
   Future<SessionsIndexSubscription> subscribeSessionsIndex({
     Map<String, dynamic>? scope,
     void Function(Object error)? onSubscribeFailure,
+    bool omitRuntimePolicy = false,
   }) async {
     await handshake();
     final subscription = SessionsIndexSubscription(
       this,
       scope: scope,
       onSubscribeFailure: onSubscribeFailure,
+      omitRuntimePolicy: omitRuntimePolicy,
     );
     try {
       await subscription.start();

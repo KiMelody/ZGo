@@ -63,7 +63,12 @@ class _ChipGate implements WorkspaceGate {
   Future<void> waitHealthy({required Duration timeout}) => Future.value();
 
   @override
-  Future<dynamic> call(String channel, String method, List<Object?> args) {
+  Future<dynamic> call(
+    String channel,
+    String method,
+    List<Object?> args, {
+    Duration? timeout,
+  }) {
     calls.add((channel, method, List<Object?>.from(args)));
     final h = handler;
     if (h == null) throw StateError('no handler for $channel.$method');

@@ -586,6 +586,12 @@ class _ZGoAppState extends State<ZGoApp>
     if (state == AppLifecycleState.resumed) {
       _applySystemBars();
       _quotaWatch.foregrounded();
+      // Cold-banner self-heal (task 11-17): a single debounced probe per live
+      // session. The method owns every gate (status / stage / kicked /
+      // in-flight open / cold failure) and stays silent otherwise.
+      for (final session in _hub.activeSessions.toList()) {
+        unawaited(session.resumeProbeIfCold());
+      }
     } else if (state == AppLifecycleState.paused) {
       _quotaWatch.backgrounded();
     }

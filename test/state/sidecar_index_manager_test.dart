@@ -229,6 +229,8 @@ void main() {
     await settle();
     expect(h.subscribeCalls, hasLength(1));
     expect(h.logs.join('\n'), contains('cold runtime, cooling down 10min'));
+    expect(h.coldRefusals, ['/repo/b'],
+        reason: 'the initial cold refusal reaches the session ledger');
 
     // Same set, same row activity — still cooling down.
     h.now = h.now.add(const Duration(minutes: 5));
@@ -241,6 +243,8 @@ void main() {
     h.manager.reconcile();
     await settle();
     expect(h.subscribeCalls, hasLength(2));
+    expect(h.coldRefusals, ['/repo/b', '/repo/b'],
+        reason: 'every cold attempt is evidence for the same key');
 
     // A set change clears the (fresh) cooldown.
     h.rows = const [];
@@ -249,6 +253,7 @@ void main() {
     h.manager.reconcile();
     await settle();
     expect(h.subscribeCalls, hasLength(3));
+    expect(h.coldRefusals, hasLength(3));
   });
 
   test('a running row keeps its workspace layer after falling out of the '
@@ -332,10 +337,14 @@ void main() {
     failure(ChannelRpcError('bridge blip', null));
     await settle();
     expect(h.disposed, isEmpty, reason: 'only cold runtime is classified');
+    expect(h.coldRefusals, isEmpty,
+        reason: 'transport failures are not cold evidence');
 
     failure(ChannelRpcError('ZCode Agent runtime is not running', null));
     await settle();
     expect(h.disposed, contains('/repo/b'));
+    expect(h.coldRefusals, ['/repo/b'],
+        reason: 'the resubscribe hook feeds the same evidence ledger');
     expect(h.manager.indexes.containsKey('/repo/b'), isFalse);
     expect(h.changed, greaterThanOrEqualTo(2),
         reason: 'subscribe install + cold drop each notify once');
@@ -802,6 +811,7 @@ class _Harness {
   bool disposedFlag = false;
   bool coldRuntime = false;
   int changed = 0;
+  final List<String> coldRefusals = [];
   int limit = 12; // mirrors DeviceSession.sidecarWorkspaceLimit (R1)
   Duration cooldown = const Duration(minutes: 10);
   Duration staleTtl = const Duration(seconds: 60);
@@ -841,6 +851,7 @@ class _Harness {
     relayRows: () => rows,
     activeKey: () => active,
     normalizeKey: (raw) => aliases[raw] ?? raw,
+    onColdRefusal: coldRefusals.add,
     onChanged: () => changed++,
     isDisposed: () => disposedFlag,
     log: logs.add,

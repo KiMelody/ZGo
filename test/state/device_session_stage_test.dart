@@ -125,7 +125,12 @@ class _FakeGate implements WorkspaceGate {
       Future.error(TimeoutException('degraded', timeout));
 
   @override
-  Future<dynamic> call(String channel, String method, List<Object?> args) =>
+  Future<dynamic> call(
+    String channel,
+    String method,
+    List<Object?> args, {
+    Duration? timeout,
+  }) =>
       Completer<dynamic>().future;
 }
 

@@ -19,9 +19,21 @@ class FakeDeviceSession extends DeviceSession {
   @override
   final SessionsIndexState sessions;
 
+  /// Resume-probe gate seams: [DeviceSession.resumeProbeIfCold] reads the
+  /// public getters, so these overrides drive the production gating. The
+  /// fake never dials (no live client), yet its [openWorkspace] answers
+  /// locally, so a probe is allowed unless a test turns it off.
+  @override
+  bool kicked = false;
+  @override
+  bool openingWorkspace = false;
+  @override
+  bool debugHasClient = true;
+
   FakeDeviceSession({
     required super.deviceId,
     required super.params,
+    super.timings,
     super.sidecarCooldown,
     super.projectResolverFactory,
     super.taskGroupResolverFactory,
@@ -143,6 +155,9 @@ class FakeDeviceSession extends DeviceSession {
               null,
             );
           }
+          if (coldWorkspaceKeys.contains(key)) {
+            coldWorkspaceKeys = {...coldWorkspaceKeys}..remove(key);
+          }
           return sidecarStates[key] ??= SessionsIndexState();
         },
         dispose: (key) async {
@@ -158,6 +173,10 @@ class FakeDeviceSession extends DeviceSession {
           return workspaceKeyOf(active);
         },
         normalizeKey: (raw) => raw,
+        onColdRefusal: (key) {
+          coldWorkspaceKeys = {...coldWorkspaceKeys, key};
+          notifyListeners();
+        },
         onChanged: notifyMergedChanged,
         isDisposed: () => debugDisposed,
         log: (line) {},
@@ -188,6 +207,7 @@ class FakeDeviceSession extends DeviceSession {
     String channel,
     String method, [
     List<Object?> args = const [],
+    Duration? timeout,
   ]) async {
     channelCalls.add((channel, method, args));
     final handler = channelHandler;
@@ -291,6 +311,18 @@ class FakeDeviceSession extends DeviceSession {
   @override
   WorkspaceOpenResult? lastWorkspaceOpenFailure;
 
+  /// Per-workspace cold evidence (design 11-17-cold-workspace-badge §2).
+  /// Production derives it from the ledger + TTL; the fake exposes the
+  /// settable view so widget tests seed markers directly, and its sidecar
+  /// closures keep it in sync (cold refusal adds, successful subscribe
+  /// clears) for tests that drive the real manager.
+  @override
+  Set<String> coldWorkspaceKeys = <String>{};
+
+  /// Optional gate awaited before [openWorkspace] answers — lets a UI test
+  /// observe the page's in-flight feedback while the open (wake) runs.
+  Future<void>? openWorkspaceGate;
+
   @override
   Future<WorkspaceOpenResult> openWorkspace(
     Map<String, dynamic> workspace, {
@@ -299,16 +331,28 @@ class FakeDeviceSession extends DeviceSession {
   }) async {
     openWorkspaceCalls.add((workspace, taskId));
     openWorkspacePurposes.add(purpose);
+    final gate = openWorkspaceGate;
+    if (gate != null) await gate;
     if (!openWorkspaceSucceeds) {
       // Mirrors production: an aborted open is not a failure, so it never
       // becomes the remembered last failure.
       if (openWorkspaceFailure is! WorkspaceOpenAborted) {
         lastWorkspaceOpenFailure = openWorkspaceFailure;
       }
+      if (openWorkspaceFailure is WorkspaceOpenRuntimeNotRunning) {
+        final key = workspaceKeyOf(workspace);
+        if (key != null) {
+          coldWorkspaceKeys = {...coldWorkspaceKeys, key};
+        }
+      }
       return openWorkspaceFailure;
     }
     _active = workspace;
     lastWorkspaceOpenFailure = null;
+    final key = workspaceKeyOf(workspace);
+    if (key != null && coldWorkspaceKeys.contains(key)) {
+      coldWorkspaceKeys = {...coldWorkspaceKeys}..remove(key);
+    }
     notifyListeners();
     return const WorkspaceOpenOpened();
   }

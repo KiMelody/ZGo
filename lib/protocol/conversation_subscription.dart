@@ -707,12 +707,21 @@ class SessionsIndexSubscription extends _SubscriptionBase<SessionsIndexState> {
   /// workspace down; every other failure keeps the built-in retry.
   final void Function(Object error)? onSubscribeFailure;
 
+  /// Omits `runtimePolicy` from THIS subscription's subscribe frame, which
+  /// the desktop reads as the default `start-if-needed` policy
+  /// (spec/protocol/wire-3-18-2.md §1): the fallback leg for desktops that
+  /// do not serve `initializeWorkspace`. False keeps the long-standing
+  /// `existing-only` frame byte-identical. Unsubscribe/resync frames are
+  /// never affected — they cannot start a runtime.
+  final bool omitRuntimePolicy;
+
   /// Internal: created by [ConversationTransport.subscribeSessionsIndex];
   /// not public API.
   SessionsIndexSubscription(
     ConversationTransport transport, {
     this.scope,
     this.onSubscribeFailure,
+    this.omitRuntimePolicy = false,
   }) : super(transport, SessionsIndexState(), 'v4-si');
 
   @override
@@ -759,9 +768,9 @@ class SessionsIndexSubscription extends _SubscriptionBase<SessionsIndexState> {
   @override
   String get _resyncMethod => 'resyncSessionsIndexV4';
   @override
-  Map<String, dynamic> get _subscribeArgs => const {
-    'runtimePolicy': 'existing-only',
-  };
+  Map<String, dynamic> get _subscribeArgs => omitRuntimePolicy
+      ? const {}
+      : const {'runtimePolicy': 'existing-only'};
   @override
   Map<String, dynamic> get _unsubscribeArgs => const {
     'runtimePolicy': 'existing-only',

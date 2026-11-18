@@ -36,6 +36,7 @@ class SidecarIndexManager {
     required this.relayRows,
     required this.activeKey,
     required this.normalizeKey,
+    required this.onColdRefusal,
     required this.onChanged,
     required this.isDisposed,
     required this.log,
@@ -77,6 +78,12 @@ class SidecarIndexManager {
 
   /// Canonicalizes a raw relay/live key through the session's key aliases.
   final String Function(String rawKey) normalizeKey;
+
+  /// One cold-runtime refusal against [key] — the initial subscribe as well
+  /// as the automatic resubscribe failure hook. Purely observational: the
+  /// session records per-workspace evidence for the card 「休眠」 marker.
+  /// The cooldown policy itself stays inside this manager.
+  final void Function(String key) onColdRefusal;
 
   /// Exactly one call per state change: subscribe installed, drop, any
   /// sidecar frame, tombstone probe write. The session owns the single
@@ -510,6 +517,7 @@ class SidecarIndexManager {
     } catch (e) {
       if (isAgentRuntimeNotRunningError(e)) {
         _writeCooldown(key);
+        onColdRefusal(key);
         log('[session] sidecar index $key: cold runtime, cooling down '
             '${cooldown.inMinutes}min');
       } else {
@@ -533,6 +541,7 @@ class SidecarIndexManager {
   void _onSubscribeFailure(String key, Object error) {
     if (isDisposed() || !isAgentRuntimeNotRunningError(error)) return;
     _writeCooldown(key);
+    onColdRefusal(key);
     log('[session] sidecar index $key: cold runtime on resubscribe, '
         'cooling down ${cooldown.inMinutes}min');
     if (_staleAt.containsKey(key)) {

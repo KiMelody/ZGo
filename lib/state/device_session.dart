@@ -30,6 +30,7 @@ import '../protocol/provider_settings.dart';
 import '../protocol/relay_client.dart';
 import '../protocol/relay_v2.dart' show RelayV2StartException;
 import '../protocol/remote_client.dart';
+import '../protocol/session_runtime.dart';
 import '../protocol/task_commands.dart';
 import '../protocol/task_group_resolver.dart';
 import '../protocol/task_groups.dart';
@@ -147,7 +148,12 @@ List<Map<String, dynamic>> mergeProjectWorkspaces(
 /// stall→rebuild policy without sockets.
 abstract interface class WorkspaceGate {
   Future<void> waitHealthy({required Duration timeout});
-  Future<dynamic> call(String channel, String method, List<Object?> args);
+  Future<dynamic> call(
+    String channel,
+    String method,
+    List<Object?> args, {
+    Duration? timeout,
+  });
 }
 
 class _LiveWorkspaceGate implements WorkspaceGate {
@@ -159,8 +165,18 @@ class _LiveWorkspaceGate implements WorkspaceGate {
       bridge.waitHealthy(timeout: timeout);
 
   @override
-  Future<dynamic> call(String channel, String method, List<Object?> args) =>
-      bridge.channels.call(channel, method, args);
+  Future<dynamic> call(
+    String channel,
+    String method,
+    List<Object?> args, {
+    Duration? timeout,
+  }) =>
+      bridge.channels.call(
+        channel,
+        method,
+        args,
+        timeout: timeout ?? const Duration(seconds: 30),
+      );
 }
 
 /// Tunable durations of [DeviceSession]'s stall defenses. Production uses
@@ -189,6 +205,18 @@ class StallTimings {
   /// Delay between automatic retries after a retryable connect failure.
   final Duration retryBackoff;
 
+  /// Minimum spacing between app-resume cold probes of one session
+  /// ([DeviceSession.resumeProbeIfCold]): a foreground handoff produces
+  /// several resumed edges in a row and the probe must stay single-shot.
+  final Duration resumeProbeDebounce;
+
+  /// Settle delay before a resume probe actually opens. The user usually
+  /// started the workspace on the desktop seconds before returning to the
+  /// app, and the desktop's per-workspace agent runtime needs ~2s to come
+  /// up (2026-10-28 cold-start measurement) — probing at the resumed edge
+  /// itself races that start and fails for no reason.
+  final Duration resumeProbeDelay;
+
   const StallTimings({
     this.healthyWaitTimeout = const Duration(seconds: 12),
     this.rpcTimeout = const Duration(seconds: 30),
@@ -196,6 +224,8 @@ class StallTimings {
     this.listReadyTimeout = const Duration(seconds: 20),
     this.minRebuildInterval = const Duration(seconds: 30),
     this.retryBackoff = const Duration(seconds: 30),
+    this.resumeProbeDebounce = const Duration(seconds: 10),
+    this.resumeProbeDelay = const Duration(seconds: 2),
   });
 }
 
@@ -204,9 +234,15 @@ enum DeviceStatus { disconnected, connecting, connected, error }
 /// Why a workspace bridge is being pointed at a workspace — decides which
 /// addressing leg the window-gate fallback may use. [chatNew] targets a new
 /// draft chat in the workspace (project addressing); [openTask] targets an
-/// existing task (host addressing via `taskHostId`). Null on internal opens
-/// (auto-open, watchdog reloads), which keep the pre-addressing behavior.
-enum WorkspaceOpenPurpose { chatNew, openTask }
+/// existing task (host addressing via `taskHostId`); [resumeProbe] is the
+/// single app-resume probe of a remembered cold-runtime failure
+/// ([DeviceSession.resumeProbeIfCold]) — it targets no task, rides the same
+/// window-gate fallback chain as [chatNew] (a null purpose would skip it and
+/// a workspace opened into another desktop window could only rethrow), and
+/// its transient failures are discarded instead of replacing the cold
+/// classification. Null on internal opens (auto-open, watchdog reloads),
+/// which keep the pre-addressing behavior.
+enum WorkspaceOpenPurpose { chatNew, openTask, resumeProbe }
 
 /// Whether a bridge-open failure is the desktop's "workspace is not in the
 /// bound window" refusal. The upstream frame carries no error code, so the
@@ -258,6 +294,18 @@ final class WorkspaceOpenRuntimeNotRunning extends WorkspaceOpenResult {
   final Object cause;
 }
 
+/// The desktop refused to start the workspace's agent runtime because no
+/// provider/model is ready (`initializeWorkspace` answered
+/// `{available:false, reasonCode:"provider_not_ready"}`). Distinct from
+/// [WorkspaceOpenRuntimeNotRunning]: retrying cannot help until the desktop
+/// provider is configured, so the UI shows provider guidance instead of the
+/// runtime copy.
+final class WorkspaceOpenProviderNotReady extends WorkspaceOpenResult {
+  const WorkspaceOpenProviderNotReady(this.cause);
+
+  final Object cause;
+}
+
 /// Any other failure (transport / channel RPC). Callers keep the raw error
 /// object as before; it is not a typed dead end.
 final class WorkspaceOpenTransportFailure extends WorkspaceOpenResult {
@@ -274,6 +322,23 @@ final class WorkspaceOpenAborted extends WorkspaceOpenResult {
   const WorkspaceOpenAborted();
 }
 
+/// Where one per-workspace cold-runtime evidence entry came from
+/// (design 11-17-cold-workspace-badge §1).
+enum _ColdEvidenceSource { openFailure, sidecarCold }
+
+/// Per-workspace cold-runtime evidence: the desktop refused a subscription
+/// because THIS workspace's agent runtime is not running while the link
+/// itself is healthy. A fact record keyed by workspace — unlike
+/// [_lastWorkspaceOpenFailure] it does not clear on connect / suspend, and
+/// only a successful subscription of the same workspace (or TTL expiry)
+/// retires it.
+class _ColdEvidence {
+  const _ColdEvidence(this.at, this.source);
+
+  final DateTime at;
+  final _ColdEvidenceSource source;
+}
+
 /// Internal marker: the first leg hit the window gate and the addressing
 /// retry failed too. Keeps the raw desktop refusal available to logs while
 /// the session surfaces [WorkspaceOpenUnreachable] to the UI.
@@ -284,6 +349,39 @@ class _WorkspaceUnreachable implements Exception {
 
   @override
   String toString() => '$cause';
+}
+
+/// Internal marker: the cold wake answered `provider_not_ready`. The cause
+/// is the original cold-runtime refusal (kept for logs); the open path
+/// classifies it as [WorkspaceOpenProviderNotReady] before the broader
+/// runtime matcher can see the cause's text.
+class _WorkspaceProviderNotReady implements Exception {
+  const _WorkspaceProviderNotReady(this.cause);
+
+  final Object cause;
+
+  @override
+  String toString() => 'provider_not_ready: $cause';
+}
+
+/// Outcome of one cold-workspace wake attempt.
+enum _ColdWakeOutcome {
+  /// `available:true` — retry the sessions-index subscribe once.
+  woken,
+
+  /// `available:false, reasonCode:"provider_not_ready"` — no retry; the open
+  /// is classified as [WorkspaceOpenProviderNotReady].
+  providerNotReady,
+
+  /// `initializeWorkspace` does not exist on this desktop — retry the
+  /// sessions-index subscribe once WITHOUT `runtimePolicy`, which the
+  /// desktop reads as the default `start-if-needed` policy
+  /// (wire-3-18-2.md §1). Only this path means "method absent".
+  methodMissing,
+
+  /// Timeout / transport failure / unusable answer — keep the pre-wake cold
+  /// verdict (no fallback retry).
+  degraded,
 }
 
 /// What the automations UI needs from a device link: live status plus the
@@ -868,6 +966,14 @@ class DeviceSession extends ChangeNotifier
   @visibleForTesting
   final Duration sidecarCooldown;
 
+  /// Display TTL of per-workspace cold evidence ([coldWorkspaceKeys]).
+  /// Null keeps the production rule: the sidecar ledger's own window
+  /// ([sidecarCooldown]). Tests inject a separate value so a short manager
+  /// cooldown (retry pacing) does not also expire the evidence under
+  /// assertion.
+  @visibleForTesting
+  final Duration? coldEvidenceTtl;
+
   /// Suspended-command ledger budget handed to every transport this session
   /// builds (11-13 R7). Only tests shrink these; production keeps the
   /// design values: a 2 min TTL bounds the whole chain, the second
@@ -902,6 +1008,7 @@ class DeviceSession extends ChangeNotifier
     this.saveCachedHome,
     this.timings = const StallTimings(),
     this.sidecarCooldown = const Duration(minutes: 10),
+    this.coldEvidenceTtl,
     this.overviewRefreshThrottle = const Duration(milliseconds: 2500),
     this.commandLedgerTtl = const Duration(minutes: 2),
     this.commandLedgerSecondConfirmDelay = const Duration(seconds: 5),
@@ -1020,6 +1127,11 @@ class DeviceSession extends ChangeNotifier
   /// the duplicate line is pure noise.
   bool _watchdogParked = false;
 
+  /// Wall clock of the last app-resume cold probe ([resumeProbeIfCold]),
+  /// debounced by [StallTimings.resumeProbeDebounce]. Epoch zero: the first
+  /// resume after a cold failure probes immediately.
+  DateTime _lastResumeProbeAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   // --- Channel-level failure isolation (dead-channel defence) ---
   /// Failure-tier ledger (per-channel tri-strike) + escalation policy —
   /// the tier semantics live on [LinkSupervisor]. Escalations (bridge-level
@@ -1064,6 +1176,15 @@ class DeviceSession extends ChangeNotifier
   /// failure banner derive from this single value (the former machine
   /// sentinel strings in [_error] are retired).
   WorkspaceOpenResult? _lastWorkspaceOpenFailure;
+
+  /// workspaceKey (alias-normalized) → most recent cold-runtime evidence
+  /// (design 11-17-cold-workspace-badge §1). Fed by a cold open failure and
+  /// by sidecar cold refusals; cleared per key by a successful open /
+  /// subscription of that workspace. Never cleared by connect / suspend —
+  /// it records desktop runtime facts, not link state. Expired entries are
+  /// filtered by [coldWorkspaceKeys] (TTL = [coldEvidenceTtl] ??
+  /// [sidecarCooldown], the sidecar ledger's own window).
+  final Map<String, _ColdEvidence> _coldEvidence = {};
 
   /// Desktop's live app version from the bootstrap-response top level
   /// (`desktopAppVersion`, live-probed 3.16.3). Null until a frame carries
@@ -1171,6 +1292,21 @@ class DeviceSession extends ChangeNotifier
   /// link/app error writes never touch it.
   WorkspaceOpenResult? get lastWorkspaceOpenFailure =>
       _lastWorkspaceOpenFailure;
+
+  /// Workspaces with unexpired cold-runtime evidence (design
+  /// 11-17-cold-workspace-badge §2): the ONLY read source of the card
+  /// 「休眠」 marker. Entries older than [coldEvidenceTtl] (production:
+  /// [sidecarCooldown]) are filtered out; a workspace without evidence is
+  /// simply absent — unknown means unknown, never "warm".
+  Set<String> get coldWorkspaceKeys {
+    final now = clock.now();
+    final ttl = coldEvidenceTtl ?? sidecarCooldown;
+    return {
+      for (final MapEntry(key: key, value: evidence)
+          in _coldEvidence.entries)
+        if (now.isBefore(evidence.at.add(ttl))) key,
+    };
+  }
 
   /// Display-only projection of the long "not fully usable yet" phases:
   /// `pairing`, `reconnecting` or `rebuilding`; null whenever none applies.
@@ -1606,6 +1742,12 @@ class DeviceSession extends ChangeNotifier
   @visibleForTesting
   bool get debugDisposed => _disposed;
 
+  /// Test seam: whether a live client is attached. The resume probe skips
+  /// without one (an open would only answer [WorkspaceOpenAborted], so the
+  /// probe could never observe anything); fakes override it to opt in.
+  @visibleForTesting
+  bool get debugHasClient => _client != null;
+
   /// Builds the manager with this session's capabilities. Overridable so
   /// state tests can drive the policy without a bridge (the fake replaces
   /// the three former `@protected` sidecar seams with this one factory).
@@ -1621,6 +1763,8 @@ class DeviceSession extends ChangeNotifier
         relayRows: () => relayTasks,
         activeKey: _sidecarActiveKey,
         normalizeKey: (rawKey) => _taskHome.normalizeKey(rawKey),
+        onColdRefusal: (key) =>
+            _recordColdEvidence(key, _ColdEvidenceSource.sidecarCold),
         onChanged: notifyMergedChanged,
         isDisposed: () => _disposed,
         log: _log,
@@ -1637,6 +1781,24 @@ class DeviceSession extends ChangeNotifier
     final rawKey = workspaceKeyOf(active);
     if (rawKey == null) return null;
     return _taskHome.normalizeKey(rawKey);
+  }
+
+  /// Records one cold-runtime evidence entry for [rawKey] (normalized to the
+  /// same key domain the sidecar manager and the workspace cards use). One
+  /// notify so the card marker appears even when the caller is a quiet
+  /// sidecar refusal (no list repaint of its own).
+  void _recordColdEvidence(String rawKey, _ColdEvidenceSource source) {
+    final key = _taskHome.normalizeKey(rawKey);
+    if (key.isEmpty) return;
+    _coldEvidence[key] = _ColdEvidence(clock.now(), source);
+    if (!_disposed) notifyListeners();
+  }
+
+  /// Forgets the evidence of [rawKey] (same normalization as the write).
+  /// A successful subscription of a workspace is proof its runtime is up.
+  void _clearColdEvidence(String rawKey) {
+    final key = _taskHome.normalizeKey(rawKey);
+    if (_coldEvidence.remove(key) != null && !_disposed) notifyListeners();
   }
 
   /// Starts ONE sidecar sessions-index subscription for [scope] on the
@@ -1662,6 +1824,9 @@ class DeviceSession extends ChangeNotifier
       throw StateError('sidecar subscription superseded');
     }
     _sidecarSubs[key] = sub;
+    // A resolved sidecar subscription proves this workspace's runtime is up
+    // (the ack itself is the proof; no need to wait for the first frame).
+    _clearColdEvidence(key);
     return sub.state;
   }
 
@@ -2105,6 +2270,68 @@ class DeviceSession extends ChangeNotifier
 
   Completer<WorkspaceOpenResult>? _openChain;
 
+  /// App-resume self-heal for the cold-runtime banner (task 11-17).
+  ///
+  /// While [lastWorkspaceOpenFailure] is [WorkspaceOpenRuntimeNotRunning]
+  /// (or [WorkspaceOpenProviderNotReady], which the desktop gate resolves
+  /// the same phone-side way) the per-workspace agent runtime can only be
+  /// started from the desktop, so no reconnect/watchdog step can clear the
+  /// banner. The one thing the phone can do is retry the open once after the
+  /// user returns: if the workspace was started (or a provider configured)
+  /// on the desktop meanwhile, the NORMAL open path succeeds and its clear
+  /// path (banner, watchdog re-arm) runs unchanged; if the runtime is still
+  /// down the cold verdict is renewed; every other outcome — including a
+  /// renewed provider refusal — is discarded by [_openWorkspaceNow] so the
+  /// parked failure stands (a transient failure must not un-park the
+  /// watchdog — see the catch).
+  ///
+  /// Gates: connected, no display stage, not kicked (a taken-over device
+  /// keeps its remembered failure after the kick and must never send another
+  /// bridge-open), no open in flight, a target workspace and a live client.
+  /// Proofed against bursts by [StallTimings.resumeProbeDebounce] and given
+  /// [StallTimings.resumeProbeDelay] of settle time before the open (the
+  /// desktop runtime is usually still starting at the resumed edge); the
+  /// gate is re-checked after the delay because that window is exactly when
+  /// the link state can move.
+  Future<void> resumeProbeIfCold() async {
+    if (_disposed || !_resumeProbeEligible) return;
+    final now = clock.now();
+    if (now.difference(_lastResumeProbeAt) < timings.resumeProbeDebounce) {
+      return;
+    }
+    _lastResumeProbeAt = now;
+    await Future<void>.delayed(timings.resumeProbeDelay);
+    if (_disposed || !_resumeProbeEligible) return;
+    final target = activeWorkspace;
+    if (target == null) return;
+    final key = workspaceKeyOf(target);
+    if (key == null) return;
+    _log('[session] resumeProbe: probing cold workspace key=$key');
+    final result = await openWorkspace(
+      target,
+      purpose: WorkspaceOpenPurpose.resumeProbe,
+    );
+    _log('[session] resumeProbe: key=$key result=${result.runtimeType}');
+  }
+
+  /// The full resume-probe gate, shared by the entry and the post-delay
+  /// re-check. Reads the public getters so a fake subclass answers with its
+  /// own seeded state (production getters return the live fields).
+  ///
+  /// Both parked dead ends are probed: the cold runtime (the desktop may
+  /// have started the workspace meanwhile) and provider_not_ready (the user
+  /// may have configured a provider meanwhile). The probe's discarded-result
+  /// rule still keeps only a renewed cold verdict able to replace the park.
+  bool get _resumeProbeEligible =>
+      (lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning ||
+          lastWorkspaceOpenFailure is WorkspaceOpenProviderNotReady) &&
+      status == DeviceStatus.connected &&
+      connectionStage == null &&
+      !kicked &&
+      !openingWorkspace &&
+      activeWorkspace != null &&
+      debugHasClient;
+
   /// The shared 「open an existing task」 entry (design 11-07 D1): resolve
   /// the task's workspace, open it only when the bridge is not already
   /// there, and answer the typed outcome. Both the task list and the
@@ -2132,7 +2359,8 @@ class DeviceSession extends ChangeNotifier
     if (workspace == null) return null;
     final needsOpen = workspaceKeyOf(workspace) !=
             workspaceKeyOf(active ?? const <String, dynamic>{}) ||
-        lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning;
+        lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning ||
+        lastWorkspaceOpenFailure is WorkspaceOpenProviderNotReady;
     if (!needsOpen) return const WorkspaceOpenOpened();
     return openWorkspace(
       workspace,
@@ -2217,7 +2445,8 @@ class DeviceSession extends ChangeNotifier
       // page has.
       final ownerKey = _taskHome.normalizeKey(workspaceKeyOf(workspace) ?? '');
       final needsOpen = ownerKey != _sidecarActiveKey() ||
-          lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning;
+          lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning ||
+          lastWorkspaceOpenFailure is WorkspaceOpenProviderNotReady;
       if (needsOpen) {
         // Aborted = superseded by a concurrent open (last-wins chain). Re-run
         // ONCE in place, exactly like TaskOpenPage; a second abort is the
@@ -2240,6 +2469,7 @@ class DeviceSession extends ChangeNotifier
               SessionResumeFailure.openAborted,
             );
           case WorkspaceOpenRuntimeNotRunning() ||
+                WorkspaceOpenProviderNotReady() ||
                 WorkspaceOpenUnreachable() ||
                 WorkspaceOpenTransportFailure():
             // `foreignWorkspace` covers "the workspace home could not be
@@ -2455,7 +2685,49 @@ class DeviceSession extends ChangeNotifier
         conversation.adoptLedger(retainedLedger);
         unawaited(retainedLedger.reconcile());
       }
-      final sub = await conversation.subscribeSessionsIndex();
+      SessionsIndexSubscription sub;
+      try {
+        sub = await conversation.subscribeSessionsIndex();
+      } catch (e) {
+        // The bridge is attached but the workspace's agent runtime is cold
+        // (`ZCODE_AGENT_RUNTIME_UNAVAILABLE`). This is the one point where
+        // the desktop's warm-up API is reachable: no second bridge, no
+        // re-addressing — initializeWorkspace on the same bridge, then ONE
+        // subscribe retry. Only the cold classification takes this path;
+        // transport / window-gate failures rethrow untouched.
+        if (!isAgentRuntimeNotRunningError(e)) rethrow;
+        final wake = await _wakeColdRuntime(
+          scope: scope,
+          key: activeKey,
+          source: _wakeSource(purpose),
+        );
+        if (_disposed || _bridge != bridge) {
+          return const WorkspaceOpenAborted();
+        }
+        if (wake == _ColdWakeOutcome.providerNotReady) {
+          throw _WorkspaceProviderNotReady(e);
+        }
+        if (wake == _ColdWakeOutcome.methodMissing) {
+          // Old desktop without `initializeWorkspace`: the subscribe frame
+          // omitting `runtimePolicy` is start-if-needed on the desktop side
+          // (wire-3-18-2.md §1), so retry the SAME subscription once in that
+          // shape. This is the wake action for this leg — initializeWorkspace
+          // never ran — and a second cold refusal falls through to the outer
+          // classification (never a second wake).
+          _log('[session] wake: retrying sessions-index without runtimePolicy '
+              'key=$activeKey');
+          sub = await conversation.subscribeSessionsIndex(
+            omitRuntimePolicy: true,
+          );
+        } else {
+          if (wake != _ColdWakeOutcome.woken) rethrow;
+          // Exactly one retry inside this open chain: a second cold refusal
+          // falls through to the outer classification (never wakes twice, so
+          // a still-cold desktop cannot loop the app).
+          _log('[session] wake: retrying sessions-index key=$activeKey');
+          sub = await conversation.subscribeSessionsIndex();
+        }
+      }
       if (_disposed || _bridge != bridge) {
         await sub.dispose();
         return const WorkspaceOpenAborted();
@@ -2515,6 +2787,9 @@ class DeviceSession extends ChangeNotifier
       final clearedColdFailure =
           _lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning;
       _lastWorkspaceOpenFailure = null;
+      // A successful open of THIS workspace is proof its runtime is up:
+      // retire its card marker by key (other workspaces keep their facts).
+      _clearColdEvidence(activeKey);
       _error = null;
       if (clearedColdFailure) {
         // Diagnose what clears the actionable banner: a successful open of
@@ -2543,7 +2818,11 @@ class DeviceSession extends ChangeNotifier
       // bridge IS attached; the desktop has not started this workspace's
       // agent process); everything else keeps the raw message.
       final WorkspaceOpenResult result;
-      if (e is _WorkspaceUnreachable || isWorkspaceWindowGateError(e)) {
+      if (e is _WorkspaceProviderNotReady) {
+        // MUST precede the runtime matcher: the marker's cause is the cold
+        // refusal, so its text would otherwise classify as cold again.
+        result = WorkspaceOpenProviderNotReady(e.cause);
+      } else if (e is _WorkspaceUnreachable || isWorkspaceWindowGateError(e)) {
         result = WorkspaceOpenUnreachable(
           e is _WorkspaceUnreachable ? e.cause : e,
         );
@@ -2555,8 +2834,33 @@ class DeviceSession extends ChangeNotifier
         // link/app errors (connect failure, app-error, reload bootstrap).
         result = WorkspaceOpenTransportFailure(e);
       }
-      _lastWorkspaceOpenFailure = result;
-      notifyListeners();
+      if (result is WorkspaceOpenRuntimeNotRunning) {
+        // Per-workspace fact for the card marker (design
+        // 11-17-cold-workspace-badge §1): the bridge is attached and the
+        // active workspace is already swapped in before the subscribe, so
+        // [_activeWorkspace] is the key that refused.
+        final active = _activeWorkspace;
+        final activeKey = active == null ? null : workspaceKeyOf(active);
+        if (activeKey != null) {
+          _recordColdEvidence(activeKey, _ColdEvidenceSource.openFailure);
+        }
+      }
+      // A resume probe is ONE diagnostic attempt on top of an already parked
+      // cold-runtime dead end ([resumeProbeIfCold]). Only the cold verdict may
+      // refresh that classification: recording a transient failure (relay
+      // still redialing, window gate, aborted open) would replace the parked
+      // cold failure, un-park the list watchdog, and send it into soft reopen
+      // → forced rebuild every `listReadyTimeout` — exactly the amplification
+      // the cold-runtime parking exists to stop. The probe caller logs the
+      // discarded result instead; the field stays the parked cold failure and
+      // the finally's [_armListWatchdog] re-parks.
+      final discardedProbeFailure =
+          purpose == WorkspaceOpenPurpose.resumeProbe &&
+          result is! WorkspaceOpenRuntimeNotRunning;
+      if (!discardedProbeFailure) {
+        _lastWorkspaceOpenFailure = result;
+        notifyListeners();
+      }
       return result;
     } finally {
       _openingWorkspace = false;
@@ -2566,6 +2870,57 @@ class DeviceSession extends ChangeNotifier
       _armListWatchdog();
     }
   }
+
+  /// Wakes a cold workspace runtime via
+  /// `zcode-session.initializeWorkspace` (research 11-17 §A; live shape
+  /// `[{workspacePath, workspaceIdentity?}]` →
+  /// `{available, workspaceKey, reasonCode?}`). Returns the outcome so the
+  /// caller decides whether to retry the subscribe, classify
+  /// provider-not-ready, fall back to a start-if-needed subscribe, or keep
+  /// the existing cold verdict. Never throws: a timeout / transport failure
+  /// is the pre-wake behavior (the cold-runtime banner) by design, and a
+  /// missing method takes the protocol's own fallback leg.
+  Future<_ColdWakeOutcome> _wakeColdRuntime({
+    required Map<String, dynamic> scope,
+    required String key,
+    required String source,
+  }) async {
+    final sw = Stopwatch()..start();
+    _log('[session] wake: calling initializeWorkspace key=$key source=$source');
+    try {
+      final result = await sessionRuntime.initializeWorkspace(scope);
+      final ms = sw.elapsedMilliseconds;
+      if (result.available) {
+        _log('[session] wake: ok key=$key source=$source (${ms}ms)');
+        return _ColdWakeOutcome.woken;
+      }
+      if (result.providerNotReady) {
+        _log('[session] wake: provider_not_ready key=$key source=$source '
+            '(${ms}ms)');
+        return _ColdWakeOutcome.providerNotReady;
+      }
+      _log('[session] wake: unavailable key=$key source=$source '
+          'reasonCode=${result.reasonCode} (${ms}ms)');
+      return _ColdWakeOutcome.degraded;
+    } on WorkspaceWakeUnavailable catch (e) {
+      final detail = e.message == null ? '' : ' ${e.message}';
+      _log('[session] wake: method unavailable key=$key source=$source '
+          '(${sw.elapsedMilliseconds}ms)$detail');
+      return _ColdWakeOutcome.methodMissing;
+    } catch (e) {
+      _log('[session] wake: failed key=$key source=$source error=$e '
+          '(${sw.elapsedMilliseconds}ms)');
+      return _ColdWakeOutcome.degraded;
+    }
+  }
+
+  /// User-visible open purposes are the user's own retry/tap; everything
+  /// else (auto-open, watchdog, resume probe) is automatic. Log-only — the
+  /// wake itself is always automatic once a cold refusal lands.
+  static String _wakeSource(WorkspaceOpenPurpose? purpose) => switch (purpose) {
+    WorkspaceOpenPurpose.chatNew || WorkspaceOpenPurpose.openTask => 'user',
+    WorkspaceOpenPurpose.resumeProbe || null => 'auto',
+  };
 
   /// The desktop local host id every 3.16.3 addressing leg carries. Project
   /// rows the resolver can name and tasks in the relay overview all belong
@@ -2767,15 +3122,19 @@ class DeviceSession extends ChangeNotifier
   void _armListWatchdog() {
     _listWatchdog?.cancel();
     if (_disposed || status != DeviceStatus.connected) return;
-    // A cold per-workspace agent runtime is a benign, user-actionable dead
-    // end: reconnecting cannot start it (only the desktop can), so the
-    // watchdog would rebuild the relay every timeout and the banner would
-    // flash between "connecting" and the runtime copy. Park it until the
-    // user retries after opening the workspace on the desktop.
-    if (_lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning) {
+    // A cold per-workspace agent runtime or a provider-not-ready refusal is
+    // a benign, user-actionable dead end: reconnecting cannot start it
+    // (only the desktop can), so the watchdog would rebuild the relay every
+    // timeout and the banner would flash between "connecting" and the
+    // workspace copy. Park it until the user retries after fixing the
+    // desktop.
+    final parkedFailure = _lastWorkspaceOpenFailure;
+    if (parkedFailure is WorkspaceOpenRuntimeNotRunning ||
+        parkedFailure is WorkspaceOpenProviderNotReady) {
       if (!_watchdogParked) {
         _watchdogParked = true;
-        _log('[session] list watchdog parked: agent runtime not running');
+        _log('[session] list watchdog parked: '
+            '${parkedFailure is WorkspaceOpenProviderNotReady ? 'provider not ready' : 'agent runtime not running'}');
       }
       return;
     }
@@ -2798,10 +3157,14 @@ class DeviceSession extends ChangeNotifier
   void _onListNotReady() {
     if (_disposed || _kicked || status != DeviceStatus.connected) return;
     // A timer callback can already be queued when the open's synchronous
-    // segment parks the watchdog; the typed cold-runtime result still
-    // means "do not escalate" (a soft reopen cannot start the runtime and
-    // only churns the link).
-    if (_lastWorkspaceOpenFailure is WorkspaceOpenRuntimeNotRunning) return;
+    // segment parks the watchdog; the typed dead-end results still mean
+    // "do not escalate" (a soft reopen cannot start the runtime or fix the
+    // provider and only churns the link).
+    final parkedFailure = _lastWorkspaceOpenFailure;
+    if (parkedFailure is WorkspaceOpenRuntimeNotRunning ||
+        parkedFailure is WorkspaceOpenProviderNotReady) {
+      return;
+    }
     final sub = _sessionsSub;
     if (sub != null && sub.state.ready) return;
     _listEscalations += 1;
@@ -3263,6 +3626,7 @@ class DeviceSession extends ChangeNotifier
     String channel,
     String method, [
     List<Object?> args = const [],
+    Duration? timeout,
   ]) async {
     final gate = _testGate ?? _liveGate();
     if (gate == null) throw StateError('not connected');
@@ -3275,8 +3639,9 @@ class DeviceSession extends ChangeNotifier
       rethrow;
     }
     try {
-      final result =
-          await gate.call(channel, method, args).timeout(timings.rpcTimeout);
+      final result = await gate
+          .call(channel, method, args, timeout: timeout)
+          .timeout(timeout ?? timings.rpcTimeout);
       // Any success proves the channel rides a live bridge again.
       _linkSupervisor.noteChannelSuccess(channel);
       return result;
@@ -3743,6 +4108,21 @@ class DeviceSession extends ChangeNotifier
     (channel, method, args) => callChannel(channel, method, args),
     scope: _taskHome.taskScopeFor,
   );
+
+  /// Cold-workspace wake on the zcode-session channel (desktop ≥3.16.3 —
+  /// see [SessionRuntimePort]). The RPC budget is [coldWakeTimeout] instead
+  /// of the 30s channel default: the desktop spawns an agent runtime inside
+  /// this call (live 1.9-4.1s, with host-exit waits reaching ~4s).
+  late final SessionRuntimePort sessionRuntime = SessionRuntimePort(
+    (channel, method, args) =>
+        callChannel(channel, method, args, coldWakeTimeout),
+  );
+
+  /// Budget for one `initializeWorkspace` wake. Deliberately generous: the
+  /// live samples (1.9-4.1s) carry a slow-disk tail and the desktop's spawn
+  /// path may wait on a host exit. The list watchdog is NOT extended — a
+  /// wake is an explicit open, not a watchdog step.
+  static const Duration coldWakeTimeout = Duration(seconds: 60);
 
   /// Whether the desktop serves the archived-deletion pair. Positive
   /// boolean: true until an unknown-method reply pins it false for the rest
