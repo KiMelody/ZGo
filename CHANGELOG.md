@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.8] - 2026-11-20
+
+### Added
+
+- **OLED pure-black theme**: a global theme flag flattens all surfaces to black with semantic ink awareness, plus a subtle five-slot elevation ladder for cards, tiles and code blocks
+- Two-stage splash theme: a fixed brand-dark first stage followed by the in-app theme
+- Redesigned launcher icon (L6e pipeline) with adaptive/monochrome layers, splash density buckets and notification icon
+
+### Changed
+
+- Chat list scrolling: image decode by display size, hop-based cache eviction, subtree and instance memoization, single-pass grouping
+- Task list scrolling: narrow signal splitting and row-level keys
+
+### Fixed
+
+- Jump-to-location chain and blank rendering in long conversations
+
 ## [1.16.7] - 2026-11-18
 
 ### Added
