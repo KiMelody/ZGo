@@ -99,7 +99,10 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: '>=4.0.0 <7.0.0'
-  flutter_launcher_icons: '>=0.13.0 <0.15.0'
+  # 0.14.0+ is required for adaptive_icon_monochrome and
+  # adaptive_icon_foreground_inset; the old >=0.13.0 lower bound could
+  # re-resolve to a version that silently drops both keys.
+  flutter_launcher_icons: '>=0.14.0 <0.15.0'
   web: '>=1.0.0 <2.0.0'
   # Test-only: builds the SQLite fixture databases for
   # test/protocol/project_resolver_test.dart. The app itself never imports
@@ -113,13 +116,18 @@ dev_dependencies:
 
 # Launcher icons — regenerate with: dart run flutter_launcher_icons
 # Source art is produced by tool/icon_gen.dart.
+# The foreground inset is 0: icon_gen.dart owns all adaptive geometry, so the
+# background halos stay locked to the glyph at one scale (the plugin's 16
+# default would shrink only the foreground).
 flutter_launcher_icons:
   android: true
   ios: true
   remove_alpha_ios: true
   image_path: assets/icon/icon.png
-  adaptive_icon_background: "#161616"
+  adaptive_icon_background: assets/icon/icon_bg.png
   adaptive_icon_foreground: assets/icon/icon_fg.png
+  adaptive_icon_monochrome: assets/icon/icon_mono.png
+  adaptive_icon_foreground_inset: 0
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

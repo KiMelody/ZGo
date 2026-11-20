@@ -643,15 +643,17 @@ class _ZGoAppState extends State<ZGoApp>
               : const Locale('zh'),
           localeResolutionCallback: _resolveFrameworkLocale,
           theme: buildLightTheme(),
-          darkTheme: buildDarkTheme(),
+          darkTheme: buildDarkTheme(oled: _theme.oledBlack),
           themeMode: _theme.mode,
           // Wraps the whole navigator so dialogs/overlays see tr() too.
           // CardTheme/DialogTheme ride the builder (widget form is stable
           // across SDKs; the ThemeData param type is not).
           builder: (context, child) => CardTheme(
-                data: zCardTheme(Theme.of(context).brightness),
+                data: zCardTheme(Theme.of(context).brightness,
+                    oled: ZOledFlag.isActive(context)),
                 child: DialogTheme(
-                  data: zDialogTheme(Theme.of(context).brightness),
+                  data: zDialogTheme(Theme.of(context).brightness,
+                      oled: ZOledFlag.isActive(context)),
                   // The observer itself reaches pages through this scope
                   // (ChatPage registers as RouteAware from it).
                   child: ChatRouteObserverScope(

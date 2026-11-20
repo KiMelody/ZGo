@@ -4441,9 +4441,10 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   Widget _kickedOverlay(BuildContext context) {
     return Positioned.fill(
       child: Material(
-        color: (ZInk.isDark(context)
-                ? ZColors.darkBackground
-                : ZColors.lightBackground)
+        // Ambient page surface: follows both theme modes and the OLED
+        // pure-black collapse instead of re-listing the dark ladder.
+        color: Theme.of(context)
+            .scaffoldBackgroundColor
             .withValues(alpha: 0.92),
         child: Center(
           child: Padding(

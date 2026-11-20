@@ -1,6 +1,8 @@
 package org.kimelody.zgo
 
+import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import io.flutter.embedding.android.FlutterActivity
@@ -9,6 +11,40 @@ import io.flutter.plugin.common.MethodChannel
 import org.json.JSONObject
 
 class MainActivity : FlutterActivity() {
+
+    /**
+     * Stage-2 splash follows the IN-APP theme setting, not the system one:
+     * the persisted Flutter theme is read before the base context attaches
+     * and drives a uiMode override. Shared_preferences legacy XML is a
+     * plugin internal — key "flutter.zgo_theme_mode" (light/system/dark,
+     * missing = dark, keep in sync with ThemeController). "system" never
+     * intervenes. Stage-1 (system splash) resolves in the system process
+     * before the override can apply, so it is pinned to brand-dark assets
+     * (task 11-19-splash-theme-follow, route B). Pre-31 starting windows
+     * cannot follow; the launch stays system-themed there.
+     *
+     * createConfigurationContext must be called on [base]: in
+     * attachBaseContext the ContextWrapper delegate is still null.
+     */
+    override fun attachBaseContext(base: Context) {
+        var ctx = base
+        if (Build.VERSION.SDK_INT >= 31) {
+            val mode = base.getSharedPreferences(
+                "FlutterSharedPreferences", Context.MODE_PRIVATE
+            ).getString("flutter.zgo_theme_mode", "dark")
+            val night = when (mode) {
+                "light" -> Configuration.UI_MODE_NIGHT_NO
+                "system" -> -1 // follow the system — no override
+                else -> Configuration.UI_MODE_NIGHT_YES // "dark" and missing
+            }
+            if (night >= 0) {
+                val cfg = Configuration(base.resources.configuration)
+                cfg.uiMode = cfg.uiMode and Configuration.UI_MODE_NIGHT_MASK.inv() or night
+                ctx = base.createConfigurationContext(cfg)
+            }
+        }
+        super.attachBaseContext(ctx)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

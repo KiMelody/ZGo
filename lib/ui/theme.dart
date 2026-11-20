@@ -361,6 +361,63 @@ Route<T> zRoute<T>(WidgetBuilder builder) {
 const double zTouchWidth = 44;
 const double zTouchHeight = 48;
 
+/// OLED surface variant, carried through [ThemeData.extensions] so widget
+/// tests leave no static state behind. The backdrop stays [pureBlack]
+/// (`#000000`, OLED pixels off) while every surface slot lifts onto a
+/// micro-ladder — the all-black collapse of 8960a66 erased the frame /
+/// background hierarchy, so the 2026-11-19 user ruling restores it with
+/// steps ~1/2 of the normal dark ladder. Only [buildDarkTheme] assembles the
+/// flag, and only when `oled: true`; the light theme and the non-OLED dark
+/// theme carry no flag (null = off).
+@immutable
+class ZOledFlag extends ThemeExtension<ZOledFlag> {
+  const ZOledFlag({required this.isPureBlack});
+
+  static const oled = ZOledFlag(isPureBlack: true);
+
+  /// Backdrop / scaffold / image-viewer backdrop — the one value that keeps
+  /// OLED pixels off.
+  static const pureBlack = Color(0xFF000000);
+
+  // OLED surface micro-ladder: the single definition point for the oled
+  // surface steps (~1/2 of the [ZColors] dark ladder). Components read them
+  // through the [ZInk] slots, never directly.
+
+  /// Card-class surfaces: cards, bubbles, popups, sheet / input fills,
+  /// snackbars and `surfaceContainerHighest` (dark #2B2B2B).
+  static const cardSurface = Color(0xFF0A0A0A);
+
+  /// Tile-class surfaces nested inside a card (dark #363636).
+  static const tileSurface = Color(0xFF0F0F0F);
+
+  /// Dual-pane sidebar (dark #1E1E1E).
+  static const sidebarSurface = Color(0xFF040404);
+
+  /// Inline-code pill (dark #262626).
+  static const codeInlineSurface = Color(0xFF080808);
+
+  /// Fenced code block (dark #0A0A0A).
+  static const codeBlockSurface = Color(0xFF050505);
+
+  final bool isPureBlack;
+
+  /// True when the ambient theme is the OLED variant. Pages that are
+  /// deliberately theme-independent (the image viewer keeps a near-black
+  /// backdrop in light mode too) read this instead of the surface slots.
+  static bool isActive(BuildContext c) =>
+      Theme.of(c).extension<ZOledFlag>()?.isPureBlack ?? false;
+
+  @override
+  ZOledFlag copyWith({bool? isPureBlack}) =>
+      ZOledFlag(isPureBlack: isPureBlack ?? this.isPureBlack);
+
+  @override
+  ZOledFlag lerp(ThemeExtension<ZOledFlag>? other, double t) {
+    if (other is! ZOledFlag) return this;
+    return t < 0.5 ? this : other;
+  }
+}
+
 /// Theme-aware text colors for the foreground tokens.
 class ZInk {
   ZInk._();
@@ -379,8 +436,8 @@ class ZInk {
       : ZColors.neutral700.withValues(alpha: 0.40);
 
   /// Sub-surface tone (tiles inside a card: reasoning, tool calls, queue).
-  static Color tile(BuildContext c) =>
-      _dark(c) ? ZColors.darkSecondary : ZColors.lightSecondary;
+  static Color tile(BuildContext c) => _surface(c, ZColors.darkSecondary,
+      ZColors.lightSecondary, ZOledFlag.tileSurface);
 
   /// 1px hairline borders around tiles.
   static Color hairline(BuildContext c) => _dark(c)
@@ -397,12 +454,12 @@ class ZInk {
       : const Color(0x1A0D0D0D);
 
   /// Inline-code pill background (assistant markdown `code`).
-  static Color codeInlineBg(BuildContext c) =>
-      _dark(c) ? ZColors.neutral800 : ZColors.neutral200;
+  static Color codeInlineBg(BuildContext c) => _surface(
+      c, ZColors.neutral800, ZColors.neutral200, ZOledFlag.codeInlineSurface);
 
   /// Fenced code-block background.
-  static Color codeBlockBg(BuildContext c) =>
-      _dark(c) ? ZColors.neutral950 : ZColors.neutral100;
+  static Color codeBlockBg(BuildContext c) => _surface(
+      c, ZColors.neutral950, ZColors.neutral100, ZOledFlag.codeBlockSurface);
 
   static Color codeText(BuildContext c) =>
       _dark(c) ? ZColors.neutral200 : ZColors.neutral700;
@@ -410,8 +467,14 @@ class ZInk {
   /// Card / panel surface (composer, slash popup, user bubble) — the
   /// `--color-card` pair; collects every former direct
   /// `ZColors.darkCard`/`lightCard` reference.
-  static Color card(BuildContext c) =>
-      _dark(c) ? ZColors.darkCard : ZColors.lightCard;
+  static Color card(BuildContext c) => _surface(
+      c, ZColors.darkCard, ZColors.lightCard, ZOledFlag.cardSurface);
+
+  /// Dual-pane left column (task list sidebar). OLED lifts it to the sidebar
+  /// micro-ladder step; the light value stays [ZColors.lightSidebar] (the
+  /// sidebar's own #F0F0F0, not the #F8F8F8 page background).
+  static Color sidebar(BuildContext c) => _surface(
+      c, ZColors.darkSidebar, ZColors.lightSidebar, ZOledFlag.sidebarSurface);
 
   /// Progress-bar track, quota-bar strength — the sidebar quota
   /// rows draw the track as a semi-transparent overlay (`bg-surface-hover`:
@@ -526,6 +589,16 @@ class ZInk {
 
   static bool _dark(BuildContext c) =>
       Theme.of(c).brightness == Brightness.dark;
+
+  /// Surface slot resolver: dark mode returns [dark]; the OLED variant swaps
+  /// in the slot's [ZOledFlag] micro-ladder step. Light mode never carries
+  /// the flag. Functional layers (hairline / cardBorder / barTrack) and text
+  /// slots bypass this on purpose — they must stay visible on a black
+  /// backdrop.
+  static Color _surface(BuildContext c, Color dark, Color light, Color oled) {
+    if (!_dark(c)) return light;
+    return ZOledFlag.isActive(c) ? oled : dark;
+  }
 }
 
 /// Slash-popup glyphs (mock ruling 09-19: commands = terminal, skills =
@@ -547,11 +620,17 @@ abstract final class ZSymbols {
 /// Light/dark mode, persisted. Defaults to dark like the page.
 class ThemeController extends ChangeNotifier {
   static const _key = 'zgo_theme_mode';
+  static const _oledKey = 'zgo_oled_black';
   ThemeMode _mode = ThemeMode.dark;
   ThemeMode get mode => _mode;
 
+  /// OLED pure-black surfaces in dark mode (user opt-in, persisted).
+  bool _oledBlack = false;
+  bool get oledBlack => _oledBlack;
+
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
+    _oledBlack = prefs.getBool(_oledKey) ?? false;
     switch (prefs.getString(_key)) {
       case 'light':
         _mode = ThemeMode.light;
@@ -576,6 +655,13 @@ class ThemeController extends ChangeNotifier {
     });
   }
 
+  Future<void> setOledBlack(bool value) async {
+    _oledBlack = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_oledKey, value);
+  }
+
   void cycle() {
     setMode(switch (_mode) {
       ThemeMode.dark => ThemeMode.light,
@@ -585,21 +671,33 @@ class ThemeController extends ChangeNotifier {
   }
 }
 
-ThemeData buildDarkTheme() {
-  const scheme = ColorScheme.dark(
+/// Builds the app's dark theme. [oled] keeps the backdrop at `#000000`
+/// (all pixels off on OLED panels) and lifts surfaces onto the
+/// [ZOledFlag] micro-ladder so cards / tiles / the sidebar stay readable
+/// against it (2026-11-19 user ruling); text, borders, tracks and status
+/// pills keep their normal dark values. The flag rides
+/// [ThemeData.extensions] so [ZInk] slots follow widget-tree scope.
+ThemeData buildDarkTheme({bool oled = false}) {
+  final scheme = ColorScheme.dark(
     primary: ZColors.neutral50,
     onPrimary: ZColors.neutral950,
     secondary: ZColors.darkSecondary,
     onSecondary: ZColors.neutral50,
-    surface: ZColors.darkBackground,
+    surface: oled ? ZOledFlag.pureBlack : ZColors.darkBackground,
     onSurface: ZColors.neutral200,
     error: ZColors.danger,
     onError: ZColors.neutral950,
-    surfaceContainerHighest: ZColors.darkCard,
-    outline: Color(0x1AFFFFFF),
+    surfaceContainerHighest:
+        oled ? ZOledFlag.cardSurface : ZColors.darkCard,
+    outline: const Color(0x1AFFFFFF),
   );
-  return _base(scheme, ZColors.darkBackground, ZColors.darkCard,
-      const Color(0x1AFFFFFF), ZColors.neutral200);
+  return _base(
+      scheme,
+      oled ? ZOledFlag.pureBlack : ZColors.darkBackground,
+      oled ? ZOledFlag.cardSurface : ZColors.darkCard,
+      const Color(0x1AFFFFFF),
+      ZColors.neutral200,
+      oled: oled);
 }
 
 ThemeData buildLightTheme() {
@@ -620,11 +718,14 @@ ThemeData buildLightTheme() {
 }
 
 ThemeData _base(ColorScheme scheme, Color background, Color card,
-    Color border, Color foreground) {
+    Color border, Color foreground, {bool oled = false}) {
   return ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
     scaffoldBackgroundColor: background,
+    extensions: oled
+        ? const <ThemeExtension<dynamic>>[ZOledFlag.oled]
+        : null,
     fontFamily: zFontFamily,
     fontFamilyFallback: zFontFallback,
     // iOS/macOS default to shrinkWrap, which would leave Material buttons
@@ -651,10 +752,13 @@ ThemeData _base(ColorScheme scheme, Color background, Color card,
             BorderRadius.vertical(top: Radius.circular(ZRadius.large)),
       ),
     ),
+    // OLED snackbars use the card ladder step instead of the default
+    // light-gray primary fill, which would glow; the text flips to the
+    // light onSurface ink instead of onPrimary's near-black.
     snackBarTheme: SnackBarThemeData(
       behavior: SnackBarBehavior.floating,
-      backgroundColor: scheme.primary,
-      contentTextStyle: TextStyle(color: scheme.onPrimary),
+      backgroundColor: oled ? card : scheme.primary,
+      contentTextStyle: TextStyle(color: oled ? foreground : scheme.onPrimary),
       shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(ZRadius.field)),
     ),
@@ -750,11 +854,17 @@ ThemeData _base(ColorScheme scheme, Color background, Color card,
 
 
 /// Card visuals for [ZGoApp]'s builder-wrapped CardTheme widget
-/// (stable across SDKs, unlike ThemeData.cardTheme's param type).
-CardThemeData zCardTheme(Brightness brightness) {
+/// (stable across SDKs, unlike ThemeData.cardTheme's param type). [oled]
+/// lifts the fill to the card micro-ladder step.
+CardThemeData zCardTheme(Brightness brightness, {bool oled = false}) {
   final dark = brightness == Brightness.dark;
+  final color = dark && oled
+      ? ZOledFlag.cardSurface
+      : dark
+          ? ZColors.darkCard
+          : ZColors.lightCard;
   return CardThemeData(
-    color: dark ? ZColors.darkCard : ZColors.lightCard,
+    color: color,
     elevation: 0,
     margin: EdgeInsets.zero,
     shape: RoundedRectangleBorder(
@@ -766,10 +876,12 @@ CardThemeData zCardTheme(Brightness brightness) {
 }
 
 /// Dialog visuals for the builder-wrapped DialogTheme widget.
-DialogThemeData zDialogTheme(Brightness brightness) {
+DialogThemeData zDialogTheme(Brightness brightness, {bool oled = false}) {
   final dark = brightness == Brightness.dark;
   return DialogThemeData(
-    backgroundColor: dark ? ZColors.darkCard : ZColors.lightCard,
+    backgroundColor: dark && oled
+        ? ZOledFlag.cardSurface
+        : (dark ? ZColors.darkCard : ZColors.lightCard),
     shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(ZRadius.tile)),
   );

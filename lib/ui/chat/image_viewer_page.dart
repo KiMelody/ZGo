@@ -34,7 +34,10 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
     // Photo surface: theme-independent near-black from the neutral
     // scale (a light-mode white viewer would wash the image out; the design
     // pins black §4.1). Not a ZInk slot on purpose — ZInk branches by theme.
-    const surface = ZColors.neutral950;
+    // The OLED flag is the one opt-in that lifts it to true #000000.
+    final surface = ZOledFlag.isActive(context)
+        ? ZOledFlag.pureBlack
+        : ZColors.neutral950;
     return Scaffold(
       backgroundColor: surface,
       body: GestureDetector(
@@ -68,8 +71,8 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
                         begin: Alignment.topCenter,
                         end: Alignment.bottomCenter,
                         colors: [
-                          ZColors.neutral950,
-                          ZColors.neutral950.withValues(alpha: 0),
+                          surface,
+                          surface.withValues(alpha: 0),
                         ],
                       ),
                     ),

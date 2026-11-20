@@ -297,12 +297,14 @@ class _DevicesPageState extends State<DevicesPage>
     await _openRemote(device);
   }
 
-  /// Applies the device URL's `theme=dark|light` for the opened route.
+  /// Applies the device URL's `theme=dark|light` for the opened route. The
+  /// dark branch follows the app-wide OLED toggle so a device route does not
+  /// silently fall back to the near-black ladder.
   Widget _deviceThemeWrap(Device device, Widget child) {
     final hint = device.themeHint;
     if (hint == null) return child;
     final data = hint == ThemeModeHint.dark
-        ? buildDarkTheme()
+        ? buildDarkTheme(oled: widget.theme.oledBlack)
         : buildLightTheme();
     return Theme(data: data, child: child);
   }

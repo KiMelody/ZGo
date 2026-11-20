@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#161616</color>
-
     <!-- Quota-watch notice (light system theme; dark overrides live in
          values-night/colors.xml). Mock palette 09-19. -->
     <color name="quota_accent">#0B7FFF</color>
@@ -10,4 +8,12 @@
     <color name="quota_text_secondary">#43464D</color>
     <color name="quota_text_muted">#767A83</color>
     <color name="quota_ring_track">#E4E5E8</color>
+    <!-- Android 12+ system splash background + stage-2 launch art field
+         (light; values-night overrides). Matches the radial field edge. -->
+    <color name="splash_bg">#D7EEFB</color>
+    <!-- Stage-1 splash background, day and night alike: the system resolves
+         the stage-1 icon and bg before the in-app uiMode override can
+         apply, so stage 1 is pinned brand-dark (route B). Same value in
+         values-night. -->
+    <color name="splash_bg_brand">#0A2D44</color>
 </resources>

@@ -59,7 +59,9 @@ class _AboutPageState extends State<AboutPage> {
           const SizedBox(height: 24),
           Center(
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(ZRadius.large),
+              // One branded asset in both themes; pill = 999 is a full circle
+              // at 72×72 (no full-radius token exists).
+              borderRadius: BorderRadius.circular(ZRadius.pill),
               child: Image.asset(
                 'assets/icon/icon.png',
                 width: 72,

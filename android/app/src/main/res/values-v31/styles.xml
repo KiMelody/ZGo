@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ system splash: the generated dark adaptive icon is large on
+         the splash screen, so on a light system the default window background
+         reads as a black slab dominated by the icon. Use the themed brand
+         background instead. Only LaunchTheme is overridden here — the base
+         styles file keeps NormalTheme and the pre-31 fallback. -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+        <item name="android:windowSplashScreenBackground">@color/splash_bg_brand</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash</item>
+    </style>
+</resources>

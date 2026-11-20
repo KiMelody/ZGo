@@ -238,6 +238,21 @@ class _SettingsPageState extends State<SettingsPage> {
                     ],
                   ),
                 ),
+                // Dark-only switch: in light mode the control is disabled
+                // (the hint copy states the scope) but the persisted value
+                // is kept so toggling back to dark restores it.
+                SwitchListTile(
+                  secondary: const Icon(Icons.brightness_2_outlined),
+                  title: Text(tr(context, 'settings.theme.oled')),
+                  subtitle: Text(tr(context, 'settings.theme.oledHint')),
+                  value: theme.oledBlack,
+                  onChanged: theme.mode == ThemeMode.light
+                      ? null
+                      : (v) {
+                          HapticFeedback.selectionClick();
+                          theme.setOledBlack(v);
+                        },
+                ),
                 _header(context, tr(context, 'settings.general')),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),

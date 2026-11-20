@@ -140,7 +140,9 @@ class NotificationService {
         }
       }
       const settings = InitializationSettings(
-        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        // The launcher icon's alpha is fully opaque, so Android renders it as
+        // a solid white square; ic_notification is the Z silhouette.
+        android: AndroidInitializationSettings('@drawable/ic_notification'),
         iOS: DarwinInitializationSettings(
           requestAlertPermission: false,
           requestBadgePermission: false,

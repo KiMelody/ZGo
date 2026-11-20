@@ -13,6 +13,9 @@
 
          This Theme is only used starting with V2 of Flutter's Android embedding. -->
     <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
-        <item name="android:windowBackground">?android:colorBackground</item>
+        <!-- Stage-2 window background: the generated launch art. FlutterActivity
+             switches LaunchTheme -> NormalTheme in onCreate, so this is what the
+             user sees between the system splash and the first Flutter frame. -->
+        <item name="android:windowBackground">@drawable/launch_background</item>
     </style>
 </resources>

@@ -658,11 +658,11 @@ class _TaskListPageState extends State<TaskListPage>
   /// Desktop layout (≥768): IDE-style sidebar (新建/搜索/项目树)
   /// + 1px divider + rounded chat pane — not a shrunk mobile card list.
   Widget _buildDualPane(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    // Surfaces come from the ambient theme so the OLED pure-black variant
+    // reaches the sidebar/divider without a second token ladder here.
+    final background = Theme.of(context).scaffoldBackgroundColor;
     return Scaffold(
-      backgroundColor: isDark
-          ? ZColors.darkBackground
-          : ZColors.lightBackground,
+      backgroundColor: background,
       // Immersive cutout handling: SafeArea lives inside each column so the
       // sidebar color block and the divider extend behind the cutout / status
       // strip (no Scaffold-background color seam) while content still clears
@@ -676,7 +676,7 @@ class _TaskListPageState extends State<TaskListPage>
           SizedBox(
             width: kSidebarWidth,
             child: ColoredBox(
-              color: isDark ? ZColors.darkSidebar : ZColors.lightSidebar,
+              color: ZInk.sidebar(context),
               child: SafeArea(
                 left: true,
                 top: true,
@@ -686,7 +686,7 @@ class _TaskListPageState extends State<TaskListPage>
               ),
             ),
           ),
-          Container(width: 1, color: const Color(0xFF333333)),
+          Container(width: 1, color: ZInk.hairline(context)),
           Expanded(
             child: SafeArea(
               left: false,
@@ -697,9 +697,7 @@ class _TaskListPageState extends State<TaskListPage>
                 padding: const EdgeInsets.fromLTRB(0, 8, 8, 8),
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: isDark
-                        ? ZColors.darkBackground
-                        : ZColors.lightBackground,
+                    color: background,
                     borderRadius: BorderRadius.circular(ZRadius.tile),
                     border: Border.all(color: ZInk.hairline(context)),
                   ),
