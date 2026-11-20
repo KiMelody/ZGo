@@ -258,6 +258,10 @@ const _zh = {
   'chat.expand': '展开',
   'chat.collapse': '收起',
   'chat.empty': '暂无消息',
+  // Structural placeholders (R4): timeline rows that exist but cannot render
+  // as content stay visible instead of silently collapsing.
+  'chat.emptyText': '空消息',
+  'chat.unsupportedRow': '该消息类型暂不支持',
   'chat.draftHint': '输入消息开始新任务',
   'chat.noSession': '尚无会话',
   'chat.noOlder': '没有更早的消息了',
@@ -1847,6 +1851,10 @@ const _en = {
   'chat.expand': 'Expand',
   'chat.collapse': 'Collapse',
   'chat.empty': 'No messages yet',
+  // Structural placeholders (R4): timeline rows that exist but cannot render
+  // as content stay visible instead of silently collapsing.
+  'chat.emptyText': 'Empty message',
+  'chat.unsupportedRow': 'Unsupported message type',
   'chat.draftHint': 'Type a message to start a new task',
   'chat.noSession': 'No session yet',
   'chat.noOlder': 'No older messages',

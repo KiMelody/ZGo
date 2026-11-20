@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:zgo/protocol/conversation_state.dart';
 import 'package:zgo/ui/chat/markdown_view.dart';
 import 'package:zgo/ui/chat/subagent_feed.dart';
 import 'package:zgo/ui/chat/timeline.dart';
@@ -60,6 +61,8 @@ void main() {
     ThemeData? theme,
     ValueNotifier<String?>? editingRowId,
     Future<void> Function(Map<String, dynamic>, String, bool)? onEditSend,
+    Map<int, Map<String, dynamic>>? agentSubagentByRowId,
+    ChatPageActions? actions,
   }) async {
     await tester.pumpWidget(
       wrap(
@@ -76,6 +79,8 @@ void main() {
           lastError: lastError,
           editingRowId: editingRowId,
           onEditSend: onEditSend,
+          agentSubagentByRowId: agentSubagentByRowId,
+          actions: actions,
         ),
         theme: theme,
       ),
@@ -359,5 +364,171 @@ void main() {
       reason: 'light theme resolves the prose ink to neutral700',
     );
     expect(styles, isNot(contains(ZColors.neutral200)));
+  });
+
+  testWidgets('the shared agent-subagent table identity is a memo input',
+      (tester) async {
+    // R5/design D4: groups without Agent rows pass null and stay reusable;
+    // groups with Agent rows carry the shared table, and a new table
+    // instance (even an empty one) must re-enter the build.
+    final rows = turnRows();
+    final table = <int, Map<String, dynamic>>{};
+    await pumpGroup(tester, rows, agentSubagentByRowId: table);
+    expect(debugTurnGroupBuilds, 1);
+
+    await pumpGroup(tester, rows, agentSubagentByRowId: table);
+    expect(debugTurnGroupBuilds, 1,
+        reason: 'identical table instance → cached subtree');
+
+    await pumpGroup(tester, rows,
+        agentSubagentByRowId: <int, Map<String, dynamic>>{});
+    expect(debugTurnGroupBuilds, 2,
+        reason: 'a fresh table instance is a new input even when empty');
+  });
+
+  test('agentSubagentIndex memoizes by rows instance and rebuilds on append',
+      () {
+    final rows = <Map<String, dynamic>>[
+      {'rowId': 1, 'kind': 'toolCall', 'toolName': 'Agent', 'toolCallId': 'c1'},
+    ];
+    final first = agentSubagentIndex(rows);
+    expect(first, isEmpty);
+    expect(agentSubagentIndex(rows), same(first),
+        reason: 'unchanged rows → the same shared map instance');
+
+    final subagentRow = <String, dynamic>{
+      'rowId': 2,
+      'kind': 'subagent',
+      'parentToolCallId': 'c1',
+      'childSessionId': 'sess_c1',
+    };
+    rows.add(subagentRow); // row.appended keeps the SAME list instance
+    final second = agentSubagentIndex(rows);
+    expect(identical(first, second), isFalse,
+        reason: 'in-place growth must fail the reference snapshot');
+    expect(identical(second[1], subagentRow), isTrue);
+
+    // The two-slot cache keeps the other surface's slot alive: alternating
+    // between two rows lists must not evict either table.
+    final otherRows = <Map<String, dynamic>>[
+      {'rowId': 9, 'kind': 'userInput', 'text': 'x'},
+    ];
+    final other = agentSubagentIndex(otherRows);
+    expect(identical(agentSubagentIndex(rows), second), isTrue);
+    expect(identical(agentSubagentIndex(otherRows), other), isTrue);
+  });
+
+  testWidgets(
+      'an appended subagent row lights the nested drill-in arrow in the '
+      'inline child timeline', (tester) async {
+    // R5/design D4 inline surface: _AgentChildTimeline renders ChatRows
+    // flat through the shared index built from the CHILD rows instance.
+    final child = ConversationState();
+    child.applyFrame({
+      'toSeq': 1,
+      'payload': {
+        'kind': 'snapshot',
+        'snapshot': {
+          'sessionId': 'child-1',
+          'logEpoch': 'e1',
+          'revision': 1,
+          'rows': {
+            'window': [
+              {
+                'rowId': 1,
+                'kind': 'assistantText',
+                'text': 'child working',
+              },
+              {
+                'rowId': 2,
+                'kind': 'toolCall',
+                'toolName': 'Agent',
+                'toolCallId': 'inner-1',
+                'status': 'running',
+                'inputText': '{"description": "nested-agent", "prompt": "q"}',
+              },
+            ],
+            'totalCount': 2,
+            'firstRowId': 1,
+          },
+        },
+      },
+    }, onGap: () => fail('unexpected gap'));
+    conversation.childStates['child-1'] = child;
+
+    final rows = <Map<String, dynamic>>[
+      {'rowId': 1, 'kind': 'userInput', 'text': 'spawn'},
+      {
+        'rowId': 2,
+        'kind': 'toolCall',
+        'toolName': 'Agent',
+        'toolCallId': 'call-1',
+        'status': 'running',
+        'inputText': '{"description": "parent-agent", "prompt": "p"}',
+      },
+      {
+        'rowId': 3,
+        'kind': 'subagent',
+        'parentToolCallId': 'call-1',
+        'childSessionId': 'child-1',
+        'summaryText': 'parent-agent',
+        'status': 'running',
+      },
+    ];
+    await pumpGroup(
+      tester,
+      rows,
+      agentSubagentByRowId: agentSubagentIndex(rows),
+      actions: ChatPageActions(
+        openSubagent: (context, feed,
+            {required childSessionId,
+            title,
+            subagentType,
+            workId,
+            parentSessionId,
+            running = false,
+            confirmWindow}) {},
+      ),
+    );
+
+    // Expand the Agent tile so the pooled child subscription mounts.
+    await tester.tap(find.byType(ExpansionTile).first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.textContaining('child working'), findsWidgets);
+
+    // The inline nested Agent tile header (innermost ExpansionTile).
+    Finder nestedArrow() => find.descendant(
+          of: find.byType(ExpansionTile).last,
+          matching: find.byIcon(Icons.chevron_right),
+        );
+    expect(nestedArrow(), findsNothing,
+        reason: 'no subagent row yet → no childSessionId → no arrow');
+
+    child.applyFrame({
+      'fromSeq': child.seq,
+      'toSeq': child.seq + 1,
+      'payload': {
+        'kind': 'deltas',
+        'deltas': [
+          {
+            'op': 'row.appended',
+            'row': {
+              'rowId': 3,
+              'kind': 'subagent',
+              'parentToolCallId': 'inner-1',
+              'childSessionId': 'grandchild-1',
+              'summaryText': 'nested-agent',
+              'status': 'running',
+            },
+          },
+        ],
+      },
+    }, onGap: () => fail('unexpected gap'));
+    await tester.pumpAndSettle();
+
+    expect(nestedArrow(), findsOneWidget,
+        reason: 'the inline timeline resolves the appended row through the '
+            'shared child-rows index');
   });
 }

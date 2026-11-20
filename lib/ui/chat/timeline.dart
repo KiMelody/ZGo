@@ -206,21 +206,115 @@ const turnTerminalPhases = {
   'error',
 };
 
-/// The `kind=='subagent'` stream row spawned by an Agent tool call, linked
-/// via parentToolCallId ↔ toolCallId (live-probed 2026-09-16); carries the
-/// childSessionId/workId needed for the detail-page entry.
-Map<String, dynamic>? _subagentRowFor(
+/// Full Agent-row → spawned-subagent-row index of one rows window (task
+/// 11-19 R5/design D4).
+///
+/// The map is keyed by the Agent tool row's `rowId`; the value is the
+/// `kind=='subagent'` stream row linked via parentToolCallId ↔ toolCallId
+/// (live-probed 2026-09-16), which carries the childSessionId/workId the
+/// drill-in chain needs.
+///
+/// Cost memo (design D4, review B1/B-9/B-10): callers construct it inside
+/// the item builder, i.e. during layout, on every state notification for
+/// every visible group. So it runs through a two-slot cache keyed by the
+/// caller's rows list INSTANCE (`identical`): the main chat's `state.rows`
+/// and an inline child timeline's `child.rows` each hold a slot, so the two
+/// surfaces do not evict each other. A slot snapshots the ROW REFERENCES as
+/// `List.of(rows)` — the row container grows in place (`row.appended` does
+/// `rows.add` on the same list), so storing the live list itself would
+/// validate against its own mutation and serve a stale index. Validation is
+/// element-wise `identical`, tail-first (wire deltas land at the tail); a
+/// mismatch rebuilds the full table once. A hit returns the SAME Map
+/// instance, which is what makes the `identical` compare of
+/// [ChatTurnGroup.agentSubagentByRowId] a valid invalidation key: the tables
+/// are only equal when the underlying row references are (row maps are
+/// immutable by contract, conversation_state replaces every touched row).
+///
+/// [isAgentTool] rows only; two passes, O(N) per rebuild (first subagent
+/// rows — first match wins, preserving the old per-row scan's order — then
+/// Agent rows resolving their `toolCallId`).
+Map<int, Map<String, dynamic>> agentSubagentIndex(
   List<Map<String, dynamic>> rows,
-  Map<String, dynamic> toolRow,
 ) {
-  final id = '${toolRow['toolCallId'] ?? ''}';
-  if (id.isEmpty) return null;
-  for (final r in rows) {
-    if (r['kind'] == 'subagent' && '${r['parentToolCallId'] ?? ''}' == id) {
-      return r;
+  for (var i = 0; i < _agentSubagentSlots.length; i++) {
+    final slot = _agentSubagentSlots[i];
+    if (!identical(slot.rows, rows)) continue;
+    if (_sameRowRefs(slot.refs, rows)) {
+      // Most-recently-used first — the LRU order the next miss evicts from.
+      if (i > 0) {
+        _agentSubagentSlots
+          ..removeAt(i)
+          ..insert(0, slot);
+      }
+      return slot.index;
     }
+    // Same list instance, mutated in place: rebuild below and refresh the
+    // snapshot (the stale slot must not linger behind the fresh one).
+    _agentSubagentSlots.removeAt(i);
+    break;
   }
-  return null;
+  final index = _buildAgentSubagentIndex(rows);
+  _agentSubagentSlots.insert(
+    0,
+    _AgentSubagentSlot(rows, List<Map<String, dynamic>>.of(rows), index),
+  );
+  if (_agentSubagentSlots.length > _kAgentSubagentIndexSlots) {
+    _agentSubagentSlots.removeLast();
+  }
+  return index;
+}
+
+const int _kAgentSubagentIndexSlots = 2;
+
+class _AgentSubagentSlot {
+  _AgentSubagentSlot(this.rows, this.refs, this.index);
+
+  /// The caller's rows list instance — the slot key.
+  final List<Map<String, dynamic>> rows;
+
+  /// `List.of(rows)` reference snapshot taken when [index] was built.
+  final List<Map<String, dynamic>> refs;
+
+  final Map<int, Map<String, dynamic>> index;
+}
+
+final List<_AgentSubagentSlot> _agentSubagentSlots = <_AgentSubagentSlot>[];
+
+/// Element-wise reference compare, tail-first — same walk as the chat
+/// page's grouping snapshot (`_sameRowRefs`).
+bool _sameRowRefs(
+  List<Map<String, dynamic>> a,
+  List<Map<String, dynamic>> b,
+) {
+  if (a.length != b.length) return false;
+  for (var i = a.length - 1; i >= 0; i--) {
+    if (!identical(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+Map<int, Map<String, dynamic>> _buildAgentSubagentIndex(
+  List<Map<String, dynamic>> rows,
+) {
+  final byParent = <String, Map<String, dynamic>>{};
+  for (final row in rows) {
+    if (row['kind'] != 'subagent') continue;
+    final parent = '${row['parentToolCallId'] ?? ''}';
+    if (parent.isEmpty) continue;
+    byParent.putIfAbsent(parent, () => row);
+  }
+  final index = <int, Map<String, dynamic>>{};
+  if (byParent.isEmpty) return index;
+  for (final row in rows) {
+    if (!isAgentTool(row)) continue;
+    final id = '${row['toolCallId'] ?? ''}';
+    if (id.isEmpty) continue;
+    final subagent = byParent[id];
+    final rowId = (row['rowId'] as num?)?.toInt();
+    if (subagent == null || rowId == null) continue;
+    index[rowId] = subagent;
+  }
+  return index;
 }
 
 AssistantTurnParts assistantTurnParts(List<Map<String, dynamic>> rows) {
@@ -234,7 +328,8 @@ AssistantTurnParts assistantTurnParts(List<Map<String, dynamic>> rows) {
 
   void flushText() {
     if (template != null) {
-      final text = buf!.toString().trim();
+      final raw = buf!.toString();
+      final text = raw.trim();
       if (text.isNotEmpty) {
         parts.add((
           kind: 'text',
@@ -242,6 +337,20 @@ AssistantTurnParts assistantTurnParts(List<Map<String, dynamic>> rows) {
           row: template,
           group: null,
           streaming: anyStream,
+        ));
+      } else if (raw.isEmpty && !anyStream) {
+        // Terminal empty text (R4/D3): a row that exists but carries no text
+        // must not vanish. Keep a text part so _AssistantBubble renders the
+        // chat.emptyText caption. Whitespace-only segments (e.g. the "\n"
+        // separator between tool calls) stay dropped: they are separators,
+        // not messages — a part would add placeholder noise to history AND a
+        // trailing one would steal the feedback-row anchor (lastTextIdx).
+        parts.add((
+          kind: 'text',
+          text: '',
+          row: template,
+          group: null,
+          streaming: false,
         ));
       }
       buf = null;
@@ -692,6 +801,19 @@ class ChatTurnGroup extends StatefulWidget {
   /// navigator (detail page, inline expansion, tests).
   final GlobalKey? groupRenderKey;
 
+  /// Agent-row → spawned-subagent-row table shared by the whole page
+  /// (task 11-19 R5/design D4) — the shared instance returned by
+  /// [agentSubagentIndex] for this page's rows, or null when the group holds
+  /// no Agent tool row. A construct-time input, NOT a build-time lookup: a
+  /// subagent row appended at the tail (`row.appended` → `rows.add`) leaves
+  /// this group's OWN rows identical, so the page-level widget cache
+  /// ([sameInputs]) would hand the same instance back and the group build
+  /// would never run — the drill-in arrow would silently stay missing. The
+  /// table's identity is therefore part of the fingerprint; the table
+  /// itself is memoized by row-reference snapshot, so the item builder pays
+  /// one reference walk, never a per-group row scan.
+  final Map<int, Map<String, dynamic>>? agentSubagentByRowId;
+
   const ChatTurnGroup({
     super.key,
     required this.rows,
@@ -710,6 +832,7 @@ class ChatTurnGroup extends StatefulWidget {
     this.sideChat = false,
     this.lastError,
     this.groupRenderKey,
+    this.agentSubagentByRowId,
   });
 
   /// Whether [next] carries the same rendering inputs as [prev] — the
@@ -752,7 +875,11 @@ class ChatTurnGroup extends StatefulWidget {
         prev.readOnly == next.readOnly &&
         prev.sideChat == next.sideChat &&
         identical(prev.lastError, next.lastError) &&
-        identical(prev.groupRenderKey, next.groupRenderKey);
+        identical(prev.groupRenderKey, next.groupRenderKey) &&
+        // Shared table instance (see [agentSubagentByRowId]): identical ⇔ the
+        // tree-referenced rows are unchanged, since the table is rebuilt
+        // exactly when its row-reference snapshot fails.
+        identical(prev.agentSubagentByRowId, next.agentSubagentByRowId);
   }
 
   @override
@@ -1056,6 +1183,7 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
             feed: widget.feed,
             actions: widget.actions,
             readOnly: widget.readOnly,
+            subagentByRowId: widget.agentSubagentByRowId,
           ),
         );
       } else {
@@ -1070,6 +1198,11 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
             state: widget.state,
             preview: widget.preview,
             feed: widget.feed,
+            // Ungrouped single tool row (often a lone Agent call): its
+            // drill-in arrow needs the same shared lookup as the grouped
+            // card — missing it would silently drop the arrow here.
+            subagentRow: widget.agentSubagentByRowId?[
+                (p.row!['rowId'] as num?)?.toInt()],
             actions: widget.actions,
             readOnly: widget.readOnly,
             sideChat: widget.sideChat,
@@ -1185,6 +1318,14 @@ class ChatRow extends StatelessWidget {
   /// the last text segment's feedback row; empty elsewhere.
   final List<Map<String, dynamic>> hookRows;
 
+  /// Agent tool row only: the spawned `kind=='subagent'` row matching this
+  /// row's `toolCallId`, resolved by the caller through the shared
+  /// [agentSubagentIndex] table (task 11-19 R5/design D4). A construct-time
+  /// input because the page-level group-widget memo skips the whole subtree
+  /// update otherwise — the appended row leaves the Agent's own group rows
+  /// identical. Null for every non-agent row.
+  final Map<String, dynamic>? subagentRow;
+
   /// Inline edit-resend plumbing (D1) — user rows only; see
   /// [ChatTurnGroup].
   final ValueNotifier<String?>? editingRowId;
@@ -1220,6 +1361,7 @@ class ChatRow extends StatelessWidget {
     this.showFeedback = true,
     this.hookRows = const [],
     this.feed,
+    this.subagentRow,
     this.turnFeedbackLocked = false,
     this.editingRowId,
     this.onEditSend,
@@ -1460,7 +1602,9 @@ class ChatRow extends StatelessWidget {
         conversation: conversation,
         sessionId: sessionId,
         // Agent rows drill into the subagent's child-session detail page.
-        subagent: isAgentTool(row) ? _subagentRowFor(state.rows, row) : null,
+        // Resolved upstream (shared row-reference index) so the appended
+        // subagent row reaches the already-cached group subtree.
+        subagent: subagentRow,
         feed: feed,
         actions: actions,
         readOnly: readOnly,
@@ -1474,7 +1618,9 @@ class ChatRow extends StatelessWidget {
         actions: actions,
       ),
       'timelineMarker' => _TimelineMarkerWidget(row: row),
-      _ => const SizedBox.shrink(),
+      // Unknown kinds must never disappear silently (R4/D3): protocol drift
+      // otherwise leaves unexplained gaps in long conversations.
+      _ => _UnsupportedRow(row: row),
     };
     final kind = row['kind'];
     if (kind != 'userInput' && kind != 'assistantText') return widget_;
@@ -1485,6 +1631,41 @@ class ChatRow extends StatelessWidget {
     return GestureDetector(
       onLongPress: () => _showActions(context),
       child: widget_,
+    );
+  }
+}
+
+/// Single caption line in the weakest ink — the shared shape of both
+/// structural placeholders (unknown kind, terminal empty text). Quiet enough
+/// to stay out of the reading flow, visible enough to explain a gap.
+class _PlaceholderLine extends StatelessWidget {
+  final String text;
+
+  const _PlaceholderLine(this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text,
+      style: ZType.caption.copyWith(color: ZInk.ghost(context)),
+    );
+  }
+}
+
+/// Fallback for an unknown `kind` (R4/D3): a visible caption placeholder
+/// instead of the former `SizedBox.shrink()`. The kind value is an internal
+/// protocol term — it only reaches debugPrint, never the screen.
+class _UnsupportedRow extends StatelessWidget {
+  final Map<String, dynamic> row;
+
+  const _UnsupportedRow({required this.row});
+
+  @override
+  Widget build(BuildContext context) {
+    debugPrint('[chat] unsupported row kind=${row['kind']}');
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: _PlaceholderLine(tr(context, 'chat.unsupportedRow')),
     );
   }
 }
@@ -2057,20 +2238,28 @@ class _AssistantBubble extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          AppMarkdown(
-            text,
-            // M0 (quote-comment-lite): plain Text + Text code bodies, so the
-            // row's long-press action sheet stays reachable on the glyphs
-            // (a SelectableText here owned the long-press arena). Free
-            // selection lives in the isolated quote view; copy stays on the
-            // feedback row and the code-block header. Applies to the
-            // subagent detail page and inline expansion too (same shared
-            // row) — the recorded, accepted trade-off.
-            selectable: false,
-            proseRightInset: 24,
-            imageResolver: preview.resolveImage,
-            onLinkTap: (href) => preview.openLink(context, href),
-          ),
+          // Terminal empty text (R4/D3): an assistant row that carries no text
+          // would render as an invisible AppMarkdown(''). Show a caption
+          // placeholder instead so the turn stays legible. Streaming rows and
+          // the feedback-locked transient (turn just ended, feedback UI owns
+          // the row) keep the legacy empty markdown — see PRD non-goals.
+          if (text.isEmpty && !inProgress)
+            _PlaceholderLine(tr(context, 'chat.emptyText'))
+          else
+            AppMarkdown(
+              text,
+              // M0 (quote-comment-lite): plain Text + Text code bodies, so the
+              // row's long-press action sheet stays reachable on the glyphs
+              // (a SelectableText here owned the long-press arena). Free
+              // selection lives in the isolated quote view; copy stays on the
+              // feedback row and the code-block header. Applies to the
+              // subagent detail page and inline expansion too (same shared
+              // row) — the recorded, accepted trade-off.
+              selectable: false,
+              proseRightInset: 24,
+              imageResolver: preview.resolveImage,
+              onLinkTap: (href) => preview.openLink(context, href),
+            ),
           if (showFeedback)
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -2848,6 +3037,10 @@ class _AgentChildTimelineState extends State<_AgentChildTimeline> {
               ? child.rows.skip(child.rows.length - 60)
               : child.rows,
         );
+        // Nested Agent rows drill in too (design D4 construction point 3):
+        // the table rides the CHILD rows list instance, so this surface and
+        // the main chat hold one cache slot each instead of evicting.
+        final subagentByRowId = agentSubagentIndex(child.rows);
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -2885,6 +3078,8 @@ class _AgentChildTimelineState extends State<_AgentChildTimeline> {
                 state: child,
                 preview: widget.preview,
                 feed: widget.feed,
+                subagentRow:
+                    subagentByRowId[(row['rowId'] as num?)?.toInt()],
                 actions: widget.actions,
                 readOnly: true,
               ),
@@ -3895,6 +4090,11 @@ class ToolGroupCard extends StatefulWidget {
   /// Read-only boundary (design D2) — forwarded to the expanded rows.
   final bool readOnly;
 
+  /// Shared agent-row → spawned-subagent-row table (task 11-19 R5/design D4)
+  /// — forwarded to every expanded tool row so a grouped Agent call keeps
+  /// its drill-in arrow. Null when the turn holds no Agent row.
+  final Map<int, Map<String, dynamic>>? subagentByRowId;
+
   const ToolGroupCard({
     super.key,
     required this.rows,
@@ -3906,6 +4106,7 @@ class ToolGroupCard extends StatefulWidget {
     this.actions,
     this.feed,
     this.readOnly = false,
+    this.subagentByRowId,
   });
 
   @override
@@ -4066,6 +4267,8 @@ class _ToolGroupCardState extends State<ToolGroupCard> {
                       state: widget.state,
                       preview: widget.preview,
                       feed: widget.feed,
+                      subagentRow: widget.subagentByRowId?[
+                          (rows[i]['rowId'] as num?)?.toInt()],
                       actions: widget.actions,
                       readOnly: widget.readOnly,
                     ),

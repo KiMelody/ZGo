@@ -36,6 +36,7 @@ import 'side_chat_command.dart';
 import 'side_chat_tab_bar.dart';
 import 'subagent_feed.dart';
 import 'timeline.dart';
+import 'tool_row_semantics.dart';
 import 'top_bounce_physics.dart';
 import 'transcript_viewport.dart';
 import 'turn_navigator.dart';
@@ -47,6 +48,32 @@ import 'workflow_run_page.dart';
 /// cached groups. Never read by production code.
 @visibleForTesting
 int debugGroupingComputations = 0;
+
+/// Upper bound for the turn-navigator jump's one-frame cache widen (same
+/// ceiling the anchor-compensation chain uses). Test seam: the give-up E2E
+/// coverage lowers it so the probe radius cannot cover the whole session;
+/// restore it after the test.
+@visibleForTesting
+double debugJumpMaxCacheExtent = 120000;
+
+/// Fraction of `maxScrollExtent` at which the jump's proportional probe
+/// lands: the target query's index over the query count, clamped to [0, 1]
+/// (an empty directory probes at the top). The estimate only positions the
+/// probe; the real landing is measured on the next frame — chat-conventions
+/// §9.
+@visibleForTesting
+double queryJumpFraction(int queryIndex, int queryCount) {
+  if (queryCount <= 0) return 0;
+  return (queryIndex / queryCount).clamp(0.0, 1.0).toDouble();
+}
+
+/// Whether the restored-cache layout's REAL maxScrollExtent trims the
+/// settled jump offset (design D2): a glide performed while the cache was
+/// widened can park past the extent the restored list actually lays out,
+/// leaving unpainted blank space below the content.
+@visibleForTesting
+bool shouldClampAfterRestore(double pixels, double maxScrollExtent) =>
+    pixels > maxScrollExtent;
 
 /// Native chat view for one task (session), backed by Conversation V4 over
 /// the page-construction boundary [ChatPageHost] (ADR-0008 rule ii).
@@ -523,13 +550,13 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     }
   }
 
-  /// Turn navigator directory (design §2.1): ascending rowIds of the real
-  /// user queries in the loaded window, recomputed in the state listener
-  /// only when `(rows.length, firstRowId, lastRowId)` changes — streaming
-  /// text deltas hit the memo key and never recompute (PRD AC: the cell
+  /// Turn navigator directory (design §2.1 / D5): ascending rowIds of the
+  /// real user queries in the loaded window. The state listener recomputes
+  /// the projection on every notification; the value-equality gate in
+  /// [_refreshQueryDirectory] keeps an unchanged directory from replacing
+  /// the list instance (streaming text deltas stay free, PRD AC: the cell
   /// list does not recompute on text deltas).
   List<int> _queryRowIds = const [];
-  (int, String?, String?)? _queryDirKey;
 
   /// Turn navigator highlight: the query at the viewport top, computed on
   /// scroll ([_updateActiveQueryIndex]). A ValueNotifier so a highlight
@@ -600,6 +627,14 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   /// ([TranscriptViewport.anchorCacheExtent]); the two never hold at once,
   /// so build reads `viewport.anchorCacheExtent ?? _jumpCacheExtent`.
   double? _jumpCacheExtent;
+
+  /// In-flight turn-navigator jump state: the tapped query's index in the
+  /// directory and the pre-jump scroll offset, kept in State so the
+  /// proportional probe (hop 1) and the give-up fallback (hop 2) still see
+  /// them across up to three frames. Overlapping jumps overwrite these —
+  /// accepted race, see design D1.
+  int _jumpQueryIndex = 0;
+  double _jumpOriginPixels = 0;
   bool _showSlash = false;
 
   /// @-mention picker state (see _maybeOpenMentionPicker).
@@ -1603,22 +1638,18 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
 
   // ---------------------------------------------------- turn navigator
 
-  /// Directory refresh (design §2.1): the memo key makes text-delta
-  /// notifies free — only a row-set shape change recomputes. Runs as a
-  /// state listener; [setState] fires only when the directory value really
-  /// changed.
+  /// Directory refresh (design §2.1 / D5): every state notification
+  /// recomputes the projection. A `(length, first, last)` shape key missed
+  /// in-place middle-row upserts — a `kind` change moves a row into or out
+  /// of the directory without touching the window edges — and left a stale
+  /// directory behind. The recompute costs the same order as the grouping
+  /// pass that misses its memo on the same notification; the value-equality
+  /// gate keeps an unchanged directory from [setState]-ing or replacing the
+  /// list instance.
   void _refreshQueryDirectory() {
     final state = _state;
     if (state == null || !mounted) return;
-    final rows = state.rows;
-    final key = (
-      rows.length,
-      rows.isEmpty ? null : '${rows.first['rowId']}',
-      rows.isEmpty ? null : '${rows.last['rowId']}',
-    );
-    if (_queryDirKey == key) return;
-    _queryDirKey = key;
-    final next = turnNavigatorQueryRowIds(rows);
+    final next = turnNavigatorQueryRowIds(state.rows);
     if (listEquals(next, _queryRowIds)) return;
     setState(() => _queryRowIds = next);
     // The highlight may follow the new directory (a fresh query appended
@@ -1644,28 +1675,29 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     });
   }
 
-  /// Highlight pass (design §2.2): the first built query group at/over the
-  /// viewport top wins; when every built query sits above it, the last one
-  /// does (the nearest above). Built groups form one contiguous SliverList
-  /// window, so "last built above" IS the nearest above. When no query
-  /// group is measurable (viewport deep inside a long answer, beyond the
-  /// layout cache), the current value stands — no flicker.
+  /// Highlight pass (design §2.2 / D6): the uppermost VISIBLE query group
+  /// wins — among groups whose top lies in the viewport window
+  /// `[viewportTop - 40, viewportBottom)`, the smallest top. When no query
+  /// top is visible, the nearest group above the line wins (the largest top
+  /// below `viewportTop - 40`). A group laid out only in the cacheExtent
+  /// below the viewport (`top >= viewportBottom`) is not visible yet and
+  /// never pre-highlights the next query. When no query group is measurable
+  /// (viewport deep inside a long answer, beyond the layout cache), the
+  /// current value stands — no flicker.
   ///
   /// Measurement goes through the page's per-group [GlobalKey] registry
   /// (task 11-19 step 4): every built group's box is read directly instead
   /// of walking the list's element tree with `visitChildElements` on every
   /// scroll frame. Entries whose element is unmounted (`currentContext ==
   /// null`) are skipped — that is the "not built / scrolled away" case, the
-  /// same one the traversal saw as an absent child. The order-independent
-  /// min/max scan is equivalent to the old in-order loop: groups are laid
-  /// out top-to-bottom, so the first group at/over the line is the one with
-  /// the smallest top among them.
+  /// same one the traversal saw as an absent child.
   void _updateActiveQueryIndex() {
     final queries = _queryRowIds;
     if (queries.length < 2 || !_scrollController.hasClients) return;
     final viewport = _listViewportBox();
     if (viewport == null) return;
     final viewportTop = viewport.localToGlobal(Offset.zero).dy;
+    final viewportBottom = viewportTop + viewport.size.height;
     double? belowTop;
     int? belowIndex;
     double? aboveTop;
@@ -1675,15 +1707,20 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       final box = key?.currentContext?.findRenderObject();
       if (box is! RenderBox || !box.attached || !box.hasSize) continue;
       final top = box.localToGlobal(Offset.zero).dy;
-      if (top >= viewportTop - 40) {
+      if (top >= viewportTop - 40 && top < viewportBottom) {
         if (belowTop == null || top < belowTop) {
           belowTop = top;
           belowIndex = index;
         }
-      } else if (aboveTop == null || top > aboveTop) {
-        aboveTop = top;
-        aboveIndex = index;
+      } else if (top < viewportTop - 40) {
+        if (aboveTop == null || top > aboveTop) {
+          aboveTop = top;
+          aboveIndex = index;
+        }
       }
+      // top >= viewportBottom: built only in the layout cache, not visible —
+      // no branch takes it (the old at/over-line test let it win the
+      // highlight rows ahead of the reader's position).
     }
     final active = belowIndex ?? aboveIndex;
     if (active == null || active == _activeQueryIndex.value) return;
@@ -1695,26 +1732,40 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   /// (chat-conventions §9). The gates keep the jump from racing an active
   /// drag, a prepend compensation chain, or another programmatic scroll.
   void _jumpToQuery(int rowId) {
+    // Tap closures hold the directory instance of their build, which the
+    // page may have refreshed since. A stale cell must not detach the
+    // bottom pin for a jump that cannot happen (design D1) — bail before
+    // any side effect.
+    final queryIndex = _queryRowIds.indexOf(rowId);
+    if (queryIndex == -1) {
+      debugPrint('[nav] stale-cell rowId=$rowId');
+      return;
+    }
     if (!_scrollController.hasClients) return;
     if (!_viewport.canJumpToQuery) return;
+    _jumpQueryIndex = queryIndex;
+    _jumpOriginPixels = _scrollController.position.pixels;
     if (_stickToBottom && mounted) setState(() => _stickToBottom = false);
     _landOnQuery(rowId, hop: 0);
   }
 
-  /// Upper bound for the jump's one-frame cache widen (same ceiling the
-  /// anchor compensation uses).
-  static const double _kJumpMaxCacheExtent = 120000.0;
-
   /// Measured landing on a query turn group: `target = pixels +
   /// (boxTop - viewportTop)` from real RenderBoxes; off-window targets
-  /// get the cache widened (hop 0) or a coarse side probe (hop 1) first so
+  /// get the cache widened (hop 0) or a proportional probe (hop 1) first so
   /// layout walks in — the estimate only positions the probe or sizes the
   /// cache, never the final landing.
   Future<void> _landOnQuery(int rowId, {required int hop}) async {
-    if (!mounted || !_scrollController.hasClients) return;
+    if (!mounted) {
+      _jumpCacheExtent = null;
+      return;
+    }
+    if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
     final viewport = _listViewportBox();
-    if (viewport == null) return;
+    if (viewport == null) {
+      _jumpCacheExtent = null;
+      return;
+    }
     final viewportTop = viewport.localToGlobal(Offset.zero).dy;
     final groupKey = ValueKey('turn-$rowId');
     RenderBox? box;
@@ -1740,9 +1791,7 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
         duration: const Duration(milliseconds: 250),
         curve: Curves.easeOut,
       );
-      if (mounted && _jumpCacheExtent != null) {
-        setState(() => _jumpCacheExtent = null);
-      }
+      _settleJump();
       return;
     }
     if (hop == 0) {
@@ -1750,11 +1799,15 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       // SliverList lays out down/up to it, then measure (the width covers
       // both directions at the current extent, ×2 headroom for the
       // SliverList's extent estimate — same ceiling as the anchor chain).
+      final widened = math.min(
+        (position.maxScrollExtent + position.viewportDimension) * 2,
+        debugJumpMaxCacheExtent,
+      );
+      debugPrint('[nav] widen rowId=$rowId hop=0 '
+          'px=${position.pixels.toStringAsFixed(1)} '
+          'cache=${widened.toStringAsFixed(1)}');
       setState(() {
-        _jumpCacheExtent = math.min(
-          (position.maxScrollExtent + position.viewportDimension) * 2,
-          _kJumpMaxCacheExtent,
-        );
+        _jumpCacheExtent = widened;
       });
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _landOnQuery(rowId, hop: 1);
@@ -1762,28 +1815,57 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       return;
     }
     if (hop == 1) {
-      // Still not built with the widened cache (enormous session): coarse
-      // probe to the target's side, let the real layout walk in, then the
-      // measured landing — the estimate-grade-anchor discipline of
-      // [_compensateAnchor], never a landing on the estimate itself.
-      var towardTop = true;
-      for (final (widget, _) in _builtGroups()) {
-        final first = widget.rows.first['rowId'];
-        if (first is num && first.toInt() > rowId) {
-          towardTop = false;
-          break;
-        }
-      }
-      _scrollController.jumpTo(towardTop ? 0.0 : position.maxScrollExtent);
+      // Still not built with the widened cache (enormous session):
+      // proportional probe — the probe offset is the same-scale estimate as
+      // the widened maxScrollExtent itself, so its error stays far below
+      // the widened radius. The next frame's measured landing is the only
+      // landing (chat-conventions §9). The max here is the WIDENED-window
+      // estimate: the cache is not restored until [_settleJump].
+      final fraction = queryJumpFraction(_jumpQueryIndex, _queryRowIds.length);
+      final probe = (position.maxScrollExtent * fraction)
+          .clamp(0.0, position.maxScrollExtent)
+          .toDouble();
+      debugPrint('[nav] probe rowId=$rowId hop=1 '
+          'fraction=${fraction.toStringAsFixed(3)} '
+          'px=${position.pixels.toStringAsFixed(1)} -> '
+          '${probe.toStringAsFixed(1)}');
+      _scrollController.jumpTo(probe);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _landOnQuery(rowId, hop: 2);
       });
       return;
     }
-    // Degenerate: unmeasurable even at the probe — give up where we are.
-    if (_jumpCacheExtent != null) {
-      setState(() => _jumpCacheExtent = null);
-    }
+    // Degenerate: unmeasurable even at the proportional probe. Give up back
+    // at the pre-jump offset — never at the probe estimate — then restore
+    // the cache and clamp against the restored layout.
+    final origin = _jumpOriginPixels
+        .clamp(0.0, position.maxScrollExtent)
+        .toDouble();
+    debugPrint('[nav] give-up rowId=$rowId '
+        'back=${_jumpOriginPixels.toStringAsFixed(1)}');
+    _scrollController.jumpTo(origin);
+    _settleJump();
+  }
+
+  /// Restores the jump's widened cacheExtent, then clamps the settled
+  /// offset against the REAL maxScrollExtent of the restored layout
+  /// (design D2): the glide/probe ran on the widened estimate, so it can
+  /// park past the content the restored list actually lays out — that
+  /// surplus is unpainted blank viewport. No-op when no widen is
+  /// outstanding.
+  void _settleJump() {
+    if (_jumpCacheExtent == null) return;
+    if (!mounted) return;
+    setState(() => _jumpCacheExtent = null);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final position = _scrollController.position;
+      final before = position.pixels;
+      if (!shouldClampAfterRestore(before, position.maxScrollExtent)) return;
+      debugPrint('[nav] clamp-after-restore px=${before.toStringAsFixed(1)} '
+          '-> max=${position.maxScrollExtent.toStringAsFixed(1)}');
+      _scrollController.jumpTo(position.maxScrollExtent);
+    });
   }
 
   void _toast(String message) {
@@ -3404,6 +3486,12 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
             state.pendingInteractions,
           );
           final itemCount = groups.length + (state.canLoadOlder ? 1 : 0);
+
+          // One shared agent-subagent table per build pass (R5/D4): every
+          // visible Agent group gets the SAME map instance (the page-level
+          // memo key), and the two-slot snapshot cache validates it once,
+          // not once per group.
+          Map<int, Map<String, dynamic>>? agentIndex;
           if (groups.isEmpty && !state.canLoadOlder) {
             // Empty conversation — or the shell-session start-failure card
             // (design 09-25 D1/D2). The gate reads the task displayStatus
@@ -3493,6 +3581,15 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
                                 ),
                               )
                             : null;
+                        // Agent-row memo key (R5/D4): the subagent row can be
+                        // appended to another turn's tail (rows.add), leaving
+                        // this group's rows identical — a build-time lookup
+                        // would never run against the cached group widget.
+                        // Shared instance per build pass; only groups holding
+                        // an Agent row ask for it.
+                        final agentSubagentByRowId = group.any(isAgentTool)
+                            ? agentIndex ??= agentSubagentIndex(state.rows)
+                            : null;
                         final candidate = ChatTurnGroup(
                           key: ValueKey('turn-${group.first['rowId']}'),
                           rows: group,
@@ -3509,6 +3606,7 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
                           gitController: _git,
                           lastError: _lastError,
                           groupRenderKey: renderKey,
+                          agentSubagentByRowId: agentSubagentByRowId,
                           // R5/AC6 closure: restricted row actions
                           // (edit-resend / retry / fork / side-ask)
                           // never render inside a side-chat tab.

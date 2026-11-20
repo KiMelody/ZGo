@@ -1,0 +1,14 @@
+#!/bin/sh
+# 提交消息规范检查。启用方式：git config core.hooksPath .githooks
+# 脚本用 python3；Windows Git Bash 下通常是 python3 或 python。
+if command -v python3 >/dev/null 2>&1; then
+    PY=python3
+elif command -v python >/dev/null 2>&1; then
+    PY=python
+else
+    echo "[提交消息检查] 未找到 Python，跳过检查（请安装 Python 以启用）" >&2
+    exit 0
+fi
+
+# 脚本路径相对于仓库根目录（hook 总是从仓库根目录执行）
+exec "$PY" "$(git rev-parse --show-toplevel)/tool/commit_msg_check.py" "$1"

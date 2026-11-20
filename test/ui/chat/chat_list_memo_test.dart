@@ -227,4 +227,95 @@ void main() {
     expect(identical(groupFor(tester, 8), g8), isFalse);
     expect(groupFor(tester, 8).rows.last['rowId'], 10);
   });
+
+  testWidgets(
+      'a subagent row appended to another turn relights the cached Agent '
+      'group drill-in arrow', (tester) async {
+    // R5/D4 cross-turn path: the Agent card sits in turn 1, the later turn
+    // (4) owns the rows that follow, and the subagent row arrives at the
+    // tail via row.appended. Turn 1's own row instances therefore do not
+    // change; only the shared agent-subagent table instance does. The
+    // page-level widget cache must not serve the stale instance — build
+    // would never run and the arrow would stay missing.
+    final gateway = FakeChatGateway();
+    await tester.pumpWidget(
+      wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+    );
+    gateway.feedSnapshot([
+      {'rowId': 1, 'kind': 'userInput', 'text': 'spawn an agent'},
+      {
+        'rowId': 2,
+        'kind': 'turnHeader',
+        'state': 'completedSuccess',
+        'activeMs': 1000,
+      },
+      {
+        'rowId': 3,
+        'kind': 'toolCall',
+        'toolName': 'Agent',
+        'toolCallId': 'call-1',
+        'status': 'running',
+        'inputText': '{"description": "explore", "prompt": "scan"}',
+      },
+      {'rowId': 4, 'kind': 'userInput', 'text': 'next question'},
+      {
+        'rowId': 5,
+        'kind': 'turnHeader',
+        'state': 'completedSuccess',
+        'activeMs': 1000,
+      },
+      {'rowId': 6, 'kind': 'assistantText', 'text': 'next answer'},
+    ]);
+    await tester.pumpAndSettle();
+
+    final agentGroup = groupFor(tester, 2);
+    expect(agentGroup.agentSubagentByRowId, isEmpty,
+        reason: 'the Agent group pays the shared-table input even before the '
+            'spawned row exists');
+    final arrow = find.descendant(
+      of: find.byKey(const ValueKey('turn-2')),
+      matching: find.byIcon(Icons.chevron_right),
+    );
+    expect(arrow, findsNothing,
+        reason: 'without a childSessionId the drill-in arrow is hidden');
+    debugTurnGroupBuilds = 0;
+
+    final subagentRow = <String, dynamic>{
+      'rowId': 7,
+      'kind': 'subagent',
+      'parentToolCallId': 'call-1',
+      'childSessionId': 'sess_child_1',
+      'summaryText': 'explore',
+      'subagentType': 'general-purpose',
+      'status': 'running',
+    };
+    final state = gateway.state;
+    state.applyFrame({
+      'fromSeq': state.seq,
+      'toSeq': state.seq + 1,
+      'payload': {
+        'kind': 'deltas',
+        'deltas': [
+          {'op': 'row.appended', 'row': subagentRow},
+        ],
+      },
+    }, onGap: () => fail('unexpected gap'));
+    await tester.pumpAndSettle();
+
+    // The Agent turn's rows are untouched (the row landed in a later
+    // group); the cache must still miss because the shared table changed.
+    final rebuilt = groupFor(tester, 2);
+    expect(identical(rebuilt, agentGroup), isFalse,
+        reason: 'the new shared table instance is part of sameInputs');
+    expect(rebuilt.rows.length, agentGroup.rows.length);
+    // row.appended stores a cast view of the delta payload, so compare the
+    // resolved row's fields rather than the literal's identity.
+    expect(rebuilt.agentSubagentByRowId![3]!['rowId'], 7);
+    expect(rebuilt.agentSubagentByRowId![3]!['childSessionId'], 'sess_child_1');
+    expect(arrow, findsOneWidget,
+        reason: 'the rebuilt Agent tile resolves the appended subagent row');
+    expect(debugTurnGroupBuilds, greaterThanOrEqualTo(1));
+    // The appended row rode the tail turn, as the fixture intended.
+    expect(groupFor(tester, 5).rows.last['rowId'], 7);
+  });
 }

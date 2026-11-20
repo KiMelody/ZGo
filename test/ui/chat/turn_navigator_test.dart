@@ -455,7 +455,7 @@ void main() {
     });
 
     testWidgets(
-      'directory is memoized: a text delta keeps the SAME list instance',
+      'directory value gate: a text delta keeps the SAME list instance',
       (tester) async {
         final gateway = FakeChatGateway();
         await tester.pumpWidget(
@@ -482,8 +482,9 @@ void main() {
             .widget<TurnNavigator>(find.byType(TurnNavigator))
             .rowIds;
 
-        // Streaming text delta: shape unchanged → the memo key hits and the
-        // directory list instance is reused (PRD AC: 不随文本 delta 重算).
+        // Streaming text delta: the projection recomputes on the notification but
+        // equals the old value → the value gate returns without setState and
+        // reuses the list instance (PRD AC: 不随文本 delta 重算).
         gateway.state.applyFrame(
           {
             'toSeq': gateway.state.seq + 1,
@@ -528,6 +529,72 @@ void main() {
           tester.widget<TurnNavigator>(find.byType(TurnNavigator)).rowIds,
           [1, 3, 5],
         );
+      },
+    );
+
+    testWidgets(
+      'an in-place middle-row kind upsert refreshes the directory '
+      '(no stale window-edge key)',
+      (tester) async {
+        final gateway = FakeChatGateway();
+        await tester.pumpWidget(
+          wrap(ChatPage(host: gateway, sessionId: 's1', title: 't')),
+        );
+        gateway.feedSnapshot([
+          {
+            'rowId': 1,
+            'kind': 'userInput',
+            'text': '第一条',
+            'origin': 'realUser',
+          },
+          {'rowId': 2, 'kind': 'assistantText', 'text': '答'},
+          {
+            'rowId': 3,
+            'kind': 'userInput',
+            'text': '第二条',
+            'origin': 'realUser',
+          },
+          {'rowId': 4, 'kind': 'assistantText', 'text': '答二'},
+          {
+            'rowId': 5,
+            'kind': 'userInput',
+            'text': '第三条',
+            'origin': 'realUser',
+          },
+          {'rowId': 6, 'kind': 'assistantText', 'text': '答三'},
+        ]);
+        await tester.pumpAndSettle();
+        List<int> directory() => tester
+            .widget<TurnNavigator>(find.byType(TurnNavigator))
+            .rowIds;
+        expect(directory(), [1, 3, 5]);
+
+        // In-place middle-row upsert: the row's `kind` changes WITHOUT
+        // touching the window shape (length / first / last rowId). The
+        // retired `(length, first, last)` memo key would have hit and kept
+        // [1, 3, 5]; the per-notification recompute must pick row 4 up.
+        gateway.state.applyFrame(
+          {
+            'toSeq': gateway.state.seq + 1,
+            'payload': {
+              'kind': 'deltas',
+              'deltas': [
+                {
+                  'op': 'row.upserted',
+                  'row': {
+                    'rowId': 4,
+                    'kind': 'userInput',
+                    'text': '原回答行改写为提问',
+                    'origin': 'realUser',
+                  },
+                },
+              ],
+            },
+          },
+          onGap: () => fail('unexpected gap'),
+        );
+        await tester.pumpAndSettle();
+        expect(directory(), [1, 3, 4, 5]);
       },
     );
 

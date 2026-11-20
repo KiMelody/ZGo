@@ -29,9 +29,9 @@ bool isRealUserQueryRow(Map<String, dynamic> row) {
 }
 
 /// The navigator directory: ascending rowIds of the real user queries in
-/// [rows] (pure projection of `ConversationState.rows`; memoized by the
-/// page on `(rows.length, firstRowId, lastRowId)` so streaming text deltas
-/// never recompute it).
+/// [rows] (pure projection of `ConversationState.rows`; the page recomputes
+/// it on every state notification and keeps the list instance only while
+/// the value is unchanged — streaming text deltas never replace it).
 List<int> turnNavigatorQueryRowIds(List<Map<String, dynamic>> rows) => [
   for (final row in rows)
     if (row['kind'] == 'userInput' &&

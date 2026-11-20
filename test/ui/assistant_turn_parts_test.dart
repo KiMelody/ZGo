@@ -64,4 +64,41 @@ void main() {
     ]).parts;
     expect(parts.map((p) => p.kind), ['text', 'row']);
   });
+
+  // R4/D3 trim semantics: terminal empty text keeps a part (the placeholder
+  // caption needs it); streaming empty text and whitespace-only separators
+  // still produce nothing.
+  test('terminal empty text keeps a placeholder part', () {
+    final row = {'rowId': 1, 'kind': 'assistantText', 'text': ''};
+    final parts = assistantTurnParts([row]).parts;
+    expect(parts, hasLength(1));
+    expect(parts.single.kind, 'text');
+    expect(parts.single.text, '');
+    expect(parts.single.row, same(row));
+    expect(parts.single.streaming, isFalse);
+  });
+
+  test('streaming empty text yields no part', () {
+    final parts = assistantTurnParts([
+      {'rowId': 1, 'kind': 'assistantText', 'text': '', 'state': 'streaming'},
+    ]).parts;
+    expect(parts, isEmpty);
+  });
+
+  test('whitespace-only text stays dropped', () {
+    final parts = assistantTurnParts([
+      {'rowId': 1, 'kind': 'assistantText', 'text': '\n'},
+    ]).parts;
+    expect(parts, isEmpty);
+  });
+
+  test('trailing whitespace-only segment adds no part (feedback anchor stays)',
+      () {
+    final parts = assistantTurnParts([
+      {'rowId': 1, 'kind': 'assistantText', 'text': 'answer'},
+      {'rowId': 2, 'kind': 'assistantText', 'text': '\n'},
+    ]).parts;
+    expect(parts, hasLength(1));
+    expect(parts.single.text, 'answer');
+  });
 }

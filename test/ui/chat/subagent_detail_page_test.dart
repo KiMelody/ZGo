@@ -9,6 +9,7 @@ import 'package:zgo/state/device_session.dart';
 import 'package:zgo/ui/chat/file_preview_page.dart';
 import 'package:zgo/ui/chat/subagent_detail_page.dart';
 import 'package:zgo/ui/chat/subagent_feed.dart';
+import 'package:zgo/ui/chat/timeline.dart';
 import 'package:zgo/ui/theme.dart';
 import 'package:zgo/ui/ui_settings.dart';
 
@@ -1029,5 +1030,85 @@ void main() {
       FilePreviewRender.plainText,
     );
     expect(find.textContaining('void main'), findsWidgets);
+  });
+
+  testWidgets('a subagent row appended to the tail turn relights the nested '
+      'Agent drill-in arrow', (tester) async {
+    // R5/design D4 detail-page surface: the Agent card sits in turn 1 while
+    // a later turn owns the rows that follow; the spawned subagent row lands
+    // at the tail, so turn 1's own rows stay identical and only the shared
+    // agent-subagent table changes. The turn group must rebuild and its
+    // drill-in arrow (available even under readOnly) must appear.
+    final gateway = _FakeSubagentGateway(rows: [
+      {'rowId': 1, 'kind': 'userInput', 'text': '父任务'},
+      {
+        'rowId': 2,
+        'kind': 'turnHeader',
+        'state': 'completedSuccess',
+        'activeMs': 10,
+      },
+      {
+        'rowId': 3,
+        'kind': 'toolCall',
+        'toolName': 'Agent',
+        'toolCallId': 'inner-1',
+        'status': 'running',
+        'inputText': '{"description": "nested-agent", "prompt": "go"}',
+      },
+      {'rowId': 4, 'kind': 'userInput', 'text': '下一轮'},
+      {
+        'rowId': 5,
+        'kind': 'turnHeader',
+        'state': 'completedSuccess',
+        'activeMs': 10,
+      },
+      {'rowId': 6, 'kind': 'assistantText', 'text': '下一轮回复'},
+    ]);
+    addTearDown(() => gateway.dispose());
+    final feed = SubagentFeed(conversation: gateway);
+    await tester.pumpWidget(
+      wrap(
+        SubagentDetailPage(
+          host: gateway,
+          feed: feed,
+          childSessionId: 'sess_child_1',
+          title: '实现加固',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // The Agent card lives in the assistant group that starts at the turn
+    // header (user rows are their own groups), i.e. key turn-2; the appended
+    // row joins the later turn's group (turn-5).
+    final arrow = find.descendant(
+      of: find.byKey(const ValueKey('turn-2')),
+      matching: find.byIcon(Icons.chevron_right),
+    );
+    expect(arrow, findsNothing);
+
+    _appendRow(gateway, {
+      'rowId': 7,
+      'kind': 'subagent',
+      'parentToolCallId': 'inner-1',
+      'childSessionId': 'grandchild-1',
+      'summaryText': 'nested-agent',
+      'subagentType': 'general-purpose',
+      'status': 'running',
+    });
+    await tester.pumpAndSettle();
+
+    expect(arrow, findsOneWidget,
+        reason: 'the read-only drill-in chain must survive the cross-turn '
+            'append');
+    // The appended row rode the later turn's group, as the fixture intended.
+    expect(
+      tester
+          .widget<ChatTurnGroup>(find.byKey(const ValueKey('turn-5')))
+          .rows
+          .last['rowId'],
+      7,
+    );
   });
 }

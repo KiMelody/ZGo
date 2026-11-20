@@ -10,6 +10,7 @@ import '../ui_settings.dart';
 import 'jump_to_bottom_button.dart';
 import 'subagent_feed.dart';
 import 'timeline.dart';
+import 'tool_row_semantics.dart';
 import 'transcript_viewport.dart';
 
 /// Read-only transcript of a subagent's child session (task 09-13 R3):
@@ -485,6 +486,9 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
           // title IS the model display (acceptance fix).
           final groups = groupChatRows(childSessionRows(state.rows));
           final itemCount = groups.length + (state.canLoadOlder ? 1 : 0);
+          // One shared agent-subagent table per build pass (R5/D4), the
+          // same memo key the main chat uses — validated once, not per group.
+          Map<int, Map<String, dynamic>>? agentIndex;
           if (!_positionedAtBottom) {
             // R1b: land on the newest content on the first frame the list is
             // actually mounted — the follow pass only fires on LATER updates
@@ -563,6 +567,13 @@ class _SubagentDetailPageState extends State<SubagentDetailPage> {
                             // masked by readOnly.
                             actions: _actions,
                             readOnly: true,
+                            // Same Agent-row memo key as the main chat
+                            // (R5/D4): nested Agent rows keep their drill-in
+                            // arrow when the subagent row lands at the tail.
+                            agentSubagentByRowId: group.any(isAgentTool)
+                                ? agentIndex ??=
+                                    agentSubagentIndex(state.rows)
+                                : null,
                           );
                         },
                       ),
