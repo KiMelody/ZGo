@@ -757,6 +757,16 @@ class TranscriptViewport extends ChangeNotifier {
       // A drag arrived under the veil: show the list while the chain waits
       // the finger out; the landing's correction then runs visible and eases.
       _liftVeil();
+      // A drag is when the widened cache costs the most: every frame lays
+      // out the whole (up to 120000px) window the compensation pre-widened.
+      // Drop it while the chain parks on the finger — but ONLY when no hop
+      // widen has happened yet (hop 0): a hop>0 chain is mid-hunt and its
+      // wide window is what keeps the anchor laid out, so clearing it there
+      // downgrades the landing to the give-up estimate. At hop 0 the release
+      // re-measures and re-widens on demand, so landing precision is
+      // unchanged (task 11-19 step 2; anchor regression in
+      // transcript_viewport_test).
+      if (hop == 0) _setAnchorCacheExtent(null);
       postFrame(() {
         if (_disposed || _positionOrNull() == null) return;
         _compensateAnchor(anchor, hop: hop, gen: gen, chainState: chainState);

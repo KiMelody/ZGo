@@ -321,6 +321,7 @@ void main() {
         deleteCopy: (id, scope) async {},
         onActiveFrameApplied: () {},
         onChanged: () {},
+        onDirectoryChanged: () {},
         log: (_) {},
       );
       service.setRelayTasks([relayTask('t1', '/repo/alpha')]);
@@ -679,6 +680,7 @@ class _Harness {
     },
     onActiveFrameApplied: () {},
     onChanged: () => changed++,
+    onDirectoryChanged: () {},
     log: logs.add,
   );
 }

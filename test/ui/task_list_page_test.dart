@@ -1067,6 +1067,9 @@ void main() {
     // The entry pull landed: one caption line with a zero-padded clock.
     final stamp = find.textContaining(RegExp(r'^最后同步 \d{2}:\d{2}$'));
     expect(stamp, findsOneWidget);
+    // Capture the card instance to prove the 30 s tick repaints only the
+    // stamp text (11-19 task-list-scroll acceptance 3).
+    final cardBeforeTick = tester.widget(find.byType(Card).first);
 
     // A tick 30s later pulls again and re-stamps the line.
     await tester.pump(const Duration(seconds: 30));
@@ -1075,6 +1078,12 @@ void main() {
     expect(
       find.textContaining(RegExp(r'^最后同步 \d{2}:\d{2}$')),
       findsOneWidget,
+    );
+    expect(
+      identical(cardBeforeTick, tester.widget(find.byType(Card).first)),
+      isTrue,
+      reason: 'the 30 s cadence must not rebuild the list/page anymore — '
+          'only the ValueNotifier-driven stamp text repaints',
     );
 
     // Replace the page so the periodic timer is disposed.
@@ -5356,6 +5365,147 @@ void main() {
       expect(node.getSemanticsData().label, contains('Worktree branch'),
           reason: 'the role copy must come from the en table, not the key');
       handle.dispose();
+    });
+  });
+
+  group('scroll perf (11-19 task-list-scroll)', () {
+    Map<String, dynamic> relayRow(
+      String id,
+      String title,
+      String path, {
+      required int updatedAt,
+    }) =>
+        {
+          'taskId': id,
+          'title': title,
+          'workspacePath': path,
+          'workspaceIdentity': path.split('/').last,
+          'updatedAt': updatedAt,
+          'status': 'idle',
+        };
+
+    testWidgets(
+        'a row keeps its open swipe tray when activity reorders the cards',
+        (tester) async {
+      usePhone(tester);
+      // Two expanded cards + rows have to fit at once so the position
+      // assertions never depend on scroll offsets.
+      tester.view.physicalSize = const Size(390, 1600);
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        workspaces: [
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+          {'workspacePath': '/repo/beta', 'workspaceIdentity': 'beta'},
+        ],
+        relayTasks: [
+          relayRow('a1', 'Alpha 任务', '/repo/alpha', updatedAt: 3000),
+          relayRow('b1', 'Beta 任务', '/repo/beta', updatedAt: 1000),
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Alpha starts on top (newer activity).
+      expect(
+        tester.getTopLeft(find.text('alpha')).dy,
+        lessThan(tester.getTopLeft(find.text('beta')).dy),
+      );
+
+      // Expand beta, then drag its row fully open.
+      await tester.tap(find.text('beta'));
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.drag(find.text('Beta 任务'), const Offset(-120, 0));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      ExcludeSemantics trayOf(String id) => tester.widget<ExcludeSemantics>(
+            find
+                .descendant(
+                  of: find.byKey(ValueKey('task:$id')),
+                  matching: find.byType(ExcludeSemantics),
+                )
+                .first,
+          );
+
+      expect(trayOf('b1').excluding, isFalse,
+          reason: 'the drag opened beta\'s tray');
+      expect(trayOf('a1').excluding, isTrue,
+          reason: 'alpha did not open anything');
+
+      // Beta's task overtakes alpha's: the card order flips.
+      session.applyRelayOverview([
+        relayRow('a1', 'Alpha 任务', '/repo/alpha', updatedAt: 1000),
+        relayRow('b1', 'Beta 任务', '/repo/beta', updatedAt: 5000),
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(
+        tester.getTopLeft(find.text('beta')).dy,
+        lessThan(tester.getTopLeft(find.text('alpha')).dy),
+        reason: 'the activity flip reorders the cards',
+      );
+      // The value keys move the State with the row: beta keeps its open
+      // tray, the swapped slot does not inherit it (PRD acceptance 2).
+      expect(trayOf('b1').excluding, isFalse,
+          reason: 'the open tray follows the row identity, not the slot');
+      expect(trayOf('a1').excluding, isTrue,
+          reason: 'the swapped-in row must not look open');
+    });
+
+    testWidgets('one rebuild materializes the directory once (shared read)',
+        (tester) async {
+      usePhone(tester);
+      final (store, device) = await setupDevice();
+      final session = FakeDeviceSession(
+        deviceId: device.id,
+        params: device.params!,
+        entries: [
+          {
+            'sessionId': 'a1',
+            'title': 'Alpha 任务',
+            'phase': 'idle',
+            'lastActivityAt': 3000,
+          },
+        ],
+        workspaces: [
+          {'workspacePath': '/repo/alpha', 'workspaceIdentity': 'alpha'},
+          {'workspacePath': '/repo/beta', 'workspaceIdentity': 'beta'},
+        ],
+        relayTasks: [
+          relayRow('a1', 'Alpha 任务', '/repo/alpha', updatedAt: 3000),
+          relayRow('b1', 'Beta 任务', '/repo/beta', updatedAt: 1000),
+        ],
+      );
+      await tester.pumpWidget(wrap(TaskListPage(
+        store: store,
+        hub: DeviceSessionHub(nativeListEnabled: () => false),
+        device: device,
+        sessionOverride: session,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      final materializations = session.taskHome.materializations;
+      expect(materializations, greaterThanOrEqualTo(1));
+
+      // One directory invalidation → every card/row in the rebuild reads the
+      // same view: exactly one new materialization, not one per consumer.
+      session.applyRelayOverview([
+        relayRow('a1', 'Alpha 任务', '/repo/alpha', updatedAt: 4000),
+        relayRow('b1', 'Beta 任务', '/repo/beta', updatedAt: 1000),
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(session.taskHome.materializations, materializations + 1);
     });
   });
 }

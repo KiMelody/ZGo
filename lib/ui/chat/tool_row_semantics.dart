@@ -73,11 +73,14 @@ String? promptOf(String inputText) {
 
 /// Tool summary: first line (已写入 `<file>` / 终端 · cmd /
 /// 探索 · N 文件), optional second line (directory path), +/- counts.
+/// [diff] lets a caller that already extracted the row's diff (the tool card)
+/// reuse it instead of paying a second extraction per build.
 ToolRowSemantics toolRowSemantics(
   Map<String, dynamic> row, {
   required String locale,
+  DiffData? diff,
 }) {
-  final diff = extractDiff(row);
+  final diffData = diff ?? extractDiff(row);
   final status = row['status'] as String? ?? '';
   final icon = switch (status) {
     'running' || 'inputStreaming' || 'pendingApproval' => Icons.hourglass_top,
@@ -93,7 +96,7 @@ ToolRowSemantics toolRowSemantics(
   if (toolName.contains('write') ||
       toolName.contains('edit') ||
       toolName.contains('notebook')) {
-    final file = toolFilePath(inputText) ?? diff?.filePath ?? toolNameRaw;
+    final file = toolFilePath(inputText) ?? diffData?.filePath ?? toolNameRaw;
     // title shows the basename; subtitle the directory
     final segs = file.split(RegExp(r'[\\/]'));
     final base = segs.last;
@@ -104,8 +107,8 @@ ToolRowSemantics toolRowSemantics(
       icon: icon,
       title: trByKeyP(locale, 'chat.tool.wrote', [base]),
       subtitle: dir,
-      additions: diff?.additions ?? 0,
-      deletions: diff?.deletions ?? 0,
+      additions: diffData?.additions ?? 0,
+      deletions: diffData?.deletions ?? 0,
     );
   }
   if (toolName.contains('taskoutput')) {
@@ -281,8 +284,8 @@ ToolRowSemantics toolRowSemantics(
     icon: icon,
     title: toolNameRaw,
     subtitle: null,
-    additions: diff?.additions ?? 0,
-    deletions: diff?.deletions ?? 0,
+    additions: diffData?.additions ?? 0,
+    deletions: diffData?.deletions ?? 0,
   );
 }
 

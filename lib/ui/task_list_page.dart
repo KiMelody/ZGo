@@ -206,6 +206,11 @@ class _TaskListPageState extends State<TaskListPage>
   DeviceSession? _groupedViewSession;
   DateTime? _groupedViewLoadedAt;
 
+  /// Grouped-view landing signal (2026-11-19 scroll-perf): the async read
+  /// leaves the [build] path entirely, so its result repaints only the list
+  /// subtree instead of the whole page.
+  final ValueNotifier<int> _groupedViewChanges = ValueNotifier<int>(0);
+
   /// Page-level counterpart of the task-group resolver's 30 s cache: a
   /// panel open after this window re-pulls (group writes have no push
   /// surface).
@@ -228,7 +233,70 @@ class _TaskListPageState extends State<TaskListPage>
     _paneTitle = widget.initialPaneTitle;
     _loadOrganizePrefs();
     WidgetsBinding.instance.addObserver(this);
+    widget.hub.addListener(_onHubChanged);
+    _bindSession();
     _startOverviewCadence(refreshNow: true);
+    // The grouped-view read used to be kicked from [build]; it now leaves the
+    // build path entirely (2026-11-19 scroll-perf) and lands on its own
+    // notifier, so one post-frame ask replaces the per-build guard.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final session = _session;
+      if (mounted && session != null) _ensureGroupedView(session);
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant TaskListPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.hub, widget.hub)) {
+      oldWidget.hub.removeListener(_onHubChanged);
+      widget.hub.addListener(_onHubChanged);
+    }
+    if (!identical(oldWidget.sessionOverride, widget.sessionOverride) ||
+        oldWidget.device.id != widget.device.id) {
+      _bindSession();
+    }
+  }
+
+  /// The hub forwards every session notify, so the page only reacts to a
+  /// session-identity swap here (ensure/suspend). The list itself listens to
+  /// the narrow directory signal instead (scroll-perf 2026-11-19).
+  void _onHubChanged() {
+    if (!mounted) return;
+    final session = _session;
+    if (identical(session, _listeningSession)) return;
+    setState(_bindSession);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && session != null) _ensureGroupedView(session);
+    });
+  }
+
+  /// Rebinds the two narrow session signals to the current session object.
+  void _bindSession() {
+    final session = _session;
+    if (identical(session, _listeningSession)) return;
+    final previous = _listeningSession;
+    previous?.taskDirectoryChanges.removeListener(_onDirectoryChanged);
+    previous?.connectionChanges.removeListener(_onConnectionChanged);
+    _listeningSession = session;
+    session?.taskDirectoryChanges.addListener(_onDirectoryChanged);
+    session?.connectionChanges.addListener(_onConnectionChanged);
+  }
+
+  /// Directory matrix write (spec session-lifecycle.md §10.2): the list
+  /// subtree repaints through its own AnimatedBuilder; this callback only
+  /// re-arms the grouped-view read.
+  void _onDirectoryChanged() {
+    final session = _session;
+    if (!mounted || session == null) return;
+    _ensureGroupedView(session);
+  }
+
+  /// Connection-status flip: status/stage/error/open-failure are low
+  /// frequency and feed the banner + AppBar, so a page-level repaint is the
+  /// cheap correct answer (the list hears this only through the parent).
+  void _onConnectionChanged() {
+    if (mounted) setState(() {});
   }
 
   /// App lifecycle (quota-watch pattern): doze stalls the RPCs anyway, so
@@ -260,12 +328,15 @@ class _TaskListPageState extends State<TaskListPage>
   /// its own RPC errors (old rows survive), so the stamp marks the moment the
   /// round finished — it proves the cadence is alive, not that every leg
   /// reached the desktop.
+  ///
+  /// The stamp lands on [_lastSyncAt] (a ValueNotifier): the timer tick must
+  /// not `setState` the page (acceptance 3, 11-19 task-list-scroll).
   Future<void> _pullOverview() async {
     final session = _session;
     if (session == null) return;
     await session.refreshTaskOverview();
     if (!mounted) return;
-    setState(() => _lastSyncAt = clock.now());
+    _lastSyncAt.value = clock.now();
   }
 
   /// `hh:mm` of a sync stamp — the 「最后同步」 line only needs the wall clock;
@@ -282,6 +353,11 @@ class _TaskListPageState extends State<TaskListPage>
   void dispose() {
     _overviewTimer?.cancel();
     _openingTask.dispose();
+    widget.hub.removeListener(_onHubChanged);
+    _listeningSession?.taskDirectoryChanges.removeListener(_onDirectoryChanged);
+    _listeningSession?.connectionChanges.removeListener(_onConnectionChanged);
+    _lastSyncAt.dispose();
+    _groupedViewChanges.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -375,7 +451,17 @@ class _TaskListPageState extends State<TaskListPage>
   /// as 「最后同步 hh:mm」 so an unchanged list still proves the cadence is
   /// alive. `refreshTaskOverview` absorbs RPC errors internally, so this is
   /// the last *attempt* — never a claim that every leg succeeded.
-  DateTime? _lastSyncAt;
+  ///
+  /// A [ValueNotifier] (2026-11-19 scroll-perf): the 30 s cadence writes it
+  /// directly, so only the timestamp text repaints — the page-level
+  /// [setState] used to rebuild the whole list every tick.
+  final ValueNotifier<DateTime?> _lastSyncAt = ValueNotifier<DateTime?>(null);
+
+  /// Task-list narrow listening (2026-11-19 scroll-perf): the session's
+  /// directory signal repaints the list subtree; the page-level rebuild only
+  /// rides connection-status flips. Chat/relay activity no longer rebuilds
+  /// the list (PRD 修复清单 1).
+  DeviceSession? _listeningSession;
 
   /// Layout breakpoint: Tailwind md — single column below, dual ≥768.
   static const double kDualPaneBreakpoint = 768;
@@ -523,7 +609,10 @@ class _TaskListPageState extends State<TaskListPage>
   /// on the key so the order is total: Dart's sort is not stable, never rely
   /// on the incoming list order. The title modes break title ties on the key
   /// for the same reason; nameDesc is the exact reverse of nameAsc.
-  List<Map<String, dynamic>> _orderedWorkspaces(DeviceSession session) {
+  List<Map<String, dynamic>> _orderedWorkspaces(
+    DeviceSession session,
+    TaskDirectory directory,
+  ) {
     if (_cardSort != 'activity') {
       final workspaces = <Map<String, dynamic>>[
         for (final ws in session.workspaces)
@@ -547,7 +636,7 @@ class _TaskListPageState extends State<TaskListPage>
       final dirKey = workspaceKeyOf(ws);
       if (dirKey == null) return null;
       int? newest;
-      for (final (entry, _) in session.taskDirectory.entriesFor(dirKey)) {
+      for (final (entry, _) in directory.entriesFor(dirKey)) {
         if (newest == null || entry.lastActivityAt > newest) {
           newest = entry.lastActivityAt;
         }
@@ -719,10 +808,17 @@ class _TaskListPageState extends State<TaskListPage>
 
   /// IDE sidebar: nav actions → projects tree → device footer.
   Widget _desktopSidebar(BuildContext context) {
+    // Directory-scoped like the mobile list (2026-11-19 scroll-perf):
+    // connection flips arrive through the page rebuild.
+    final current = _session;
     return AnimatedBuilder(
-      animation: widget.hub,
+      animation: Listenable.merge([
+        _groupedViewChanges,
+        if (current != null) current.taskDirectoryChanges,
+      ]),
       builder: (context, _) {
         final session = _session;
+        final directory = session?.taskDirectory;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -831,9 +927,10 @@ class _TaskListPageState extends State<TaskListPage>
                         padding: zScreenPadding(context,
                             top: 0, bottom: 16, horizontal: 6),
                         children: [
-                          ..._desktopPinned(context, session),
-                          for (final ws in _orderedWorkspaces(session))
-                            _desktopWorkspaceFolder(context, session, ws),
+                          ..._desktopPinned(context, session, directory!),
+                          for (final ws in _orderedWorkspaces(session, directory))
+                            _desktopWorkspaceFolder(
+                                context, session, ws, directory),
                         ],
                       ),
               ),
@@ -876,8 +973,12 @@ class _TaskListPageState extends State<TaskListPage>
     );
   }
 
-  List<Widget> _desktopPinned(BuildContext context, DeviceSession session) {
-    final pinned = session.taskDirectory.pinnedEntries();
+  List<Widget> _desktopPinned(
+    BuildContext context,
+    DeviceSession session,
+    TaskDirectory directory,
+  ) {
+    final pinned = directory.pinnedEntries();
     if (pinned.isEmpty) return const [];
     return [
       Padding(
@@ -905,6 +1006,7 @@ class _TaskListPageState extends State<TaskListPage>
     BuildContext context,
     DeviceSession session,
     Map<String, dynamic> ws,
+    TaskDirectory directory,
   ) {
     final isActive = _isWorkspaceActive(session, ws);
     final key = workspaceKeyOf(ws) ?? workspaceTitle(ws);
@@ -918,8 +1020,8 @@ class _TaskListPageState extends State<TaskListPage>
         ? const <SessionEntry>[]
         : _sortedEntries(
             [
-              for (final (e, _) in session.taskDirectory
-                  .entriesFor(dirKey, includeArchived: _showArchived))
+              for (final (e, _) in directory.entriesFor(
+                  dirKey, includeArchived: _showArchived))
                 e,
             ],
             stabilizeActive: true,
@@ -927,8 +1029,7 @@ class _TaskListPageState extends State<TaskListPage>
     // C2 parity: sidebar rows under a workspace folder carry the same
     // group palette dot the mobile card rows do (same grouped-view source;
     // a miss on older desktops keeps the plain rows).
-    _ensureGroupedView(session);
-    final groupDotOf = _groupDotOf(session);
+    final groupDotOf = _groupDotOf(session, directory);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1290,18 +1391,24 @@ class _TaskListPageState extends State<TaskListPage>
   }
 
   Widget _listBody(BuildContext context) {
-    // Stage copy (B-03) is consumed the project way: a merge of the hub (the
-    // page's session conduit) with the live session itself, so a stage change
-    // repaints even between hub forwarders. No state library.
+    // Narrow listening (2026-11-19 scroll-perf): the list subtree repaints
+    // only when the task directory invalidates (spec session-lifecycle.md
+    // §10.2) or the grouped-view read lands. Connection-status flips reach
+    // this subtree through the page-level rebuild (they are rare); chat /
+    // relay / watchdog notifies no longer rebuild the list at all.
     final session = _session;
     final animation = Listenable.merge([
-      widget.hub,
-      if (session != null) session,
+      _groupedViewChanges,
+      if (session != null) session.taskDirectoryChanges,
     ]);
     return AnimatedBuilder(
       animation: animation,
       builder: (context, _) {
         final session = _session;
+        // One directory read per rebuild (PRD 修复清单 2): the getter is
+        // fingerprint-guarded but not free (it hashes the sidecar layers on
+        // every call), so every consumer below takes the same view.
+        final directory = session?.taskDirectory;
         final banner = _ConnectionBanner(
           session: session,
           handoverBusy: _handoverBusy,
@@ -1317,21 +1424,30 @@ class _TaskListPageState extends State<TaskListPage>
         final rows = <Widget>[
           banner,
           const SizedBox(height: 12),
-          _headerRow(context, session),
+          _headerRow(context, session, directory),
           const SizedBox(height: 12),
-          if (session != null && _showArchived)
-            ..._archiveView(context, session)
+          if (session != null && directory != null && _showArchived)
+            ..._archiveView(context, session, directory)
           else ...[
-            if (session != null) ..._pinnedGroup(context, session),
+            if (session != null && directory != null)
+              ..._pinnedGroup(context, session, directory),
             if (session == null || session.workspaces.isEmpty)
               _fallback(context, session)
             else if (_groupBy == 'timeline')
-              ..._timelineGroups(context, session)
+              ..._timelineGroups(context, session, directory!)
             else
-              for (final ws in _orderedWorkspaces(session))
+              for (final ws in _orderedWorkspaces(session, directory!))
                 Padding(
+                  // The key must sit on the LIST ITEM root: the sliver's
+                  // findChildIndexCallback below uses it to move the element
+                  // (and the row State inside the card) when activity
+                  // reorders the cards.
+                  key: ValueKey(
+                    'workspace-card:'
+                    '${workspaceKeyOf(ws) ?? workspaceTitle(ws)}',
+                  ),
                   padding: const EdgeInsets.only(bottom: ZSpacing.cardGap),
-                  child: _workspaceCard(context, session, ws),
+                  child: _workspaceCard(context, session, ws, directory),
                 ),
           ],
         ];
@@ -1354,6 +1470,17 @@ class _TaskListPageState extends State<TaskListPage>
                   context, top: 12, bottom: 32, horizontal: 12),
               itemCount: rows.length,
               itemBuilder: (context, i) => rows[i],
+              // Activity reordering swaps the card order: keyed item roots
+              // let the sliver MOVE the element (and the swipe tray State
+              // inside it) instead of rebuilding the new occupant with the
+              // old slot's state. Unkeyed scaffolding rows return null and
+              // keep the plain index reuse.
+              findChildIndexCallback: (key) {
+                for (var i = 0; i < rows.length; i++) {
+                  if (rows[i].key == key) return i;
+                }
+                return null;
+              },
             ),
           ),
         );
@@ -1397,9 +1524,13 @@ class _TaskListPageState extends State<TaskListPage>
   }
 
   /// Section header + collapse / tidy / refresh.
-  Widget _headerRow(BuildContext context, DeviceSession? session) {
+  Widget _headerRow(
+    BuildContext context,
+    DeviceSession? session,
+    TaskDirectory? directory,
+  ) {
     final workspaces = session?.workspaces.length ?? 0;
-    final tasks = session == null ? 0 : session.taskDirectory.totalTaskCount;
+    final tasks = directory?.totalTaskCount ?? 0;
     return Row(
       children: [
         Expanded(
@@ -1419,16 +1550,21 @@ class _TaskListPageState extends State<TaskListPage>
                 overflow: TextOverflow.ellipsis,
                 style: ZType.sub.copyWith(color: ZInk.faint(context)),
               ),
-              if (_lastSyncAt != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Text(
-                    trP(context, 'tasks.lastSync', [_clockLabel(_lastSyncAt!)]),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: ZType.caption.copyWith(color: ZInk.ghost(context)),
-                  ),
-                ),
+              ValueListenableBuilder<DateTime?>(
+                valueListenable: _lastSyncAt,
+                builder: (context, lastSyncAt, _) {
+                  if (lastSyncAt == null) return const SizedBox.shrink();
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      trP(context, 'tasks.lastSync', [_clockLabel(lastSyncAt)]),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: ZType.caption.copyWith(color: ZInk.ghost(context)),
+                    ),
+                  );
+                },
+              ),
             ],
           ),
         ),
@@ -1609,8 +1745,12 @@ class _TaskListPageState extends State<TaskListPage>
 
   /// "已置顶" group above the workspace cards: one card per pinned
   /// task (title, workspace · time, phase pill).
-  List<Widget> _pinnedGroup(BuildContext context, DeviceSession session) {
-    final pinned = session.taskDirectory.pinnedEntries();
+  List<Widget> _pinnedGroup(
+    BuildContext context,
+    DeviceSession session,
+    TaskDirectory directory,
+  ) {
+    final pinned = directory.pinnedEntries();
     if (pinned.isEmpty) return const [];
     return [
       Padding(
@@ -1625,8 +1765,9 @@ class _TaskListPageState extends State<TaskListPage>
       ),
       for (final (e, key) in pinned)
         Padding(
+          key: ValueKey('pinned-card:${e.sessionId}'),
           padding: const EdgeInsets.only(bottom: ZSpacing.cardGap),
-          child: _pinnedCard(context, session, e, workspaceKey: key),
+          child: _pinnedCard(context, session, directory, e, workspaceKey: key),
         ),
     ];
   }
@@ -1634,6 +1775,7 @@ class _TaskListPageState extends State<TaskListPage>
   Widget _pinnedCard(
     BuildContext context,
     DeviceSession session,
+    TaskDirectory directory,
     SessionEntry entry, {
     required String? workspaceKey,
   }) {
@@ -1652,11 +1794,15 @@ class _TaskListPageState extends State<TaskListPage>
       relativeTimeShort(context, entry.lastActivityAt),
     ].join(' · ');
     return SwipeActionsRow(
-      actions: _swipeActions(session, entry),
+      // Identity key: the pinned row's gesture tray follows its task when
+      // ANOTHER card's activity reorders the groups (11-19 task-list-scroll).
+      key: ValueKey('pinned-${entry.sessionId}'),
+      actions: _swipeActions(session, entry,
+          sessionOnlyIds: directory.sessionOnlyIds),
       trayRadius: ZRadius.tile,
       childRadius: ZRadius.tile,
       child: Card(
-        clipBehavior: Clip.antiAlias,
+        clipBehavior: Clip.hardEdge,
         child: InkWell(
           onTap: () => _openWorkspaceTask(session, ws, entry, title),
           onLongPress: () => _taskActions(context, session, entry),
@@ -1712,8 +1858,12 @@ class _TaskListPageState extends State<TaskListPage>
   /// 3.17.1 task groups (direct sqlite read) render as their own sections
   /// (色点 + 标题) above the day buckets; tasks in no group keep the buckets
   /// untouched.
-  List<Widget> _timelineGroups(BuildContext context, DeviceSession session) {
-    final pairs = session.taskDirectory.allEntries();
+  List<Widget> _timelineGroups(
+    BuildContext context,
+    DeviceSession session,
+    TaskDirectory directory,
+  ) {
+    final pairs = directory.allEntries();
     final entries = _sortedEntries([for (final (e, _) in pairs) e]);
     final wsKeyOf = {for (final (e, key) in pairs) e.sessionId: key};
     if (entries.isEmpty) {
@@ -1729,7 +1879,6 @@ class _TaskListPageState extends State<TaskListPage>
         ),
       ];
     }
-    _ensureGroupedView(session);
     final grouped = identical(_groupedViewSession, session)
         ? _groupedView
         : null;
@@ -1738,7 +1887,7 @@ class _TaskListPageState extends State<TaskListPage>
     if (grouped != null && grouped.groups.isNotEmpty) {
       final byId = {for (final e in entries) e.sessionId: e};
       sections.addAll(
-        _groupSections(context, session, grouped, byId, wsKeyOf),
+        _groupSections(context, session, directory, grouped, byId, wsKeyOf),
       );
       claimed = {
         // Bucket suppression mirrors the section membership judgment
@@ -1779,7 +1928,8 @@ class _TaskListPageState extends State<TaskListPage>
         for (final e in bucket.value)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
-            child: _directoryTaskRow(context, session, e, wsKeyOf[e.sessionId]),
+            child: _directoryTaskRow(
+                context, session, directory, e, wsKeyOf[e.sessionId]),
           ),
       ],
     ];
@@ -1792,6 +1942,7 @@ class _TaskListPageState extends State<TaskListPage>
   Widget _directoryTaskRow(
     BuildContext context,
     DeviceSession session,
+    TaskDirectory directory,
     SessionEntry entry,
     String? workspaceKey,
   ) {
@@ -1800,6 +1951,7 @@ class _TaskListPageState extends State<TaskListPage>
     return _taskRow(
       context,
       session,
+      directory,
       entry,
       workspaceLabel: _rowWorkspaceLabel(session, ws),
       workspace: ws,
@@ -1807,9 +1959,10 @@ class _TaskListPageState extends State<TaskListPage>
   }
 
   /// Kick the grouped-view load when the session changed or the 30 s page
-  /// TTL expired; the result lands via setState after the async read
-  /// (a miss lands as null → flat view). The session stamp still guards
-  /// against a stale answer landing on a different session.
+  /// TTL expired; the result lands on [_groupedViewChanges] after the async
+  /// read (a miss lands as null → flat view) — never a page-level setState.
+  /// The session stamp still guards against a stale answer landing on a
+  /// different session.
   void _ensureGroupedView(DeviceSession session) {
     final loadedAt = _groupedViewLoadedAt;
     if (identical(_groupedViewSession, session) &&
@@ -1821,7 +1974,8 @@ class _TaskListPageState extends State<TaskListPage>
     _groupedViewLoadedAt = DateTime.now();
     session.groupedTaskView().then((view) {
       if (mounted && identical(_groupedViewSession, session)) {
-        setState(() => _groupedView = view);
+        _groupedView = view;
+        _groupedViewChanges.value++;
       }
     });
   }
@@ -1835,6 +1989,7 @@ class _TaskListPageState extends State<TaskListPage>
   List<Widget> _groupSections(
     BuildContext context,
     DeviceSession session,
+    TaskDirectory directory,
     GroupedTaskView view,
     Map<String, SessionEntry> byId,
     Map<String, String?> wsKeyOf,
@@ -1860,6 +2015,7 @@ class _TaskListPageState extends State<TaskListPage>
             child: _directoryTaskRow(
               context,
               session,
+              directory,
               byId[m.taskId]!,
               wsKeyOf[m.taskId],
             ),
@@ -1956,12 +2112,13 @@ class _TaskListPageState extends State<TaskListPage>
   /// directory, sitting in another workspace, or pinned (the 已置顶 card
   /// carries no group dot) contributes nothing. Empty while the grouped
   /// read is in flight or unavailable (R4 silent degrade).
-  Map<String, Color> _groupDotOf(DeviceSession session) {
+  Map<String, Color> _groupDotOf(
+      DeviceSession session, TaskDirectory directory) {
     final grouped = identical(_groupedViewSession, session)
         ? _groupedView
         : null;
     if (grouped == null) return const {};
-    final pairs = session.taskDirectory.allEntries();
+    final pairs = directory.allEntries();
     final byId = {for (final (e, _) in pairs) e.sessionId: e};
     final wsKeyOf = {for (final (e, key) in pairs) e.sessionId: key};
     final dots = <String, Color>{};
@@ -1986,8 +2143,12 @@ class _TaskListPageState extends State<TaskListPage>
   /// Archive view (归档列表): every archived task on the device,
   /// from the merged task directory, grouped by workspace. Rows long-press
   /// into the shared action sheet (取消归档 / 删除 live there).
-  List<Widget> _archiveView(BuildContext context, DeviceSession session) {
-    final groups = _archiveGroups(session);
+  List<Widget> _archiveView(
+    BuildContext context,
+    DeviceSession session,
+    TaskDirectory directory,
+  ) {
+    final groups = _archiveGroups(session, directory);
     final total = groups.fold<int>(0, (n, g) => n + g.$2.length);
     final widgets = <Widget>[
       // 「全部删除」entry (desktop 3.17.1 deleteArchivedTasks; the official
@@ -2032,6 +2193,7 @@ class _TaskListPageState extends State<TaskListPage>
               child: _taskRow(
                 context,
                 session,
+                directory,
                 e,
                 workspace:
                     TaskDirectory.workspaceForKey(session.workspaces, e, dirKey),
@@ -2066,15 +2228,15 @@ class _TaskListPageState extends State<TaskListPage>
   /// surface under that group (no draft header) — [_orderedWorkspaces]
   /// filters those workspaces out.
   List<(Map<String, dynamic>, List<SessionEntry>)> _archiveGroups(
-      DeviceSession session) {
+      DeviceSession session, TaskDirectory directory) {
     final groups = <(Map<String, dynamic>, List<SessionEntry>)>[];
-    for (final ws in _orderedWorkspaces(session)) {
+    for (final ws in _orderedWorkspaces(session, directory)) {
       final dirKey = workspaceKeyOf(ws);
       final entries = _sortedEntries(dirKey == null
           ? const <SessionEntry>[]
           : [
-              for (final (e, _) in session.taskDirectory
-                  .entriesFor(dirKey, includeArchived: true))
+              for (final (e, _) in directory.entriesFor(dirKey,
+                  includeArchived: true))
                 e,
             ]);
       if (entries.isNotEmpty) groups.add((ws, entries));
@@ -2251,6 +2413,7 @@ class _TaskListPageState extends State<TaskListPage>
     BuildContext context,
     DeviceSession session,
     Map<String, dynamic> ws,
+    TaskDirectory directory,
   ) {
     final isActive = _isWorkspaceActive(session, ws);
     final key = workspaceKeyOf(ws) ?? workspaceTitle(ws);
@@ -2265,7 +2428,7 @@ class _TaskListPageState extends State<TaskListPage>
     var entries = dirKey == null
         ? const <SessionEntry>[]
         : [
-            for (final (e, _) in session.taskDirectory.entriesFor(dirKey)) e,
+            for (final (e, _) in directory.entriesFor(dirKey)) e,
           ];
     // Dual-tier active row order (10-31): several streaming rows must not
     // trade places on every output frame (see [_sortedEntries]).
@@ -2276,14 +2439,13 @@ class _TaskListPageState extends State<TaskListPage>
     // Highlight: the "current" task row (latest running, else the
     // most recently active) gets a rounded white/10 background.
     final current = _currentEntry(entries);
-    // B8: the grouped-view read is kicked here too so workspace rows can
-    // carry the group dot; a miss (missing tables / no home) keeps the
-    // flat rows.
-    _ensureGroupedView(session);
-    final groupDotOf = _groupDotOf(session);
+    // B8: the grouped-view read rides the page listener now (it used to be
+    // kicked from this build path); a miss keeps the flat rows.
+    final groupDotOf = _groupDotOf(session, directory);
 
     return Card(
-      clipBehavior: Clip.antiAlias,
+      key: ValueKey('workspace:$key'),
+      clipBehavior: Clip.hardEdge,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -2388,6 +2550,7 @@ class _TaskListPageState extends State<TaskListPage>
                 _taskRow(
                   context,
                   session,
+                  directory,
                   entries[i],
                   highlight:
                       current != null &&
@@ -2555,6 +2718,7 @@ class _TaskListPageState extends State<TaskListPage>
   Widget _taskRow(
     BuildContext context,
     DeviceSession session,
+    TaskDirectory directory,
     SessionEntry entry, {
     bool highlight = false,
     String? workspaceLabel,
@@ -2570,114 +2734,31 @@ class _TaskListPageState extends State<TaskListPage>
       if (workspaceLabel != null) workspaceLabel,
       relativeTimeShort(context, entry.lastActivityAt),
     ].join(' · ');
-    final awaiting = entry.pendingInteraction != null;
-    final unread = entry.raw['unreadAt'] != null;
     // Conversation rows merged into the default card (draft-* workspaces)
     // keep their own workspace map, so the row can name its type.
     final conversation =
         workspace != null && _isConversationWorkspace(workspace);
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-          horizontal: 8, vertical: ZListRow.gap),
-      child: SwipeActionsRow(
-        actions: _swipeActions(session, entry),
-        trayRadius: ZRadius.field,
-        childRadius: ZRadius.field,
-        child: Material(
-          color: highlight
-              ? Colors.white.withValues(alpha: 0.1)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(ZRadius.field),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(ZRadius.field),
-            onTap: () => _openWorkspaceTask(session, workspace, entry, title),
-            onLongPress: () => _taskActions(context, session, entry),
-            // Row height follows the content: ZListRow.padding only (R5).
-            child: Padding(
-              padding: ZListRow.padding,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            if (groupDot != null) ...[
-                              Container(
-                                width: ZListRow.dot,
-                                height: ZListRow.dot,
-                                decoration: BoxDecoration(
-                                  color: groupDot,
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                              const SizedBox(width: 6),
-                            ],
-                            if (unread) ...[
-                              Container(
-                                width: ZListRow.dot,
-                                height: ZListRow.dot,
-                                decoration: const BoxDecoration(
-                                  color: ZColors.sky500,
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                              const SizedBox(width: 6),
-                            ],
-                            Expanded(
-                              child: Text(
-                                title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: ZType.bodyStrong,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 3),
-                        Row(
-                          children: [
-                            if (awaiting) ...[
-                              _awaitingTag(context),
-                              const SizedBox(width: 6),
-                            ],
-                            // Type (constant) after state (transient), and a
-                            // neutral chip so it never competes with the
-                            // awaiting warning tone.
-                            if (conversation) ...[
-                              _conversationTag(context),
-                              const SizedBox(width: 6),
-                            ],
-                            // Read-only worktree branch (R2): display only,
-                            // no tap target.
-                            if (branch != null) ...[
-                              TaskBranchChip(branchName: branch),
-                              const SizedBox(width: 6),
-                            ],
-                            Expanded(
-                              child: Text(
-                                subtitle,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: ZType.sub.copyWith(
-                                  color: ZInk.faint(context),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  PhasePill(label: phaseLabel, phase: entry.phase, solid: true),
-                ],
-              ),
-            ),
-          ),
-        ),
+    // Identity-keyed row (2026-11-19 scroll-perf): the State + the swipe
+    // tray follow the task id through reorders, and `didUpdateWidget`
+    // compares the data record so an unchanged row's subtree is reused.
+    return _TaskRowView(
+      key: ValueKey('task:${entry.sessionId}'),
+      data: (
+        title: title,
+        subtitle: subtitle,
+        phase: entry.phase,
+        phaseLabel: phaseLabel,
+        branch: branch,
+        awaiting: entry.pendingInteraction != null,
+        unread: entry.raw['unreadAt'] != null,
+        conversation: conversation,
+        highlight: highlight,
+        groupDot: groupDot,
       ),
+      actions: _swipeActions(session, entry,
+          sessionOnlyIds: directory.sessionOnlyIds),
+      onTap: () => _openWorkspaceTask(session, workspace, entry, title),
+      onLongPress: () => _taskActions(context, session, entry),
     );
   }
 
@@ -2694,11 +2775,14 @@ class _TaskListPageState extends State<TaskListPage>
   /// disabled state to lean on, and a dead tap would only end in the
   /// matches=0 error. Delete stays (V4 deleteSession route). Same gate as
   /// the long-press sheet's four muted registry ops.
-  List<SwipeAction> _swipeActions(DeviceSession session, SessionEntry entry) {
+  List<SwipeAction> _swipeActions(
+    DeviceSession session,
+    SessionEntry entry, {
+    required Set<String> sessionOnlyIds,
+  }) {
     final archived = entry.raw['archived'] == true;
     final unread = entry.raw['unreadAt'] != null;
-    final isDraft =
-        session.taskDirectory.sessionOnlyIds.contains(entry.sessionId);
+    final isDraft = sessionOnlyIds.contains(entry.sessionId);
     final archiveFg =
         ZInk.isDark(context) ? ZColors.sky400 : ZColors.sky600;
     return [
@@ -2740,41 +2824,6 @@ class _TaskListPageState extends State<TaskListPage>
   }
 
   /// `permissionTag`/`userInputTag`: 「等待确认」amber mini-pill.
-  Widget _awaitingTag(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-      decoration: BoxDecoration(
-        color: ZColors.warning.withValues(alpha: 0.16),
-        borderRadius: BorderRadius.circular(ZRadius.mini),
-      ),
-      child: Text(
-        tr(context, 'tasks.awaiting'),
-        style: ZType.caption.copyWith(
-          fontWeight: FontWeight.w500,
-          color: ZInk.warningTone(context),
-        ),
-      ),
-    );
-  }
-
-  /// Row-level 「对话」 chip for conversation (draft-*) sessions that the
-  /// directory merges into the default card. Same neutral shape as the card
-  /// header's [_kindBadge]: the row type is constant information, not a
-  /// warning state.
-  Widget _conversationTag(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-      decoration: BoxDecoration(
-        color: ZInk.tile(context),
-        borderRadius: BorderRadius.circular(ZRadius.mini),
-      ),
-      child: Text(
-        tr(context, 'tasks.workspaceKind.conversation'),
-        style: ZType.caption.copyWith(color: ZInk.faint(context)),
-      ),
-    );
-  }
-
   /// Opens a task row whatever workspace it lives in: tasks of the active
   /// workspace go straight to chat; others re-point the bridge first
   /// (workspace-bridge-open rides the taskId). The resolve → open decision
@@ -4511,6 +4560,220 @@ class _ArchiveClearDialogState extends State<_ArchiveClearDialog> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// `permissionTag`/`userInputTag`: 「等待确认」 amber mini-pill.
+Widget _awaitingTag(BuildContext context) {
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+    decoration: BoxDecoration(
+      color: ZColors.warning.withValues(alpha: 0.16),
+      borderRadius: BorderRadius.circular(ZRadius.mini),
+    ),
+    child: Text(
+      tr(context, 'tasks.awaiting'),
+      style: ZType.caption.copyWith(
+        fontWeight: FontWeight.w500,
+        color: ZInk.warningTone(context),
+      ),
+    ),
+  );
+}
+
+/// Row-level 「对话」 chip for conversation (draft-*) sessions that the
+/// directory merges into the default card. Same neutral shape as the card
+/// header's `_kindBadge`: the row type is constant information, not a
+/// warning state.
+Widget _conversationTag(BuildContext context) {
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+    decoration: BoxDecoration(
+      color: ZInk.tile(context),
+      borderRadius: BorderRadius.circular(ZRadius.mini),
+    ),
+    child: Text(
+      tr(context, 'tasks.workspaceKind.conversation'),
+      style: ZType.caption.copyWith(color: ZInk.faint(context)),
+    ),
+  );
+}
+
+/// Stable data identity of one task row (2026-11-19 scroll-perf): a record
+/// so `didUpdateWidget` compares field-by-field without touching the entry
+/// object (the directory hands out fresh maps on every frame).
+typedef _TaskRowData = ({
+  String title,
+  String subtitle,
+  String phase,
+  String phaseLabel,
+  String? branch,
+  bool awaiting,
+  bool unread,
+  bool conversation,
+  bool highlight,
+  Color? groupDot,
+});
+
+/// One task row, identity-keyed by the session id and content-cached across
+/// parent rebuilds. The data record equals when nothing the row renders
+/// changed — the cached subtree is then reused as-is. The swipe tray lives
+/// INSIDE this keyed subtree, so a row that trades places (activity
+/// reordering) keeps its open/closed gesture state attached to its own task
+/// instead of the slot it used to occupy (PRD acceptance 2).
+class _TaskRowView extends StatefulWidget {
+  const _TaskRowView({
+    super.key,
+    required this.data,
+    required this.actions,
+    required this.onTap,
+    required this.onLongPress,
+  });
+
+  final _TaskRowData data;
+  final List<SwipeAction> actions;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
+
+  @override
+  State<_TaskRowView> createState() => _TaskRowViewState();
+}
+
+class _TaskRowViewState extends State<_TaskRowView> {
+  Widget? _content;
+
+  @override
+  void didUpdateWidget(covariant _TaskRowView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Callbacks are dereferenced off `widget` at event time and the swipe
+    // actions live outside the cached content, so data is the whole compare
+    // surface.
+    if (oldWidget.data != widget.data) _content = null;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Theme / locale / text-scale flips invalidate captured styles and
+    // `tr()` strings baked into the cached subtree.
+    _content = null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final content = _content ??= _buildContent(context);
+    return Padding(
+      padding:
+          const EdgeInsets.symmetric(horizontal: 8, vertical: ZListRow.gap),
+      child: SwipeActionsRow(
+        actions: widget.actions,
+        trayRadius: ZRadius.field,
+        childRadius: ZRadius.field,
+        // Row-level repaint isolation: ListView's automatic boundary covers
+        // the whole card, so a running row's constantly animating PhasePill
+        // spinner would otherwise repaint every sibling row in that card.
+        child: RepaintBoundary(child: content),
+      ),
+    );
+  }
+
+  Widget _buildContent(BuildContext context) {
+    final data = widget.data;
+    return Material(
+      color: data.highlight
+          ? Colors.white.withValues(alpha: 0.1)
+          : Colors.transparent,
+      borderRadius: BorderRadius.circular(ZRadius.field),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(ZRadius.field),
+        onTap: () => widget.onTap(),
+        onLongPress: () => widget.onLongPress(),
+        // Row height follows the content: ZListRow.padding only (R5).
+        child: Padding(
+          padding: ZListRow.padding,
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        if (data.groupDot != null) ...[
+                          Container(
+                            width: ZListRow.dot,
+                            height: ZListRow.dot,
+                            decoration: BoxDecoration(
+                              color: data.groupDot,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                        ],
+                        if (data.unread) ...[
+                          Container(
+                            width: ZListRow.dot,
+                            height: ZListRow.dot,
+                            decoration: const BoxDecoration(
+                              color: ZColors.sky500,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                        ],
+                        Expanded(
+                          child: Text(
+                            data.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: ZType.bodyStrong,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Row(
+                      children: [
+                        if (data.awaiting) ...[
+                          _awaitingTag(context),
+                          const SizedBox(width: 6),
+                        ],
+                        // Type (constant) after state (transient), and a
+                        // neutral chip so it never competes with the
+                        // awaiting warning tone.
+                        if (data.conversation) ...[
+                          _conversationTag(context),
+                          const SizedBox(width: 6),
+                        ],
+                        // Read-only worktree branch (R2): display only,
+                        // no tap target.
+                        if (data.branch != null) ...[
+                          TaskBranchChip(branchName: data.branch!),
+                          const SizedBox(width: 6),
+                        ],
+                        Expanded(
+                          child: Text(
+                            data.subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: ZType.sub.copyWith(
+                              color: ZInk.faint(context),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              PhasePill(
+                  label: data.phaseLabel, phase: data.phase, solid: true),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

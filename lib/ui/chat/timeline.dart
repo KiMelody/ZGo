@@ -39,6 +39,13 @@ import 'workflow_card.dart';
 
 export 'chat_preview.dart' show ChatPreview;
 
+/// Test counter (task 11-19 chat-scroll wave 2): how many turn-group bodies
+/// were built — i.e. how often the row-identity memo missed. Unchanged
+/// groups across a wire frame must not move this. Never read by production
+/// code.
+@visibleForTesting
+int debugTurnGroupBuilds = 0;
+
 /// One ordered part of an assistant turn: either a merged text segment
 /// (kind == 'text') or a non-text row (kind == 'row').
 typedef AssistantPart = ({
@@ -400,26 +407,74 @@ List<Map<String, dynamic>> _messageClassSort(List<Map<String, dynamic>> run) {
 /// after one). Consecutive assistant rows are merged into a single group
 /// EVEN IF the server bumps `turnId` mid-response, so one answer never
 /// splits into several bubbles each carrying its own feedback buttons.
+///
+/// Single pass (task 11-19 chat-scroll wave 2 step 3): the assistant-message
+/// repair (10-19, [repairInvertedToolOrder]) and the turn grouping share one
+/// scan — the old composition materialized the whole repaired list first
+/// (a full extra O(rows) allocation per wire frame) only to partition it.
+/// Flushed message runs are class-sorted exactly as before
+/// ([_messageClassSort] — identity-returning when already canonical), so the
+/// output is item-for-item identical; the equivalence is pinned by the
+/// golden test `test/ui/chat/group_chat_rows_golden_test.dart`.
 List<List<Map<String, dynamic>>> groupChatRows(List<Map<String, dynamic>> rows) {
   final groups = <List<Map<String, dynamic>>>[];
   List<Map<String, dynamic>>? current;
-  for (final row in repairInvertedToolOrder(rows)) {
+
+  void addRow(Map<String, dynamic> row) {
     final kind = row['kind'];
     if (kind == 'timelineMarker') {
       current = null;
       groups.add([row]);
-      continue;
+      return;
     }
     final isUser = kind == 'userInput';
     final startsGroup =
-        isUser || current == null || current.first['kind'] == 'userInput';
+        isUser || current == null || current!.first['kind'] == 'userInput';
     if (startsGroup) {
       current = [row];
-      groups.add(current);
+      groups.add(current!);
     } else {
-      current.add(row);
+      current!.add(row);
     }
   }
+
+  // Run buffer for the inverted-persisted-order repair. Boundaries
+  // (turnHeader/userInput) flush and pass through in place; keyless rows
+  // inside a run inherit the preceding row's class (attachments travel with
+  // their host), keyless rows outside any run pass through.
+  var run = <Map<String, dynamic>>[];
+  var runKey = '';
+
+  void flushRun() {
+    if (run.isEmpty) return;
+    for (final row in _messageClassSort(run)) {
+      addRow(row);
+    }
+    run = <Map<String, dynamic>>[];
+  }
+
+  for (final row in rows) {
+    final kind = row['kind'];
+    if (kind == 'turnHeader' || kind == 'userInput') {
+      flushRun();
+      runKey = '';
+      addRow(row);
+      continue;
+    }
+    final key = '${row['assistantResponseId'] ?? ''}';
+    if (key.isEmpty) {
+      if (run.isEmpty) {
+        addRow(row);
+      } else {
+        run.add(row);
+      }
+      continue;
+    }
+    if (run.isNotEmpty && key != runKey) flushRun();
+    runKey = key;
+    run.add(row);
+  }
+  flushRun();
   return groups;
 }
 
@@ -627,6 +682,16 @@ class ChatTurnGroup extends StatefulWidget {
   /// preview line simply never renders.
   final Map<String, dynamic>? lastError;
 
+  /// Page-owned measurement handle (task 11-19 step 4): the chat page's turn
+  /// navigator reads the highlighted group's RenderBox through this key
+  /// instead of walking the whole element tree every scroll frame. It is
+  /// mounted on the build ROOT container (Column / marker row / empty
+  /// shrink), which resolves to the same RenderBox `_builtGroups()` used to
+  /// find — the `turn-…` [key] contract is untouched (transcript_viewport
+  /// hard-codes it for the stick/anchor chain). Null on surfaces without a
+  /// navigator (detail page, inline expansion, tests).
+  final GlobalKey? groupRenderKey;
+
   const ChatTurnGroup({
     super.key,
     required this.rows,
@@ -644,7 +709,51 @@ class ChatTurnGroup extends StatefulWidget {
     this.readOnly = false,
     this.sideChat = false,
     this.lastError,
+    this.groupRenderKey,
   });
+
+  /// Whether [next] carries the same rendering inputs as [prev] — the
+  /// widget-instance reuse gate of the main list (task 11-19 chat-scroll
+  /// wave 2 step 3) and the invalidation compare of the inner body memo.
+  ///
+  /// Row identity IS the content fingerprint: rows are immutable by
+  /// contract (conversation_state replaces every touched row map
+  /// copy-on-write; chat-conventions §9), so element-wise reference
+  /// equality over the whole group means the turn is unchanged — no
+  /// content deep-compare, which would betray the contract's purpose.
+  /// The first/last + length shortcut is NOT enough: a mid-list row can
+  /// update alone (tool progress, feedback upsert), so every index is
+  /// compared (a pointer scan, tail-first because deltas land at the tail).
+  ///
+  /// Every plumbing field must match too: reusing an instance built for a
+  /// different `lastError` / editing notifier / read-only flag / render key
+  /// would pin stale behaviour on it. Callbacks are compared with `==` —
+  /// Dart guarantees method tear-offs of the same receiver + method are
+  /// equal closures (`identical` would make every teardown miss).
+  static bool sameInputs(ChatTurnGroup prev, ChatTurnGroup next) {
+    if (prev.key != next.key) return false;
+    final a = prev.rows;
+    final b = next.rows;
+    if (a.length != b.length) return false;
+    for (var i = a.length - 1; i >= 0; i--) {
+      if (!identical(a[i], b[i])) return false;
+    }
+    return identical(prev.conversation, next.conversation) &&
+        prev.sessionId == next.sessionId &&
+        prev.onAction == next.onAction &&
+        identical(prev.state, next.state) &&
+        identical(prev.feed, next.feed) &&
+        identical(prev.preview, next.preview) &&
+        prev.confirmWindow == next.confirmWindow &&
+        identical(prev.editingRowId, next.editingRowId) &&
+        prev.onEditSend == next.onEditSend &&
+        identical(prev.actions, next.actions) &&
+        identical(prev.gitController, next.gitController) &&
+        prev.readOnly == next.readOnly &&
+        prev.sideChat == next.sideChat &&
+        identical(prev.lastError, next.lastError) &&
+        identical(prev.groupRenderKey, next.groupRenderKey);
+  }
 
   @override
   State<ChatTurnGroup> createState() => _ChatTurnGroupState();
@@ -656,13 +765,45 @@ class ChatTurnGroup extends StatefulWidget {
 class _ChatTurnGroupState extends State<ChatTurnGroup> {
   bool _showChanges = true;
 
+  /// Memoized build root (task 11-19 chat-scroll wave 2 step 2). When the
+  /// group's row instances are unchanged, [build] hands the framework the
+  /// previously built subtree root — `identical` widget → Flutter skips the
+  /// whole subtree update, markdown parses included. The legitimacy is the
+  /// row-instance-immutability contract (chat-conventions §9); see
+  /// [ChatTurnGroup.sameInputs].
+  ///
+  /// Invalidation paths: [didUpdateWidget] (any input change, compared
+  /// through [ChatTurnGroup.sameInputs]); the internal state flips below
+  /// (expansion toggle, terminal confirm) because those change what the
+  /// cached subtree renders. Theme / locale / text-scale are NOT this
+  /// memo's business: this State registers no inherited dependency (the
+  /// cached children carry their own), so a flip marks those child elements
+  /// dirty directly — an identical parent widget does not stop
+  /// [InheritedWidget] notifications. Asserted by the theme flip case in
+  /// `test/ui/chat/timeline_group_memo_test.dart`.
+  Widget? _memoBody;
+
+  /// Non-row [ConversationState] inputs the subtree reads: [_UserBubble]'s
+  /// rewind-disabled flag (`isRunning`), the long-press/diff affordances
+  /// (`sawRowActions`), and — only for groups that render a workflow tool
+  /// row — the live mirror family (`workflowRuns`; the card dispatches on
+  /// it and its build reads it). Compared per build so a state-only frame
+  /// (control/config patch) cannot leave a stale subtree on screen.
+  bool? _memoIsRunning;
+  bool? _memoSawRowActions;
+  WorkflowRuns? _memoWorkflowRuns;
+  bool _memoHasWorkflowRows = false;
+
   /// Terminal-footer gate (F) — the hold window itself; the footer's
   /// business flag stays in [_terminalConfirmed].
   late final ConfirmGate _terminalGate = ConfirmGate(
     window: widget.confirmWindow,
     onConfirmed: () {
       if (mounted && turnTerminalPhases.contains(_headerPhase ?? '')) {
-        setState(() => _terminalConfirmed = true);
+        setState(() {
+          _memoBody = null; // the footer/pill render set changed
+          _terminalConfirmed = true;
+        });
       }
     },
   );
@@ -684,6 +825,25 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
   void didUpdateWidget(ChatTurnGroup oldWidget) {
     super.didUpdateWidget(oldWidget);
     _reconcileTerminal();
+    // Any input change invalidates the cached subtree. `_reconcileTerminal`
+    // may already have cleared it through its own setState — clearing twice
+    // is a no-op.
+    if (!ChatTurnGroup.sameInputs(oldWidget, widget)) _memoBody = null;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Fires once, right after mount: this State's own build registers no
+    // inherited dependency (on a hit it returns the cached root without
+    // constructing children; on a miss the children — not this State — take
+    // the Theme / UiSettings / text-scale deps). Theme / locale / text-scale
+    // freshness therefore does NOT ride this clear: those flips mark the
+    // dependent leaf elements dirty directly, and the identical-parent
+    // shortcut does not suppress [InheritedWidget] notifications. Keep the
+    // clear as an invariant guard for any inherited read this State may add
+    // later (theme flip case in test/ui/chat/timeline_group_memo_test.dart).
+    _memoBody = null;
   }
 
   @override
@@ -720,7 +880,12 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
     final terminal = turnTerminalPhases.contains(_headerPhase ?? '');
     if (!terminal) {
       _terminalGate.observe(false);
-      if (_terminalConfirmed) setState(() => _terminalConfirmed = false);
+      if (_terminalConfirmed) {
+        setState(() {
+          _memoBody = null; // footer/pill render set shrank back
+          _terminalConfirmed = false;
+        });
+      }
       return;
     }
     // First-frame terminal (history / snapshot) was preset in initState —
@@ -731,13 +896,33 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
 
   @override
   Widget build(BuildContext context) {
+    final isRunning = widget.state.isRunning;
+    final sawRowActions = widget.state.sawRowActions;
+    final workflowRuns = widget.state.workflowRuns;
+    final cached = _memoBody;
+    if (cached != null &&
+        isRunning == _memoIsRunning &&
+        sawRowActions == _memoSawRowActions &&
+        (!_memoHasWorkflowRows ||
+            identical(workflowRuns, _memoWorkflowRuns))) {
+      return cached;
+    }
+    _memoIsRunning = isRunning;
+    _memoSawRowActions = sawRowActions;
+    _memoWorkflowRuns = workflowRuns;
+    _memoHasWorkflowRows = widget.rows.any(isWorkflowToolRow);
+    debugTurnGroupBuilds++;
+    return _memoBody = _buildGroup(context);
+  }
+
+  Widget _buildGroup(BuildContext context) {
     final rows = widget.rows;
     final conversation = widget.conversation;
     final sessionId = widget.sessionId;
     final onAction = widget.onAction;
     // single timeline marker
     if (rows.length == 1 && rows.first['kind'] == 'timelineMarker') {
-      return _TimelineMarkerWidget(row: rows.first);
+      return _withRenderKey(_TimelineMarkerWidget(row: rows.first));
     }
     final first = rows.first;
     final isUserTurn = first['kind'] == 'userInput';
@@ -794,7 +979,10 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
           row: header,
           hasChanges: header['fileChanges'] is Map,
           expanded: _showChanges,
-          onToggle: () => setState(() => _showChanges = !_showChanges),
+          onToggle: () => setState(() {
+            _memoBody = null; // the change-capsule expansion changed
+            _showChanges = !_showChanges;
+          }),
           terminalConfirmed: _terminalConfirmed,
         ),
       );
@@ -933,11 +1121,19 @@ class _ChatTurnGroupState extends State<ChatTurnGroup> {
         ),
       );
     }
-    if (children.isEmpty) return const SizedBox.shrink();
-    return Column(
+    if (children.isEmpty) return _withRenderKey(const SizedBox.shrink());
+    return _withRenderKey(Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: children,
-    );
+    ));
+  }
+
+  /// Mounts the page's measurement [ChatTurnGroup.groupRenderKey] on the
+  /// build root. Every branch gets it (marker row / empty shrink / body
+  /// Column) so the key exists for every group the page registers.
+  Widget _withRenderKey(Widget child) {
+    final key = widget.groupRenderKey;
+    return key == null ? child : KeyedSubtree(key: key, child: child);
   }
 }
 
@@ -1742,7 +1938,15 @@ class _AttachmentViewState extends State<_AttachmentView> {
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(ZRadius.field),
-          child: Image.memory(_imageBytes!, width: 220, fit: BoxFit.cover),
+          // Decode at the painted width (220dp × dpr), not the file's full
+          // resolution: phone screenshots are 2000px+ wide and the bubble
+          // paid for the oversized decode whenever the image cache missed.
+          child: Image.memory(
+            _imageBytes!,
+            width: 220,
+            fit: BoxFit.cover,
+            cacheWidth: (220 * MediaQuery.devicePixelRatioOf(context)).round(),
+          ),
         ),
       ),
     );
@@ -2128,6 +2332,19 @@ class _ToolCallTileState extends State<_ToolCallTile> {
   /// only while expanded so its pooled subscription follows the expansion.
   bool _expanded = false;
 
+  /// Decoded node_repl image bytes, by their base64 payload: `Image.memory`
+  /// and the fullscreen viewer share ONE decode of a source. Two
+  /// `base64Decode` calls also produce two `MemoryImage` identities the
+  /// image cache cannot merge, so every rebuild decoded twice. Bounded by
+  /// this row's images — the state dies with the row.
+  final Map<String, Uint8List> _imageBytes = {};
+
+  /// Pretty-printed `_kv` bodies by label (input/output/error): the JSON
+  /// `jsonDecode` + 2-space re-indent is O(text) on every rebuild while a
+  /// row streams, and each label only shows its latest value anyway. Keyed
+  /// by label (not by body) so a growing output cannot accumulate prefixes.
+  final Map<String, ({String raw, String pretty})> _prettyByLabel = {};
+
   @override
   Widget build(BuildContext context) {
     final row = widget.row;
@@ -2173,7 +2390,11 @@ class _ToolCallTileState extends State<_ToolCallTile> {
         ? display['images'] as List
         : const [];
 
-    final summary = toolRowSemantics(row, locale: localeOf(context));
+    final summary = toolRowSemantics(
+      row,
+      locale: localeOf(context),
+      diff: diff,
+    );
 
     final agentPrompt = isAgentTool(row) ? promptOf(inputText) : null;
     final childSessionId = widget.subagent?['childSessionId'] as String?;
@@ -2277,7 +2498,12 @@ class _ToolCallTileState extends State<_ToolCallTile> {
                 leading: Icon(summary.icon, size: ZTile.iconSize, color: color),
                 title: title,
                 subtitle: subtitle,
-                children: [
+                // The body is skipped while collapsed (task 11-19 step 3):
+                // the SDK builds ExpansionTile children even offstage, so
+                // extractDiff/_kv/DiffView/decode work ran for invisible
+                // content on every streaming rebuild.
+                children: _expanded
+                    ? [
                   // File edits show only the diff: the raw input/output JSON
                   // of a write/edit call is noise the web omits too.
                   // Agent rows expand to the dispatched prompt (web
@@ -2332,38 +2558,7 @@ class _ToolCallTileState extends State<_ToolCallTile> {
                     ),
                   for (final image in images)
                     if (image is Map && image['base64'] is String)
-                      Padding(
-                        padding: ZTile.body,
-                        child: InkWell(
-                          onTap: () => Navigator.of(context).push(
-                            zRoute(
-                              (_) => ImageViewerPage(
-                                bytes: base64Decode(
-                                    image['base64'] as String),
-                              ),
-                            ),
-                          ),
-                          child: ClipRRect(
-                            borderRadius:
-                                BorderRadius.circular(ZRadius.field),
-                            // Same floor/cap as markdown images: a decode
-                            // -pending or tiny intrinsic image still owns a
-                            // real tap box; big screenshots stay tile-sized.
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(
-                                  minHeight: 48, maxHeight: 320),
-                              child: Image.memory(
-                                base64Decode(image['base64'] as String),
-                                fit: BoxFit.contain,
-                                width: double.infinity,
-                                errorBuilder:
-                                    (context, error, stackTrace) =>
-                                        const SizedBox.shrink(),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
+                      _toolImage(context, image['base64'] as String),
                   // Inline child transcript (web childToolCalls):
                   // mounted only while expanded so the pooled child
                   // subscription follows the expansion.
@@ -2378,12 +2573,43 @@ class _ToolCallTileState extends State<_ToolCallTile> {
                       preview: widget.preview,
                       actions: widget.actions,
                     ),
-                ],
+                ]
+                    : const <Widget>[],
               ),
             ),
             // Live progress stays visible while collapsed.
             if (progress is Map) _ProgressRow(progress: progress),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// One node_repl image: the tap target and the inline painting share the
+  /// single decoded byte buffer cached in [_imageBytes] (see the field docs).
+  Widget _toolImage(BuildContext context, String base64) {
+    final bytes = _imageBytes.putIfAbsent(base64, () => base64Decode(base64));
+    return Padding(
+      padding: ZTile.body,
+      child: InkWell(
+        onTap: () => Navigator.of(context).push(
+          zRoute((_) => ImageViewerPage(bytes: bytes)),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(ZRadius.field),
+          // Same floor/cap as markdown images: a decode -pending or tiny
+          // intrinsic image still owns a real tap box; big screenshots stay
+          // tile-sized.
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48, maxHeight: 320),
+            child: Image.memory(
+              bytes,
+              fit: BoxFit.contain,
+              width: double.infinity,
+              errorBuilder: (context, error, stackTrace) =>
+                  const SizedBox.shrink(),
+            ),
+          ),
         ),
       ),
     );
@@ -2439,14 +2665,25 @@ class _ToolCallTileState extends State<_ToolCallTile> {
     );
   }
 
-  Widget _kv(BuildContext context, String label, String value,
-      {String? openPath}) {
-    // Pretty-print JSON input when possible (structured view)
+  /// Pretty-print JSON when possible (structured view), cached per label.
+  /// The cache key is the label, not the body: `input`/`output`/`error` each
+  /// render their latest value, and a streaming output must not leave one
+  /// entry per prefix behind.
+  String _prettyJson(String label, String value) {
+    final cached = _prettyByLabel[label];
+    if (cached != null && cached.raw == value) return cached.pretty;
     var display = value;
     try {
       final decoded = jsonDecode(value);
       display = const JsonEncoder.withIndent('  ').convert(decoded);
     } catch (_) {}
+    _prettyByLabel[label] = (raw: value, pretty: display);
+    return display;
+  }
+
+  Widget _kv(BuildContext context, String label, String value,
+      {String? openPath}) {
+    final display = _prettyJson(label, value);
     final tappable = openPath != null && ChatPreview.dispatchable(openPath);
     final openBase =
         tappable ? openPath.split(RegExp(r'[\\/]')).last : null;
@@ -2839,16 +3076,29 @@ class _BashOutputPreviewState extends State<_BashOutputPreview> {
 
   bool _expanded = false;
 
-  @override
-  Widget build(BuildContext context) {
-    final raw = widget.preview['text'];
-    final lines = sanitizeTerminalPreview(raw is String ? raw : '')
-        .split('\n')
-        .toList();
+  /// Sanitized, blank-trimmed lines of the last input (task 11-19 step 3):
+  /// a running Bash row upserts its tail line once a second, and the regex
+  /// strip + CR redraw normalization is the most expensive part of that
+  /// rebuild. Keyed by string equality — a growing tail always differs.
+  String? _lastRaw;
+  List<String> _lastLines = const [];
+
+  List<String> _linesOf(Object? raw) {
+    final text = raw is String ? raw : '';
+    if (_lastRaw == text) return _lastLines;
+    final lines = sanitizeTerminalPreview(text).split('\n').toList();
     // Trailing blank lines carry no signal and would eat the window.
     while (lines.isNotEmpty && lines.last.trim().isEmpty) {
       lines.removeLast();
     }
+    _lastRaw = text;
+    _lastLines = lines;
+    return lines;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = _linesOf(widget.preview['text']);
     if (lines.isEmpty) return const SizedBox.shrink();
 
     final total = (widget.preview['totalLines'] as num?)?.toInt();

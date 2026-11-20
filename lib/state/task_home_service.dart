@@ -26,6 +26,7 @@ class TaskHomeService {
     required this.deleteCopy,
     required this.onActiveFrameApplied,
     required this.onChanged,
+    required this.onDirectoryChanged,
     required this.log,
   });
 
@@ -60,6 +61,13 @@ class TaskHomeService {
   /// The session's guarded notify for the home-adjudication anchor write
   /// (the former `correctTaskHome` notify).
   final void Function() onChanged;
+
+  /// Fires once per actual directory invalidation ([_bump]) — the task list
+  /// page's narrow listenable (2026-11-19 scroll-perf). Not a notifier of
+  /// its own: the session stays the single notify owner; this callback is
+  /// the directory-scoped slice of it, aligned point-for-point with the
+  /// invalidation matrix (spec/state/session-lifecycle.md §10.2).
+  final void Function() onDirectoryChanged;
 
   final void Function(String line) log;
 
@@ -104,7 +112,14 @@ class TaskHomeService {
       _indexDiffBase;
 
   int _revision = 0;
-  void _bump() => _revision++;
+  /// Bumps the materialized-view revision and reports the invalidation to
+  /// the session (the task list page's directory listenable). Every matrix
+  /// write point funnels through here, so the narrow notify cannot drift
+  /// from the cache.
+  void _bump() {
+    _revision++;
+    onDirectoryChanged();
+  }
 
   TaskDirectoryView? _view;
   String? _viewFingerprint;
@@ -611,6 +626,10 @@ class TaskHomeService {
   void anchorCreatedTask(String taskId, String? workspaceKey) {
     if (workspaceKey == null) return;
     store.anchorHome(taskId, normalizeKey(workspaceKey), now: clock.now());
+    // Store writes carry no notify of their own (§10.2 row "store 写点");
+    // the session-level create flow notifies broadly, but the task list
+    // page hears only the directory slice.
+    _bump();
   }
 
   /// Records a confirmed local delete: the id enters the persisted tombstone
@@ -618,6 +637,7 @@ class TaskHomeService {
   void rememberLocalDelete(String sessionId) {
     store.addLocalDelete(sessionId);
     store.dropAnchor(sessionId);
+    _bump();
   }
 
   bool isSessionDeleted(String sessionId) =>

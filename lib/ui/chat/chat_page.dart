@@ -42,6 +42,12 @@ import 'turn_navigator.dart';
 import 'workflow_card.dart';
 import 'workflow_run_page.dart';
 
+/// Test counter (task 11-19 chat-scroll wave 2): how many times the message
+/// list recomputed its grouping. Unchanged row instances must reuse the
+/// cached groups. Never read by production code.
+@visibleForTesting
+int debugGroupingComputations = 0;
+
 /// Native chat view for one task (session), backed by Conversation V4 over
 /// the page-construction boundary [ChatPageHost] (ADR-0008 rule ii).
 /// Draft mode (no [sessionId]): the first message issues `createSession`
@@ -529,6 +535,39 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   /// scroll ([_updateActiveQueryIndex]). A ValueNotifier so a highlight
   /// change repaints only the strip, never the page.
   final ValueNotifier<int?> _activeQueryIndex = ValueNotifier(null);
+
+  /// Per-group render keys for the highlight pass (task 11-19 step 4): the
+  /// item builder hands every [ChatTurnGroup] its own [GlobalKey] (mounted on
+  /// the group's build root), so the highlight reads the query groups' boxes
+  /// directly — one registry lookup per query — instead of a full
+  /// `visitChildElements` walk every scroll frame. The keys carry no state;
+  /// the page clears the registry on dispose (the elements are gone with the
+  /// page). The `turn-…` ValueKey contract on ChatTurnGroup is untouched.
+  final Map<int, GlobalKey> _turnGroupKeys = {};
+
+  /// Grouping memo (task 11-19 chat-scroll wave 2 step 3). [state] notifies
+  /// on every wire frame — including frames that only touch config / queue /
+  /// control — so the full scan + repair + partition used to run each time.
+  /// [_groupedRowRefs] is a shallow copy of the row instances the cached
+  /// [_groupedRows] was derived from (the state's own list is mutated in
+  /// place by delta application, so it cannot serve as its own snapshot).
+  /// Rows are immutable by contract (chat-conventions §9), so reference
+  /// equality means the same input; the scan walks tail-first because
+  /// deltas land at the tail.
+  List<Map<String, dynamic>>? _groupedRowRefs;
+  List<List<Map<String, dynamic>>> _groupedRows = const [];
+
+  /// Identical [ChatTurnGroup] instances by first rowId, handed back to the
+  /// ListView for unchanged groups — Flutter's `identical` widget shortcut
+  /// then skips the group's update entirely ([ChatTurnGroup.sameInputs] is
+  /// the gate). Cleared whenever the non-row state the group subtree reads
+  /// changes (see [_syncGroupWidgetCache]).
+  final Map<int, ChatTurnGroup> _groupWidgetCache = {};
+  String? _groupWidgetCacheSession;
+  bool? _groupWidgetCacheRunning;
+  bool? _groupWidgetCacheSawRowActions;
+  WorkflowRuns? _groupWidgetCacheWorkflowRuns;
+  bool _groupWidgetCacheWorkflowSensitive = false;
 
   /// True while the keyboard occupies the viewport (IME inset past the
   /// 100/80 hysteresis band, R2 10-16). Flipped by [_KeyboardProbe] —
@@ -1181,6 +1220,9 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     _viewport.dispose();
     _scrollController.dispose();
     _activeQueryIndex.dispose();
+    // The groups (and their elements) died with the page; the registry only
+    // held measurement handles, so dropping it is all that is needed.
+    _turnGroupKeys.clear();
     _imeOccupied.dispose();
     super.dispose();
   }
@@ -1608,24 +1650,42 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   /// window, so "last built above" IS the nearest above. When no query
   /// group is measurable (viewport deep inside a long answer, beyond the
   /// layout cache), the current value stands — no flicker.
+  ///
+  /// Measurement goes through the page's per-group [GlobalKey] registry
+  /// (task 11-19 step 4): every built group's box is read directly instead
+  /// of walking the list's element tree with `visitChildElements` on every
+  /// scroll frame. Entries whose element is unmounted (`currentContext ==
+  /// null`) are skipped — that is the "not built / scrolled away" case, the
+  /// same one the traversal saw as an absent child. The order-independent
+  /// min/max scan is equivalent to the old in-order loop: groups are laid
+  /// out top-to-bottom, so the first group at/over the line is the one with
+  /// the smallest top among them.
   void _updateActiveQueryIndex() {
     final queries = _queryRowIds;
     if (queries.length < 2 || !_scrollController.hasClients) return;
     final viewport = _listViewportBox();
     if (viewport == null) return;
     final viewportTop = viewport.localToGlobal(Offset.zero).dy;
-    int? active;
-    for (final (widget, box) in _builtGroups()) {
-      final first = widget.rows.first['rowId'];
-      if (first is! num) continue;
-      final index = queries.indexOf(first.toInt());
-      if (index < 0) continue;
-      if (box.localToGlobal(Offset.zero).dy >= viewportTop - 40) {
-        active = index;
-        break;
+    double? belowTop;
+    int? belowIndex;
+    double? aboveTop;
+    int? aboveIndex;
+    for (var index = 0; index < queries.length; index++) {
+      final key = _turnGroupKeys[queries[index]];
+      final box = key?.currentContext?.findRenderObject();
+      if (box is! RenderBox || !box.attached || !box.hasSize) continue;
+      final top = box.localToGlobal(Offset.zero).dy;
+      if (top >= viewportTop - 40) {
+        if (belowTop == null || top < belowTop) {
+          belowTop = top;
+          belowIndex = index;
+        }
+      } else if (aboveTop == null || top > aboveTop) {
+        aboveTop = top;
+        aboveIndex = index;
       }
-      active = index;
     }
+    final active = belowIndex ?? aboveIndex;
     if (active == null || active == _activeQueryIndex.value) return;
     _activeQueryIndex.value = active;
   }
@@ -2549,10 +2609,11 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
   }
 
   /// Every currently-built turn group, in list order: (widget, box) — the
-  /// turn navigator's directory/highlight pass (the history anchor chain
-  /// measures through the viewport's own element port). Only BUILT children
-  /// exist here — SliverList keeps just the viewport plus its cacheExtent
-  /// alive.
+  /// turn navigator jump's landing/probe pass (the per-frame highlight reads
+  /// the page's GlobalKey registry instead, task 11-19 step 4; the history
+  /// anchor chain measures through the viewport's own element port). Only
+  /// BUILT children exist here — SliverList keeps just the viewport plus its
+  /// cacheExtent alive.
   List<(ChatTurnGroup, RenderBox)> _builtGroups() {
     final groups = <(ChatTurnGroup, RenderBox)>[];
     final listContext = _listKey.currentContext;
@@ -3229,6 +3290,83 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
     );
   }
 
+  /// Cached grouping of [ConversationState.rows] (see [_groupedRowRefs]).
+  /// Row maps are immutable by contract (chat-conventions §9): when every
+  /// row instance is the one the cache was built from, the grouping is
+  /// reused verbatim — no repair pass, no partition, no allocation.
+  List<List<Map<String, dynamic>>> _groupedRowsFor(ConversationState state) {
+    final rows = state.rows;
+    final refs = _groupedRowRefs;
+    if (refs != null && _sameRowRefs(refs, rows)) return _groupedRows;
+    final groups = groupChatRows(rows);
+    _groupedRowRefs = List<Map<String, dynamic>>.of(rows);
+    _groupedRows = groups;
+    debugGroupingComputations++;
+    // Drop cached group widgets whose turn left the window (row.removed /
+    // retry truncation): the instance references the old row maps, which
+    // must not outlive the state's rows.
+    if (_groupWidgetCache.isNotEmpty) {
+      final liveIds = <int>{
+        for (final group in groups)
+          if (group.first['rowId'] is num)
+            (group.first['rowId'] as num).toInt(),
+      };
+      _groupWidgetCache.removeWhere((rowId, _) => !liveIds.contains(rowId));
+    }
+    return groups;
+  }
+
+  /// Element-wise reference compare, tail-first: wire deltas land at the
+  /// tail, so a changed frame bails out on the first or second compare. The
+  /// unchanged frame pays the full scan — a pointer walk, no allocation.
+  static bool _sameRowRefs(
+    List<Map<String, dynamic>> a,
+    List<Map<String, dynamic>> b,
+  ) {
+    if (a.length != b.length) return false;
+    for (var i = a.length - 1; i >= 0; i--) {
+      if (!identical(a[i], b[i])) return false;
+    }
+    return true;
+  }
+
+  /// Drops the reusable [ChatTurnGroup] instances when data they read from
+  /// outside the rows changes: the session (a different conversation), the
+  /// running flag (user bubbles' rewind disabled state) and — only when a
+  /// cached group renders a workflow tool row — the live workflow mirror
+  /// family the card dispatch reads. Clearing only drops widget instances;
+  /// the inner group memo decides whether the body itself must rebuild.
+  void _syncGroupWidgetCache(ConversationState state) {
+    if (_groupWidgetCacheSession != _sessionId ||
+        state.isRunning != _groupWidgetCacheRunning ||
+        state.sawRowActions != _groupWidgetCacheSawRowActions ||
+        (_groupWidgetCacheWorkflowSensitive &&
+            !identical(state.workflowRuns, _groupWidgetCacheWorkflowRuns))) {
+      _groupWidgetCache.clear();
+      _groupWidgetCacheWorkflowSensitive = false;
+    }
+    _groupWidgetCacheSession = _sessionId;
+    _groupWidgetCacheRunning = state.isRunning;
+    _groupWidgetCacheSawRowActions = state.sawRowActions;
+    _groupWidgetCacheWorkflowRuns = state.workflowRuns;
+  }
+
+  /// The group widget for one turn: the cached instance when every input is
+  /// unchanged ([ChatTurnGroup.sameInputs]), otherwise the fresh candidate
+  /// (which then becomes the cache entry).
+  ChatTurnGroup _groupWidget(int rowId, ChatTurnGroup candidate) {
+    final cached = _groupWidgetCache[rowId];
+    if (cached != null && ChatTurnGroup.sameInputs(cached, candidate)) {
+      return cached;
+    }
+    _groupWidgetCache[rowId] = candidate;
+    if (!_groupWidgetCacheWorkflowSensitive &&
+        candidate.rows.any(isWorkflowToolRow)) {
+      _groupWidgetCacheWorkflowSensitive = true;
+    }
+    return candidate;
+  }
+
   /// The message stream itself — the layer the jump-to-bottom control floats
   /// over (see [build]).
   Widget _messageList(BuildContext context, ConversationState? state) {
@@ -3256,7 +3394,8 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
       child: AnimatedBuilder(
         animation: state,
         builder: (context, _) {
-          final groups = groupChatRows(state.rows);
+          _syncGroupWidgetCache(state);
+          final groups = _groupedRowsFor(state);
           // D9 anchor plan: interactions anchored into the held window
           // render after their turn group (below); the bottom strip's
           // _PendingInteractions excludes the same ids.
@@ -3340,6 +3479,46 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
                         final anchored =
                             anchorPlan.byGroup[groupIndex] ??
                             const <Map<String, dynamic>>[];
+                        // Highlight measurement handle (task 11-19 step 4):
+                        // one stable GlobalKey per group rowId, mounted on the
+                        // group's build root. putIfAbsent keeps the same key
+                        // across rebuilds so the element is never re-keyed.
+                        final groupRowId = group.first['rowId'];
+                        final renderKey = groupRowId is num
+                            ? _turnGroupKeys.putIfAbsent(
+                                groupRowId.toInt(),
+                                () => GlobalKey(
+                                  debugLabel:
+                                      'turn-group-${groupRowId.toInt()}',
+                                ),
+                              )
+                            : null;
+                        final candidate = ChatTurnGroup(
+                          key: ValueKey('turn-${group.first['rowId']}'),
+                          rows: group,
+                          conversation: widget.host,
+                          sessionId: _sessionId ?? '',
+                          onAction: _run,
+                          state: state,
+                          feed: _feed,
+                          preview: _preview,
+                          confirmWindow: widget.turnFooterConfirmWindow,
+                          actions: _actions,
+                          editingRowId: _editingRowId,
+                          onEditSend: _sendUserEdit,
+                          gitController: _git,
+                          lastError: _lastError,
+                          groupRenderKey: renderKey,
+                          // R5/AC6 closure: restricted row actions
+                          // (edit-resend / retry / fork / side-ask)
+                          // never render inside a side-chat tab.
+                          sideChat: widget.chromeless,
+                        );
+                        // Unchanged turn → the identical widget instance;
+                        // Flutter skips its whole subtree update.
+                        final groupWidget = groupRowId is num
+                            ? _groupWidget(groupRowId.toInt(), candidate)
+                            : candidate;
                         return Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
@@ -3350,26 +3529,7 @@ class _ChatPageState extends State<ChatPage> with RouteAware {
                             // prepend remounts the window (the `turn-…` key
                             // prefix is a contract — see transcript_viewport).
                             // The load-older button row stays unkeyed.
-                            ChatTurnGroup(
-                              key: ValueKey('turn-${group.first['rowId']}'),
-                              rows: group,
-                              conversation: widget.host,
-                              sessionId: _sessionId ?? '',
-                              onAction: _run,
-                              state: state,
-                              feed: _feed,
-                              preview: _preview,
-                              confirmWindow: widget.turnFooterConfirmWindow,
-                              actions: _actions,
-                              editingRowId: _editingRowId,
-                              onEditSend: _sendUserEdit,
-                              gitController: _git,
-                              lastError: _lastError,
-                              // R5/AC6 closure: restricted row actions
-                              // (edit-resend / retry / fork / side-ask)
-                              // never render inside a side-chat tab.
-                              sideChat: widget.chromeless,
-                            ),
+                            groupWidget,
                             // D9: interactions anchored to a row of this
                             // group render directly after it (in-stream),
                             // same card component as the bottom strip.

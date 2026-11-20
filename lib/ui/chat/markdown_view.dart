@@ -8,11 +8,29 @@ import '../ui_settings.dart';
 import 'image_viewer_page.dart';
 import 'source_highlight.dart';
 
+/// Test counter (task 11-19 chat-scroll wave 2): how many [MarkdownBody]
+/// instances this renderer constructed. The widget-instance memo must keep
+/// repeated builds of unchanged input at zero. Never read by production code.
+@visibleForTesting
+int debugMarkdownBodiesBuilt = 0;
+
 /// Markdown renderer matching the web client look: selectable
 /// body text, inline code on a pill background, fenced code blocks with a
 /// language tag, line count, copy button and collapse toggle in a
 /// self-drawn header bar (collapsed by default).
-class AppMarkdown extends StatelessWidget {
+///
+/// Stateful since task 11-19 wave 2: the parsed [MarkdownBody] widget
+/// instance is memoized and handed back on every rebuild whose `data` is
+/// the identical string — Flutter's `identical` widget short-circuit then
+/// skips the whole parse/build subtree. Legitimacy rests on the row
+/// instance-immutability contract (chat-conventions §9): an unchanged row
+/// carries the same `text` string instance. Style-relevant parameters
+/// (body style / selectable / prose inset / highlight / image-resolver
+/// and link-callback presence) invalidate; the callbacks themselves are
+/// reached through State-stable trampolines that read the live [widget],
+/// so they never force a re-parse. Theme / locale / text-scale flips
+/// invalidate via [State.didChangeDependencies].
+class AppMarkdown extends StatefulWidget {
   final String data;
   final bool selectable;
 
@@ -55,12 +73,61 @@ class AppMarkdown extends StatelessWidget {
   });
 
   @override
+  State<AppMarkdown> createState() => _AppMarkdownState();
+}
+
+class _AppMarkdownState extends State<AppMarkdown> {
+  /// Last constructed [MarkdownBody] subtree. Non-null = the memoized render
+  /// of the current (data + style parameters); the identity short-circuit in
+  /// [build] hands it back untouched.
+  MarkdownBody? _body;
+
+  @override
+  void didUpdateWidget(AppMarkdown oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The callback identities are NOT part of this compare: both callbacks
+    // are reached through the State-stable trampolines below, which read the
+    // live [widget] at invocation time. Only their presence (whether the
+    // MarkdownBody was wired with a handler at all) matters.
+    if (!identical(widget.data, oldWidget.data) ||
+        widget.bodyStyle != oldWidget.bodyStyle ||
+        widget.selectable != oldWidget.selectable ||
+        widget.proseRightInset != oldWidget.proseRightInset ||
+        widget.highlight != oldWidget.highlight ||
+        (widget.imageResolver == null) != (oldWidget.imageResolver == null) ||
+        (widget.onLinkTap == null) != (oldWidget.onLinkTap == null)) {
+      _body = null;
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Theme / locale / text-scale flips restyle the cached subtree (ZInk
+    // colors are baked into the style sheet, copy strings live in children).
+    _body = null;
+  }
+
+  void _handleTapLink(String text, String? href, String? title) {
+    final onLinkTap = widget.onLinkTap;
+    if (onLinkTap != null && href != null && href.isNotEmpty) onLinkTap(href);
+  }
+
+  Widget _sizedImageBuilder(MarkdownImageConfig config) {
+    final resolver = widget.imageResolver;
+    if (resolver == null) return const SizedBox.shrink();
+    return _MarkdownImage(path: config.uri.toString(), resolver: resolver);
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final body = bodyStyle.copyWith(height: 1.6);
+    final cached = _body;
+    if (cached != null) return cached;
+    final body = widget.bodyStyle.copyWith(height: 1.6);
     final code = ZType.sub.copyWith(fontFamily: 'monospace');
-    // Prose trailing inset (see [proseRightInset]); zero is the flutter_
-    // markdown fallback value, so 0 keeps byte-identical layout.
-    final prosePad = EdgeInsets.only(right: proseRightInset);
+    // Prose trailing inset (see [AppMarkdown.proseRightInset]); zero is the
+    // flutter_markdown fallback value, so 0 keeps byte-identical layout.
+    final prosePad = EdgeInsets.only(right: widget.proseRightInset);
     final styleSheet = MarkdownStyleSheet(
       p: body.copyWith(color: ZInk.solid(context)),
       pPadding: prosePad,
@@ -84,7 +151,7 @@ class AppMarkdown extends StatelessWidget {
               color: ZColors.sky500.withValues(alpha: 0.5), width: 3),
         ),
       ),
-      blockquotePadding: EdgeInsets.only(left: 12, right: proseRightInset),
+      blockquotePadding: EdgeInsets.only(left: 12, right: widget.proseRightInset),
       listBullet: body.copyWith(color: ZInk.solid(context)),
       tableBody: ZType.sub.copyWith(color: ZInk.solid(context)),
       tableHead: ZType.sub.copyWith(
@@ -99,27 +166,25 @@ class AppMarkdown extends StatelessWidget {
           color: ZColors.sky500, decoration: TextDecoration.underline),
     );
 
-    return MarkdownBody(
-      data: data,
-      selectable: selectable,
+    debugMarkdownBodiesBuilt++;
+    final markdown = MarkdownBody(
+      data: widget.data,
+      selectable: widget.selectable,
       styleSheet: styleSheet,
       builders: {
         'code': _CodeBlockBuilder(
-            codeStyle: code, highlight: highlight, selectable: selectable),
+            codeStyle: code,
+            highlight: widget.highlight,
+            selectable: widget.selectable),
       },
       softLineBreak: true,
-      sizedImageBuilder: imageResolver == null
+      sizedImageBuilder: widget.imageResolver == null
           ? null
-          : (config) => _MarkdownImage(
-                path: config.uri.toString(),
-                resolver: imageResolver!,
-              ),
-      onTapLink: onLinkTap == null
-          ? null
-          : (text, href, title) {
-              if (href != null && href.isNotEmpty) onLinkTap!(href);
-            },
+          : _sizedImageBuilder,
+      onTapLink: widget.onLinkTap == null ? null : _handleTapLink,
     );
+    _body = markdown;
+    return markdown;
   }
 }
 
@@ -215,8 +280,25 @@ class _MarkdownImageState extends State<_MarkdownImage> {
             // Full-width contained block (markdown image rhythm);
             // the 48px floor keeps even tiny images a real tap target.
             constraints: const BoxConstraints(maxHeight: 280, minHeight: 48),
-            child: Image.memory(bytes, fit: BoxFit.contain,
-                width: double.infinity),
+            // Decode at the laid-out width × dpr — the image is painted at
+            // full column width, so anything above that is wasted pixels on
+            // every decode. The parent constraint is the real width (pane
+            // width in the dual-column embed); MediaQuery is only the
+            // unbounded fallback.
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final width = constraints.maxWidth.isFinite
+                    ? constraints.maxWidth
+                    : MediaQuery.sizeOf(context).width;
+                return Image.memory(
+                  bytes,
+                  fit: BoxFit.contain,
+                  width: double.infinity,
+                  cacheWidth:
+                      (width * MediaQuery.devicePixelRatioOf(context)).round(),
+                );
+              },
+            ),
           ),
         ),
       ),

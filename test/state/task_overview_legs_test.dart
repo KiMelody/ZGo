@@ -236,6 +236,59 @@ void main() {
     await session.dispose();
   });
 
+  test('the connection signal fires once at first landing, not per cadence '
+      'round (3.16.2 channel legs)', () async {
+    final stub = _OverviewStubClient(_params());
+    stub.bootstrapResult = {
+      'workspaces': [
+        {'workspacePath': '/repo', 'workspaceIdentity': 'repo-id'},
+      ],
+    };
+    final session = await _connected(stub);
+    final gate = _FakeGate()
+      ..handler = (method, args) async =>
+          method == 'listPinnedTaskIds' ? <String>[] : _emptyLegResponse();
+    session.debugAttachGateForTest(gate);
+
+    var pageLevelSignals = 0;
+    session.connectionChanges.addListener(() => pageLevelSignals += 1);
+
+    await session.refreshTaskOverview();
+    expect(session.taskOverviewLoaded, isTrue);
+    expect(pageLevelSignals, 1,
+        reason: 'the first rundown flips the pending gate: one page-level '
+            'signal is the landing edge');
+
+    await session.refreshTaskOverview();
+    await session.refreshTaskOverview();
+    expect(pageLevelSignals, 1,
+        reason: 'later 30 s rounds only refresh the directory view; the '
+            'page-level connection signal must not re-fire per tick');
+    await session.dispose();
+  });
+
+  test('a landed legacy bootstrap overview does not re-fire the connection '
+      'signal on cadence rounds', () async {
+    final stub = _OverviewStubClient(_params());
+    final session = await _connected(stub);
+    expect(session.taskOverviewLoaded, isTrue,
+        reason: 'connect lands the legacy bootstrap tasks leg');
+    final gate = _FakeGate();
+    session.debugAttachGateForTest(gate);
+
+    var pageLevelSignals = 0;
+    session.connectionChanges.addListener(() => pageLevelSignals += 1);
+
+    await session.refreshTaskOverview();
+    await session.refreshTaskOverview();
+
+    expect(pageLevelSignals, 0,
+        reason: 'a held bootstrap tasks overview is authoritative: cadence '
+            'rounds must not rebuild the page (the channel legs are skipped)');
+    expect(session.relayTasks.single['taskId'], 'boot-1');
+    await session.dispose();
+  });
+
   test('any failing leg keeps the previous rows (no timeline-only overwrite)',
       () async {
     final stub = _OverviewStubClient(_params());

@@ -61,9 +61,37 @@ Object? _firstKey(Map<String, dynamic> map, List<String> keys) {
   return null;
 }
 
+/// Identity memo for [extractDiff]: rows are immutable maps, replaced wholesale
+/// on an upsert, so the same map instance always yields the same extraction.
+/// An [Expando] is weakly keyed — it can never retain a row the state dropped
+/// (task 11-19 step 3; the extraction runs twice per tool-card build, once for
+/// the tile and once inside [toolRowSemantics], on every streaming upsert).
+final Expando<Object> _diffMemo = Expando<Object>();
+
+/// Sentinel for "this row has no diff" — an [Expando] lookup cannot tell an
+/// absent entry from a cached null.
+final Object _noDiff = Object();
+
+/// Test counter for the collapsed-card discipline: the tile skips its body
+/// while collapsed, and repeated builds of an unchanged row must not
+/// re-extract. Never read by production code.
+@visibleForTesting
+int debugDiffExtractions = 0;
+
 /// Tries to extract a diff from a toolCall row. Returns null when the row
 /// is not a file edit.
 DiffData? extractDiff(Map<String, dynamic> row) {
+  final cached = _diffMemo[row];
+  if (cached != null) {
+    return identical(cached, _noDiff) ? null : cached as DiffData;
+  }
+  final diff = _extractDiff(row);
+  _diffMemo[row] = diff ?? _noDiff;
+  return diff;
+}
+
+DiffData? _extractDiff(Map<String, dynamic> row) {
+  debugDiffExtractions++;
   // display.kind === 'file_diff' with patch info
   final display = row['display'];
   final candidates = <Object?>[

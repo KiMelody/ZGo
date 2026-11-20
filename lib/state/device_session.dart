@@ -1026,13 +1026,19 @@ class DeviceSession extends ChangeNotifier
     unawaited(_homeStore.load().then((_) {
       // Only a disk state that actually merged in is worth a re-group
       // notify; an empty/cold store must not add noise notifies.
-      if (!_disposed && _homeStore.hasPersistedState) notifyListeners();
+      if (!_disposed && _homeStore.hasPersistedState) {
+        _notifyTaskDirectoryChanged();
+        notifyListeners();
+      }
     }));
     // Persisted workspace activity keys (design 11-01 §4): the cold-start
     // card order gets its idle-tier keys back before any live rows land, so
     // one notify re-sorts the cards with the restored values.
     unawaited(_activityStore.load().then((_) {
-      if (!_disposed && _activityStore.hasPersistedState) notifyListeners();
+      if (!_disposed && _activityStore.hasPersistedState) {
+        _notifyTaskDirectoryChanged();
+        notifyListeners();
+      }
     }));
     // Composer drafts (design 10-20): fire-and-forget warm-up like the
     // home store; page ops await the load themselves, so this only
@@ -1354,6 +1360,40 @@ class DeviceSession extends ChangeNotifier
   /// deliberately NOT remembered here — they retry once per round.
   bool _taskBranchLookupUnavailable = false;
 
+  /// Task-list directory signal (2026-11-19 scroll-perf). Fires on exactly
+  /// the write points of the TaskHomeService invalidation matrix
+  /// (spec/state/session-lifecycle.md §10.2) — relay rows, workspace
+  /// aliases, active live frames, active-subscription swaps, sidecar
+  /// set/frames/probes, snapshot writes, store writes and suspend — plus
+  /// the task-list-only extras the matrix does not carry (cold-workspace
+  /// markers, branch chips, activity-store loads). The task list page
+  /// listens HERE instead of the session's broad notify so chat/relay/Watchdog
+  /// notifies no longer rebuild the whole list.
+  final ValueNotifier<int> _taskDirectoryEpoch = ValueNotifier<int>(0);
+
+  /// See [_taskDirectoryEpoch].
+  Listenable get taskDirectoryChanges => _taskDirectoryEpoch;
+
+  void _notifyTaskDirectoryChanged() {
+    if (_disposed) return;
+    _taskDirectoryEpoch.value++;
+  }
+
+  /// Connection-status signal (banner / AppBar online line): status,
+  /// connection stage, error/kicked, open-failure, `openingWorkspace` and
+  /// overview-landed flips. These are low-frequency, so the task list page
+  /// may safely rebuild a whole frame on them — unlike the per-frame
+  /// directory signal.
+  final ValueNotifier<int> _connectionEpoch = ValueNotifier<int>(0);
+
+  /// See [_connectionEpoch].
+  Listenable get connectionChanges => _connectionEpoch;
+
+  void _notifyConnectionChanged() {
+    if (_disposed) return;
+    _connectionEpoch.value++;
+  }
+
   /// `zcode-task.listTaskList` scopes assembled from [workspaces] — the
   /// wire list completed with the desktop's project roots on 3.16.2
   /// (research/07), so workspaces outside the bound window are still
@@ -1489,7 +1529,10 @@ class DeviceSession extends ChangeNotifier
         // (30s cadence): reconcile anchors, then re-diff the recently
         // active non-active workspaces.
         _taskHome.applyRelayOverview(_normalizeRelayTasks(deduped.values));
-        _taskOverviewLanded = true;
+        if (!_taskOverviewLanded) {
+          _taskOverviewLanded = true;
+          _notifyConnectionChanged();
+        }
         _recordOverviewWorkspaceActivity();
         notifyListeners();
         await _mergePinnedTaskFlags();
@@ -1709,6 +1752,7 @@ class DeviceSession extends ChangeNotifier
             taskCommands.delete(taskId, scope: scope),
         onActiveFrameApplied: _onActiveFrameApplied,
         onChanged: notifyMergedChanged,
+        onDirectoryChanged: _notifyTaskDirectoryChanged,
         log: _log,
       );
 
@@ -1718,6 +1762,7 @@ class DeviceSession extends ChangeNotifier
   void notifyMergedChanged() {
     if (_disposed) return;
     _recordLiveWorkspaceActivity();
+    _notifyTaskDirectoryChanged();
     notifyListeners();
   }
 
@@ -1791,14 +1836,20 @@ class DeviceSession extends ChangeNotifier
     final key = _taskHome.normalizeKey(rawKey);
     if (key.isEmpty) return;
     _coldEvidence[key] = _ColdEvidence(clock.now(), source);
-    if (!_disposed) notifyListeners();
+    if (!_disposed) {
+      _notifyTaskDirectoryChanged();
+      notifyListeners();
+    }
   }
 
   /// Forgets the evidence of [rawKey] (same normalization as the write).
   /// A successful subscription of a workspace is proof its runtime is up.
   void _clearColdEvidence(String rawKey) {
     final key = _taskHome.normalizeKey(rawKey);
-    if (_coldEvidence.remove(key) != null && !_disposed) notifyListeners();
+    if (_coldEvidence.remove(key) != null && !_disposed) {
+      _notifyTaskDirectoryChanged();
+      notifyListeners();
+    }
   }
 
   /// Starts ONE sidecar sessions-index subscription for [scope] on the
@@ -2033,6 +2084,7 @@ class DeviceSession extends ChangeNotifier
       if (failure.message != null) 'failureMessage': failure.message,
     });
     notifyListeners();
+    _notifyConnectionChanged();
   }
 
   /// Relay push (`workspace-list-updated {result:{workspaces, tasks?, ...}}`):
@@ -2057,10 +2109,14 @@ class DeviceSession extends ChangeNotifier
         for (final t in tasks)
           if (t is Map) t.cast<String, dynamic>(),
       ]));
-      _taskOverviewLanded = true;
+      if (!_taskOverviewLanded) {
+        _taskOverviewLanded = true;
+        _notifyConnectionChanged();
+      }
       _recordOverviewWorkspaceActivity();
     }
     notifyListeners();
+    _notifyConnectionChanged();
   }
 
   /// `app-error` reason → session failure state. session-conflict means the
@@ -2196,6 +2252,7 @@ class DeviceSession extends ChangeNotifier
       'previousState': previous.name,
     });
     notifyListeners();
+    _notifyConnectionChanged();
   }
 
   /// Writes the display-only [_connectionStage] projection: a value-identical
@@ -2208,6 +2265,7 @@ class DeviceSession extends ChangeNotifier
     if (_connectionStage == next) return;
     _connectionStage = next;
     notifyListeners();
+    _notifyConnectionChanged();
   }
 
   /// The workspace matching [preferredWorkspaceKey], if still listed.
@@ -2554,6 +2612,7 @@ class DeviceSession extends ChangeNotifier
       return const WorkspaceOpenAborted();
     }
     _openingWorkspace = true;
+    _notifyConnectionChanged();
     final sw = Stopwatch()..start();
     _listWatchdog?.cancel();
     try {
@@ -2799,6 +2858,7 @@ class DeviceSession extends ChangeNotifier
       }
       onWorkspaceOpened?.call(activeKey);
       notifyListeners();
+      _notifyConnectionChanged();
       // The active workspace changed: re-diff the sidecar set on the fresh
       // bridge (the old active workspace is now a candidate; the newly
       // active one must leave the set).
@@ -2860,10 +2920,12 @@ class DeviceSession extends ChangeNotifier
       if (!discardedProbeFailure) {
         _lastWorkspaceOpenFailure = result;
         notifyListeners();
+        _notifyConnectionChanged();
       }
       return result;
     } finally {
       _openingWorkspace = false;
+      _notifyConnectionChanged();
       sw.stop();
       // Connected-but-never-ready (open failed OR subscribed with no
       // snapshot yet) is exactly the cold-start loading bug: guard it.
@@ -3113,6 +3175,10 @@ class DeviceSession extends ChangeNotifier
     _listEscalations = 0;
     _softReloadFails = 0;
     _recordLiveWorkspaceActivity();
+    // Ready frames already bumped the directory inside `applyLiveFrame`;
+    // this covers the not-ready repaint (readiness marker) and keeps one
+    // notify per applied frame exactly like the old broad notify.
+    _notifyTaskDirectoryChanged();
     notifyListeners();
   }
 
@@ -3292,7 +3358,10 @@ class DeviceSession extends ChangeNotifier
       // `pinned` bit: the cross-workspace `listPinnedTaskIds` authority only
       // applies to the 3.16.2 channel leg (see [_mergePinnedTaskFlags]).
       _tasksFromBootstrap = true;
-      _taskOverviewLanded = true;
+      if (!_taskOverviewLanded) {
+        _taskOverviewLanded = true;
+        _notifyConnectionChanged();
+      }
       // Fresh overview = fresh anchor evidence (tombstone expiry,
       // single-copy reconcile, absence prune) + a sidecar re-diff.
       _taskHome.applyRelayOverview(_normalizeRelayTasks([
@@ -3537,6 +3606,7 @@ class DeviceSession extends ChangeNotifier
         await _refreshTaskBranches();
         if (_disposed || _client != client) return;
         _recordOverviewWorkspaceActivity();
+        _notifyTaskDirectoryChanged();
         notifyListeners();
       } catch (e) {
         _log('[session] overview refresh failed (kept old values): $e');

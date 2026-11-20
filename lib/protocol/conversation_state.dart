@@ -1438,8 +1438,9 @@ class ConversationState extends ChangeNotifier {
     _configReverted = true;
   }
 
-  /// Optimistic row edit (e.g. feedback) — mutates the row in place and
-  /// notifies; the server row.upserted will confirm.
+  /// Optimistic row edit (e.g. feedback) — replaces the row with a shallow
+  /// copy (rows are never mutated in place; UI-side memo identity relies on
+  /// this) and notifies; the server row.upserted will confirm.
   void optimisticRowUpdate(num? rowId, Map<String, dynamic> patch) {
     final index = rows.indexWhere(
       (r) => (r['rowId'] as num?)?.toInt() == rowId?.toInt(),

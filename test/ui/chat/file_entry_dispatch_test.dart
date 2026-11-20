@@ -478,6 +478,13 @@ void main() {
         },
       ]);
       await tester.pumpAndSettle();
+      // The bubble decodes at 220dp × dpr (task 11-19), which wraps the
+      // provider in ResizeImage — a cache key the shared 1x1 fixture is not
+      // pre-warmed under. The image box is 0-high until the (real, async)
+      // decode lands, so let it complete before the tap is measured.
+      await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await tester.pumpAndSettle();
 
       await tester.tap(find.byType(Image).first);
       await tester.pumpAndSettle();

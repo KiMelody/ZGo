@@ -725,5 +725,108 @@ void main() {
       expect(h.landings.single.target, 1000);
       expect(h.viewport.anchorCacheExtent, isNull);
     });
+
+    test(
+      'a drag at hop 0 drops the widened cache, and the release landing is '
+      'unchanged (prepend → drag → release → prepend)',
+      () async {
+        final h = _Harness()..current = stateWithRows([100, 111]);
+        addTearDown(h.dispose);
+        h.measure.groups = [measuredGroup(100, top: 100)];
+        h.measure.scroll =
+            (pixels: 500, maxScrollExtent: 10000, viewportDimension: 500);
+
+        // First prepend + landing arms the pre-widen (measured delta 500).
+        h.responses.add(olderPage(40, 99, hasMore: true));
+        await h.viewport.loadOlder();
+        await h.pumpOne(); // settle: prepend frame queued
+        await h.pumpOne(); // prepend frame: commit + queue the landing
+        h.measure.groups = [measuredGroup(100, top: 600)];
+        h.measure.scroll =
+            (pixels: 500, maxScrollExtent: 10600, viewportDimension: 500);
+        await h.pumpOne(); // landing hop 0
+        expect(h.landings.single.target, 1000);
+        expect(h.viewport.compensationInFlight, isFalse);
+
+        // Second prepend: the cache is widened from the measured delta.
+        h.responses.add(olderPage(20, 39, hasMore: true));
+        await h.viewport.loadOlder();
+        await h.pumpOne(); // settle
+        await h.pumpOne(); // prepend frame
+        expect(h.viewport.anchorCacheExtent, 1500,
+            reason: 'preWiden = measuredDelta 500 × 2 + viewport 500');
+
+        // A drag arrives before the chain measures. The hop-0 wait branch
+        // drops the wide window (the whole point of task 11-19 step 2) and
+        // keeps the chain parked on the finger.
+        dragStart(h);
+        await h.pumpOne();
+        expect(h.viewport.anchorCacheExtent, isNull,
+            reason: 'a drag must not keep laying out the widened window');
+        expect(h.viewport.compensationInFlight, isTrue,
+            reason: 'the chain waits for the release, it does not land');
+
+        // Release: the chain re-measures and lands exactly as before —
+        // pixels 500 + (top 1200 − viewportTop 0 − dy 600).
+        dragEnd(h);
+        h.measure.groups = [
+          measuredGroup(40, top: 0),
+          measuredGroup(100, top: 1200),
+        ];
+        h.measure.scroll =
+            (pixels: 500, maxScrollExtent: 11200, viewportDimension: 500);
+        await h.pumpOne();
+        expect(h.landings, hasLength(2));
+        expect(h.landings.last.target, 1100,
+            reason: 'measured landing unchanged by the cleared cache');
+        expect(h.viewport.anchorCacheExtent, isNull);
+        expect(h.viewport.compensationInFlight, isFalse);
+
+        // A THIRD prepend after the drag parks nothing stale: the cache is
+        // re-widened on demand from the freshly measured delta (600).
+        h.responses.add(olderPage(10, 19, hasMore: true));
+        await h.viewport.loadOlder();
+        await h.pumpOne(); // settle
+        await h.pumpOne(); // prepend frame
+        expect(h.viewport.anchorCacheExtent, 1700,
+            reason: 'measuredDelta 600 × 2 + viewport 500');
+      },
+    );
+
+    test('a drag mid-hop keeps the widened cache so the landing is not '
+        'downgraded to the give-up estimate', () async {
+      final h = _Harness()..current = stateWithRows([100, 111]);
+      addTearDown(h.dispose);
+      h.measure.groups = [measuredGroup(100, top: 100)];
+      h.measure.scroll =
+          (pixels: 500, maxScrollExtent: 10000, viewportDimension: 500);
+
+      h.responses.add(olderPage(40, 99, hasMore: true));
+      await h.viewport.loadOlder();
+      await h.pumpOne(); // settle
+      await h.pumpOne(); // prepend frame (no pre-widen yet: no measured delta)
+
+      // Hop 0 finds no anchor and widens the window for hop 1.
+      h.measure.groups = [measuredGroup(999, top: 0)];
+      h.measure.scroll =
+          (pixels: 500, maxScrollExtent: 10600, viewportDimension: 500);
+      await h.pumpOne();
+      expect(h.viewport.anchorCacheExtent, 1700);
+
+      // The drag arrives while hop 1 is pending: the wide window is what
+      // keeps the anchor laid out, so the wait branch keeps it.
+      dragStart(h);
+      await h.pumpOne();
+      expect(h.viewport.anchorCacheExtent, 1700,
+          reason: 'mid-hop must not clear the window the hunt depends on');
+      expect(h.viewport.compensationInFlight, isTrue);
+
+      // Release: hop 1 measures and lands; only the terminal exit clears.
+      dragEnd(h);
+      h.measure.groups = [measuredGroup(100, top: 600)];
+      await h.pumpOne();
+      expect(h.landings.single.target, 1000);
+      expect(h.viewport.anchorCacheExtent, isNull);
+    });
   });
 }
